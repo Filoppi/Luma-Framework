@@ -2,6 +2,7 @@
 #include "../Includes/DICE.hlsl"
 #include "../Includes/Reinhard.hlsl"
 #include "../Includes/ColorGradingLUT.hlsl"
+#include "../Includes/Oklab.hlsl"
 
 Texture2D<float4> t1 : register(t1);
 Texture2D<float4> t0 : register(t0);
@@ -105,14 +106,14 @@ void main(
 
     // Fix potentially raised LUT floor
     float3 blackFloorFixColorLinear = gradedSceneColorLinear - (gradedBlackColorLinear * (1.0 - saturate(gradedSceneColorLinear * 10.0)));
-    float3 blackFloorFixColorOklab = linear_srgb_to_oklab(blackFloorFixColorLinear);
-    float3 gradedSceneColorOklab = linear_srgb_to_oklab(gradedSceneColorLinear);
+    float3 blackFloorFixColorOklab = Oklab::linear_srgb_to_oklab(blackFloorFixColorLinear);
+    float3 gradedSceneColorOklab = Oklab::linear_srgb_to_oklab(gradedSceneColorLinear);
     gradedSceneColorOklab.x = lerp(gradedSceneColorOklab.x, blackFloorFixColorOklab.x, 2.0 / 3.0); // Keep the hue and chrominance of the raised/tinted shadow, but restore much of the original shadow level for contrast
-    gradedSceneColorLinear = oklab_to_linear_srgb(gradedSceneColorOklab);
+    gradedSceneColorLinear = Oklab::oklab_to_linear_srgb(gradedSceneColorOklab);
 
     float minChrominanceChange = 0.8; // Mostly desaturation for now, we only want the hue shifts (e.g. turning white into yellow)
     float maxChrominanceChange = FLT_MAX; // Setting this to 1 works too, it prevents the clipped color from boosting saturation, however, that's very unlikely to happen
-    float3 clippedColorOklab = linear_srgb_to_oklab(saturate(gradedSceneColorLinear));
+    float3 clippedColorOklab = Oklab::linear_srgb_to_oklab(saturate(gradedSceneColorLinear));
     float hueStrength = 0.0;
     float chrominanceStrength = 0.8 * saturate(clippedColorOklab.x); // Desaturate bright colors more
     gradedSceneColorLinear = RestoreHueAndChrominance(gradedSceneColorLinear, saturate(gradedSceneColorLinear), hueStrength, chrominanceStrength, minChrominanceChange, maxChrominanceChange);
@@ -220,16 +221,16 @@ void main(
     // Boost saturation
     float highlightsSaturationIntensity = 0.25; // Anything more is deep fried.
     float luminanceTonemap = saturate(Reinhard::ReinhardRange(GetLuminance(gradedSceneColorLinear), MidGray, -1.0, 1.0, false).x);
-    fakeHDRColor = linear_srgb_to_oklab(fakeHDRColor);
+    fakeHDRColor = Oklab::linear_srgb_to_oklab(fakeHDRColor);
     fakeHDRColor.yz *= lerp(1.0, max(pow(luminanceTonemap, 1.0 / DefaultGamma) + 0.5, 1.0), highlightsSaturationIntensity); // Arbitrary formula
-	  fakeHDRColor = oklab_to_linear_srgb(fakeHDRColor);
+	  fakeHDRColor = Oklab::oklab_to_linear_srgb(fakeHDRColor);
     
     gradedSceneColorLinear = lerp(gradedSceneColorLinear, fakeHDRColor, LumaData.CustomData3);
 
 #if 1 // More perceptually accurate and better expands into BT.2020
-    gradedSceneColorLinear = linear_srgb_to_oklab(gradedSceneColorLinear);
+    gradedSceneColorLinear = Oklab::linear_srgb_to_oklab(gradedSceneColorLinear);
     gradedSceneColorLinear.yz *= 1.0 + LumaData.CustomData4;
-    gradedSceneColorLinear = oklab_to_linear_srgb(gradedSceneColorLinear);
+    gradedSceneColorLinear = Oklab::oklab_to_linear_srgb(gradedSceneColorLinear);
 #else
     gradedSceneColorLinear = Saturation(gradedSceneColorLinear, 1.0 + LumaData.CustomData4);
 #endif
