@@ -1,0 +1,37 @@
+cbuffer _Globals : register(b0)
+{
+   float2 invPixelSize : packoffset(c0);
+   float preBlendAmount : packoffset(c0.z);
+   float postAddAmount : packoffset(c0.w);
+   float4 parametricTonemapParams : packoffset(c1);
+   float4 parametricTonemapToeCoeffs : packoffset(c2);
+   float4 parametricTonemapShoulderCoeffs : packoffset(c3);
+   float3 filmGrainColorScale : packoffset(c4);
+   float4 filmGrainTextureScaleAndOffset : packoffset(c5);
+   float4 color : packoffset(c6);
+   float4 colorMatrix0 : packoffset(c7);
+   float4 colorMatrix1 : packoffset(c8);
+   float4 colorMatrix2 : packoffset(c9);
+   float4 ironsightsDofParams : packoffset(c10);
+   float4 filmicLensDistortParams : packoffset(c11);
+   float4 colorScale : packoffset(c12);
+   float4 runnersVisionColor : packoffset(c13);
+   float3 depthScaleFactors : packoffset(c14);
+   float4 dofParams : packoffset(c15);
+   float4 dofParams2 : packoffset(c16);
+   float4 dofDebugParams : packoffset(c17);
+   float3 bloomScale : packoffset(c18);
+   float3 lensDirtExponent : packoffset(c19);
+   float3 lensDirtFactor : packoffset(c20);
+   float3 lensDirtBias : packoffset(c21);
+   float4 tonemapCoeffA : packoffset(c22);
+   float4 tonemapCoeffB : packoffset(c23);
+   float3 luminanceVector : packoffset(c24);
+   float3 vignetteParams : packoffset(c25);
+   float4 vignetteColor : packoffset(c26);
+   float4 chromostereopsisParams : packoffset(c27);
+   float4 distortionScaleOffset : packoffset(c28);
+   float3 maxClampColor : packoffset(c29);
+   float fftBloomSpikeDampingScale : packoffset(c29.w);
+   float4 fftKernelSampleScales : packoffset(c30);
+}
