@@ -1,4 +1,7 @@
 #define GAME_BIOSHOCK_SERIES 1
+#define DISABLE_AUTO_DEBUGGER
+
+#define SHOW_RAW_AO 1
 
 #include "..\..\Core\core.hpp"
 
@@ -12,6 +15,9 @@ namespace
    ShaderHashesList pixel_shader_hashes_Tonemap;
    ShaderHashesList pixel_shader_hashes_AA;
    ShaderHashesList shader_hashes_Fog;
+   ShaderHashesList compute_shader_hashes_AO_main_pass;
+   ShaderHashesList compute_shader_hashes_AO_denoise_pass1;
+   ShaderHashesList compute_shader_hashes_AO_denoise_pass2;
 
    enum class BioShockGame
    {
@@ -21,6 +27,17 @@ namespace
    };
 
    BioShockGame bioshock_game = BioShockGame::BioShock_Remastered;
+
+   // XeGTAO
+   constexpr size_t XE_GTAO_DEPTH_MIP_LEVELS = 5;
+   constexpr UINT XE_GTAO_NUMTHREADS_X = 8;
+   constexpr UINT XE_GTAO_NUMTHREADS_Y = 8;
+   com_ptr<ID3D11ComputeShader> g_cs_xegtao_prefilter_depths16x16;
+   com_ptr<ID3D11ComputeShader> g_cs_xegtao_main_pass;
+   com_ptr<ID3D11ComputeShader> g_cs_xegtao_denoise_pass;
+   bool g_xegtao_enable;
+   bool g_show_raw_ao;
+   com_ptr<ID3D11ShaderResourceView> g_srv_raw_ao;
 
    // User settings:
    bool enable_luts_normalization = true; // TODO: try it (in BS2 luts are written on the CPU, they might be raised?)
@@ -116,6 +133,77 @@ namespace
          }
          ASSERT_ONCE(success);
       }
+   }
+
+   template <typename... Args>
+   void log_info(std::string_view fmt, Args&&... args)
+   {
+      const std::string msg = std::vformat(fmt, std::make_format_args(args...));
+      reshade::log::message(reshade::log::level::info, msg.c_str());
+   }
+
+   template <typename... Args>
+   void log_error(std::string_view fmt, Args&&... args)
+   {
+      const std::string msg = std::vformat(fmt, std::make_format_args(args...));
+      reshade::log::message(reshade::log::level::error, msg.c_str());
+   }
+
+   template <typename... Args>
+   void log_debug(std::string_view fmt, Args&&... args)
+   {
+      const std::string msg = std::vformat(fmt, std::make_format_args(args...));
+      reshade::log::message(reshade::log::level::debug, msg.c_str());
+   }
+
+   std::filesystem::path get_shaders_path()
+   {
+      wchar_t filename[MAX_PATH];
+      GetModuleFileNameW(nullptr, filename, MAX_PATH);
+      std::filesystem::path path = filename;
+      path = path.parent_path();
+      path /= L".\\Luma";
+      return path;
+   }
+
+   void compile_shader(ID3DBlob** code, const wchar_t* file, const char* target, const char* entry_point = "main", const D3D_SHADER_MACRO* defines = nullptr)
+   {
+      std::filesystem::path path = get_shaders_path();
+      path /= file;
+      com_ptr<ID3DBlob> error;
+      auto hr = D3DCompileFromFile(path.c_str(), defines, D3D_COMPILE_STANDARD_FILE_INCLUDE, entry_point, target, D3DCOMPILE_OPTIMIZATION_LEVEL3, 0, code, &error);
+      if (FAILED(hr))
+      {
+         if (error)
+         {
+            log_error("D3DCompileFromFile: {}", (const char*)error->GetBufferPointer());
+         }
+         else
+         {
+            log_error("D3DCompileFromFile: (HRESULT){:08X}", hr);
+         }
+      }
+   }
+
+   void create_vertex_shader(ID3D11Device* device, ID3D11VertexShader** vs, const wchar_t* file, const char* entry_point = "main", const D3D_SHADER_MACRO* defines = nullptr)
+   {
+      com_ptr<ID3DBlob> code;
+      compile_shader(&code, file, "vs_5_0", entry_point, defines);
+      device->CreateVertexShader(code->GetBufferPointer(), code->GetBufferSize(), nullptr, vs);
+   }
+
+   void create_pixel_shader(ID3D11Device* device, ID3D11PixelShader** ps, const wchar_t* file, const char* entry_point = "main", const D3D_SHADER_MACRO* defines = nullptr)
+   {
+      com_ptr<ID3DBlob> code;
+      compile_shader(&code, file, "ps_5_0", entry_point, defines);
+      device->CreatePixelShader(code->GetBufferPointer(), code->GetBufferSize(), nullptr, ps);
+   }
+
+   void create_compute_shader(ID3D11Device* device, ID3D11ComputeShader** cs, const wchar_t* file, const char* entry_point = "main", const D3D_SHADER_MACRO* defines = nullptr)
+   {
+      com_ptr<ID3DBlob> code;
+      compile_shader(&code, file, "cs_5_0", entry_point, defines);
+      device->CreateComputeShader(code->GetBufferPointer(), code->GetBufferSize(), nullptr, cs);
    }
 }
 
@@ -262,6 +350,9 @@ public:
          DrawResetButton(cb_luma_global_settings.GameSettings.BloomRadius, default_luma_global_game_settings.BloomRadius, "BloomRadius", runtime);
       }
 
+      ImGui::Checkbox("Show Raw AO", &g_show_raw_ao);
+      ImGui::Checkbox("XeGTAO enable", &g_xegtao_enable);
+
       if (ImGui::SliderFloat("Bloom Intensity", &cb_luma_global_settings.GameSettings.BloomIntensity, 0.f, 2.f))
          reshade::set_config_value(runtime, NAME, "BloomIntensity", cb_luma_global_settings.GameSettings.BloomIntensity);
       DrawResetButton(cb_luma_global_settings.GameSettings.BloomIntensity, default_luma_global_game_settings.BloomIntensity, "BloomIntensity", runtime);
@@ -398,6 +489,159 @@ public:
    {
       auto& game_device_data = GetGameDeviceData(device_data);
 
+      if (original_shader_hashes.Contains(compute_shader_hashes_AO_main_pass))
+      {
+         if (g_xegtao_enable)
+         {
+            // Original binds:
+            // t0 - depth - r32f
+            // t1 - normal - rgba8unorm
+            // u0 - out - rgba8unorm
+            // s0 - point clamp
+
+            // Backup the Out UAV and the Normal SRV since we will overide them,
+            // before we will need them. 
+            com_ptr<ID3D11UnorderedAccessView> uav_original;
+            native_device_context->CSGetUnorderedAccessViews(0, 1, &uav_original);
+            com_ptr<ID3D11ShaderResourceView> srv_normal;
+            native_device_context->CSGetShaderResources(1, 1, &srv_normal);
+
+            // XeGTAOPrefilterDepths16x16 pass
+            //
+
+            D3D11_TEXTURE2D_DESC tex_desc = {};
+            tex_desc.Width = device_data.output_resolution.x;
+            tex_desc.Height = device_data.output_resolution.y;
+            tex_desc.MipLevels = XE_GTAO_DEPTH_MIP_LEVELS;
+            tex_desc.ArraySize = 1;
+            tex_desc.Format = DXGI_FORMAT_R32_FLOAT;
+            tex_desc.SampleDesc.Count = 1;
+            tex_desc.BindFlags = D3D11_BIND_UNORDERED_ACCESS | D3D11_BIND_SHADER_RESOURCE;
+
+            // Create CS.
+            [[unlikely]] if (!g_cs_xegtao_prefilter_depths16x16)
+            {
+               create_compute_shader(native_device, &g_cs_xegtao_prefilter_depths16x16, L"XeGTAO_impl.hlsl", "prefilter_depths16x16_cs");
+            }
+
+            // Create prefilter depths views.
+            com_ptr<ID3D11Texture2D> tex;
+            native_device->CreateTexture2D(&tex_desc, nullptr, &tex);
+            std::array<ID3D11UnorderedAccessView*, XE_GTAO_DEPTH_MIP_LEVELS> uav_prefilter_depths;
+            D3D11_UNORDERED_ACCESS_VIEW_DESC uav_desc = {};
+            uav_desc.Format = tex_desc.Format;
+            uav_desc.ViewDimension = D3D11_UAV_DIMENSION_TEXTURE2D;
+            for (int i = 0; i < uav_prefilter_depths.size(); ++i)
+            {
+               uav_desc.Texture2D.MipSlice = i;
+               native_device->CreateUnorderedAccessView(tex.get(), &uav_desc, &uav_prefilter_depths[i]);
+            }
+            com_ptr<ID3D11ShaderResourceView> srv_prefilter_depths;
+            native_device->CreateShaderResourceView(tex.get(), nullptr, &srv_prefilter_depths);
+
+            // Bindings.
+            native_device_context->CSSetShader(g_cs_xegtao_prefilter_depths16x16.get(), nullptr, 0);
+            native_device_context->CSSetUnorderedAccessViews(0, uav_prefilter_depths.size(), uav_prefilter_depths.data(), nullptr);
+
+            native_device_context->Dispatch((tex_desc.Width + 16 - 1) / 16, (tex_desc.Height + 16 - 1) / 16, 1);
+
+            // Unbind UAVs and release uav_prefilter_depths.
+            static constexpr std::array<ID3D11UnorderedAccessView*, uav_prefilter_depths.size()> uav_nulls_prefilter_depths_pass = {};
+            native_device_context->CSSetUnorderedAccessViews(0, uav_nulls_prefilter_depths_pass.size(), uav_nulls_prefilter_depths_pass.data(), nullptr);
+            for (int i = 0; i < uav_prefilter_depths.size(); ++i)
+            {
+               uav_prefilter_depths[i]->Release();
+            }
+
+            //
+
+            // XeGTAOMainPass pass
+            //
+
+            // Create CS.
+            [[unlikely]] if (!g_cs_xegtao_main_pass)
+            {
+               create_compute_shader(native_device, &g_cs_xegtao_main_pass, L"XeGTAO_impl.hlsl", "main_pass_cs");
+            }
+
+            // Create AO term and Edges views.
+            tex_desc.Format = DXGI_FORMAT_R8G8_UNORM;
+            tex_desc.MipLevels = 1;
+            tex.reset();
+            native_device->CreateTexture2D(&tex_desc, nullptr, &tex);
+            com_ptr<ID3D11UnorderedAccessView> uav_main_pass;
+            native_device->CreateUnorderedAccessView(tex.get(), nullptr, &uav_main_pass);
+            com_ptr<ID3D11ShaderResourceView> srv_main_pass;
+            native_device->CreateShaderResourceView(tex.get(), nullptr, &srv_main_pass);
+
+            // Bindings.
+            native_device_context->CSSetShader(g_cs_xegtao_main_pass.get(), nullptr, 0);
+            const std::array srvs_main_pass = { srv_prefilter_depths.get(), srv_normal.get() };
+            native_device_context->CSSetShaderResources(0, srvs_main_pass.size(), srvs_main_pass.data());
+            const std::array uavs_main_pass = { uav_main_pass.get() };
+            native_device_context->CSSetUnorderedAccessViews(0, uavs_main_pass.size(), uavs_main_pass.data(), nullptr);
+
+            native_device_context->Dispatch((tex_desc.Width + XE_GTAO_NUMTHREADS_X - 1) / XE_GTAO_NUMTHREADS_X, (tex_desc.Height + XE_GTAO_NUMTHREADS_Y - 1) / XE_GTAO_NUMTHREADS_Y, 1);
+
+            // Unbind UAVs.
+            static constexpr std::array<ID3D11UnorderedAccessView*, 1> uav_nulls_main_pass = {};
+            native_device_context->CSSetUnorderedAccessViews(0, uav_nulls_main_pass.size(), uav_nulls_main_pass.data(), nullptr);
+
+            //
+
+            // XeGTAODenoisePass pass
+            //
+            // Doing only one XeGTAODenoisePass pass (as last/final pass) correspond to "Denoising level: Sharp" from the XeGTAO demo.
+            //
+
+            // Create CS.
+            [[unlikely]] if (!g_cs_xegtao_denoise_pass)
+            {
+               create_compute_shader(native_device, &g_cs_xegtao_denoise_pass, L"XeGTAO_impl.hlsl", "denoise_pass_cs");
+            }
+
+            // Bindings.
+            native_device_context->CSSetShader(g_cs_xegtao_denoise_pass.get(), nullptr, 0);
+            const std::array srvs_denoise_pass = { srv_main_pass.get() };
+            native_device_context->CSSetShaderResources(0, srvs_denoise_pass.size(), srvs_denoise_pass.data());
+            const std::array uavs_denoise_pass = { uav_original.get() };
+            native_device_context->CSSetUnorderedAccessViews(0, uavs_denoise_pass.size(), uavs_denoise_pass.data(), nullptr);
+
+            native_device_context->Dispatch((tex_desc.Width + (XE_GTAO_NUMTHREADS_X * 2) - 1) / (XE_GTAO_NUMTHREADS_X * 2), (tex_desc.Height + XE_GTAO_NUMTHREADS_Y - 1) / XE_GTAO_NUMTHREADS_Y, 1);
+
+            //
+
+            return DrawOrDispatchOverrideType::Replaced;
+         }
+
+         return DrawOrDispatchOverrideType::None;
+      }
+
+      if (g_xegtao_enable && original_shader_hashes.Contains(compute_shader_hashes_AO_denoise_pass1))
+      {
+         return DrawOrDispatchOverrideType::Skip;
+      }
+
+      if (original_shader_hashes.Contains(compute_shader_hashes_AO_denoise_pass2))
+      {
+         // This is for both XeGTAO and the original AO.
+         if (g_show_raw_ao)
+         {
+            com_ptr<ID3D11UnorderedAccessView> uav;
+            native_device_context->CSGetUnorderedAccessViews(0, 1, &uav);
+            com_ptr<ID3D11Resource> resource;
+            uav->GetResource(&resource);
+            g_srv_raw_ao.reset();
+            native_device->CreateShaderResourceView(resource.get(), nullptr, &g_srv_raw_ao);
+         }
+
+         if (g_xegtao_enable)
+         {
+            return DrawOrDispatchOverrideType::Skip;
+         }
+         return DrawOrDispatchOverrideType::None;
+      }
+
       // Copy the scene and feed it to the additive fog shader, so we can pre-blend with the background in the customized shader, without raising blacks etc
       // TODO: skip this if fog correction is at 0%, and branch in the shader to not read the background.
       if (is_custom_pass && !game_device_data.drew_tonemap && original_shader_hashes.Contains(shader_hashes_Fog))
@@ -477,6 +721,41 @@ public:
    void OnPresent(ID3D11Device* native_device, DeviceData& device_data) override
    {
       auto& game_device_data = GetGameDeviceData(device_data);
+
+      if (g_show_raw_ao)
+      {
+         com_ptr<ID3D11DeviceContext> ctx;
+         native_device->GetImmediateContext(&ctx);
+
+         // Create VS.
+         static com_ptr<ID3D11VertexShader> vs;
+         [[unlikely]] if (!vs)
+         {
+            create_vertex_shader(native_device, &vs, L"FullscreenTriangle_vs.hlsl");
+         }
+
+         // Create PS.
+         static com_ptr<ID3D11PixelShader> ps;
+         [[unlikely]] if (!ps)
+         {
+            create_pixel_shader(native_device, &ps, L"Load_ps.hlsl");
+         }
+
+         // Create backbuffer RTV.
+         auto backbuffer = (ID3D11Resource*)*device_data.back_buffers.begin();
+         com_ptr<ID3D11RenderTargetView> rtv_backbuffer;
+         native_device->CreateRenderTargetView(backbuffer, nullptr, &rtv_backbuffer);
+
+         // Bindings.
+         const std::array rtvs = { rtv_backbuffer.get() };
+         ctx->OMSetRenderTargets(rtvs.size(), rtvs.data(), nullptr);
+         ctx->VSSetShader(vs.get(), nullptr, 0);
+         ctx->PSSetShader(ps.get(), nullptr, 0);
+         const std::array srvs = { g_srv_raw_ao.get() };
+         ctx->PSSetShaderResources(0, srvs.size(), srvs.data());
+
+         ctx->Draw(3, 0);
+      }
 
       if (game_device_data.drew_tonemap && !game_device_data.drew_aa && !sent_aa_assert)
       {
@@ -643,6 +922,9 @@ BOOL APIENTRY DllMain(HMODULE hModule, DWORD ul_reason_for_call, LPVOID lpReserv
       {
          pixel_shader_hashes_Tonemap.pixel_shaders = { Shader::Hash_StrToNum("29D570D8") };
          pixel_shader_hashes_AA.pixel_shaders = { Shader::Hash_StrToNum("27BD2A2E"), Shader::Hash_StrToNum("5CDD5AB1") }; // Different qualities
+         compute_shader_hashes_AO_main_pass.compute_shaders = { Shader::Hash_StrToNum("348372D0") };
+         compute_shader_hashes_AO_denoise_pass1.compute_shaders = { Shader::Hash_StrToNum("F6ED18D8") };
+         compute_shader_hashes_AO_denoise_pass2.compute_shaders = { Shader::Hash_StrToNum("BA9A4DB1") };
       }
       // Shared between games
       if (bioshock_game == BioShockGame::BioShock_Remastered || bioshock_game == BioShockGame::BioShock_2_Remastered)

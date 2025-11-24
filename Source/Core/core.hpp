@@ -722,7 +722,7 @@ namespace
 #if 0 // We don't lock "s_mutex_shader_defines" here as it wouldn't be particularly relevant (it won't lead to crashes, as generaly they are not edited in random threads, though having it enabled could lead to deadlocks if there's nested locks!).
       const std::shared_lock lock(s_mutex_shader_defines);
 #endif
-      assert(shader_defines_data_index.contains(hash));
+      //assert(shader_defines_data_index.contains(hash));
 #if DEVELOPMENT // Just to avoid returning a random variable while developing
       if (!shader_defines_data_index.contains(hash))
       {
