@@ -1,8 +1,6 @@
 #define GAME_BIOSHOCK_SERIES 1
 #define DISABLE_AUTO_DEBUGGER
 
-#define SHOW_RAW_AO 1
-
 #include "..\..\Core\core.hpp"
 
 #include "BS2_CrashFix\BS2_CrashFix.h"
@@ -32,9 +30,6 @@ namespace
    constexpr size_t XE_GTAO_DEPTH_MIP_LEVELS = 5;
    constexpr UINT XE_GTAO_NUMTHREADS_X = 8;
    constexpr UINT XE_GTAO_NUMTHREADS_Y = 8;
-   com_ptr<ID3D11ComputeShader> g_cs_xegtao_prefilter_depths16x16;
-   com_ptr<ID3D11ComputeShader> g_cs_xegtao_main_pass;
-   com_ptr<ID3D11ComputeShader> g_cs_xegtao_denoise_pass;
    bool g_xegtao_enable;
    bool g_show_raw_ao;
    com_ptr<ID3D11ShaderResourceView> g_srv_raw_ao;
@@ -134,77 +129,6 @@ namespace
          ASSERT_ONCE(success);
       }
    }
-
-   template <typename... Args>
-   void log_info(std::string_view fmt, Args&&... args)
-   {
-      const std::string msg = std::vformat(fmt, std::make_format_args(args...));
-      reshade::log::message(reshade::log::level::info, msg.c_str());
-   }
-
-   template <typename... Args>
-   void log_error(std::string_view fmt, Args&&... args)
-   {
-      const std::string msg = std::vformat(fmt, std::make_format_args(args...));
-      reshade::log::message(reshade::log::level::error, msg.c_str());
-   }
-
-   template <typename... Args>
-   void log_debug(std::string_view fmt, Args&&... args)
-   {
-      const std::string msg = std::vformat(fmt, std::make_format_args(args...));
-      reshade::log::message(reshade::log::level::debug, msg.c_str());
-   }
-
-   std::filesystem::path get_shaders_path()
-   {
-      wchar_t filename[MAX_PATH];
-      GetModuleFileNameW(nullptr, filename, MAX_PATH);
-      std::filesystem::path path = filename;
-      path = path.parent_path();
-      path /= L".\\Luma";
-      return path;
-   }
-
-   void compile_shader(ID3DBlob** code, const wchar_t* file, const char* target, const char* entry_point = "main", const D3D_SHADER_MACRO* defines = nullptr)
-   {
-      std::filesystem::path path = get_shaders_path();
-      path /= file;
-      com_ptr<ID3DBlob> error;
-      auto hr = D3DCompileFromFile(path.c_str(), defines, D3D_COMPILE_STANDARD_FILE_INCLUDE, entry_point, target, D3DCOMPILE_OPTIMIZATION_LEVEL3, 0, code, &error);
-      if (FAILED(hr))
-      {
-         if (error)
-         {
-            log_error("D3DCompileFromFile: {}", (const char*)error->GetBufferPointer());
-         }
-         else
-         {
-            log_error("D3DCompileFromFile: (HRESULT){:08X}", hr);
-         }
-      }
-   }
-
-   void create_vertex_shader(ID3D11Device* device, ID3D11VertexShader** vs, const wchar_t* file, const char* entry_point = "main", const D3D_SHADER_MACRO* defines = nullptr)
-   {
-      com_ptr<ID3DBlob> code;
-      compile_shader(&code, file, "vs_5_0", entry_point, defines);
-      device->CreateVertexShader(code->GetBufferPointer(), code->GetBufferSize(), nullptr, vs);
-   }
-
-   void create_pixel_shader(ID3D11Device* device, ID3D11PixelShader** ps, const wchar_t* file, const char* entry_point = "main", const D3D_SHADER_MACRO* defines = nullptr)
-   {
-      com_ptr<ID3DBlob> code;
-      compile_shader(&code, file, "ps_5_0", entry_point, defines);
-      device->CreatePixelShader(code->GetBufferPointer(), code->GetBufferSize(), nullptr, ps);
-   }
-
-   void create_compute_shader(ID3D11Device* device, ID3D11ComputeShader** cs, const wchar_t* file, const char* entry_point = "main", const D3D_SHADER_MACRO* defines = nullptr)
-   {
-      com_ptr<ID3DBlob> code;
-      compile_shader(&code, file, "cs_5_0", entry_point, defines);
-      device->CreateComputeShader(code->GetBufferPointer(), code->GetBufferSize(), nullptr, cs);
-   }
 }
 
 struct GameDeviceDataBioshockSeries final : public GameDeviceData
@@ -263,6 +187,14 @@ public:
       GetShaderDefineData(GAMUT_MAPPING_TYPE_HASH).SetDefaultValue('1'); // Enable it, especially given the fog correction generating wild colors
 
       GetShaderDefineData(TEST_SDR_HDR_SPLIT_VIEW_MODE_NATIVE_IMPL_HASH).SetDefaultValue('1'); // The game just clipped, so HDR is an extension of SDR (except for some shaders that we adjust)
+
+      if (bioshock_game == BioShockGame::BioShock_Infinite)
+      {
+         native_shaders_definitions.emplace(CompileTimeStringHash("BSI XeGTAO Prefilter Depths"), ShaderDefinition("Luma_BSI_XeGTAO_impl", reshade::api::pipeline_subobject_type::compute_shader, nullptr, "prefilter_depths16x16_cs"));
+         native_shaders_definitions.emplace(CompileTimeStringHash("BSI XeGTAO Main Pass"), ShaderDefinition("Luma_BSI_XeGTAO_impl", reshade::api::pipeline_subobject_type::compute_shader, nullptr, "main_pass_cs"));
+         native_shaders_definitions.emplace(CompileTimeStringHash("BSI XeGTAO Denoise Pass"), ShaderDefinition("Luma_BSI_XeGTAO_impl", reshade::api::pipeline_subobject_type::compute_shader, nullptr, "denoise_pass_cs"));
+         native_shaders_definitions.emplace(CompileTimeStringHash("Show AO"), ShaderDefinition("Luma_ShowAO", reshade::api::pipeline_subobject_type::pixel_shader));
+      }
    }
 
    void OnLoad(std::filesystem::path& file_path, bool failed) override
@@ -518,12 +450,6 @@ public:
             tex_desc.SampleDesc.Count = 1;
             tex_desc.BindFlags = D3D11_BIND_UNORDERED_ACCESS | D3D11_BIND_SHADER_RESOURCE;
 
-            // Create CS.
-            [[unlikely]] if (!g_cs_xegtao_prefilter_depths16x16)
-            {
-               create_compute_shader(native_device, &g_cs_xegtao_prefilter_depths16x16, L"XeGTAO_impl.hlsl", "prefilter_depths16x16_cs");
-            }
-
             // Create prefilter depths views.
             com_ptr<ID3D11Texture2D> tex;
             native_device->CreateTexture2D(&tex_desc, nullptr, &tex);
@@ -540,7 +466,7 @@ public:
             native_device->CreateShaderResourceView(tex.get(), nullptr, &srv_prefilter_depths);
 
             // Bindings.
-            native_device_context->CSSetShader(g_cs_xegtao_prefilter_depths16x16.get(), nullptr, 0);
+            native_device_context->CSSetShader(device_data.native_compute_shaders[CompileTimeStringHash("BSI XeGTAO Prefilter Depths")].get(), nullptr, 0);
             native_device_context->CSSetUnorderedAccessViews(0, uav_prefilter_depths.size(), uav_prefilter_depths.data(), nullptr);
 
             native_device_context->Dispatch((tex_desc.Width + 16 - 1) / 16, (tex_desc.Height + 16 - 1) / 16, 1);
@@ -558,12 +484,6 @@ public:
             // XeGTAOMainPass pass
             //
 
-            // Create CS.
-            [[unlikely]] if (!g_cs_xegtao_main_pass)
-            {
-               create_compute_shader(native_device, &g_cs_xegtao_main_pass, L"XeGTAO_impl.hlsl", "main_pass_cs");
-            }
-
             // Create AO term and Edges views.
             tex_desc.Format = DXGI_FORMAT_R8G8_UNORM;
             tex_desc.MipLevels = 1;
@@ -575,7 +495,7 @@ public:
             native_device->CreateShaderResourceView(tex.get(), nullptr, &srv_main_pass);
 
             // Bindings.
-            native_device_context->CSSetShader(g_cs_xegtao_main_pass.get(), nullptr, 0);
+            native_device_context->CSSetShader(device_data.native_compute_shaders[CompileTimeStringHash("BSI XeGTAO Main Pass")].get(), nullptr, 0);
             const std::array srvs_main_pass = { srv_prefilter_depths.get(), srv_normal.get() };
             native_device_context->CSSetShaderResources(0, srvs_main_pass.size(), srvs_main_pass.data());
             const std::array uavs_main_pass = { uav_main_pass.get() };
@@ -594,14 +514,8 @@ public:
             // Doing only one XeGTAODenoisePass pass (as last/final pass) correspond to "Denoising level: Sharp" from the XeGTAO demo.
             //
 
-            // Create CS.
-            [[unlikely]] if (!g_cs_xegtao_denoise_pass)
-            {
-               create_compute_shader(native_device, &g_cs_xegtao_denoise_pass, L"XeGTAO_impl.hlsl", "denoise_pass_cs");
-            }
-
             // Bindings.
-            native_device_context->CSSetShader(g_cs_xegtao_denoise_pass.get(), nullptr, 0);
+            native_device_context->CSSetShader(device_data.native_compute_shaders[CompileTimeStringHash("BSI XeGTAO Denoise Pass")].get(), nullptr, 0);
             const std::array srvs_denoise_pass = { srv_main_pass.get() };
             native_device_context->CSSetShaderResources(0, srvs_denoise_pass.size(), srvs_denoise_pass.data());
             const std::array uavs_denoise_pass = { uav_original.get() };
@@ -727,34 +641,28 @@ public:
          com_ptr<ID3D11DeviceContext> ctx;
          native_device->GetImmediateContext(&ctx);
 
-         // Create VS.
-         static com_ptr<ID3D11VertexShader> vs;
-         [[unlikely]] if (!vs)
-         {
-            create_vertex_shader(native_device, &vs, L"FullscreenTriangle_vs.hlsl");
-         }
-
-         // Create PS.
-         static com_ptr<ID3D11PixelShader> ps;
-         [[unlikely]] if (!ps)
-         {
-            create_pixel_shader(native_device, &ps, L"Load_ps.hlsl");
-         }
-
          // Create backbuffer RTV.
          auto backbuffer = (ID3D11Resource*)*device_data.back_buffers.begin();
          com_ptr<ID3D11RenderTargetView> rtv_backbuffer;
          native_device->CreateRenderTargetView(backbuffer, nullptr, &rtv_backbuffer);
 
+         // Back up the original and set the new primitive topology. 
+         D3D11_PRIMITIVE_TOPOLOGY primitive_topology_original;
+         ctx->IAGetPrimitiveTopology(&primitive_topology_original);
+         ctx->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLESTRIP);
+
          // Bindings.
          const std::array rtvs = { rtv_backbuffer.get() };
          ctx->OMSetRenderTargets(rtvs.size(), rtvs.data(), nullptr);
-         ctx->VSSetShader(vs.get(), nullptr, 0);
-         ctx->PSSetShader(ps.get(), nullptr, 0);
+         ctx->VSSetShader(device_data.native_vertex_shaders[CompileTimeStringHash("Copy VS")].get(), nullptr, 0);
+         ctx->PSSetShader(device_data.native_pixel_shaders[CompileTimeStringHash("Show AO")].get(), nullptr, 0);
          const std::array srvs = { g_srv_raw_ao.get() };
          ctx->PSSetShaderResources(0, srvs.size(), srvs.data());
 
-         ctx->Draw(3, 0);
+         ctx->Draw(4, 0);
+
+         // Restore the orginal primitive topology.
+         ctx->IASetPrimitiveTopology(primitive_topology_original);
       }
 
       if (game_device_data.drew_tonemap && !game_device_data.drew_aa && !sent_aa_assert)

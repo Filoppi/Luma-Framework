@@ -17,7 +17,7 @@ cbuffer _Globals : register(b0)
 #define EFFECT_RADIUS 0.12
 #define DEPTH_MIP_SAMPLING_OFFSET 2.0
 #define SLICE_COUNT 15.0
-#include "XeGTAO.hlsli"
+#include "BSI_XeGTAO.hlsli"
 
 SamplerState smp : register(s0);
 
