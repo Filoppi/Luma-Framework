@@ -11,12 +11,26 @@ cbuffer _Globals : register(b0)
 	float g_fTanHalfV : packoffset(c5.y);
 }
 
+#include "Includes/Settings.hlsl"
+
+#if XE_GTAO_QUALITY == 0 // Low
+	#define SLICE_COUNT 4.0
+#elif XE_GTAO_QUALITY == 1 // Medium
+	#define SLICE_COUNT 9.0
+#elif XE_GTAO_QUALITY == 2 // High
+	#define SLICE_COUNT 14.0
+	#elif XE_GTAO_QUALITY == 3 // Very High
+	#define SLICE_COUNT 19.0
+#elif XE_GTAO_QUALITY == 4 // Ultra
+	#define SLICE_COUNT 24.0
+#endif
+
 #define VIEWPORT_PIXEL_SIZE g_f4RTSize.zw
 #define NDC_TO_VIEW_MUL float2(g_fTanHalfH * 2.0, g_fTanHalfV * -2.0)
 #define NDC_TO_VIEW_ADD float2(-g_fTanHalfH, g_fTanHalfV)
-#define EFFECT_RADIUS 0.12
-#define DEPTH_MIP_SAMPLING_OFFSET 2.0
-#define SLICE_COUNT 15.0
+#define EFFECT_RADIUS 0.11
+#define RADIUS_MULTIPLIER 1.59
+#define EFFECT_FALLOFF_RANGE 0.8
 #include "Includes/XeGTAO.hlsli"
 
 SamplerState smp : register(s0);

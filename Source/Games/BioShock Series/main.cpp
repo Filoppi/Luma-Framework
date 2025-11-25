@@ -31,8 +31,11 @@ namespace
    constexpr UINT XE_GTAO_NUMTHREADS_X = 8;
    constexpr UINT XE_GTAO_NUMTHREADS_Y = 8;
    bool g_xegtao_enable;
+
+#if DEVELOPMENT
    bool g_show_raw_ao;
    com_ptr<ID3D11ShaderResourceView> g_srv_raw_ao;
+#endif
 
    // User settings:
    bool enable_luts_normalization = true; // TODO: try it (in BS2 luts are written on the CPU, they might be raised?)
@@ -171,6 +174,7 @@ public:
          "\nhowever it's arguable whether the default value or the calibrated value is the most accurate one, so pick what you want."
          "\nWe are only applying this correction to the game scene and not the UI, as it doesn't seem necessary there."
          "\nMode 1 and 2 are different ways or applying the gamma correction, so pick what you prefer.", 2},
+         {"XE_GTAO_QUALITY", '2', true, false, "0 - Low\n1 - Medium\n2 - High\n3 - Very High\n4 - Ultra", 4},
       };
       shader_defines_data.append_range(game_shader_defines_data);
 
@@ -227,6 +231,7 @@ public:
       reshade::get_config_value(runtime, NAME, "FogIntensity", cb_luma_global_settings.GameSettings.FogIntensity);
       reshade::get_config_value(runtime, NAME, "BloomIntensity", cb_luma_global_settings.GameSettings.BloomIntensity);
       reshade::get_config_value(runtime, NAME, "BloomRadius", cb_luma_global_settings.GameSettings.BloomRadius);
+      reshade::get_config_value(runtime, NAME, "XeGTAOEnable", g_xegtao_enable);
       // "device_data.cb_luma_global_settings_dirty" should already be true at this point
    }
 
@@ -282,8 +287,12 @@ public:
          DrawResetButton(cb_luma_global_settings.GameSettings.BloomRadius, default_luma_global_game_settings.BloomRadius, "BloomRadius", runtime);
       }
 
+#if DEVELOPMENT
       ImGui::Checkbox("Show Raw AO", &g_show_raw_ao);
-      ImGui::Checkbox("XeGTAO enable", &g_xegtao_enable);
+#endif
+
+      if (ImGui::Checkbox("XeGTAO enable", &g_xegtao_enable))
+        reshade::set_config_value(runtime, NAME, "XeGTAOEnable", g_xegtao_enable);
 
       if (ImGui::SliderFloat("Bloom Intensity", &cb_luma_global_settings.GameSettings.BloomIntensity, 0.f, 2.f))
          reshade::set_config_value(runtime, NAME, "BloomIntensity", cb_luma_global_settings.GameSettings.BloomIntensity);
@@ -429,7 +438,7 @@ public:
             // t0 - depth - r32f
             // t1 - normal - rgba8unorm
             // u0 - out - rgba8unorm
-            // s0 - point clamp
+            // s0 - point wrap
 
             // Backup the Out UAV and the Normal SRV since we will overide them,
             // before we will need them. 
@@ -503,10 +512,6 @@ public:
 
             native_device_context->Dispatch((tex_desc.Width + XE_GTAO_NUMTHREADS_X - 1) / XE_GTAO_NUMTHREADS_X, (tex_desc.Height + XE_GTAO_NUMTHREADS_Y - 1) / XE_GTAO_NUMTHREADS_Y, 1);
 
-            // Unbind UAVs.
-            static constexpr std::array<ID3D11UnorderedAccessView*, 1> uav_nulls_main_pass = {};
-            native_device_context->CSSetUnorderedAccessViews(0, uav_nulls_main_pass.size(), uav_nulls_main_pass.data(), nullptr);
-
             //
 
             // XeGTAODenoisePass pass
@@ -515,11 +520,11 @@ public:
             //
 
             // Bindings.
+            const std::array uavs_denoise_pass = { uav_original.get() };
+            native_device_context->CSSetUnorderedAccessViews(0, uavs_denoise_pass.size(), uavs_denoise_pass.data(), nullptr);
             native_device_context->CSSetShader(device_data.native_compute_shaders[CompileTimeStringHash("BSI XeGTAO Denoise Pass")].get(), nullptr, 0);
             const std::array srvs_denoise_pass = { srv_main_pass.get() };
             native_device_context->CSSetShaderResources(0, srvs_denoise_pass.size(), srvs_denoise_pass.data());
-            const std::array uavs_denoise_pass = { uav_original.get() };
-            native_device_context->CSSetUnorderedAccessViews(0, uavs_denoise_pass.size(), uavs_denoise_pass.data(), nullptr);
 
             native_device_context->Dispatch((tex_desc.Width + (XE_GTAO_NUMTHREADS_X * 2) - 1) / (XE_GTAO_NUMTHREADS_X * 2), (tex_desc.Height + XE_GTAO_NUMTHREADS_Y - 1) / XE_GTAO_NUMTHREADS_Y, 1);
 
@@ -538,6 +543,7 @@ public:
 
       if (original_shader_hashes.Contains(compute_shader_hashes_AO_denoise_pass2))
       {
+#if DEVELOPMENT
          // This is for both XeGTAO and the original AO.
          if (g_show_raw_ao)
          {
@@ -548,6 +554,7 @@ public:
             g_srv_raw_ao.reset();
             native_device->CreateShaderResourceView(resource.get(), nullptr, &g_srv_raw_ao);
          }
+#endif
 
          if (g_xegtao_enable)
          {
@@ -636,6 +643,7 @@ public:
    {
       auto& game_device_data = GetGameDeviceData(device_data);
 
+#if DEVELOPMENT
       if (g_show_raw_ao)
       {
          com_ptr<ID3D11DeviceContext> ctx;
@@ -664,6 +672,7 @@ public:
          // Restore the orginal primitive topology.
          ctx->IASetPrimitiveTopology(primitive_topology_original);
       }
+#endif
 
       if (game_device_data.drew_tonemap && !game_device_data.drew_aa && !sent_aa_assert)
       {
@@ -830,7 +839,7 @@ BOOL APIENTRY DllMain(HMODULE hModule, DWORD ul_reason_for_call, LPVOID lpReserv
       {
          pixel_shader_hashes_Tonemap.pixel_shaders = { Shader::Hash_StrToNum("29D570D8") };
          pixel_shader_hashes_AA.pixel_shaders = { Shader::Hash_StrToNum("27BD2A2E"), Shader::Hash_StrToNum("5CDD5AB1") }; // Different qualities
-         compute_shader_hashes_AO_main_pass.compute_shaders = { Shader::Hash_StrToNum("348372D0") };
+         compute_shader_hashes_AO_main_pass.compute_shaders = { Shader::Hash_StrToNum("1E7B9941"), Shader::Hash_StrToNum("348372D0") }; // High and Ultra quality
          compute_shader_hashes_AO_denoise_pass1.compute_shaders = { Shader::Hash_StrToNum("F6ED18D8") };
          compute_shader_hashes_AO_denoise_pass2.compute_shaders = { Shader::Hash_StrToNum("BA9A4DB1") };
       }
