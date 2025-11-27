@@ -531,6 +531,13 @@ namespace
       { CompileTimeStringHash("Unclip LUT 2D"), { "Luma_UnclipLUT2D", reshade::api::pipeline_subobject_type::compute_shader } },
       { CompileTimeStringHash("Unclip LUT 1D"), { "Luma_UnclipLUT1D", reshade::api::pipeline_subobject_type::compute_shader } },
 #endif
+
+      { CompileTimeStringHash("SMAA Edge Detection VS"), { "Luma_SMAA_impl", reshade::api::pipeline_subobject_type::vertex_shader, nullptr, "smaa_edge_detection_vs" } },
+      { CompileTimeStringHash("SMAA Edge Detection PS"), { "Luma_SMAA_impl", reshade::api::pipeline_subobject_type::pixel_shader, nullptr, "smaa_edge_detection_ps" } },
+      { CompileTimeStringHash("SMAA Blending Weight Calculation VS"), { "Luma_SMAA_impl", reshade::api::pipeline_subobject_type::vertex_shader, nullptr, "smaa_blending_weight_calculation_vs" } },
+      { CompileTimeStringHash("SMAA Blending Weight Calculation PS"), { "Luma_SMAA_impl", reshade::api::pipeline_subobject_type::pixel_shader, nullptr, "smaa_blending_weight_calculation_ps" } },
+      { CompileTimeStringHash("SMAA Neighborhood Blending VS"), { "Luma_SMAA_impl", reshade::api::pipeline_subobject_type::vertex_shader, nullptr, "smaa_neighborhood_blending_vs" } },
+      { CompileTimeStringHash("SMAA Neighborhood Blending PS"), { "Luma_SMAA_impl", reshade::api::pipeline_subobject_type::pixel_shader, nullptr, "smaa_neighborhood_blending_ps" } },
    };
 
    // TODO: make the data in these a unique ptr for easier handling, and the shader binary data contained inside of "CachedShader" too.

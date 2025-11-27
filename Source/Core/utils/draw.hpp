@@ -1,5 +1,8 @@
 #pragma once
 
+#include "../texture_data/SMAA_AreaTex.h"
+#include "../texture_data/SMAA_SearchTex.h"
+
 enum class DrawStateStackType
 {
    // Same as "FullGraphics" but skips some states that are usually not changed by our code.
@@ -1184,4 +1187,244 @@ void SanitizeNaNs(ID3D11Device* device, ID3D11DeviceContext* device_context, ID3
 
       DrawCustomPixelShader(device_context, nullptr, nullptr, device_data.sampler_state_point.get(), vs->second.get(), ps->second.get(), data.srv.get(), data.original_rtv.get(), data.width, data.height);
    }
+}
+
+void DrawSMAA(ID3D11Device* device, ID3D11DeviceContext* device_context, const DeviceData& device_data, ID3D11RenderTargetView* rtv, ID3D11ShaderResourceView* srv_color_tex, ID3D11ShaderResourceView* srv_color_tex_gamma, ID3D11ShaderResourceView* srv_predication_tex = nullptr)
+{
+   // TODO: SMAA has some constant device data, move that somewhere else.
+   
+   // Backup IA.
+   D3D11_PRIMITIVE_TOPOLOGY primitive_topology_original;
+   device_context->IAGetPrimitiveTopology(&primitive_topology_original);
+
+   // Backup VS.
+   com_ptr<ID3D11VertexShader> vs_original;
+   device_context->VSGetShader(&vs_original, nullptr, nullptr);
+
+   // Backup PS.
+   com_ptr<ID3D11PixelShader> ps_original;
+   device_context->PSGetShader(&ps_original, nullptr, nullptr);
+   std::array<ID3D11SamplerState*, 2> ps_samplers_original = {};
+   device_context->PSGetSamplers(0, ps_samplers_original.size(), ps_samplers_original.data());
+   std::array<ID3D11ShaderResourceView*, 3> ps_srvs_original = {};
+   device_context->PSGetShaderResources(0, ps_srvs_original.size(), ps_srvs_original.data());
+
+   // Backup Viewports.
+   UINT num_viewports;
+   device_context->RSGetViewports(&num_viewports, nullptr);
+   std::vector<D3D11_VIEWPORT> viewports_original(num_viewports);
+   device_context->RSGetViewports(&num_viewports, viewports_original.data());
+
+   // Backup Rasterizer.
+   com_ptr<ID3D11RasterizerState> rasterizer_original;
+   device_context->RSGetState(&rasterizer_original);
+
+   // Backup Blend.
+   com_ptr<ID3D11BlendState> blend_original;
+   FLOAT blend_factor_original[4];
+   UINT sample_mask_original;
+   device_context->OMGetBlendState(&blend_original, blend_factor_original, &sample_mask_original);
+
+   // Backup DepthStencil
+   com_ptr<ID3D11DepthStencilState> ds_original;
+   UINT stencil_ref_original;
+   device_context->OMGetDepthStencilState(&ds_original, &stencil_ref_original);
+
+   // Backup RTs.
+   std::array<ID3D11RenderTargetView*, D3D11_SIMULTANEOUS_RENDER_TARGET_COUNT> rtvs_original = {};
+   com_ptr<ID3D11DepthStencilView> dsv_original;
+   device_context->OMGetRenderTargets(rtvs_original.size(), rtvs_original.data(), &dsv_original);
+
+   // Get passed RTV's texture description.
+   com_ptr<ID3D11Resource> resource;
+   rtv->GetResource(&resource);
+   com_ptr<ID3D11Texture2D> tex;
+   auto hr = resource->QueryInterface(&tex);
+   assert(SUCCEEDED(hr));
+   D3D11_TEXTURE2D_DESC tex_desc;
+   tex->GetDesc(&tex_desc);
+
+   // EdgeDetection pass
+   //
+
+   // Create viewport
+   D3D11_VIEWPORT viewport = {};
+   viewport.Width = tex_desc.Width;
+   viewport.Height = tex_desc.Height;
+
+   // Create DS.
+   static com_ptr<ID3D11DepthStencilState> ds_disable_depth_replace_stencil;
+   [[unlikely]] if (!ds_disable_depth_replace_stencil)
+   {
+      CD3D11_DEPTH_STENCIL_DESC desc(D3D11_DEFAULT);
+      desc.DepthEnable = FALSE;
+      desc.StencilEnable = TRUE;
+      desc.FrontFace.StencilPassOp = D3D11_STENCIL_OP_REPLACE;
+      hr = device->CreateDepthStencilState(&desc, &ds_disable_depth_replace_stencil);
+      assert(SUCCEEDED(hr));
+   }
+
+   // Create DSV.
+   tex_desc.Format = DXGI_FORMAT_D24_UNORM_S8_UINT;
+   tex_desc.BindFlags = D3D11_BIND_DEPTH_STENCIL;
+   tex.reset();
+   hr = device->CreateTexture2D(&tex_desc, nullptr, &tex);
+   assert(SUCCEEDED(hr));
+   com_ptr<ID3D11DepthStencilView> dsv;
+   hr = device->CreateDepthStencilView(tex.get(), nullptr, &dsv);
+   assert(SUCCEEDED(hr));
+
+   // Create RT and views.
+   tex_desc.Format = DXGI_FORMAT_R8G8_UNORM;
+   tex_desc.BindFlags = D3D11_BIND_SHADER_RESOURCE | D3D11_BIND_RENDER_TARGET;
+   tex.reset();
+   hr = device->CreateTexture2D(&tex_desc, nullptr, &tex);
+   assert(SUCCEEDED(hr));
+   com_ptr<ID3D11RenderTargetView> rtv_edge_detection;
+   hr = device->CreateRenderTargetView(tex.get(), nullptr, &rtv_edge_detection);
+   assert(SUCCEEDED(hr));
+   com_ptr<ID3D11ShaderResourceView> srv_edge_detection;
+   hr = device->CreateShaderResourceView(tex.get(), nullptr, &srv_edge_detection);
+   assert(SUCCEEDED(hr));
+
+   // Bindings.
+   device_context->OMSetBlendState(nullptr, nullptr, UINT_MAX);
+   device_context->OMSetDepthStencilState(ds_disable_depth_replace_stencil.get(), 1);
+   const std::array rtvs_edge_detection = { rtv_edge_detection.get() };
+   device_context->OMSetRenderTargets(rtvs_edge_detection.size(), rtvs_edge_detection.data(), dsv.get());
+   device_context->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+   device_context->VSSetShader(device_data.native_vertex_shaders.at(Math::CompileTimeStringHash("SMAA Edge Detection VS")).get(), nullptr, 0);
+   device_context->PSSetShader(device_data.native_pixel_shaders.at(Math::CompileTimeStringHash("SMAA Edge Detection PS")).get(), nullptr, 0);
+   const std::array ps_samplers = { device_data.sampler_state_linear.get(), device_data.sampler_state_point.get() };
+   device_context->PSSetSamplers(0, ps_samplers.size(), ps_samplers.data());
+   const std::array ps_srvs_edge_detection = { srv_color_tex_gamma, srv_predication_tex };
+   device_context->PSSetShaderResources(0, ps_srvs_edge_detection.size(), ps_srvs_edge_detection.data());
+   device_context->RSSetViewports(1, &viewport);
+   device_context->RSSetState(nullptr);
+
+   static constexpr FLOAT clear_color[4] = {};
+   device_context->ClearRenderTargetView(rtv_edge_detection.get(), clear_color);
+   device_context->ClearDepthStencilView(dsv.get(), D3D10_CLEAR_STENCIL, 1.0f, 0);
+   device_context->Draw(3, 0);
+
+   //
+
+   // BlendingWeightCalculation pass
+   //
+
+   // Create area texture.
+   static com_ptr<ID3D11ShaderResourceView> srv_area_tex;
+   [[unlikely]] if (!srv_area_tex)
+   {
+      D3D11_TEXTURE2D_DESC tex_desc = {};
+      tex_desc.Width = AREATEX_WIDTH;
+      tex_desc.Height = AREATEX_HEIGHT;
+      tex_desc.MipLevels = 1;
+      tex_desc.ArraySize = 1;
+      tex_desc.Format = DXGI_FORMAT_R8G8_UNORM;
+      tex_desc.SampleDesc.Count = 1;
+      tex_desc.Usage = D3D11_USAGE_IMMUTABLE;
+      tex_desc.BindFlags = D3D11_BIND_SHADER_RESOURCE;
+      D3D11_SUBRESOURCE_DATA subresource_data = {};
+      subresource_data.pSysMem = areaTexBytes;
+      subresource_data.SysMemPitch = AREATEX_PITCH;
+      tex.reset();
+      hr = device->CreateTexture2D(&tex_desc, &subresource_data, &tex);
+      assert(SUCCEEDED(hr));
+      hr = device->CreateShaderResourceView(tex.get(), nullptr, &srv_area_tex);
+      assert(SUCCEEDED(hr));
+   }
+
+   // Create search texture.
+   static com_ptr<ID3D11ShaderResourceView> srv_search_tex;
+   [[unlikely]] if (!srv_search_tex)
+   {
+      D3D11_TEXTURE2D_DESC tex_desc = {};
+      tex_desc.Width = SEARCHTEX_WIDTH;
+      tex_desc.Height = SEARCHTEX_HEIGHT;
+      tex_desc.MipLevels = 1;
+      tex_desc.ArraySize = 1;
+      tex_desc.Format = DXGI_FORMAT_R8_UNORM;
+      tex_desc.SampleDesc.Count = 1;
+      tex_desc.Usage = D3D11_USAGE_IMMUTABLE;
+      tex_desc.BindFlags = D3D11_BIND_SHADER_RESOURCE;
+      D3D11_SUBRESOURCE_DATA subresource_data = {};
+      subresource_data.pSysMem = searchTexBytes;
+      subresource_data.SysMemPitch = SEARCHTEX_PITCH;
+      tex.reset();
+      hr = device->CreateTexture2D(&tex_desc, &subresource_data, &tex);
+      assert(SUCCEEDED(hr));
+      hr = device->CreateShaderResourceView(tex.get(), nullptr, &srv_search_tex);
+      assert(SUCCEEDED(hr));
+   }
+
+   // Create DS.
+   static com_ptr<ID3D11DepthStencilState> ds_disable_depth_use_stencil;
+   [[unlikely]] if (!ds_disable_depth_use_stencil)
+   {
+      CD3D11_DEPTH_STENCIL_DESC desc(D3D11_DEFAULT);
+      desc.DepthEnable = FALSE;
+      desc.StencilEnable = TRUE;
+      desc.FrontFace.StencilFunc = D3D11_COMPARISON_EQUAL;
+      hr = device->CreateDepthStencilState(&desc, &ds_disable_depth_use_stencil);
+      assert(SUCCEEDED(hr));
+   }
+
+   // Create RT and views.
+   tex_desc.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
+   tex.reset();
+   hr = device->CreateTexture2D(&tex_desc, nullptr, &tex);
+   assert(SUCCEEDED(hr));
+   com_ptr<ID3D11RenderTargetView> rtv_blending_weight_calculation;
+   hr = device->CreateRenderTargetView(tex.get(), nullptr, &rtv_blending_weight_calculation);
+   assert(SUCCEEDED(hr));
+   com_ptr<ID3D11ShaderResourceView> srv_blending_weight_calculation;
+   hr = device->CreateShaderResourceView(tex.get(), nullptr, &srv_blending_weight_calculation);
+   assert(SUCCEEDED(hr));
+
+   // Bindings.
+   device_context->OMSetDepthStencilState(ds_disable_depth_use_stencil.get(), 1);
+   const std::array rtvs_blending_weight_calculation = { rtv_blending_weight_calculation.get() };
+   device_context->OMSetRenderTargets(rtvs_blending_weight_calculation.size(), rtvs_blending_weight_calculation.data(), dsv.get());
+   device_context->VSSetShader(device_data.native_vertex_shaders.at(Math::CompileTimeStringHash("SMAA Blending Weight Calculation VS")).get(), nullptr, 0);
+   device_context->PSSetShader(device_data.native_pixel_shaders.at(Math::CompileTimeStringHash("SMAA Blending Weight Calculation PS")).get(), nullptr, 0);
+   const std::array ps_srvs_blending_weight_calculation = { srv_edge_detection.get(), srv_area_tex.get(), srv_search_tex.get() };
+   device_context->PSSetShaderResources(0, ps_srvs_blending_weight_calculation.size(), ps_srvs_blending_weight_calculation.data());
+
+   device_context->ClearRenderTargetView(rtv_blending_weight_calculation.get(), clear_color);
+   device_context->Draw(3, 0);
+
+   //
+
+   // NeighborhoodBlending pass
+   //
+
+   // Bindings.
+   device_context->OMSetRenderTargets(1, &rtv, nullptr);
+   device_context->VSSetShader(device_data.native_vertex_shaders.at(Math::CompileTimeStringHash("SMAA Neighborhood Blending VS")).get(), nullptr, 0);
+   device_context->PSSetShader(device_data.native_pixel_shaders.at(Math::CompileTimeStringHash("SMAA Neighborhood Blending PS")).get(), nullptr, 0);
+   const std::array ps_srvs_neighborhood_blending = { srv_color_tex, srv_blending_weight_calculation.get() };
+   device_context->PSSetShaderResources(0, ps_srvs_neighborhood_blending.size(), ps_srvs_neighborhood_blending.data());
+
+   device_context->Draw(3, 0);
+
+   //
+
+   // Restore
+   device_context->OMSetBlendState(blend_original.get(), blend_factor_original, sample_mask_original);
+   device_context->OMSetDepthStencilState(ds_original.get(), stencil_ref_original);
+   device_context->OMSetRenderTargets(rtvs_original.size(), rtvs_original.data(), dsv_original.get());
+   device_context->IASetPrimitiveTopology(primitive_topology_original);
+   device_context->VSSetShader(vs_original.get(), nullptr, 0);
+   device_context->PSSetShader(ps_original.get(), nullptr, 0);
+   device_context->PSSetSamplers(0, ps_samplers_original.size(), ps_samplers_original.data());
+   device_context->PSSetShaderResources(0, ps_srvs_original.size(), ps_srvs_original.data());
+   device_context->RSSetViewports(viewports_original.size(), viewports_original.data());
+   device_context->RSSetState(rasterizer_original.get());
+
+   // Release com arrays.
+   auto release_com_array = [](auto& array){ for (auto* p : array) if (p) p->Release(); };
+   release_com_array(rtvs_original);
+   release_com_array(ps_samplers_original);
+   release_com_array(ps_srvs_original);
 }

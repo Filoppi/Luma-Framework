@@ -111,7 +111,7 @@ void main_pass_cs(uint2 dtid : SV_DispatchThreadID)
 	float3 viewspaceNormal = tex1.SampleLevel(smp, normalizedScreenPos, 0).xyz;
 	viewspaceNormal = viewspaceNormal * 2.0 - 1.0;
 	viewspaceNormal = normalize(viewspaceNormal);
-	viewspaceNormal *= 5.0;
+	//viewspaceNormal *= 5.0; // The original AO does this.
 	viewspaceNormal = mul(WorldToView, viewspaceNormal);
 
 	XeGTAO_MainPass(dtid, SpatioTemporalNoise(dtid, 0), viewspaceNormal, tex0, smp, ao_term_and_edges);

@@ -9,6 +9,7 @@ namespace CB
 {
 	struct LumaGameSettings
 	{
+		float2 OutputRes;
 		float2 InvOutputRes;
 		float FogCorrectionIntensity;
 		float FogIntensity;

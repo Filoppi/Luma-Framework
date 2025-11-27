@@ -1,5 +1,4 @@
 #define GAME_BIOSHOCK_SERIES 1
-#define DISABLE_AUTO_DEBUGGER
 
 #include "..\..\Core\core.hpp"
 
@@ -12,6 +11,7 @@ namespace
    ShaderHashesList pixel_shader_hashes_Bloom;
    ShaderHashesList pixel_shader_hashes_Tonemap;
    ShaderHashesList pixel_shader_hashes_AA;
+   ShaderHashesList pixel_shader_hashes_depth_copy;
    ShaderHashesList shader_hashes_Fog;
    ShaderHashesList compute_shader_hashes_AO_main_pass;
    ShaderHashesList compute_shader_hashes_AO_denoise_pass1;
@@ -36,6 +36,10 @@ namespace
    bool g_show_raw_ao;
    com_ptr<ID3D11ShaderResourceView> g_srv_raw_ao;
 #endif
+
+   bool g_smaa_enable;
+
+   com_ptr<ID3D11ShaderResourceView> g_srv_depth;
 
    // User settings:
    bool enable_luts_normalization = true; // TODO: try it (in BS2 luts are written on the CPU, they might be raised?)
@@ -194,10 +198,17 @@ public:
 
       if (bioshock_game == BioShockGame::BioShock_Infinite)
       {
+         // XeGTAO
          native_shaders_definitions.emplace(CompileTimeStringHash("BSI XeGTAO Prefilter Depths"), ShaderDefinition("Luma_BSI_XeGTAO_impl", reshade::api::pipeline_subobject_type::compute_shader, nullptr, "prefilter_depths16x16_cs"));
          native_shaders_definitions.emplace(CompileTimeStringHash("BSI XeGTAO Main Pass"), ShaderDefinition("Luma_BSI_XeGTAO_impl", reshade::api::pipeline_subobject_type::compute_shader, nullptr, "main_pass_cs"));
          native_shaders_definitions.emplace(CompileTimeStringHash("BSI XeGTAO Denoise Pass"), ShaderDefinition("Luma_BSI_XeGTAO_impl", reshade::api::pipeline_subobject_type::compute_shader, nullptr, "denoise_pass_cs"));
+         
+#if DEVELOPMENT
          native_shaders_definitions.emplace(CompileTimeStringHash("Show AO"), ShaderDefinition("Luma_ShowAO", reshade::api::pipeline_subobject_type::pixel_shader));
+#endif
+
+         // SMAA
+         native_shaders_definitions.emplace(CompileTimeStringHash("SMAA Linear To sRGB CS"), ShaderDefinition("Luma_SMAA_LinearTosRGB_CS", reshade::api::pipeline_subobject_type::compute_shader));
       }
    }
 
@@ -232,6 +243,7 @@ public:
       reshade::get_config_value(runtime, NAME, "BloomIntensity", cb_luma_global_settings.GameSettings.BloomIntensity);
       reshade::get_config_value(runtime, NAME, "BloomRadius", cb_luma_global_settings.GameSettings.BloomRadius);
       reshade::get_config_value(runtime, NAME, "XeGTAOEnable", g_xegtao_enable);
+      reshade::get_config_value(runtime, NAME, "SMAAEnable", g_smaa_enable);
       // "device_data.cb_luma_global_settings_dirty" should already be true at this point
    }
 
@@ -293,6 +305,9 @@ public:
 
       if (ImGui::Checkbox("XeGTAO enable", &g_xegtao_enable))
         reshade::set_config_value(runtime, NAME, "XeGTAOEnable", g_xegtao_enable);
+
+      if (ImGui::Checkbox("SMAA enable", &g_smaa_enable))
+         reshade::set_config_value(runtime, NAME, "SMAAEnable", g_smaa_enable);
 
       if (ImGui::SliderFloat("Bloom Intensity", &cb_luma_global_settings.GameSettings.BloomIntensity, 0.f, 2.f))
          reshade::set_config_value(runtime, NAME, "BloomIntensity", cb_luma_global_settings.GameSettings.BloomIntensity);
@@ -421,6 +436,8 @@ public:
    {
       auto& device_data = *swapchain->get_device()->get_private_data<DeviceData>();
 
+      cb_luma_global_settings.GameSettings.OutputRes.x = device_data.output_resolution.x;
+      cb_luma_global_settings.GameSettings.OutputRes.y = device_data.output_resolution.y;
       cb_luma_global_settings.GameSettings.InvOutputRes.x = 1.f / device_data.output_resolution.x;
       cb_luma_global_settings.GameSettings.InvOutputRes.y = 1.f / device_data.output_resolution.y;
       device_data.cb_luma_global_settings_dirty = true;
@@ -429,6 +446,17 @@ public:
    DrawOrDispatchOverrideType OnDrawOrDispatch(ID3D11Device* native_device, ID3D11DeviceContext* native_device_context, CommandListData& cmd_list_data, DeviceData& device_data, reshade::api::shader_stage stages, const ShaderHashesList<OneShaderPerPipeline>& original_shader_hashes, bool is_custom_pass, bool& updated_cbuffers, std::function<void()>* original_draw_dispatch_func) override
    {
       auto& game_device_data = GetGameDeviceData(device_data);
+
+      if (original_shader_hashes.Contains(pixel_shader_hashes_depth_copy))
+      {
+         // RT should be r32f.
+         com_ptr<ID3D11RenderTargetView> rtv;
+         native_device_context->OMGetRenderTargets(1, &rtv, nullptr);
+         com_ptr<ID3D11Resource> resource;
+         rtv->GetResource(&resource);
+         g_srv_depth.reset();
+         native_device->CreateShaderResourceView(resource.get(), nullptr, &g_srv_depth);
+      }
 
       if (original_shader_hashes.Contains(compute_shader_hashes_AO_main_pass))
       {
@@ -626,6 +654,67 @@ public:
       // Tonemapper
       if (!game_device_data.drew_tonemap && original_shader_hashes.Contains(pixel_shader_hashes_Tonemap))
       {
+         if (g_smaa_enable)
+         {
+            // SRV0 should be the scene in linear color space.
+            com_ptr<ID3D11ShaderResourceView> srv;
+            native_device_context->PSGetShaderResources(0, 1, &srv);
+
+            // Get the scene resource and texture description from SRV.
+            com_ptr<ID3D11Resource> resource;
+            srv->GetResource(&resource);
+            com_ptr<ID3D11Texture2D> tex;
+            resource->QueryInterface(&tex);
+            D3D11_TEXTURE2D_DESC tex_desc;
+            tex->GetDesc(&tex_desc);
+
+            // LinearTosRGB pass
+            //
+            // In addition we will copy SRV.
+            //
+
+            // Create UAs and views.
+            tex_desc.BindFlags = D3D11_BIND_SHADER_RESOURCE | D3D11_BIND_UNORDERED_ACCESS;
+            tex.reset();
+            native_device->CreateTexture2D(&tex_desc, nullptr, &tex);
+            com_ptr<ID3D11UnorderedAccessView> uav_linear_to_gamma;
+            native_device->CreateUnorderedAccessView(tex.get(), nullptr, &uav_linear_to_gamma);
+            com_ptr<ID3D11ShaderResourceView> srv_linear_to_gamma;
+            native_device->CreateShaderResourceView(tex.get(), nullptr, &srv_linear_to_gamma);
+            tex.reset();
+            native_device->CreateTexture2D(&tex_desc, nullptr, &tex);
+            com_ptr<ID3D11UnorderedAccessView> uav_copy;
+            native_device->CreateUnorderedAccessView(tex.get(), nullptr, &uav_copy);
+            com_ptr<ID3D11ShaderResourceView> srv_copy;
+            native_device->CreateShaderResourceView(tex.get(), nullptr, &srv_copy);
+
+            // Bindings.
+            static constexpr ID3D11ShaderResourceView* srv_null = nullptr;
+            native_device_context->PSSetShaderResources(0, 1, &srv_null);
+            const std::array srvs = { srv.get() };
+            native_device_context->CSSetShaderResources(0, srvs.size(), srvs.data());
+            const std::array cs_uavs_linear_to_gamma = { uav_copy.get(), uav_linear_to_gamma.get() };
+            native_device_context->CSSetUnorderedAccessViews(0, cs_uavs_linear_to_gamma.size(), cs_uavs_linear_to_gamma.data(), nullptr);
+            native_device_context->CSSetShader(device_data.native_compute_shaders[CompileTimeStringHash("SMAA Linear To sRGB CS")].get(), nullptr, 0);
+
+            native_device_context->Dispatch((tex_desc.Width + 8 - 1) / 8, (tex_desc.Height + 8 - 1) / 8, 1);
+
+            // Unbind UAVs and SRVs.
+            static constexpr std::array<ID3D11UnorderedAccessView*, 2> uav_nulls = {};
+            native_device_context->CSSetUnorderedAccessViews(0, uav_nulls.size(), uav_nulls.data(), nullptr);
+            native_device_context->CSSetShaderResources(0, 1, &srv_null);
+
+            //
+
+            native_device_context->PSSetShaderResources(0, srvs.size(), srvs.data());
+
+            // Create RTV to the scenes's resource.
+            com_ptr<ID3D11RenderTargetView> rtv;
+            native_device->CreateRenderTargetView(resource.get(), nullptr, &rtv);
+
+            DrawSMAA(native_device, native_device_context, device_data, rtv.get(), srv_copy.get(), srv_linear_to_gamma.get(), g_srv_depth.get());
+         }
+
          game_device_data.drew_tonemap = true;
       }
 
@@ -839,6 +928,7 @@ BOOL APIENTRY DllMain(HMODULE hModule, DWORD ul_reason_for_call, LPVOID lpReserv
       {
          pixel_shader_hashes_Tonemap.pixel_shaders = { Shader::Hash_StrToNum("29D570D8") };
          pixel_shader_hashes_AA.pixel_shaders = { Shader::Hash_StrToNum("27BD2A2E"), Shader::Hash_StrToNum("5CDD5AB1") }; // Different qualities
+         pixel_shader_hashes_depth_copy.pixel_shaders = { Shader::Hash_StrToNum("496E549B") };
          compute_shader_hashes_AO_main_pass.compute_shaders = { Shader::Hash_StrToNum("1E7B9941"), Shader::Hash_StrToNum("348372D0") }; // High and Ultra quality
          compute_shader_hashes_AO_denoise_pass1.compute_shaders = { Shader::Hash_StrToNum("F6ED18D8") };
          compute_shader_hashes_AO_denoise_pass2.compute_shaders = { Shader::Hash_StrToNum("BA9A4DB1") };
