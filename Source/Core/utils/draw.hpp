@@ -1256,11 +1256,11 @@ void DrawSMAA(ID3D11Device* device, ID3D11DeviceContext* device_context, const D
    static com_ptr<ID3D11DepthStencilState> ds_disable_depth_replace_stencil;
    [[unlikely]] if (!ds_disable_depth_replace_stencil)
    {
-      CD3D11_DEPTH_STENCIL_DESC desc(D3D11_DEFAULT);
-      desc.DepthEnable = FALSE;
-      desc.StencilEnable = TRUE;
-      desc.FrontFace.StencilPassOp = D3D11_STENCIL_OP_REPLACE;
-      hr = device->CreateDepthStencilState(&desc, &ds_disable_depth_replace_stencil);
+      CD3D11_DEPTH_STENCIL_DESC ds_desc(D3D11_DEFAULT);
+      ds_desc.DepthEnable = FALSE;
+      ds_desc.StencilEnable = TRUE;
+      ds_desc.FrontFace.StencilPassOp = D3D11_STENCIL_OP_REPLACE;
+      hr = device->CreateDepthStencilState(&ds_desc, &ds_disable_depth_replace_stencil);
       assert(SUCCEEDED(hr));
    }
 
@@ -1362,11 +1362,11 @@ void DrawSMAA(ID3D11Device* device, ID3D11DeviceContext* device_context, const D
    static com_ptr<ID3D11DepthStencilState> ds_disable_depth_use_stencil;
    [[unlikely]] if (!ds_disable_depth_use_stencil)
    {
-      CD3D11_DEPTH_STENCIL_DESC desc(D3D11_DEFAULT);
-      desc.DepthEnable = FALSE;
-      desc.StencilEnable = TRUE;
-      desc.FrontFace.StencilFunc = D3D11_COMPARISON_EQUAL;
-      hr = device->CreateDepthStencilState(&desc, &ds_disable_depth_use_stencil);
+      CD3D11_DEPTH_STENCIL_DESC ds_desc(D3D11_DEFAULT);
+      ds_desc.DepthEnable = FALSE;
+      ds_desc.StencilEnable = TRUE;
+      ds_desc.FrontFace.StencilFunc = D3D11_COMPARISON_EQUAL;
+      hr = device->CreateDepthStencilState(&ds_desc, &ds_disable_depth_use_stencil);
       assert(SUCCEEDED(hr));
    }
 
@@ -1410,7 +1410,7 @@ void DrawSMAA(ID3D11Device* device, ID3D11DeviceContext* device_context, const D
 
    //
 
-   // Restore
+   // Restore.
    device_context->OMSetBlendState(blend_original.get(), blend_factor_original, sample_mask_original);
    device_context->OMSetDepthStencilState(ds_original.get(), stencil_ref_original);
    device_context->OMSetRenderTargets(rtvs_original.size(), rtvs_original.data(), dsv_original.get());
