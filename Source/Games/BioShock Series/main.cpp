@@ -30,13 +30,13 @@ namespace
    constexpr size_t XE_GTAO_DEPTH_MIP_LEVELS = 5;
    constexpr UINT XE_GTAO_NUMTHREADS_X = 8;
    constexpr UINT XE_GTAO_NUMTHREADS_Y = 8;
-   bool g_xegtao_enable;
+   bool g_xegtao_enable = true;
 
 #if DEVELOPMENT
-   bool g_show_raw_ao;
+   bool g_show_raw_ao = false;
 #endif
 
-   bool g_smaa_enable;
+   bool g_smaa_enable = true;
 
    // User settings:
    bool enable_luts_normalization = true; // TODO: try it (in BS2 luts are written on the CPU, they might be raised?)
