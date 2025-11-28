@@ -34,12 +34,9 @@ namespace
 
 #if DEVELOPMENT
    bool g_show_raw_ao;
-   com_ptr<ID3D11ShaderResourceView> g_srv_raw_ao;
 #endif
 
    bool g_smaa_enable;
-
-   com_ptr<ID3D11ShaderResourceView> g_srv_depth;
 
    // User settings:
    bool enable_luts_normalization = true; // TODO: try it (in BS2 luts are written on the CPU, they might be raised?)
@@ -146,6 +143,12 @@ struct GameDeviceDataBioshockSeries final : public GameDeviceData
    // BS/BS2/Infinite fog
    com_ptr<ID3D11Texture2D> scene_texture;
    com_ptr<ID3D11ShaderResourceView> scene_texture_srv;
+
+#if DEVELOPMENT
+   com_ptr<ID3D11ShaderResourceView> srv_raw_ao;
+#endif
+
+    com_ptr<ID3D11ShaderResourceView> srv_depth;
 };
 
 class BioshockSeries final : public Game
@@ -182,6 +185,9 @@ public:
       };
       shader_defines_data.append_range(game_shader_defines_data);
 
+      // SMAA
+      native_shaders_definitions.emplace(CompileTimeStringHash("SMAA Linear To sRGB CS"), ShaderDefinition("Luma_SMAA_LinearTosRGB_CS", reshade::api::pipeline_subobject_type::compute_shader));
+
       // Other games don't need this. BS2 uses "SetDeviceGammaRamp" and defaulted to 1.2. BS1 uses "IDXGIOutput::SetGammaControl" but defaults to a neutral value. BSI doesn't seem to use either.
       if (bioshock_game != BioShockGame::BioShock_2_Remastered)
       {
@@ -207,8 +213,6 @@ public:
          native_shaders_definitions.emplace(CompileTimeStringHash("Show AO"), ShaderDefinition("Luma_ShowAO", reshade::api::pipeline_subobject_type::pixel_shader));
 #endif
 
-         // SMAA
-         native_shaders_definitions.emplace(CompileTimeStringHash("SMAA Linear To sRGB CS"), ShaderDefinition("Luma_SMAA_LinearTosRGB_CS", reshade::api::pipeline_subobject_type::compute_shader));
       }
    }
 
@@ -231,6 +235,11 @@ public:
             {
                reshade::log::message(reshade::log::level::warning, "BioShock 2 Remastered Luma failed to patch for Ultrawide compatibility. If you have already patched the executable, restore the original for proper dynamic Hor+ FoV on Weapons");
             }
+         }
+
+         if (bioshock_game == BioShockGame::BioShock_Remastered || bioshock_game == BioShockGame::BioShock_2_Remastered)
+         {
+            reshade::register_event<reshade::addon_event::init_resource>(BioshockSeries::OnInitResource);
          }
       }
    }
@@ -454,8 +463,8 @@ public:
          native_device_context->OMGetRenderTargets(1, &rtv, nullptr);
          com_ptr<ID3D11Resource> resource;
          rtv->GetResource(&resource);
-         g_srv_depth.reset();
-         native_device->CreateShaderResourceView(resource.get(), nullptr, &g_srv_depth);
+         game_device_data.srv_depth.reset();
+         native_device->CreateShaderResourceView(resource.get(), nullptr, &game_device_data.srv_depth);
       }
 
       if (original_shader_hashes.Contains(compute_shader_hashes_AO_main_pass))
@@ -579,8 +588,8 @@ public:
             native_device_context->CSGetUnorderedAccessViews(0, 1, &uav);
             com_ptr<ID3D11Resource> resource;
             uav->GetResource(&resource);
-            g_srv_raw_ao.reset();
-            native_device->CreateShaderResourceView(resource.get(), nullptr, &g_srv_raw_ao);
+            game_device_data.srv_raw_ao.reset();
+            native_device->CreateShaderResourceView(resource.get(), nullptr, &game_device_data.srv_raw_ao);
          }
 #endif
 
@@ -712,7 +721,7 @@ public:
             com_ptr<ID3D11RenderTargetView> rtv;
             native_device->CreateRenderTargetView(resource.get(), nullptr, &rtv);
 
-            DrawSMAA(native_device, native_device_context, device_data, rtv.get(), srv_copy.get(), srv_linear_to_gamma.get(), g_srv_depth.get());
+            DrawSMAA(native_device, native_device_context, device_data, rtv.get(), srv_copy.get(), srv_linear_to_gamma.get(), game_device_data.srv_depth.get());
          }
 
          game_device_data.drew_tonemap = true;
@@ -753,7 +762,7 @@ public:
          ctx->OMSetRenderTargets(rtvs.size(), rtvs.data(), nullptr);
          ctx->VSSetShader(device_data.native_vertex_shaders[CompileTimeStringHash("Copy VS")].get(), nullptr, 0);
          ctx->PSSetShader(device_data.native_pixel_shaders[CompileTimeStringHash("Show AO")].get(), nullptr, 0);
-         const std::array srvs = { g_srv_raw_ao.get() };
+         const std::array srvs = { game_device_data.srv_raw_ao.get() };
          ctx->PSSetShaderResources(0, srvs.size(), srvs.data());
 
          ctx->Draw(4, 0);
@@ -799,6 +808,18 @@ public:
                ApplyCrashFix();
             }
          }
+      }
+   }
+
+   static void OnInitResource(reshade::api::device* device, const reshade::api::resource_desc& desc, const reshade::api::subresource_data* initial_data, reshade::api::resource_usage initial_state, reshade::api::resource resource)
+   {
+      if (desc.texture.format == reshade::api::format::r24_unorm_x8_uint)
+      {
+         auto& device_data = *device->get_private_data<DeviceData>();
+         auto& game_device_data = GetGameDeviceData(device_data);
+         auto native_device = (ID3D11Device*)device->get_native();
+         game_device_data.srv_depth.reset();
+         native_device->CreateShaderResourceView((ID3D11Resource*)resource.handle, nullptr, &game_device_data.srv_depth);
       }
    }
 };
