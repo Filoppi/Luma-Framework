@@ -423,6 +423,7 @@ public:
 
          "\n\nContributors:"
          "\nErsh"
+         "\nGaramond"
 
          "\n\nThird Party:"
          "\nReShade"
@@ -433,6 +434,8 @@ public:
          "\ngir489 (BioShock 2 Remastered Crash Fix)"
          "\nOklab"
          "\nDICE (HDR tonemapper)"
+         "\nGTAO (Intel)"
+         "\nSMAA"
          , "");
    }
 
