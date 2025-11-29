@@ -327,7 +327,8 @@ void main(
   float3 untonemapped = r0.xyz;
 
 #if FIX_RAISED_BLACKS
-    cb_postfx_tonemapping_tonemappingcoeffs0.z *= pow(saturate(GetLuminance(untonemapped) / cb_postfx_tonemapping_tonemappingparms.x), 0.333);
+    float4 tonemappingCoeffs0 = cb_postfx_tonemapping_tonemappingcoeffs0;
+    tonemappingCoeffs0.z *= pow(saturate(GetLuminance(untonemapped) / cb_postfx_tonemapping_tonemappingparms.x), 0.333);
     //cb_postfx_tonemapping_tonemappingcoeffs0.z = 0;
     //cb_postfx_tonemapping_tonemappingcoeffs1.z = 0;
 #endif
