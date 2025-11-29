@@ -123,13 +123,11 @@ float3 applyUserTonemap(float3 inputColor)
   }
 }
 
-float3 vanillaTonemap_Inverse(float3 inputColor)
+float3 vanillaTonemap_Inverse(float3 inputColor, float4 tonemappingCoeffs0 /*= cb_postfx_tonemapping_tonemappingcoeffs0*/, float4 tonemappingCoeffs1 /*= cb_postfx_tonemapping_tonemappingcoeffs1*/)
 {
 #if 0
     return inputColor;
 #endif
-    float4 tonemappingCoeffs0 = cb_postfx_tonemapping_tonemappingcoeffs0;
-    float4 tonemappingCoeffs1 = cb_postfx_tonemapping_tonemappingcoeffs1;
     
     float3 outputColor0 = (tonemappingCoeffs0.z - (tonemappingCoeffs0.w * inputColor.rgb)) / ((tonemappingCoeffs0.y * inputColor.rgb) - tonemappingCoeffs0.x);
     float3 outputColor1 = (tonemappingCoeffs1.z - (tonemappingCoeffs1.w * inputColor.rgb)) / ((tonemappingCoeffs1.y * inputColor.rgb) - tonemappingCoeffs1.x);
@@ -162,18 +160,18 @@ float3 vanillaTonemap_Inverse(float3 inputColor)
 
 // This doesn't seem to make much sense given that TAA was running before tonemapping and storing its history on a linear (R11G11B10F) texture.
 // My guess is that they first wrote TAA on a R8G8B8A8 UNORM texture, and hence applied gamma and tonemap to it, and then converted to storing it in linear space and forgot about it.
-float3 vanillaTonemap(float3 inputColor)
+float3 vanillaTonemap(float3 inputColor, float4 tonemappingCoeffs0 /*= cb_postfx_tonemapping_tonemappingcoeffs0*/, float4 tonemappingCoeffs1 /*= cb_postfx_tonemapping_tonemappingcoeffs1*/)
 {
 #if 0 // TAA doesn't need tonemapping to work properly, in fact, it's probably worse (and more expensive) to run it (actually this breaks the output)
     return inputColor;
 #endif
 #if 0
-    return inputColor * (0.18 / vanillaTonemap_Inverse(0.18, inverse));
+    return inputColor * (0.18 / vanillaTonemap_Inverse(0.18, inverse, tonemappingCoeffs0, tonemappingCoeffs1));
 #endif
 #if 0
     if (inverse)
     {
-        return inputColor * (0.18 / vanillaTonemap_Inverse(0.18, inverse));
+        return inputColor * (0.18 / vanillaTonemap_Inverse(0.18, inverse, tonemappingCoeffs0, tonemappingCoeffs1));
     }
 #endif
     // Some threshold to skip tonemapping, or treat highlights differently.
@@ -183,8 +181,6 @@ float3 vanillaTonemap(float3 inputColor)
     bool3 tonemapThreshold = inputColor < cb_postfx_tonemapping_tonemappingparms.x;
         
     // This isn't the actual inverse tonemap formula, it's just called inverse anyway for some reason
-    float4 tonemappingCoeffs0 = cb_postfx_tonemapping_tonemappingcoeffs0;
-    float4 tonemappingCoeffs1 = cb_postfx_tonemapping_tonemappingcoeffs1;
     
     float3 outputColor;
     float4 tonemappingCoeffs;
@@ -325,16 +321,18 @@ void main(
   }
   r0.xyz = v0.zzz * r0.xyz; // auto exposure
   float3 untonemapped = r0.xyz;
+  
+  float4 tonemappingCoeffs0 = cb_postfx_tonemapping_tonemappingcoeffs0;
+  float4 tonemappingCoeffs1 = cb_postfx_tonemapping_tonemappingcoeffs1;
 
 #if FIX_RAISED_BLACKS
-    float4 tonemappingCoeffs0 = cb_postfx_tonemapping_tonemappingcoeffs0;
     tonemappingCoeffs0.z *= pow(saturate(GetLuminance(untonemapped) / cb_postfx_tonemapping_tonemappingparms.x), 0.333);
-    //cb_postfx_tonemapping_tonemappingcoeffs0.z = 0;
-    //cb_postfx_tonemapping_tonemappingcoeffs1.z = 0;
+    //tonemappingCoeffs0.z = 0;
+    //tonemappingCoeffs0.z = 0;
 #endif
 
   float3 outputColor;
-  float3 vanillaTonemap_ = vanillaTonemap(untonemapped); // TODO: remove _
+  float3 vanillaTonemap_ = vanillaTonemap(untonemapped, tonemappingCoeffs0, tonemappingCoeffs1); // TODO: remove _
   
 #if 0 // apply color grading to vanillaTonemap so blending doesn't break sliders
   //case: if (LumaSettings.DisplayMode >= 1)
@@ -366,7 +364,7 @@ void main(
 #endif
 
     const float SDRTMMidGrayOut = MidGray; 
-    const float SDRTMMidGrayIn = GetLuminance(vanillaTonemap_Inverse(SDRTMMidGrayOut));
+    const float SDRTMMidGrayIn = GetLuminance(vanillaTonemap_Inverse(SDRTMMidGrayOut, tonemappingCoeffs0, tonemappingCoeffs1));
     float SDRTMMidGrayRatio = SDRTMMidGrayOut / SDRTMMidGrayIn;
     untonemapped *= SDRTMMidGrayRatio;
     
@@ -445,7 +443,7 @@ void main(
   {
     o0.xyz = float3(1, 0, 0);
   }
-#if !FIX_RAISED_BLACKS && 0 // Happens always
+#if !FIX_RAISED_BLACKS && 0 // Test raised blacks. Happens always
   if (cb_postfx_tonemapping_tonemappingcoeffs0.z != 0)
   {
     o0.xyz = float3(1, 0, 1);
