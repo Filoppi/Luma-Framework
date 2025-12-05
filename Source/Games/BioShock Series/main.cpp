@@ -1,6 +1,7 @@
 #define GAME_BIOSHOCK_SERIES 1
 
 #define ENABLE_SMAA 1
+#define ENABLE_BLOOM 1
 
 #include "..\..\Core\core.hpp"
 
@@ -35,6 +36,8 @@ namespace
    bool g_xegtao_enable = true;
 
    bool g_smaa_enable = true;
+   bool g_luma_bloom_enable = true;
+   float g_bloom_intensity;
 
    // User settings:
    bool enable_luts_normalization = true; // TODO: try it (in BS2 luts are written on the CPU, they might be raised?)
@@ -175,8 +178,13 @@ public:
          "\nhowever it's arguable whether the default value or the calibrated value is the most accurate one, so pick what you want."
          "\nWe are only applying this correction to the game scene and not the UI, as it doesn't seem necessary there."
          "\nMode 1 and 2 are different ways or applying the gamma correction, so pick what you prefer.", 2},
-         {"XE_GTAO_QUALITY", '2', true, false, "0 - Low\n1 - Medium\n2 - High\n3 - Very High\n4 - Ultra", 4},
       };
+
+      if (bioshock_game == BioShockGame::BioShock_Infinite)
+      {
+         game_shader_defines_data.push_back({ "XE_GTAO_QUALITY", '2', true, false, "0 - Low\n1 - Medium\n2 - High\n3 - Very High\n4 - Ultra", 4 });
+      }
+
       shader_defines_data.append_range(game_shader_defines_data);
 
       // SMAA
@@ -238,9 +246,9 @@ public:
       reshade::api::effect_runtime* runtime = nullptr;
       reshade::get_config_value(runtime, NAME, "FogCorrectionIntensity", cb_luma_global_settings.GameSettings.FogCorrectionIntensity);
       reshade::get_config_value(runtime, NAME, "FogIntensity", cb_luma_global_settings.GameSettings.FogIntensity);
-      reshade::get_config_value(runtime, NAME, "BloomIntensity", cb_luma_global_settings.GameSettings.BloomIntensity);
-      reshade::get_config_value(runtime, NAME, "BloomRadius", cb_luma_global_settings.GameSettings.BloomRadius);
+      reshade::get_config_value(runtime, NAME, "BloomIntensity", g_bloom_intensity);
       reshade::get_config_value(runtime, NAME, "SMAAEnable", g_smaa_enable);
+      reshade::get_config_value(runtime, NAME, "LumaBloomEnable", g_luma_bloom_enable);
 
       if (bioshock_game == BioShockGame::BioShock_Infinite)
       {
@@ -294,23 +302,28 @@ public:
          if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
             ImGui::SetTooltip("You can decrease or increase fog to your liking.");
          DrawResetButton(cb_luma_global_settings.GameSettings.FogIntensity, default_luma_global_game_settings.FogIntensity, "FogIntensity", runtime);
-
-         if (ImGui::SliderFloat("Bloom Radius", &cb_luma_global_settings.GameSettings.BloomRadius, 0.f, 1.f))
-            reshade::set_config_value(runtime, NAME, "BloomRadius", cb_luma_global_settings.GameSettings.BloomRadius);
-         if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
-            ImGui::SetTooltip("The bloom radius is arguably too wide for modern resolutions, customize it to your liking. 1 is the Vanilla value.");
-         DrawResetButton(cb_luma_global_settings.GameSettings.BloomRadius, default_luma_global_game_settings.BloomRadius, "BloomRadius", runtime);
       }
 
       if (bioshock_game == BioShockGame::BioShock_Infinite && ImGui::Checkbox("XeGTAO enable", &g_xegtao_enable))
         reshade::set_config_value(runtime, NAME, "XeGTAOEnable", g_xegtao_enable);
 
-      if (ImGui::Checkbox("SMAA enable", &g_smaa_enable))
+      if (ImGui::Checkbox("SMAA Enable", &g_smaa_enable))
          reshade::set_config_value(runtime, NAME, "SMAAEnable", g_smaa_enable);
 
-      if (ImGui::SliderFloat("Bloom Intensity", &cb_luma_global_settings.GameSettings.BloomIntensity, 0.f, 2.f))
-         reshade::set_config_value(runtime, NAME, "BloomIntensity", cb_luma_global_settings.GameSettings.BloomIntensity);
-      DrawResetButton(cb_luma_global_settings.GameSettings.BloomIntensity, default_luma_global_game_settings.BloomIntensity, "BloomIntensity", runtime);
+      if (ImGui::Checkbox("Luma Bloom Enable", &g_luma_bloom_enable))
+         reshade::set_config_value(runtime, NAME, "LumaBloomEnable", g_luma_bloom_enable);
+
+      if (g_luma_bloom_enable)
+      {
+         if (ImGui::SliderFloat("Bloom Intensity", &g_bloom_intensity, 0.f, 1.f))
+            reshade::set_config_value(runtime, NAME, "BloomIntensity", g_bloom_intensity);
+         DrawResetButton(g_bloom_intensity, default_luma_global_game_settings.BloomIntensity, "BloomIntensity", runtime);
+         cb_luma_global_settings.GameSettings.BloomIntensity = g_bloom_intensity;
+      }
+      else
+      {
+         cb_luma_global_settings.GameSettings.BloomIntensity = 1.0;
+      }
 
 #if 0 // TODO
       ImGui::NewLine();
@@ -627,11 +640,19 @@ public:
       }
 
       // Bloom
-      if (is_custom_pass && !game_device_data.drew_tonemap && original_shader_hashes.Contains(pixel_shader_hashes_Bloom) && fix_bloom_samplers)
+      if (is_custom_pass && !game_device_data.drew_tonemap && original_shader_hashes.Contains(pixel_shader_hashes_Bloom))
       {
-         // Bloom used a nearest neighbor sampler, which made no sense and made it pixelated
-         ID3D11SamplerState* const sampler_state_linear = device_data.sampler_state_linear.get();
-         native_device_context->PSSetSamplers(0, 1, &sampler_state_linear);
+         if (g_luma_bloom_enable)
+         {
+            return DrawOrDispatchOverrideType::Skip;
+         }
+
+         if (fix_bloom_samplers && bioshock_game == BioShockGame::BioShock_2_Remastered)
+         {
+            // Bloom used a nearest neighbor sampler, which made no sense and made it pixelated
+            ID3D11SamplerState* const sampler_state_linear = device_data.sampler_state_linear.get();
+            native_device_context->PSSetSamplers(0, 1, &sampler_state_linear);
+         }
 
          return DrawOrDispatchOverrideType::None;
       }
@@ -698,6 +719,25 @@ public:
             native_device->CreateRenderTargetView(resource.get(), nullptr, &rtv);
 
             DrawSMAA(native_device, native_device_context, device_data, rtv.get(), srv_copy.get(), srv_linear_to_gamma.get(), game_device_data.srv_depth.get());
+         }
+
+         if (g_luma_bloom_enable)
+         {
+            // SRV0 should be the scene in linear color space.
+            ComPtr<ID3D11ShaderResourceView> srv_original;
+            native_device_context->PSGetShaderResources(0, 1, srv_original.put());
+
+            ComPtr<ID3D11ShaderResourceView> srv_bloom;
+            DrawBloom(native_device, native_device_context, device_data, srv_original.get(), srv_bloom.put());
+
+            if (bioshock_game == BioShockGame::BioShock_Infinite)
+            {
+                native_device_context->PSSetShaderResources(3, 1, &srv_bloom);
+            }
+            else
+            {
+                native_device_context->PSSetShaderResources(1, 1, &srv_bloom);
+            }
          }
 
          game_device_data.drew_tonemap = true;
@@ -870,8 +910,22 @@ BOOL APIENTRY DllMain(HMODULE hModule, DWORD ul_reason_for_call, LPVOID lpReserv
       // Default values
       default_luma_global_game_settings.FogCorrectionIntensity = 1.f; // 0 is vanilla. Values between 0.75 and 1 as great defaults.
       default_luma_global_game_settings.FogIntensity = 1.f;
-      default_luma_global_game_settings.BloomIntensity = bioshock_game == BioShockGame::BioShock_Infinite ? 1.f : 0.8f; // TODO: test in BSI
-      default_luma_global_game_settings.BloomRadius = 0.75f; // 1 is vanilla, however it was too big and looks too blurry
+
+      // This needs more testing.
+      if (bioshock_game == BioShockGame::BioShock_Remastered)
+      {
+         default_luma_global_game_settings.BloomIntensity = 0.16;
+      }
+      else if (bioshock_game == BioShockGame::BioShock_2_Remastered)
+      {
+         default_luma_global_game_settings.BloomIntensity = 0.1;
+      }
+      else // BSI.
+      {
+         default_luma_global_game_settings.BloomIntensity = 0.05;
+      }
+
+      g_bloom_intensity = default_luma_global_game_settings.BloomIntensity;
       cb_luma_global_settings.GameSettings = default_luma_global_game_settings;
 
 #if DEVELOPMENT
@@ -882,6 +936,7 @@ BOOL APIENTRY DllMain(HMODULE hModule, DWORD ul_reason_for_call, LPVOID lpReserv
 
       if (bioshock_game == BioShockGame::BioShock_Remastered)
       {
+         pixel_shader_hashes_Bloom.pixel_shaders = { Shader::Hash_StrToNum("D127814C"), Shader::Hash_StrToNum("621F29F9"), Shader::Hash_StrToNum("D6C6679E") };
          pixel_shader_hashes_Tonemap.pixel_shaders = { Shader::Hash_StrToNum("6457104F") };
       }
       else if (bioshock_game == BioShockGame::BioShock_2_Remastered)
@@ -899,6 +954,7 @@ BOOL APIENTRY DllMain(HMODULE hModule, DWORD ul_reason_for_call, LPVOID lpReserv
          compute_shader_hashes_AO_denoise_pass1.compute_shaders = { Shader::Hash_StrToNum("F6ED18D8") };
          compute_shader_hashes_AO_denoise_pass2.compute_shaders = { Shader::Hash_StrToNum("BA9A4DB1") };
       }
+
       // Shared between games
       if (bioshock_game == BioShockGame::BioShock_Remastered || bioshock_game == BioShockGame::BioShock_2_Remastered)
       {

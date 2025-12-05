@@ -170,6 +170,7 @@ constexpr bool OneShaderPerPipeline = true;
 #include "includes/shader_define.h"
 #include "includes/instance_data.h"
 #include "includes/game.h"
+#include "includes/com_ptr.h"
 
 #include "utils/format.hpp"
 #include "utils/pipeline.hpp"
@@ -562,6 +563,14 @@ namespace
       { CompileTimeStringHash("SMAA Neighborhood Blending VS"), { "Luma_SMAA_impl", reshade::api::pipeline_subobject_type::vertex_shader, nullptr, "smaa_neighborhood_blending_vs" } },
       { CompileTimeStringHash("SMAA Neighborhood Blending PS"), { "Luma_SMAA_impl", reshade::api::pipeline_subobject_type::pixel_shader, nullptr, "smaa_neighborhood_blending_ps" } },
 #endif
+
+#if ENABLE_BLOOM
+      { CompileTimeStringHash("Bloom VS"), { "Luma_Bloom", reshade::api::pipeline_subobject_type::vertex_shader, nullptr, "bloom_main_vs" } },
+      { CompileTimeStringHash("Bloom Prefilter PS"), { "Luma_Bloom", reshade::api::pipeline_subobject_type::pixel_shader, nullptr, "bloom_prefilter_ps" } },
+      { CompileTimeStringHash("Bloom Downsample PS"), { "Luma_Bloom", reshade::api::pipeline_subobject_type::pixel_shader, nullptr, "bloom_downsample_ps" } },
+      { CompileTimeStringHash("Bloom Upsample PS"), { "Luma_Bloom", reshade::api::pipeline_subobject_type::pixel_shader, nullptr, "bloom_upsample_ps" } },
+#endif
+
    };
 
    // TODO: make the data in these a unique ptr for easier handling, and the shader binary data contained inside of "CachedShader" too.

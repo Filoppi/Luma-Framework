@@ -1222,12 +1222,12 @@ void DrawSMAA(ID3D11Device* device, ID3D11DeviceContext* device_context, const D
    device_context->IAGetPrimitiveTopology(&primitive_topology_original);
 
    // Backup VS.
-   com_ptr<ID3D11VertexShader> vs_original;
-   device_context->VSGetShader(&vs_original, nullptr, nullptr);
+   ComPtr<ID3D11VertexShader> vs_original;
+   device_context->VSGetShader(vs_original.put(), nullptr, nullptr);
 
    // Backup PS.
-   com_ptr<ID3D11PixelShader> ps_original;
-   device_context->PSGetShader(&ps_original, nullptr, nullptr);
+   ComPtr<ID3D11PixelShader> ps_original;
+   device_context->PSGetShader(ps_original.put(), nullptr, nullptr);
    std::array<ID3D11SamplerState*, 2> ps_samplers_original = {};
    device_context->PSGetSamplers(0, ps_samplers_original.size(), ps_samplers_original.data());
    std::array<ID3D11ShaderResourceView*, 3> ps_srvs_original = {};
@@ -1240,31 +1240,30 @@ void DrawSMAA(ID3D11Device* device, ID3D11DeviceContext* device_context, const D
    device_context->RSGetViewports(&num_viewports, viewports_original.data());
 
    // Backup Rasterizer.
-   com_ptr<ID3D11RasterizerState> rasterizer_original;
-   device_context->RSGetState(&rasterizer_original);
+   ComPtr<ID3D11RasterizerState> rasterizer_original;
+   device_context->RSGetState(rasterizer_original.put());
 
    // Backup Blend.
-   com_ptr<ID3D11BlendState> blend_original;
+   ComPtr<ID3D11BlendState> blend_original;
    FLOAT blend_factor_original[4];
    UINT sample_mask_original;
-   device_context->OMGetBlendState(&blend_original, blend_factor_original, &sample_mask_original);
+   device_context->OMGetBlendState(blend_original.put(), blend_factor_original, &sample_mask_original);
 
    // Backup DepthStencil
-   com_ptr<ID3D11DepthStencilState> ds_original;
+   ComPtr<ID3D11DepthStencilState> ds_original;
    UINT stencil_ref_original;
-   device_context->OMGetDepthStencilState(&ds_original, &stencil_ref_original);
+   device_context->OMGetDepthStencilState(ds_original.put(), &stencil_ref_original);
 
    // Backup RTs.
    std::array<ID3D11RenderTargetView*, D3D11_SIMULTANEOUS_RENDER_TARGET_COUNT> rtvs_original = {};
-   com_ptr<ID3D11DepthStencilView> dsv_original;
-   device_context->OMGetRenderTargets(rtvs_original.size(), rtvs_original.data(), &dsv_original);
+   ComPtr<ID3D11DepthStencilView> dsv_original;
+   device_context->OMGetRenderTargets(rtvs_original.size(), rtvs_original.data(), dsv_original.put());
 
    // Get passed RTV's texture description.
-   com_ptr<ID3D11Resource> resource;
-   rtv->GetResource(&resource);
-   com_ptr<ID3D11Texture2D> tex;
-   auto hr = resource->QueryInterface(&tex);
-   assert(SUCCEEDED(hr));
+   ComPtr<ID3D11Resource> resource;
+   rtv->GetResource(resource.put());
+   ComPtr<ID3D11Texture2D> tex;
+   ensure(resource->QueryInterface(tex.put()), >= 0);
    D3D11_TEXTURE2D_DESC tex_desc;
    tex->GetDesc(&tex_desc);
 
@@ -1277,45 +1276,36 @@ void DrawSMAA(ID3D11Device* device, ID3D11DeviceContext* device_context, const D
    viewport.Height = tex_desc.Height;
 
    // Create DS.
-   static com_ptr<ID3D11DepthStencilState> ds_disable_depth_replace_stencil;
+   static ComPtr<ID3D11DepthStencilState> ds_disable_depth_replace_stencil;
    [[unlikely]] if (!ds_disable_depth_replace_stencil)
    {
       CD3D11_DEPTH_STENCIL_DESC ds_desc(D3D11_DEFAULT);
       ds_desc.DepthEnable = FALSE;
       ds_desc.StencilEnable = TRUE;
       ds_desc.FrontFace.StencilPassOp = D3D11_STENCIL_OP_REPLACE;
-      hr = device->CreateDepthStencilState(&ds_desc, &ds_disable_depth_replace_stencil);
-      assert(SUCCEEDED(hr));
+      ensure(device->CreateDepthStencilState(&ds_desc, ds_disable_depth_replace_stencil.put()), >= 0);
    }
 
    // Create DSV.
    tex_desc.Format = DXGI_FORMAT_D24_UNORM_S8_UINT;
    tex_desc.BindFlags = D3D11_BIND_DEPTH_STENCIL;
-   tex.reset();
-   hr = device->CreateTexture2D(&tex_desc, nullptr, &tex);
-   assert(SUCCEEDED(hr));
-   com_ptr<ID3D11DepthStencilView> dsv;
-   hr = device->CreateDepthStencilView(tex.get(), nullptr, &dsv);
-   assert(SUCCEEDED(hr));
+   ensure(device->CreateTexture2D(&tex_desc, nullptr, tex.put()), >= 0);
+   ComPtr<ID3D11DepthStencilView> dsv;
+   ensure(device->CreateDepthStencilView(tex.get(), nullptr, dsv.put()), >= 0);
 
    // Create RT and views.
    tex_desc.Format = DXGI_FORMAT_R8G8_UNORM;
    tex_desc.BindFlags = D3D11_BIND_SHADER_RESOURCE | D3D11_BIND_RENDER_TARGET;
-   tex.reset();
-   hr = device->CreateTexture2D(&tex_desc, nullptr, &tex);
-   assert(SUCCEEDED(hr));
-   com_ptr<ID3D11RenderTargetView> rtv_edge_detection;
-   hr = device->CreateRenderTargetView(tex.get(), nullptr, &rtv_edge_detection);
-   assert(SUCCEEDED(hr));
-   com_ptr<ID3D11ShaderResourceView> srv_edge_detection;
-   hr = device->CreateShaderResourceView(tex.get(), nullptr, &srv_edge_detection);
-   assert(SUCCEEDED(hr));
+   ensure(device->CreateTexture2D(&tex_desc, nullptr, tex.put()), >= 0);
+   ComPtr<ID3D11RenderTargetView> rtv_edge_detection;
+   ensure(device->CreateRenderTargetView(tex.get(), nullptr, rtv_edge_detection.put()), >= 0);
+   ComPtr<ID3D11ShaderResourceView> srv_edge_detection;
+   ensure(device->CreateShaderResourceView(tex.get(), nullptr, srv_edge_detection.put()), >= 0);
 
    // Bindings.
    device_context->OMSetBlendState(nullptr, nullptr, UINT_MAX);
    device_context->OMSetDepthStencilState(ds_disable_depth_replace_stencil.get(), 1);
-   const std::array rtvs_edge_detection = { rtv_edge_detection.get() };
-   device_context->OMSetRenderTargets(rtvs_edge_detection.size(), rtvs_edge_detection.data(), dsv.get());
+   device_context->OMSetRenderTargets(1, &rtv_edge_detection, dsv.get());
    device_context->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
    device_context->VSSetShader(device_data.native_vertex_shaders.at(Math::CompileTimeStringHash("SMAA Edge Detection VS")).get(), nullptr, 0);
    device_context->PSSetShader(device_data.native_pixel_shaders.at(Math::CompileTimeStringHash("SMAA Edge Detection PS")).get(), nullptr, 0);
@@ -1352,15 +1342,12 @@ void DrawSMAA(ID3D11Device* device, ID3D11DeviceContext* device_context, const D
       D3D11_SUBRESOURCE_DATA subresource_data = {};
       subresource_data.pSysMem = areaTexBytes;
       subresource_data.SysMemPitch = AREATEX_PITCH;
-      tex.reset();
-      hr = device->CreateTexture2D(&tex_desc, &subresource_data, &tex);
-      assert(SUCCEEDED(hr));
-      hr = device->CreateShaderResourceView(tex.get(), nullptr, &srv_area_tex);
-      assert(SUCCEEDED(hr));
+      ensure(device->CreateTexture2D(&tex_desc, &subresource_data, tex.put()), >= 0);
+      ensure(device->CreateShaderResourceView(tex.get(), nullptr, srv_area_tex.put()), >= 0);
    }
 
    // Create search texture.
-   static com_ptr<ID3D11ShaderResourceView> srv_search_tex;
+   static ComPtr<ID3D11ShaderResourceView> srv_search_tex;
    [[unlikely]] if (!srv_search_tex)
    {
       D3D11_TEXTURE2D_DESC tex_desc = {};
@@ -1375,41 +1362,32 @@ void DrawSMAA(ID3D11Device* device, ID3D11DeviceContext* device_context, const D
       D3D11_SUBRESOURCE_DATA subresource_data = {};
       subresource_data.pSysMem = searchTexBytes;
       subresource_data.SysMemPitch = SEARCHTEX_PITCH;
-      tex.reset();
-      hr = device->CreateTexture2D(&tex_desc, &subresource_data, &tex);
-      assert(SUCCEEDED(hr));
-      hr = device->CreateShaderResourceView(tex.get(), nullptr, &srv_search_tex);
-      assert(SUCCEEDED(hr));
+      ensure(device->CreateTexture2D(&tex_desc, &subresource_data, tex.put()), >= 0);
+      ensure(device->CreateShaderResourceView(tex.get(), nullptr, srv_search_tex.put()), >= 0);
    }
 
    // Create DS.
-   static com_ptr<ID3D11DepthStencilState> ds_disable_depth_use_stencil;
+   static ComPtr<ID3D11DepthStencilState> ds_disable_depth_use_stencil;
    [[unlikely]] if (!ds_disable_depth_use_stencil)
    {
       CD3D11_DEPTH_STENCIL_DESC ds_desc(D3D11_DEFAULT);
       ds_desc.DepthEnable = FALSE;
       ds_desc.StencilEnable = TRUE;
       ds_desc.FrontFace.StencilFunc = D3D11_COMPARISON_EQUAL;
-      hr = device->CreateDepthStencilState(&ds_desc, &ds_disable_depth_use_stencil);
-      assert(SUCCEEDED(hr));
+      ensure(device->CreateDepthStencilState(&ds_desc, ds_disable_depth_use_stencil.put()), >= 0);
    }
 
    // Create RT and views.
    tex_desc.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
-   tex.reset();
-   hr = device->CreateTexture2D(&tex_desc, nullptr, &tex);
-   assert(SUCCEEDED(hr));
-   com_ptr<ID3D11RenderTargetView> rtv_blending_weight_calculation;
-   hr = device->CreateRenderTargetView(tex.get(), nullptr, &rtv_blending_weight_calculation);
-   assert(SUCCEEDED(hr));
-   com_ptr<ID3D11ShaderResourceView> srv_blending_weight_calculation;
-   hr = device->CreateShaderResourceView(tex.get(), nullptr, &srv_blending_weight_calculation);
-   assert(SUCCEEDED(hr));
+   ensure(device->CreateTexture2D(&tex_desc, nullptr, tex.put()), >= 0);
+   ComPtr<ID3D11RenderTargetView> rtv_blending_weight_calculation;
+   ensure(device->CreateRenderTargetView(tex.get(), nullptr, rtv_blending_weight_calculation.put()), >= 0);
+   ComPtr<ID3D11ShaderResourceView> srv_blending_weight_calculation;
+   ensure(device->CreateShaderResourceView(tex.get(), nullptr, srv_blending_weight_calculation.put()), >= 0);
 
    // Bindings.
    device_context->OMSetDepthStencilState(ds_disable_depth_use_stencil.get(), 1);
-   const std::array rtvs_blending_weight_calculation = { rtv_blending_weight_calculation.get() };
-   device_context->OMSetRenderTargets(rtvs_blending_weight_calculation.size(), rtvs_blending_weight_calculation.data(), dsv.get());
+   device_context->OMSetRenderTargets(1, &rtv_blending_weight_calculation, dsv.get());
    device_context->VSSetShader(device_data.native_vertex_shaders.at(Math::CompileTimeStringHash("SMAA Blending Weight Calculation VS")).get(), nullptr, 0);
    device_context->PSSetShader(device_data.native_pixel_shaders.at(Math::CompileTimeStringHash("SMAA Blending Weight Calculation PS")).get(), nullptr, 0);
    const std::array ps_srvs_blending_weight_calculation = { srv_edge_detection.get(), srv_area_tex.get(), srv_search_tex.get() };
@@ -1451,4 +1429,173 @@ void DrawSMAA(ID3D11Device* device, ID3D11DeviceContext* device_context, const D
    release_com_array(rtvs_original);
    release_com_array(ps_samplers_original);
    release_com_array(ps_srvs_original);
+}
+
+void DrawBloom(ID3D11Device* device, ID3D11DeviceContext* device_context, const DeviceData& device_data, ID3D11ShaderResourceView* srv_scene, ID3D11ShaderResourceView** srv_bloom)
+{
+    // Backup IA.
+   D3D11_PRIMITIVE_TOPOLOGY primitive_topology_original;
+   device_context->IAGetPrimitiveTopology(&primitive_topology_original);
+
+   // Backup VS.
+   ComPtr<ID3D11VertexShader> vs_original;
+   device_context->VSGetShader(vs_original.put(), nullptr, nullptr);
+
+   // Backup PS.
+   ComPtr<ID3D11PixelShader> ps_original;
+   device_context->PSGetShader(ps_original.put(), nullptr, nullptr);
+   ComPtr<ID3D11SamplerState> ps_sampler_original;
+   device_context->PSGetSamplers(0, 1, ps_sampler_original.put());
+   ComPtr<ID3D11ShaderResourceView> ps_srv_original;
+   device_context->PSGetShaderResources(0, 1, ps_srv_original.put());
+
+   // Backup Viewports.
+   UINT num_viewports;
+   device_context->RSGetViewports(&num_viewports, nullptr);
+   std::vector<D3D11_VIEWPORT> viewports_original(num_viewports);
+   device_context->RSGetViewports(&num_viewports, viewports_original.data());
+
+   // Backup Rasterizer.
+   ComPtr<ID3D11RasterizerState> rasterizer_original;
+   device_context->RSGetState(rasterizer_original.put());
+
+   // Backup Blend.
+   ComPtr<ID3D11BlendState> blend_original;
+   FLOAT blend_factor_original[4];
+   UINT sample_mask_original;
+   device_context->OMGetBlendState(blend_original.put(), blend_factor_original, &sample_mask_original);
+
+   // Backup RTs.
+   std::array<ID3D11RenderTargetView*, D3D11_SIMULTANEOUS_RENDER_TARGET_COUNT> rtvs_original = {};
+   ComPtr<ID3D11DepthStencilView> dsv_original;
+   device_context->OMGetRenderTargets(rtvs_original.size(), rtvs_original.data(), dsv_original.put());
+
+   // Create MIPs and views.
+   //
+
+   // Get the scene resource and texture description from the SRV.
+   ComPtr<ID3D11Resource> resource;
+   srv_scene->GetResource(resource.put());
+   ComPtr<ID3D11Texture2D> tex;
+   ensure(resource->QueryInterface(tex.put()), >= 0);
+   D3D11_TEXTURE2D_DESC tex_desc;
+   tex->GetDesc(&tex_desc);
+
+   constexpr int num_mips = 4;
+
+   tex_desc.Width /= 2;
+   tex_desc.Height /= 2;
+   tex_desc.MipLevels = num_mips;
+   tex_desc.Format = DXGI_FORMAT_R16G16B16A16_FLOAT;
+   tex_desc.BindFlags = D3D11_BIND_SHADER_RESOURCE | D3D11_BIND_RENDER_TARGET;
+   ensure(device->CreateTexture2D(&tex_desc, nullptr, tex.put()), >= 0);
+
+   ID3D11RenderTargetView* rtv_mips[num_mips] = {};
+   ID3D11ShaderResourceView* srv_mips[num_mips] = {};
+
+   D3D11_RENDER_TARGET_VIEW_DESC rtv_desc = {};
+   rtv_desc.Format = tex_desc.Format;
+   rtv_desc.ViewDimension = D3D11_RTV_DIMENSION_TEXTURE2D;
+
+   D3D11_SHADER_RESOURCE_VIEW_DESC srv_desc = {};
+   srv_desc.Format = tex_desc.Format;
+   srv_desc.ViewDimension = D3D11_SRV_DIMENSION_TEXTURE2D;
+   srv_desc.Texture2D.MipLevels = 1;
+
+   for (int i = 0; i < num_mips; ++i)
+   {
+       rtv_desc.Texture2D.MipSlice = i;
+       ensure(device->CreateRenderTargetView(tex.get(), &rtv_desc, &rtv_mips[i]), >= 0);
+       srv_desc.Texture2D.MostDetailedMip = i;
+       ensure(device->CreateShaderResourceView(tex.get(), &srv_desc, &srv_mips[i]), >= 0);
+   }
+
+   //
+
+   // Prefilter (downsample) pass
+   //
+
+   D3D11_VIEWPORT viewport = {};
+   viewport.Width = tex_desc.Width;
+   viewport.Height = tex_desc.Height;
+
+   device_context->OMSetRenderTargets(1, &rtv_mips[0], nullptr);
+   device_context->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+   device_context->VSSetShader(device_data.native_vertex_shaders.at(Math::CompileTimeStringHash("Bloom VS")).get(), nullptr, 0);
+   device_context->PSSetShader(device_data.native_pixel_shaders.at(Math::CompileTimeStringHash("Bloom Prefilter PS")).get(), nullptr, 0);
+   const std::array ps_samplers = { device_data.sampler_state_linear.get() };
+   device_context->PSSetSamplers(0, ps_samplers.size(), ps_samplers.data());
+   device_context->PSSetShaderResources(0, 1, &srv_scene);
+   device_context->RSSetViewports(1, &viewport);
+   device_context->RSSetState(nullptr);
+
+   device_context->Draw(3, 0);
+
+   //
+
+   // Downsample passes
+   //
+
+   device_context->PSSetShader(device_data.native_pixel_shaders.at(Math::CompileTimeStringHash("Bloom Downsample PS")).get(), nullptr, 0);
+   
+   for (int i = 1; i < num_mips; ++i)
+   {
+       viewport.Width /= 2;
+       viewport.Height /= 2;
+
+       device_context->OMSetRenderTargets(1, &rtv_mips[i], nullptr);
+       device_context->PSSetShaderResources(0, 1, &srv_mips[i - 1]);
+       device_context->RSSetViewports(1, &viewport);
+
+       device_context->Draw(3, 0);
+   }
+
+   //
+
+   // Upsample passes
+   //
+
+   device_context->PSSetShader(device_data.native_pixel_shaders.at(Math::CompileTimeStringHash("Bloom Upsample PS")).get(), nullptr, 0);
+   CD3D11_BLEND_DESC blend_desc(D3D11_DEFAULT);
+   blend_desc.RenderTarget[0].BlendEnable = TRUE;
+   blend_desc.RenderTarget[0].DestBlend = D3D11_BLEND_ONE;
+
+   ComPtr<ID3D11BlendState> blend;
+   ensure(device->CreateBlendState(&blend_desc, blend.put()), >= 0);
+   device_context->OMSetBlendState(blend.get(), nullptr, UINT_MAX);
+
+   for (int i = num_mips - 1; i > 0; --i)
+   {
+       viewport.Width *= 2;
+       viewport.Height *= 2;
+
+       device_context->OMSetRenderTargets(1, &rtv_mips[i - 1], nullptr);
+       device_context->PSSetShaderResources(0, 1, &srv_mips[i]);
+       device_context->RSSetViewports(1, &viewport);
+
+       device_context->Draw(3, 0);
+   }
+
+   //
+
+   // Return the final bloom.
+   *srv_bloom = srv_mips[0];
+   (*srv_bloom)->AddRef();
+
+   // Restore.
+   device_context->OMSetBlendState(blend_original.get(), blend_factor_original, sample_mask_original);
+   device_context->OMSetRenderTargets(rtvs_original.size(), rtvs_original.data(), dsv_original.get());
+   device_context->IASetPrimitiveTopology(primitive_topology_original);
+   device_context->VSSetShader(vs_original.get(), nullptr, 0);
+   device_context->PSSetShader(ps_original.get(), nullptr, 0);
+   device_context->PSSetSamplers(0, 1, &ps_sampler_original);
+   device_context->PSSetShaderResources(0, 1, &ps_srv_original);
+   device_context->RSSetViewports(viewports_original.size(), viewports_original.data());
+   device_context->RSSetState(rasterizer_original.get());
+
+   // Release com arrays.
+   auto release_com_array = [](auto& array){ for (auto* p : array) if (p) p->Release(); };
+   release_com_array(rtvs_original);
+   release_com_array(rtv_mips);
+   release_com_array(srv_mips);
 }

@@ -96,5 +96,8 @@
     <ClInclude Include="includes\shader_patching.h">
       <Filter>Includes</Filter>
     </ClInclude>
+    <ClInclude Include="includes\com_ptr.h">
+      <Filter>Includes</Filter>
+    </ClInclude>
   </ItemGroup>
 </Project>
