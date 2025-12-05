@@ -145,7 +145,8 @@ struct GameDeviceDataBioshockSeries final : public GameDeviceData
    com_ptr<ID3D11Texture2D> scene_texture;
    com_ptr<ID3D11ShaderResourceView> scene_texture_srv;
 
-    com_ptr<ID3D11ShaderResourceView> srv_depth;
+   com_ptr<ID3D11ShaderResourceView> srv_depth;
+   DrawSMAAData draw_smaa_data;
 };
 
 class BioshockSeries final : public Game
@@ -718,7 +719,7 @@ public:
             com_ptr<ID3D11RenderTargetView> rtv;
             native_device->CreateRenderTargetView(resource.get(), nullptr, &rtv);
 
-            DrawSMAA(native_device, native_device_context, device_data, rtv.get(), srv_copy.get(), srv_linear_to_gamma.get(), game_device_data.srv_depth.get());
+            DrawSMAA(native_device, native_device_context, device_data, game_device_data.draw_smaa_data, rtv.get(), srv_copy.get(), srv_linear_to_gamma.get(), game_device_data.srv_depth.get());
          }
 
          if (g_luma_bloom_enable)

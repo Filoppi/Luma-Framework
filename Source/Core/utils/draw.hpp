@@ -1213,10 +1213,16 @@ void SanitizeNaNs(ID3D11Device* device, ID3D11DeviceContext* device_context, ID3
    }
 }
 
-void DrawSMAA(ID3D11Device* device, ID3D11DeviceContext* device_context, const DeviceData& device_data, ID3D11RenderTargetView* rtv, ID3D11ShaderResourceView* srv_color_tex, ID3D11ShaderResourceView* srv_color_tex_gamma, ID3D11ShaderResourceView* srv_predication_tex = nullptr)
+struct DrawSMAAData
 {
-   // TODO: SMAA has some constant device data, move that somewhere else.
-   
+   ComPtr<ID3D11ShaderResourceView> srv_area_tex;
+   ComPtr<ID3D11ShaderResourceView> srv_search_tex;
+   ComPtr<ID3D11DepthStencilState> ds_disable_depth_replace_stencil;
+   ComPtr<ID3D11DepthStencilState> ds_disable_depth_use_stencil;
+};
+
+void DrawSMAA(ID3D11Device* device, ID3D11DeviceContext* device_context, const DeviceData& device_data, DrawSMAAData& data, ID3D11RenderTargetView* rtv, ID3D11ShaderResourceView* srv_color_tex, ID3D11ShaderResourceView* srv_color_tex_gamma, ID3D11ShaderResourceView* srv_predication_tex = nullptr)
+{  
    // Backup IA.
    D3D11_PRIMITIVE_TOPOLOGY primitive_topology_original;
    device_context->IAGetPrimitiveTopology(&primitive_topology_original);
@@ -1276,14 +1282,13 @@ void DrawSMAA(ID3D11Device* device, ID3D11DeviceContext* device_context, const D
    viewport.Height = tex_desc.Height;
 
    // Create DS.
-   static ComPtr<ID3D11DepthStencilState> ds_disable_depth_replace_stencil;
-   [[unlikely]] if (!ds_disable_depth_replace_stencil)
+   [[unlikely]] if (!data.ds_disable_depth_replace_stencil)
    {
       CD3D11_DEPTH_STENCIL_DESC ds_desc(D3D11_DEFAULT);
       ds_desc.DepthEnable = FALSE;
       ds_desc.StencilEnable = TRUE;
       ds_desc.FrontFace.StencilPassOp = D3D11_STENCIL_OP_REPLACE;
-      ensure(device->CreateDepthStencilState(&ds_desc, ds_disable_depth_replace_stencil.put()), >= 0);
+      ensure(device->CreateDepthStencilState(&ds_desc, data.ds_disable_depth_replace_stencil.put()), >= 0);
    }
 
    // Create DSV.
@@ -1304,7 +1309,7 @@ void DrawSMAA(ID3D11Device* device, ID3D11DeviceContext* device_context, const D
 
    // Bindings.
    device_context->OMSetBlendState(nullptr, nullptr, UINT_MAX);
-   device_context->OMSetDepthStencilState(ds_disable_depth_replace_stencil.get(), 1);
+   device_context->OMSetDepthStencilState(data.ds_disable_depth_replace_stencil.get(), 1);
    device_context->OMSetRenderTargets(1, &rtv_edge_detection, dsv.get());
    device_context->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
    device_context->VSSetShader(device_data.native_vertex_shaders.at(Math::CompileTimeStringHash("SMAA Edge Detection VS")).get(), nullptr, 0);
@@ -1327,8 +1332,7 @@ void DrawSMAA(ID3D11Device* device, ID3D11DeviceContext* device_context, const D
    //
 
    // Create area texture.
-   static com_ptr<ID3D11ShaderResourceView> srv_area_tex; // TODO: this will cause crashes!
-   [[unlikely]] if (!srv_area_tex)
+   [[unlikely]] if (!data.srv_area_tex)
    {
       D3D11_TEXTURE2D_DESC tex_desc = {};
       tex_desc.Width = AREATEX_WIDTH;
@@ -1343,12 +1347,11 @@ void DrawSMAA(ID3D11Device* device, ID3D11DeviceContext* device_context, const D
       subresource_data.pSysMem = areaTexBytes;
       subresource_data.SysMemPitch = AREATEX_PITCH;
       ensure(device->CreateTexture2D(&tex_desc, &subresource_data, tex.put()), >= 0);
-      ensure(device->CreateShaderResourceView(tex.get(), nullptr, srv_area_tex.put()), >= 0);
+      ensure(device->CreateShaderResourceView(tex.get(), nullptr, data.srv_area_tex.put()), >= 0);
    }
 
    // Create search texture.
-   static ComPtr<ID3D11ShaderResourceView> srv_search_tex;
-   [[unlikely]] if (!srv_search_tex)
+   [[unlikely]] if (!data.srv_search_tex)
    {
       D3D11_TEXTURE2D_DESC tex_desc = {};
       tex_desc.Width = SEARCHTEX_WIDTH;
@@ -1363,18 +1366,17 @@ void DrawSMAA(ID3D11Device* device, ID3D11DeviceContext* device_context, const D
       subresource_data.pSysMem = searchTexBytes;
       subresource_data.SysMemPitch = SEARCHTEX_PITCH;
       ensure(device->CreateTexture2D(&tex_desc, &subresource_data, tex.put()), >= 0);
-      ensure(device->CreateShaderResourceView(tex.get(), nullptr, srv_search_tex.put()), >= 0);
+      ensure(device->CreateShaderResourceView(tex.get(), nullptr, data.srv_search_tex.put()), >= 0);
    }
 
    // Create DS.
-   static ComPtr<ID3D11DepthStencilState> ds_disable_depth_use_stencil;
-   [[unlikely]] if (!ds_disable_depth_use_stencil)
+   [[unlikely]] if (!data.ds_disable_depth_use_stencil)
    {
       CD3D11_DEPTH_STENCIL_DESC ds_desc(D3D11_DEFAULT);
       ds_desc.DepthEnable = FALSE;
       ds_desc.StencilEnable = TRUE;
       ds_desc.FrontFace.StencilFunc = D3D11_COMPARISON_EQUAL;
-      ensure(device->CreateDepthStencilState(&ds_desc, ds_disable_depth_use_stencil.put()), >= 0);
+      ensure(device->CreateDepthStencilState(&ds_desc, data.ds_disable_depth_use_stencil.put()), >= 0);
    }
 
    // Create RT and views.
@@ -1386,11 +1388,11 @@ void DrawSMAA(ID3D11Device* device, ID3D11DeviceContext* device_context, const D
    ensure(device->CreateShaderResourceView(tex.get(), nullptr, srv_blending_weight_calculation.put()), >= 0);
 
    // Bindings.
-   device_context->OMSetDepthStencilState(ds_disable_depth_use_stencil.get(), 1);
+   device_context->OMSetDepthStencilState(data.ds_disable_depth_use_stencil.get(), 1);
    device_context->OMSetRenderTargets(1, &rtv_blending_weight_calculation, dsv.get());
    device_context->VSSetShader(device_data.native_vertex_shaders.at(Math::CompileTimeStringHash("SMAA Blending Weight Calculation VS")).get(), nullptr, 0);
    device_context->PSSetShader(device_data.native_pixel_shaders.at(Math::CompileTimeStringHash("SMAA Blending Weight Calculation PS")).get(), nullptr, 0);
-   const std::array ps_srvs_blending_weight_calculation = { srv_edge_detection.get(), srv_area_tex.get(), srv_search_tex.get() };
+   const std::array ps_srvs_blending_weight_calculation = { srv_edge_detection.get(), data.srv_area_tex.get(), data.srv_search_tex.get() };
    device_context->PSSetShaderResources(0, ps_srvs_blending_weight_calculation.size(), ps_srvs_blending_weight_calculation.data());
 
    device_context->ClearRenderTargetView(rtv_blending_weight_calculation.get(), clear_color);
