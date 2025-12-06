@@ -15,6 +15,7 @@ namespace
    ShaderHashesList pixel_shader_hashes_Tonemap;
    ShaderHashesList pixel_shader_hashes_AA;
    ShaderHashesList pixel_shader_hashes_depth_copy;
+   ShaderHashesList pixel_shader_hashes_lens_flare;
    ShaderHashesList shader_hashes_Fog;
    ShaderHashesList compute_shader_hashes_AO_main_pass;
    ShaderHashesList compute_shader_hashes_AO_denoise_pass1;
@@ -36,8 +37,11 @@ namespace
    bool g_xegtao_enable = true;
 
    bool g_smaa_enable = true;
+   
    bool g_luma_bloom_enable = true;
    float g_bloom_intensity;
+   
+   bool g_lens_flare_enable = true;
 
    // User settings:
    bool enable_luts_normalization = true; // TODO: try it (in BS2 luts are written on the CPU, they might be raised?)
@@ -254,6 +258,7 @@ public:
       if (bioshock_game == BioShockGame::BioShock_Infinite)
       {
          reshade::get_config_value(runtime, NAME, "XeGTAOEnable", g_xegtao_enable);
+         reshade::get_config_value(runtime, NAME, "LensFlareEnable", g_lens_flare_enable);
       }
       
       // "device_data.cb_luma_global_settings_dirty" should already be true at this point
@@ -305,8 +310,14 @@ public:
          DrawResetButton(cb_luma_global_settings.GameSettings.FogIntensity, default_luma_global_game_settings.FogIntensity, "FogIntensity", runtime);
       }
 
-      if (bioshock_game == BioShockGame::BioShock_Infinite && ImGui::Checkbox("XeGTAO enable", &g_xegtao_enable))
-        reshade::set_config_value(runtime, NAME, "XeGTAOEnable", g_xegtao_enable);
+      if (bioshock_game == BioShockGame::BioShock_Infinite)
+      {
+         if (ImGui::Checkbox("XeGTAO Enable", &g_xegtao_enable))
+           reshade::set_config_value(runtime, NAME, "XeGTAOEnable", g_xegtao_enable);
+
+         if (ImGui::Checkbox("Lens Flare Enable", &g_lens_flare_enable))
+           reshade::set_config_value(runtime, NAME, "LensFlareEnable", g_lens_flare_enable);
+      }
 
       if (ImGui::Checkbox("SMAA Enable", &g_smaa_enable))
          reshade::set_config_value(runtime, NAME, "SMAAEnable", g_smaa_enable);
@@ -640,6 +651,11 @@ public:
          return DrawOrDispatchOverrideType::None;
       }
 
+      if (!g_lens_flare_enable && original_shader_hashes.Contains(pixel_shader_hashes_lens_flare))
+      {
+         return DrawOrDispatchOverrideType::Skip;
+      }
+
       // Bloom
       if (is_custom_pass && !game_device_data.drew_tonemap && original_shader_hashes.Contains(pixel_shader_hashes_Bloom))
       {
@@ -951,6 +967,7 @@ BOOL APIENTRY DllMain(HMODULE hModule, DWORD ul_reason_for_call, LPVOID lpReserv
          pixel_shader_hashes_Tonemap.pixel_shaders = { Shader::Hash_StrToNum("29D570D8") };
          pixel_shader_hashes_AA.pixel_shaders = { Shader::Hash_StrToNum("27BD2A2E"), Shader::Hash_StrToNum("5CDD5AB1") }; // Different qualities
          pixel_shader_hashes_depth_copy.pixel_shaders = { Shader::Hash_StrToNum("496E549B") };
+         pixel_shader_hashes_lens_flare.pixel_shaders = { 0xE5427265 };
          compute_shader_hashes_AO_main_pass.compute_shaders = { Shader::Hash_StrToNum("1E7B9941"), Shader::Hash_StrToNum("348372D0") }; // High and Ultra quality
          compute_shader_hashes_AO_denoise_pass1.compute_shaders = { Shader::Hash_StrToNum("F6ED18D8") };
          compute_shader_hashes_AO_denoise_pass2.compute_shaders = { Shader::Hash_StrToNum("BA9A4DB1") };
