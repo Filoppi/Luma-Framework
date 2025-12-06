@@ -327,7 +327,7 @@ public:
 
       if (g_luma_bloom_enable)
       {
-         if (ImGui::SliderFloat("Bloom Intensity", &g_bloom_intensity, 0.f, 1.f))
+         if (ImGui::SliderFloat("Bloom Intensity", &g_bloom_intensity, 0.f, 2.f))
             reshade::set_config_value(runtime, NAME, "BloomIntensity", g_bloom_intensity);
          DrawResetButton(g_bloom_intensity, default_luma_global_game_settings.BloomIntensity, "BloomIntensity", runtime);
          cb_luma_global_settings.GameSettings.BloomIntensity = g_bloom_intensity;
@@ -927,21 +927,7 @@ BOOL APIENTRY DllMain(HMODULE hModule, DWORD ul_reason_for_call, LPVOID lpReserv
       // Default values
       default_luma_global_game_settings.FogCorrectionIntensity = 1.f; // 0 is vanilla. Values between 0.75 and 1 as great defaults.
       default_luma_global_game_settings.FogIntensity = 1.f;
-
-      // This needs more testing.
-      if (bioshock_game == BioShockGame::BioShock_Remastered)
-      {
-         default_luma_global_game_settings.BloomIntensity = 0.16;
-      }
-      else if (bioshock_game == BioShockGame::BioShock_2_Remastered)
-      {
-         default_luma_global_game_settings.BloomIntensity = 0.1;
-      }
-      else // BSI.
-      {
-         default_luma_global_game_settings.BloomIntensity = 0.05;
-      }
-
+      default_luma_global_game_settings.BloomIntensity = 1.0f;
       g_bloom_intensity = default_luma_global_game_settings.BloomIntensity;
       cb_luma_global_settings.GameSettings = default_luma_global_game_settings;
 
