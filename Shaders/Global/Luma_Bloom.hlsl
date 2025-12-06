@@ -26,8 +26,6 @@ Texture2D tex : register(t0);
 
 //
 
-
-
 // Fullscreen triangle VS.
 void bloom_main_vs(uint vid : SV_VertexID, out float4 pos : SV_Position, out float2 texcoord : TEXCOORD)
 {
@@ -41,7 +39,7 @@ void bloom_main_vs(uint vid : SV_VertexID, out float4 pos : SV_Position, out flo
 float karis_average(float3 color)
 {
     const float luma = dot(color, Rec709_Luminance);
-    return 1.0 * rcp(1.0 + luma);
+    return rcp(1.0 + luma);
 }
 
 float3 quadratic_threshold(float3 color)
@@ -89,8 +87,8 @@ float4 bloom_prefilter_ps(float4 pos : SV_Position, float2 texcoord : TEXCOORD) 
     //
 
     // Partial Karis average.
-    // Apply the Karis average in blocks of 4 samples.
-    // And additionaly apply weighted distribution.
+    // Apply the Karis average in blocks of 4 samples,
+    // and additionaly apply weighted distribution.
     float3 groups[5];
     groups[0] = (d + e + i + j);
     groups[1] = (a + b + g + f);
@@ -161,7 +159,7 @@ float4 bloom_upsample_ps(float4 pos : SV_Position, float2 texcoord : TEXCOORD) :
 
     float3 a, b, c, d, e, f, g, h, i;
 
-    // Cant use float in preprocessor.
+    // Can't use float in preprocessor.
     // This should get optimized out.
     if (BLOOM_RADIUS != 1.0)
     {
