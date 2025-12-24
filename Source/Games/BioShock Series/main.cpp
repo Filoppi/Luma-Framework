@@ -146,7 +146,7 @@ struct GameDeviceDataBioshockSeries final : public GameDeviceData
    com_ptr<ID3D11Texture2D> scene_texture;
    com_ptr<ID3D11ShaderResourceView> scene_texture_srv;
 
-   com_ptr<ID3D11ShaderResourceView> srv_depth;
+   ComPtr<ID3D11ShaderResourceView> srv_depth;
    DrawSMAAData draw_smaa_data;
 };
 
@@ -163,8 +163,8 @@ public:
       std::vector<ShaderDefineData> game_shader_defines_data = {
          {"TONEMAP_TYPE", '1', true, false, "0 - SDR: Vanilla\n2 - SDR/HDR: Vanilla+\n3 - HDR: Untonemapped"},
          {"ALLOW_AA", '0', true, false, "Allows disabling the game's FXAA implementation", 1},
-         {"ENABLE_LUMA", '1', true, false, "Allows disabling the mod's improvements to the game's look", 1},
-         {"ENABLE_IMPROVED_BLOOM", '1', true, false, "Reduces the excessive bloom's pixelation due to usage of nearest neighbor texture sampling in the original shaders", 1},
+         {"ENABLE_LUMA", '1', true, false, "Allow disabling the mod's improvements to the game's look", 1},
+         {"ENABLE_IMPROVED_BLOOM", '1', true, false, "BS: Reduces blur over the entire scene.\nBS2: Reduces the excessive bloom's pixelation due to usage of nearest neighbor texture sampling in the original shaders", 1},
          {"ENABLE_LUT_EXTRAPOLATION", '1', true, false, "Use Luma's signature technique for expanding Color Grading LUTs from SDR to HDR", 1},
          {"ENABLE_COLOR_GRADING", '1', true, false, "Allows disabling the color grading LUT (some other color filters might still get applied)", 1},
          {"DISABLE_BLACK_BARS", '0', true, false,
@@ -209,9 +209,10 @@ public:
       if (bioshock_game == BioShockGame::BioShock_Infinite)
       {
          // XeGTAO
-         native_shaders_definitions.emplace(CompileTimeStringHash("BSI XeGTAO Prefilter Depths"), ShaderDefinition("Luma_BSI_XeGTAO_impl", reshade::api::pipeline_subobject_type::compute_shader, nullptr, "prefilter_depths16x16_cs"));
-         native_shaders_definitions.emplace(CompileTimeStringHash("BSI XeGTAO Main Pass"), ShaderDefinition("Luma_BSI_XeGTAO_impl", reshade::api::pipeline_subobject_type::compute_shader, nullptr, "main_pass_cs"));
-         native_shaders_definitions.emplace(CompileTimeStringHash("BSI XeGTAO Denoise Pass"), ShaderDefinition("Luma_BSI_XeGTAO_impl", reshade::api::pipeline_subobject_type::compute_shader, nullptr, "denoise_pass_cs"));
+         native_shaders_definitions.emplace(CompileTimeStringHash("BSI XeGTAO Prefilter Depths CS"), ShaderDefinition{ "Luma_BSI_XeGTAO", reshade::api::pipeline_subobject_type::compute_shader, nullptr, "prefilter_depths16x16_cs" });
+         native_shaders_definitions.emplace(CompileTimeStringHash("BSI XeGTAO Main Pass CS"), ShaderDefinition{ "Luma_BSI_XeGTAO", reshade::api::pipeline_subobject_type::compute_shader, nullptr, "main_pass_cs" });
+         native_shaders_definitions.emplace(CompileTimeStringHash("BSI XeGTAO Denoise Pass 1 CS"), ShaderDefinition{ "Luma_BSI_XeGTAO", reshade::api::pipeline_subobject_type::compute_shader, nullptr, "denoise_pass_cs", { { "XE_GTAO_FINAL_APPLY", "0" } } });
+         native_shaders_definitions.emplace(CompileTimeStringHash("BSI XeGTAO Denoise Pass 2 CS"), ShaderDefinition{ "Luma_BSI_XeGTAO", reshade::api::pipeline_subobject_type::compute_shader, nullptr, "denoise_pass_cs", { { "XE_GTAO_FINAL_APPLY", "1" } } });
       }
    }
 
@@ -476,12 +477,11 @@ public:
       if (original_shader_hashes.Contains(pixel_shader_hashes_depth_copy))
       {
          // RT should be r32f.
-         com_ptr<ID3D11RenderTargetView> rtv;
-         native_device_context->OMGetRenderTargets(1, &rtv, nullptr);
-         com_ptr<ID3D11Resource> resource;
-         rtv->GetResource(&resource);
-         game_device_data.srv_depth.reset();
-         native_device->CreateShaderResourceView(resource.get(), nullptr, &game_device_data.srv_depth);
+         ComPtr<ID3D11RenderTargetView> rtv;
+         native_device_context->OMGetRenderTargets(1, rtv.put(), nullptr);
+         ComPtr<ID3D11Resource> resource;
+         rtv->GetResource(resource.put());
+         ensure(native_device->CreateShaderResourceView(resource.get(), nullptr, game_device_data.srv_depth.put()), >= 0);
       }
 
       if (original_shader_hashes.Contains(compute_shader_hashes_AO_main_pass))
@@ -496,10 +496,10 @@ public:
 
             // Backup the Out UAV and the Normal SRV since we will overide them,
             // before we will need them. 
-            com_ptr<ID3D11UnorderedAccessView> uav_original;
-            native_device_context->CSGetUnorderedAccessViews(0, 1, &uav_original);
-            com_ptr<ID3D11ShaderResourceView> srv_normal;
-            native_device_context->CSGetShaderResources(1, 1, &srv_normal);
+            ComPtr<ID3D11UnorderedAccessView> uav_original;
+            native_device_context->CSGetUnorderedAccessViews(0, 1, uav_original.put());
+            ComPtr<ID3D11ShaderResourceView> srv_normal;
+            native_device_context->CSGetShaderResources(1, 1, srv_normal.put());
 
             // XeGTAOPrefilterDepths16x16 pass
             //
@@ -514,8 +514,8 @@ public:
             tex_desc.BindFlags = D3D11_BIND_UNORDERED_ACCESS | D3D11_BIND_SHADER_RESOURCE;
 
             // Create prefilter depths views.
-            com_ptr<ID3D11Texture2D> tex;
-            native_device->CreateTexture2D(&tex_desc, nullptr, &tex);
+            ComPtr<ID3D11Texture2D> tex;
+            ensure(native_device->CreateTexture2D(&tex_desc, nullptr, tex.put()), >= 0);
             std::array<ID3D11UnorderedAccessView*, XE_GTAO_DEPTH_MIP_LEVELS> uav_prefilter_depths;
             D3D11_UNORDERED_ACCESS_VIEW_DESC uav_desc = {};
             uav_desc.Format = tex_desc.Format;
@@ -523,14 +523,14 @@ public:
             for (int i = 0; i < uav_prefilter_depths.size(); ++i)
             {
                uav_desc.Texture2D.MipSlice = i;
-               native_device->CreateUnorderedAccessView(tex.get(), &uav_desc, &uav_prefilter_depths[i]);
+               ensure(native_device->CreateUnorderedAccessView(tex.get(), &uav_desc, &uav_prefilter_depths[i]), >= 0);
             }
-            com_ptr<ID3D11ShaderResourceView> srv_prefilter_depths;
-            native_device->CreateShaderResourceView(tex.get(), nullptr, &srv_prefilter_depths);
+            ComPtr<ID3D11ShaderResourceView> srv_prefilter_depths;
+            ensure(native_device->CreateShaderResourceView(tex.get(), nullptr, srv_prefilter_depths.put()), >= 0);
 
             // Bindings.
-            native_device_context->CSSetShader(device_data.native_compute_shaders[CompileTimeStringHash("BSI XeGTAO Prefilter Depths")].get(), nullptr, 0);
             native_device_context->CSSetUnorderedAccessViews(0, uav_prefilter_depths.size(), uav_prefilter_depths.data(), nullptr);
+            native_device_context->CSSetShader(device_data.native_compute_shaders.at(CompileTimeStringHash("BSI XeGTAO Prefilter Depths CS")).get(), nullptr, 0);
 
             native_device_context->Dispatch((tex_desc.Width + 16 - 1) / 16, (tex_desc.Height + 16 - 1) / 16, 1);
 
@@ -550,35 +550,50 @@ public:
             // Create AO term and Edges views.
             tex_desc.Format = DXGI_FORMAT_R8G8_UNORM;
             tex_desc.MipLevels = 1;
-            tex.reset();
-            native_device->CreateTexture2D(&tex_desc, nullptr, &tex);
-            com_ptr<ID3D11UnorderedAccessView> uav_main_pass;
-            native_device->CreateUnorderedAccessView(tex.get(), nullptr, &uav_main_pass);
-            com_ptr<ID3D11ShaderResourceView> srv_main_pass;
-            native_device->CreateShaderResourceView(tex.get(), nullptr, &srv_main_pass);
+            ensure(native_device->CreateTexture2D(&tex_desc, nullptr, tex.put()), >= 0);
+            ComPtr<ID3D11UnorderedAccessView> uav_main_pass;
+            ensure(native_device->CreateUnorderedAccessView(tex.get(), nullptr, uav_main_pass.put()), >= 0);
+            ComPtr<ID3D11ShaderResourceView> srv_main_pass;
+            ensure(native_device->CreateShaderResourceView(tex.get(), nullptr, srv_main_pass.put()), >= 0);
 
             // Bindings.
-            native_device_context->CSSetShader(device_data.native_compute_shaders[CompileTimeStringHash("BSI XeGTAO Main Pass")].get(), nullptr, 0);
+            native_device_context->CSSetUnorderedAccessViews(0, 1, &uav_main_pass, nullptr);
+            native_device_context->CSSetShader(device_data.native_compute_shaders.at(CompileTimeStringHash("BSI XeGTAO Main Pass CS")).get(), nullptr, 0);
             const std::array srvs_main_pass = { srv_prefilter_depths.get(), srv_normal.get() };
             native_device_context->CSSetShaderResources(0, srvs_main_pass.size(), srvs_main_pass.data());
-            const std::array uavs_main_pass = { uav_main_pass.get() };
-            native_device_context->CSSetUnorderedAccessViews(0, uavs_main_pass.size(), uavs_main_pass.data(), nullptr);
 
             native_device_context->Dispatch((tex_desc.Width + XE_GTAO_NUMTHREADS_X - 1) / XE_GTAO_NUMTHREADS_X, (tex_desc.Height + XE_GTAO_NUMTHREADS_Y - 1) / XE_GTAO_NUMTHREADS_Y, 1);
 
             //
 
-            // XeGTAODenoisePass pass
+            // Doing 2 XeGTAODenoisePass passes correspond to "Denoising level: Medium" from the XeGTAO demo.
+
+            // XeGTAODenoisePass1 pass
             //
-            // Doing only one XeGTAODenoisePass pass (as last/final pass) correspond to "Denoising level: Sharp" from the XeGTAO demo.
+
+            // Create AO term and Edges views.
+            ensure(native_device->CreateTexture2D(&tex_desc, nullptr, tex.put()), >= 0);
+            ComPtr<ID3D11UnorderedAccessView> uav_denoise_pass1;
+            ensure(native_device->CreateUnorderedAccessView(tex.get(), nullptr, uav_denoise_pass1.put()), >= 0);
+            ComPtr<ID3D11ShaderResourceView> srv_denoise_pass1;
+            ensure(native_device->CreateShaderResourceView(tex.get(), nullptr, srv_denoise_pass1.put()), >= 0);
+
+            // Bindings.
+            native_device_context->CSSetUnorderedAccessViews(0, 1, &uav_denoise_pass1, nullptr);
+            native_device_context->CSSetShader(device_data.native_compute_shaders.at(CompileTimeStringHash("BSI XeGTAO Denoise Pass 1 CS")).get(), nullptr, 0);
+            native_device_context->CSSetShaderResources(0, 1, &srv_main_pass);
+
+            native_device_context->Dispatch((tex_desc.Width + (XE_GTAO_NUMTHREADS_X * 2) - 1) / (XE_GTAO_NUMTHREADS_X * 2), (tex_desc.Height + XE_GTAO_NUMTHREADS_Y - 1) / XE_GTAO_NUMTHREADS_Y,1);
+
+            //
+
+            // XeGTAODenoisePass2 pass
             //
 
             // Bindings.
-            const std::array uavs_denoise_pass = { uav_original.get() };
-            native_device_context->CSSetUnorderedAccessViews(0, uavs_denoise_pass.size(), uavs_denoise_pass.data(), nullptr);
-            native_device_context->CSSetShader(device_data.native_compute_shaders[CompileTimeStringHash("BSI XeGTAO Denoise Pass")].get(), nullptr, 0);
-            const std::array srvs_denoise_pass = { srv_main_pass.get() };
-            native_device_context->CSSetShaderResources(0, srvs_denoise_pass.size(), srvs_denoise_pass.data());
+            native_device_context->CSSetUnorderedAccessViews(0, 1, &uav_original, nullptr);
+            native_device_context->CSSetShader(device_data.native_compute_shaders.at(CompileTimeStringHash("BSI XeGTAO Denoise Pass 2 CS")).get(), nullptr, 0);
+            native_device_context->CSSetShaderResources(0, 1, &srv_denoise_pass1);
 
             native_device_context->Dispatch((tex_desc.Width + (XE_GTAO_NUMTHREADS_X * 2) - 1) / (XE_GTAO_NUMTHREADS_X * 2), (tex_desc.Height + XE_GTAO_NUMTHREADS_Y - 1) / XE_GTAO_NUMTHREADS_Y, 1);
 
@@ -820,7 +835,7 @@ public:
          auto& game_device_data = GetGameDeviceData(device_data);
          auto native_device = (ID3D11Device*)device->get_native();
          game_device_data.srv_depth.reset();
-         native_device->CreateShaderResourceView((ID3D11Resource*)resource.handle, nullptr, &game_device_data.srv_depth);
+         ensure(native_device->CreateShaderResourceView((ID3D11Resource*)resource.handle, nullptr, game_device_data.srv_depth.put()), >= 0);
       }
    }
 };

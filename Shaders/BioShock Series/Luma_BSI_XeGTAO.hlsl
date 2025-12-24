@@ -1,44 +1,17 @@
-// XeGTAO implementation adopted for Deus Ex: Human Revolution
+// XeGTAO addopted for Bioshock Infinite.
 //
-// For the reference see:  https://github.com/GameTechDev/XeGTAO
+// Source: https://github.com/GameTechDev/XeGTAO
+
+cbuffer _Globals : register(b0)
+{
+    float4 OcclusionFadeoutParameters : packoffset(c0);
+    float3x3 WorldToView : packoffset(c1);
+    float4 g_f4RTSize : packoffset(c4); // (width, height, 1/width, 1/height)
+    float g_fTanHalfH : packoffset(c5);
+    float g_fTanHalfV : packoffset(c5.y);
+}
 
 #include "Includes/Settings.hlsl"
-
-cbuffer SceneBuffer : register(b0)
-{
-    row_major float4x4 View : packoffset(c0);
-    row_major float4x4 ScreenMatrix : packoffset(c4);
-    float2 DepthExportScale : packoffset(c8);
-    float2 FogScaleOffset : packoffset(c9);
-    float3 CameraPosition : packoffset(c10);
-    float3 CameraDirection : packoffset(c11);
-    float3 DepthFactors : packoffset(c12);
-    float2 ShadowDepthBias : packoffset(c13);
-    float4 SubframeViewport : packoffset(c14);
-    row_major float3x4 DepthToWorld : packoffset(c15);
-    float4 DepthToView : packoffset(c18);
-    float4 OneOverDepthToView : packoffset(c19);
-    float4 DepthToW : packoffset(c20);
-    float4 ClipPlane : packoffset(c21);
-    float2 ViewportDepthScaleOffset : packoffset(c22);
-    float2 ColorDOFDepthScaleOffset : packoffset(c23);
-    float2 TimeVector : packoffset(c24);
-    float3 HeightFogParams : packoffset(c25);
-    float3 GlobalAmbient : packoffset(c26);
-    float4 GlobalParams[16] : packoffset(c27);
-    float DX3_SSAOScale : packoffset(c43);
-    float4 ScreenExtents : packoffset(c44);
-    float2 ScreenResolution : packoffset(c45);
-    float4 PSSMToMap1Lin : packoffset(c46);
-    float4 PSSMToMap1Const : packoffset(c47);
-    float4 PSSMToMap2Lin : packoffset(c48);
-    float4 PSSMToMap2Const : packoffset(c49);
-    float4 PSSMToMap3Lin : packoffset(c50);
-    float4 PSSMToMap3Const : packoffset(c51);
-    float4 PSSMDistances : packoffset(c52);
-    row_major float4x4 WorldToPSSM0 : packoffset(c53);
-    float StereoOffset : packoffset(c25.w);
-}
 
 #if XE_GTAO_QUALITY == 0 // Low
     #define SLICE_COUNT 4.0
@@ -56,7 +29,7 @@ cbuffer SceneBuffer : register(b0)
 //
 
 #ifndef EFFECT_RADIUS
-#define EFFECT_RADIUS 0.35 // Default 0.5
+#define EFFECT_RADIUS 0.4 // Default 0.5
 #endif
 
 #ifndef RADIUS_MULTIPLIER
@@ -72,11 +45,11 @@ cbuffer SceneBuffer : register(b0)
 #endif
 
 #ifndef THIN_OCCLUDER_COMPENSATION
-#define THIN_OCCLUDER_COMPENSATION 0.0 // Default 0.0
+#define THIN_OCCLUDER_COMPENSATION 0.0 // Default 0.0 
 #endif
 
 #ifndef FINAL_VALUE_POWER
-#define FINAL_VALUE_POWER 0.45 // Default 2.2
+#define FINAL_VALUE_POWER 1.0 // Default 2.2
 #endif
 
 #ifndef DEPTH_MIP_SAMPLING_OFFSET
@@ -95,11 +68,20 @@ cbuffer SceneBuffer : register(b0)
 #define DENOISE_BLUR_BETA 1.2 // Default 1.2
 #endif
 
+#ifndef CAMERA_CLIP_NEAR
+#define CAMERA_CLIP_NEAR 0.1 // Default 0.1
+#endif
+
+#ifndef CAMERA_CLIP_FAR
+#define CAMERA_CLIP_FAR 1000.0 // Default 1000.0
+#endif
+
 //
 
-#define VIEWPORT_PIXEL_SIZE ScreenExtents.zw + ScreenExtents.xy // Intentionally not in parenthesis.
-#define NDC_TO_VIEW_MUL DepthToView.xy
-#define NDC_TO_VIEW_ADD DepthToView.zw
+#define VIEWPORT_PIXEL_SIZE g_f4RTSize.zw
+
+#define NDC_TO_VIEW_MUL float2(g_fTanHalfH * 2.0, g_fTanHalfV * -2.0)
+#define NDC_TO_VIEW_ADD float2(-g_fTanHalfH, g_fTanHalfV)
 #define NDC_TO_VIEW_MUL_X_PIXEL_SIZE (NDC_TO_VIEW_MUL * VIEWPORT_PIXEL_SIZE)
 
 #define XE_GTAO_DEPTH_MIP_LEVELS 5.0
@@ -110,8 +92,16 @@ cbuffer SceneBuffer : register(b0)
 
 float XeGTAO_ScreenSpaceToViewSpaceDepth(const float screenDepth)
 {
-    float viewspaceDepth = 1.0 / max(1e-6, screenDepth * DepthToW.x + DepthToW.y);
-    return viewspaceDepth / 100.0; // Dividing by 100 makes AO look close to the original SSAO.
+    float depthLinearizeMul = CAMERA_CLIP_FAR * CAMERA_CLIP_NEAR / (CAMERA_CLIP_FAR - CAMERA_CLIP_NEAR);
+    float depthLinearizeAdd = CAMERA_CLIP_FAR / (CAMERA_CLIP_FAR - CAMERA_CLIP_NEAR);
+
+    // correct the handedness issue. need to make sure this below is correct, but I think it is.
+    if (depthLinearizeMul * depthLinearizeAdd < 0.0) {
+        depthLinearizeAdd = -depthLinearizeAdd;
+    }
+
+    // Optimised version of "-cameraClipNear / (cameraClipFar - projDepth * (cameraClipFar - cameraClipNear)) * cameraClipFar"
+    return depthLinearizeMul / (depthLinearizeAdd - screenDepth);
 }
 
 // This is also a good place to do non-linear depth conversion for cases where one wants the 'radius' (effectively the threshold between near-field and far-field GI), 
@@ -243,22 +233,6 @@ float3 XeGTAO_ComputeViewspacePosition(float2 screenPos, float viewspaceDepth)
     return ret;
 }
 
-float3 XeGTAO_CalculateNormal(const float4 edgesLRTB, const float3 pixCenterPos, float3 pixLPos, float3 pixRPos, float3 pixTPos, float3 pixBPos)
-{
-    // Get this pixel's viewspace normal
-    float4 acceptedNormals = saturate(float4(edgesLRTB.x * edgesLRTB.z, edgesLRTB.z * edgesLRTB.y, edgesLRTB.y * edgesLRTB.w, edgesLRTB.w * edgesLRTB.x) + 0.01);
-
-    pixLPos = normalize(pixLPos - pixCenterPos);
-    pixRPos = normalize(pixRPos - pixCenterPos);
-    pixTPos = normalize(pixTPos - pixCenterPos);
-    pixBPos = normalize(pixBPos - pixCenterPos);
-
-    float3 pixelNormal = acceptedNormals.x * cross(pixLPos, pixTPos) + acceptedNormals.y * cross(pixTPos, pixRPos) + acceptedNormals.z * cross(pixRPos, pixBPos) + acceptedNormals.w * cross(pixBPos, pixLPos);
-    pixelNormal = normalize(pixelNormal);
-
-    return pixelNormal;
-}
-
 // http://h14s.p5r.org/2012/09/0x5f3759df.html, [Drobot2014a] Low Level Optimizations for GCN, https://blog.selfshadow.com/publications/s2016-shading-course/activision/s2016_pbs_activision_occlusion.pdf slide 63
 float XeGTAO_FastSqrt(float x)
 {
@@ -294,20 +268,6 @@ void XeGTAO_MainPass(uint2 pixCoord, float2 localNoise, float3 viewspaceNormal, 
 
     float4 edgesLRTB = XeGTAO_CalculateEdges(viewspaceZ, pixLZ, pixRZ, pixTZ, pixBZ);
     const float edges = XeGTAO_PackEdges(edgesLRTB);
-
-#if XE_GTAO_GENERATE_NORMALS
-    // Generating screen space normals in-place is faster than generating normals in a separate pass but requires
-    // use of 32bit depth buffer (16bit works but visibly degrades quality) which in turn slows everything down. So to
-    // reduce complexity and allow for screen space normal reuse by other effects, we've pulled it out into a separate
-    // pass.
-    // However, we leave this code in, in case anyone has a use-case where it fits better.
-    float3 CENTER = XeGTAO_ComputeViewspacePosition(normalizedScreenPos, viewspaceZ);
-    float3 LEFT = XeGTAO_ComputeViewspacePosition(normalizedScreenPos + float2(-1.0, 0.0) * VIEWPORT_PIXEL_SIZE, pixLZ);
-    float3 RIGHT = XeGTAO_ComputeViewspacePosition(normalizedScreenPos + float2(1.0, 0.0) * VIEWPORT_PIXEL_SIZE, pixRZ);
-    float3 TOP = XeGTAO_ComputeViewspacePosition(normalizedScreenPos + float2(0.0, -1.0) * VIEWPORT_PIXEL_SIZE, pixTZ);
-    float3 BOTTOM = XeGTAO_ComputeViewspacePosition(normalizedScreenPos + float2(0.0, 1.0) * VIEWPORT_PIXEL_SIZE, pixBZ);
-    viewspaceNormal = XeGTAO_CalculateNormal(edgesLRTB, CENTER, LEFT, RIGHT, TOP, BOTTOM);
-#endif
 
     // Move center pixel slightly towards camera to avoid imprecision artifacts due to depth buffer imprecision; offset depends on depth texture format used
     viewspaceZ *= 0.99999; // this is good for FP32 depth buffer
@@ -524,7 +484,7 @@ void XeGTAO_AddSample(float ssaoValue, float edgeValue, inout float sum, inout f
 
 void XeGTAO_Denoise(uint2 pixCoordBase, Texture2D sourceAOTermAndEdges, SamplerState texSampler,
 #if XE_GTAO_FINAL_APPLY
-RWTexture2D<float4> outputTexture
+RWTexture2D<unorm float4> outputTexture
 #else
 RWTexture2D<unorm float2> outputTexture
 #endif
@@ -614,11 +574,11 @@ RWTexture2D<unorm float2> outputTexture
         aoTerm[side] = sum / sumWeight;
 
 #if XE_GTAO_FINAL_APPLY
-        // Originally SSAO packs AO term as alpha to viewspace normlas, so we do the same.
-        outputTexture[pixCoord] = float4(outputTexture[pixCoord].rgb, saturate(aoTerm[side] * XE_GTAO_OCCLUSION_TERM_SCALE));
+        outputTexture[pixCoord] = float4(saturate(aoTerm[side] * XE_GTAO_OCCLUSION_TERM_SCALE), 0.0, 0.0, 0.0);
 #else
         outputTexture[pixCoord] = float2(aoTerm[side], side == 0 ? edgesQ0.y : edgesQ1.x);
 #endif
+    
     }
 }
 
@@ -638,7 +598,7 @@ RWTexture2D<float> out_working_depth_mip4 : register(u4);
 RWTexture2D<unorm float2> ao_term_and_edges : register(u0);
 
 #if XE_GTAO_FINAL_APPLY
-RWTexture2D<float4> final_output : register(u0);
+RWTexture2D<unorm float4> final_output : register(u0);
 #else
 RWTexture2D<unorm float2> final_output : register(u0);
 #endif
@@ -704,15 +664,12 @@ void main_pass_cs(uint2 dtid : SV_DispatchThreadID)
     // tex1 = world-space normal
     // smp = g_samplerPointClamp
 
-    float3 viewspaceNormal = 0.0;
-
-    #if !XE_GTAO_GENERATE_NORMALS
     // Sample and decode normals.
     const float2 normalizedScreenPos = (dtid + 0.5) * VIEWPORT_PIXEL_SIZE;
-    viewspaceNormal = tex1.SampleLevel(smp, normalizedScreenPos, 0).xyz;
+    float3 viewspaceNormal = tex1.SampleLevel(smp, normalizedScreenPos, 0).xyz;
     viewspaceNormal = viewspaceNormal * 2.0 - 1.0;
     viewspaceNormal = normalize(viewspaceNormal);
-    #endif
+    viewspaceNormal = mul(WorldToView, viewspaceNormal);
 
     XeGTAO_MainPass(dtid, SpatioTemporalNoise(dtid, 0), viewspaceNormal, tex0, smp, ao_term_and_edges);
 }
