@@ -23,4 +23,12 @@ static const float DevelopmentVerticalResolution = 1080.0;
 #define ENABLE_HIGHLIGHTS_DESATURATION_TYPE 0
 #endif
 
+#ifndef XE_GTAO_GENERATE_NORMALS
+#define XE_GTAO_GENERATE_NORMALS 0
+#endif
+
+#ifndef XE_GTAO_QUALITY
+#define XE_GTAO_QUALITY 2
+#endif
+
 #endif // SRC_GAME_SETTINGS_HLSL

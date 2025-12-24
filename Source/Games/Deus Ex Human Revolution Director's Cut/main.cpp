@@ -5,6 +5,8 @@
 
 #define ENABLE_ORIGINAL_SHADERS_MEMORY_EDITS 1
 
+#define ENABLE_SMAA 1
+
 #include "..\..\Core\core.hpp"
 
 namespace
@@ -18,13 +20,24 @@ namespace
 
    bool has_ssao = false;
 
+   bool g_smaa_enable = true;
+
+   // XeGTAO
+   constexpr size_t XE_GTAO_DEPTH_MIP_LEVELS = 5;
+   constexpr UINT XE_GTAO_NUMTHREADS_X = 8;
+   constexpr UINT XE_GTAO_NUMTHREADS_Y = 8;
+   bool g_xegtao_enable = true;
+
    ShaderHashesList pixel_shader_hashes_ColorGrading;
+   ShaderHashesList pixel_shader_hashes_MLAA_mask;
    ShaderHashesList pixel_shader_hashes_SupportedAA;
    ShaderHashesList pixel_shader_hashes_BloomGeneration1;
    ShaderHashesList pixel_shader_hashes_BloomComposition;
    ShaderHashesList pixel_shader_hashes_UI;
    ShaderHashesList pixel_shader_hashes_Lighting;
    ShaderHashesList pixel_shader_hashes_SSAOGeneration;
+   ShaderHashesList compute_shader_hashes_SSAODenoise;
+   ShaderHashesList pixel_shader_hashes_Copy; // Used to copy SSAO, but not exclusivly.
 
    // From "rrika9"
    const std::vector<uint8_t> pattern_ui_scale_1 = {
@@ -183,6 +196,7 @@ struct GameDeviceDataDeusExHumanRevolutionDC final : public GameDeviceData
    bool has_drawn_supported_aa = false;
    bool has_drawn_opaque_geometry = false;
    bool has_drawn_ssao = false;
+   bool has_drawn_xegtao = false;
 
    SanitizeNaNsData sanitize_nans_data;
 
@@ -199,6 +213,10 @@ struct GameDeviceDataDeusExHumanRevolutionDC final : public GameDeviceData
 
    com_ptr<ID3D11Resource> depth_buffer;
    com_ptr<ID3D11ShaderResourceView> depth_buffer_srv;
+
+   ComPtr<ID3D11Buffer> cb_ssao_scene_buffer;
+
+   DrawSMAAData draw_smaa_data;
 
    struct BlendDescCompare
    {
@@ -235,6 +253,8 @@ public:
          {"ENABLE_IMPROVED_BLOOM", '1', true, false, "The bloom radius was calibrated for 720p/1080p and looked too small at higher resolutions", 1},
          {"ENABLE_IMPROVED_COLOR_GRADING", '1', true, false, "Allow running a new, modernized, version of the color grading pass (e.g. the gold filter)", 1},
          {"ENABLE_HIGHLIGHTS_DESATURATION_TYPE", '0', true, false, "If you found highlights to be too saturated, try different values for this (0-3)", 3},
+         {"XE_GTAO_QUALITY", '2', true, false, "0 - Low\n1 - Medium\n2 - High\n3 - Very High\n4 - Ultra", 4},
+         {"XE_GTAO_GENERATE_NORMALS", '0', true, false, "XeGTAO will by default use G-buffer normals, but pictures/certificates on walls have wrong normals so they will get over darkened.\nTo solve that you can enable this to generate normals from depth, but the AO will be less accurate.", 1}
       };
       shader_defines_data.append_range(game_shader_defines_data);
 
@@ -263,6 +283,14 @@ public:
 #endif
 
       native_shaders_definitions.emplace(CompileTimeStringHash("Modulate Lighting"), ShaderDefinition{ "Luma_ModulateLighting", reshade::api::pipeline_subobject_type::pixel_shader });
+
+      // XeGTAO
+      native_shaders_definitions.emplace(CompileTimeStringHash("DXHR XeGTAO Prefilter Depths CS"), ShaderDefinition{ "Luma_DXHR_XeGTAO", reshade::api::pipeline_subobject_type::compute_shader, nullptr, "prefilter_depths16x16_cs" });
+      native_shaders_definitions.emplace(CompileTimeStringHash("DXHR XeGTAO Main Pass CS"), ShaderDefinition{ "Luma_DXHR_XeGTAO", reshade::api::pipeline_subobject_type::compute_shader, nullptr, "main_pass_cs" });
+      native_shaders_definitions.emplace(CompileTimeStringHash("DXHR XeGTAO Denoise Pass 1 CS"), ShaderDefinition{ "Luma_DXHR_XeGTAO", reshade::api::pipeline_subobject_type::compute_shader, nullptr, "denoise_pass_cs", { { "XE_GTAO_FINAL_APPLY", "0" } } });
+      native_shaders_definitions.emplace(CompileTimeStringHash("DXHR XeGTAO Denoise Pass 2 CS"), ShaderDefinition{ "Luma_DXHR_XeGTAO", reshade::api::pipeline_subobject_type::compute_shader, nullptr, "denoise_pass_cs", { { "XE_GTAO_FINAL_APPLY", "1" } } });
+
+      native_shaders_definitions.emplace(CompileTimeStringHash("DXHR SMAA Linearize CS"), ShaderDefinition{ "Luma_SMAA_Linearize", reshade::api::pipeline_subobject_type::compute_shader });
    }
 
    void OnLoad(std::filesystem::path& file_path, bool failed) override
@@ -547,6 +575,13 @@ public:
             game_device_data.lighting_buffer_rtv = lighting_buffer_rtv;
             game_device_data.has_found_lighting_buffer = true;
          }
+         else if (original_shader_hashes.Contains(pixel_shader_hashes_MLAA_mask))
+         {
+            if (g_smaa_enable)
+            {
+                return DrawOrDispatchOverrideType::Skip;
+            }
+         }
          // Tell the supported AA shaders they need to tonemap, as the gold filter shader won't run, and that's ideally where we'd do TM
          else if (is_custom_pass && original_shader_hashes.Contains(pixel_shader_hashes_SupportedAA))
          {
@@ -566,6 +601,51 @@ public:
                ASSERT_ONCE(device_data.back_buffers.contains((uint64_t)rt_resource.get())); // Note: this might trigger for one frame after loading
             }
 #endif
+               if (g_smaa_enable)
+               {
+                  // SRV0 should be the scene.
+                  ComPtr<ID3D11ShaderResourceView> srv_scene;
+                  native_device_context->PSGetShaderResources(0, 1, srv_scene.put());
+                  
+                  // Get scene resource and texture description.
+                  ComPtr<ID3D11Resource> resource;
+                  srv_scene->GetResource(resource.put());
+                  ComPtr<ID3D11Texture2D> tex;
+                  ensure(resource->QueryInterface(tex.put()), >= 0);
+                  D3D11_TEXTURE2D_DESC tex_desc;
+                  tex->GetDesc(&tex_desc);
+
+                  // Linearize pass
+                  //
+                  // The game renders everything in sRGB light.
+                  //
+
+                  // Create UAV and SRV.
+                  tex_desc.BindFlags = D3D11_BIND_UNORDERED_ACCESS | D3D11_BIND_SHADER_RESOURCE;
+                  ensure(native_device->CreateTexture2D(&tex_desc, nullptr, tex.put()), >= 0);
+                  ComPtr<ID3D11UnorderedAccessView> uav_linearize;
+                  ensure(native_device->CreateUnorderedAccessView(tex.get(), nullptr, uav_linearize.put()), >= 0);
+                  ComPtr<ID3D11ShaderResourceView> srv_linearize;
+                  ensure(native_device->CreateShaderResourceView(tex.get(), nullptr, srv_linearize.put()), >= 0);
+
+                  // Bindings.
+                  native_device_context->CSSetUnorderedAccessViews(0, 1, &uav_linearize, nullptr);
+                  native_device_context->CSSetShader(device_data.native_compute_shaders.at(CompileTimeStringHash("DXHR SMAA Linearize CS")).get(), nullptr, 0);
+                  native_device_context->CSSetShaderResources(0, 1, &srv_scene);
+
+                  native_device_context->Dispatch((tex_desc.Width + 8 - 1) / 8, (tex_desc.Height + 8 - 1) / 8, 1);
+                  
+                  // Unbind UAV.
+                  static constexpr ID3D11UnorderedAccessView* uav_null = {};
+                  native_device_context->CSSetUnorderedAccessViews(0, 1, &uav_null, nullptr);
+
+                  //
+
+                  DrawSMAA(native_device, native_device_context, device_data, game_device_data.draw_smaa_data, game_device_data.swapchain_rtv.get(), srv_linearize.get(), srv_scene.get(), game_device_data.depth_buffer_srv.get());
+
+                  return DrawOrDispatchOverrideType::Replaced;
+               }
+               
          }
          else if (original_shader_hashes.Contains(pixel_shader_hashes_ColorGrading))
          {
@@ -595,7 +675,150 @@ public:
          // Requires SSAO enabled in the setting
          else if (original_shader_hashes.Contains(pixel_shader_hashes_SSAOGeneration))
          {
+            // In case XeGTAO is enabled we still use this to signal XeGTAO that game wants to draw AO.
             game_device_data.has_drawn_ssao = true;
+
+            if (g_xegtao_enable)
+            {
+                native_device_context->PSGetConstantBuffers(2, 1, game_device_data.cb_ssao_scene_buffer.put());
+                return DrawOrDispatchOverrideType::Skip;
+            }
+         }
+         else if (original_shader_hashes.Contains(compute_shader_hashes_SSAODenoise))
+         {
+            if (g_xegtao_enable)
+            {
+                return DrawOrDispatchOverrideType::Skip;
+            }
+         }
+         else if (original_shader_hashes.Contains(pixel_shader_hashes_Copy))
+         {
+            if (g_xegtao_enable && !game_device_data.has_drawn_xegtao && game_device_data.has_drawn_ssao)
+            {
+               // RT should be viewspace normal.
+               // Originaly the game wants to store AO term in alpha channel of the RT,
+               // so we do the same.
+               ComPtr<ID3D11RenderTargetView> rtv_original;
+               native_device_context->OMGetRenderTargets(1, rtv_original.put(), nullptr);
+               ComPtr<ID3D11Resource> resource;
+               rtv_original->GetResource(resource.put());
+               
+               // Create SRV and UAV normal.
+               ComPtr<ID3D11ShaderResourceView> srv_normal;
+               ensure(native_device->CreateShaderResourceView(resource.get(), nullptr, srv_normal.put()), >= 0);
+               ComPtr<ID3D11UnorderedAccessView> uav_normal;
+               ensure(native_device->CreateUnorderedAccessView(resource.get(), nullptr, uav_normal.put()), >= 0);
+
+               // XeGTAOPrefilterDepths16x16 pass
+               //
+
+               D3D11_TEXTURE2D_DESC tex_desc = {};
+               tex_desc.Width = device_data.output_resolution.x;
+               tex_desc.Height = device_data.output_resolution.y;
+               tex_desc.MipLevels = XE_GTAO_DEPTH_MIP_LEVELS;
+               tex_desc.ArraySize = 1;
+               tex_desc.Format = DXGI_FORMAT_R32_FLOAT;
+               tex_desc.SampleDesc.Count = 1;
+               tex_desc.BindFlags = D3D11_BIND_UNORDERED_ACCESS | D3D11_BIND_SHADER_RESOURCE;
+
+               // Create prefilter depths views.
+               ComPtr<ID3D11Texture2D> tex;
+               ensure(native_device->CreateTexture2D(&tex_desc, nullptr, tex.put()), >= 0);
+               std::array<ID3D11UnorderedAccessView*, XE_GTAO_DEPTH_MIP_LEVELS> uav_prefilter_depths;
+               D3D11_UNORDERED_ACCESS_VIEW_DESC uav_desc = {};
+               uav_desc.Format = tex_desc.Format;
+               uav_desc.ViewDimension = D3D11_UAV_DIMENSION_TEXTURE2D;
+               for (int i = 0; i < uav_prefilter_depths.size(); ++i)
+               {
+                  uav_desc.Texture2D.MipSlice = i;
+                  ensure(native_device->CreateUnorderedAccessView(tex.get(), &uav_desc, &uav_prefilter_depths[i]), >= 0);
+               }
+               ComPtr<ID3D11ShaderResourceView> srv_prefilter_depths;
+               ensure(native_device->CreateShaderResourceView(tex.get(), nullptr, srv_prefilter_depths.put()), >= 0);
+
+               // Bindings.
+               native_device_context->CSSetUnorderedAccessViews(0, uav_prefilter_depths.size(), uav_prefilter_depths.data(), nullptr);
+               native_device_context->CSSetShader(device_data.native_compute_shaders.at(CompileTimeStringHash("DXHR XeGTAO Prefilter Depths CS")).get(), nullptr, 0);
+               native_device_context->CSSetConstantBuffers(0, 1, &game_device_data.cb_ssao_scene_buffer);
+               auto smp = device_data.sampler_state_point.get();
+               native_device_context->CSSetSamplers(0, 1, &smp);
+               auto srv_depth = game_device_data.depth_buffer_srv.get();
+               native_device_context->CSSetShaderResources(0, 1, &srv_depth);
+
+               native_device_context->Dispatch((tex_desc.Width + 16 - 1) / 16, (tex_desc.Height + 16 - 1) / 16, 1);
+
+               // Unbind UAVs and release uav_prefilter_depths.
+               static constexpr std::array<ID3D11UnorderedAccessView*, uav_prefilter_depths.size()> uav_nulls_prefilter_depths_pass = {};
+               native_device_context->CSSetUnorderedAccessViews(0, uav_nulls_prefilter_depths_pass.size(), uav_nulls_prefilter_depths_pass.data(), nullptr);
+               for (int i = 0; i < uav_prefilter_depths.size(); ++i)
+               {
+                  uav_prefilter_depths[i]->Release();
+               }
+
+               //
+
+               // XeGTAOMainPass pass
+               //
+
+               // Create AO term and Edges views.
+               tex_desc.Format = DXGI_FORMAT_R8G8_UNORM;
+               tex_desc.MipLevels = 1;
+               ensure(native_device->CreateTexture2D(&tex_desc, nullptr, tex.put()), >= 0);
+               ComPtr<ID3D11UnorderedAccessView> uav_main_pass;
+               ensure(native_device->CreateUnorderedAccessView(tex.get(), nullptr, uav_main_pass.put()), >= 0);
+               ComPtr<ID3D11ShaderResourceView> srv_main_pass;
+               ensure(native_device->CreateShaderResourceView(tex.get(), nullptr, srv_main_pass.put()), >= 0);
+
+               // Bindings.
+               native_device_context->OMSetRenderTargets(0, nullptr, nullptr); // We have to unbind RTV normal.
+               native_device_context->CSSetUnorderedAccessViews(0, 1, &uav_main_pass, nullptr);
+               native_device_context->CSSetShader(device_data.native_compute_shaders.at(CompileTimeStringHash("DXHR XeGTAO Main Pass CS")).get(), nullptr, 0);
+               const std::array srvs_main_pass = { srv_prefilter_depths.get(), srv_normal.get() };
+               native_device_context->CSSetShaderResources(0, srvs_main_pass.size(), srvs_main_pass.data());
+
+               native_device_context->Dispatch((tex_desc.Width + XE_GTAO_NUMTHREADS_X - 1) / XE_GTAO_NUMTHREADS_X, (tex_desc.Height + XE_GTAO_NUMTHREADS_Y - 1) / XE_GTAO_NUMTHREADS_Y, 1);
+
+               //
+
+               // Doing 2 XeGTAODenoisePass passes correspond to "Denoising level: Medium" from the XeGTAO demo.
+
+               // XeGTAODenoisePass1 pass
+               //
+
+               // Create AO term and Edges views.
+               ensure(native_device->CreateTexture2D(&tex_desc, nullptr, tex.put()), >= 0);
+               ComPtr<ID3D11UnorderedAccessView> uav_denoise_pass1;
+               ensure(native_device->CreateUnorderedAccessView(tex.get(), nullptr, uav_denoise_pass1.put()), >= 0);
+               ComPtr<ID3D11ShaderResourceView> srv_denoise_pass1;
+               ensure(native_device->CreateShaderResourceView(tex.get(), nullptr, srv_denoise_pass1.put()), >= 0);
+
+               // Bindings.
+               native_device_context->CSSetUnorderedAccessViews(0, 1, &uav_denoise_pass1, nullptr);
+               native_device_context->CSSetShader(device_data.native_compute_shaders.at(CompileTimeStringHash("DXHR XeGTAO Denoise Pass 1 CS")).get(), nullptr, 0);
+               native_device_context->CSSetShaderResources(0, 1, &srv_main_pass);
+
+               native_device_context->Dispatch((tex_desc.Width + (XE_GTAO_NUMTHREADS_X * 2) - 1) / (XE_GTAO_NUMTHREADS_X * 2), (tex_desc.Height + XE_GTAO_NUMTHREADS_Y - 1) / XE_GTAO_NUMTHREADS_Y, 1);
+
+               //
+
+               // XeGTAODenoisePass2 pass
+               //
+
+               // Bindings.
+               native_device_context->CSSetUnorderedAccessViews(0, 1, &uav_normal, nullptr);
+               native_device_context->CSSetShader(device_data.native_compute_shaders.at(CompileTimeStringHash("DXHR XeGTAO Denoise Pass 2 CS")).get(), nullptr, 0);
+               native_device_context->CSSetShaderResources(0, 1, &srv_denoise_pass1);
+
+               native_device_context->Dispatch((tex_desc.Width + (XE_GTAO_NUMTHREADS_X * 2) - 1) / (XE_GTAO_NUMTHREADS_X * 2), (tex_desc.Height + XE_GTAO_NUMTHREADS_Y - 1) / XE_GTAO_NUMTHREADS_Y, 1);
+
+               ID3D11UnorderedAccessView* uav_null_denoise = {};
+               native_device_context->CSSetUnorderedAccessViews(0, 1, &uav_null_denoise, nullptr);
+
+               //
+
+               game_device_data.has_drawn_xegtao = true;
+               return DrawOrDispatchOverrideType::Replaced;
+            }
          }
          // Materials rendering
          // Exclude UI to avoid doing this during UI only screens,
@@ -996,6 +1219,7 @@ public:
       device_data.has_drawn_main_post_processing = false;
       game_device_data.has_drawn_any_shader = false;
       game_device_data.has_drawn_ssao = false;
+      game_device_data.has_drawn_xegtao = false;
       game_device_data.has_found_lighting_buffer = false;
       game_device_data.has_found_lighting_cbuffer = false;
       game_device_data.has_drawn_gold_filter = false;
@@ -1011,6 +1235,8 @@ public:
    {
       reshade::api::effect_runtime* runtime = nullptr;
 
+      reshade::get_config_value(runtime, NAME, "XeGTAOEnable", g_xegtao_enable);
+      reshade::get_config_value(runtime, NAME, "SMAAEnable", g_smaa_enable);
       reshade::get_config_value(runtime, NAME, "BloomIntensity", cb_luma_global_settings.GameSettings.BloomIntensity);
       reshade::get_config_value(runtime, NAME, "EmissiveIntensity", cb_luma_global_settings.GameSettings.EmissiveIntensity);
       reshade::get_config_value(runtime, NAME, "FogIntensity", cb_luma_global_settings.GameSettings.FogIntensity);
@@ -1081,7 +1307,22 @@ public:
          ImGui::TextUnformatted("Warning: for the mod to apply tonemapping properly, FXAA High or MLAA need to be selected as Anti Aliasing modes.\nEdge Anti Aliasing is also not tested with this mod and might not work (due to it using a higher quality depth buffer).\nNote that this message might accidentally show in menus.");
          ImGui::PopStyleColor();
       }
-
+      if (ImGui::Checkbox("SMAA Enable", &g_smaa_enable))
+      {
+         reshade::set_config_value(runtime, NAME, "SMAAEnable", g_smaa_enable);
+      }
+      if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
+      {
+         ImGui::SetTooltip("Replaces FXAA High or MLAA if enabled, FXAA High or MLAA have to be enabled in game.");
+      }
+      if (ImGui::Checkbox("XeGTAO Enable", &g_xegtao_enable))
+      {
+         reshade::set_config_value(runtime, NAME, "XeGTAOEnable", g_xegtao_enable);
+      }
+      if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
+      {
+         ImGui::SetTooltip("Replaces SSAO if enabled, SSAO have to be enabled in game.");
+      }
       if (ImGui::SliderFloat("Bloom Intensity", &cb_luma_global_settings.GameSettings.BloomIntensity, 0.f, 2.f))
       {
          reshade::set_config_value(runtime, NAME, "BloomIntensity", cb_luma_global_settings.GameSettings.BloomIntensity);
@@ -1331,10 +1572,13 @@ BOOL APIENTRY DllMain(HMODULE hModule, DWORD ul_reason_for_call, LPVOID lpReserv
       // TODO: add button to hide the UI (and gameplay overlay HUD)
 
       pixel_shader_hashes_ColorGrading.pixel_shaders = { Shader::Hash_StrToNum("BFF40A4D"), Shader::Hash_StrToNum("9D02077A") }; // Only one ever
-      pixel_shader_hashes_SupportedAA.pixel_shaders = { Shader::Hash_StrToNum("51BBB596"), Shader::Hash_StrToNum("FF6E347A") }; // MLAA and FXAA High (in any order)
+      pixel_shader_hashes_MLAA_mask.pixel_shaders = { 0x6B0219A1, 0x1DA1E46E };
+      pixel_shader_hashes_SupportedAA.pixel_shaders = { Shader::Hash_StrToNum("51BBB596"), Shader::Hash_StrToNum("FF6E347A") }; // MLAA (composition) and FXAA High (in any order)
       pixel_shader_hashes_BloomGeneration1.pixel_shaders = { Shader::Hash_StrToNum("612D5E25"), Shader::Hash_StrToNum("B357A376"), Shader::Hash_StrToNum("F4422C0D") };
       pixel_shader_hashes_BloomComposition.pixel_shaders = { Shader::Hash_StrToNum("29E509CF"), Shader::Hash_StrToNum("24314FFA"), Shader::Hash_StrToNum("AAB155FF") };
       pixel_shader_hashes_SSAOGeneration.pixel_shaders = { Shader::Hash_StrToNum("D44718C4"), Shader::Hash_StrToNum("7A054979") }; // DC and OG
+      compute_shader_hashes_SSAODenoise.compute_shaders = { 0x54A9A847, 0x8A03353C };
+      pixel_shader_hashes_Copy.pixel_shaders = { 0xB8813A2F };
       pixel_shader_hashes_UI.pixel_shaders = { Shader::Hash_StrToNum("E5757FCE"), Shader::Hash_StrToNum("D07AC030"), Shader::Hash_StrToNum("B8813A2F"), Shader::Hash_StrToNum("3773AC30"), Shader::Hash_StrToNum("9CB44B83"), Shader::Hash_StrToNum("6BAF4A32") };
       pixel_shader_hashes_Lighting.pixel_shaders = { Shader::Hash_StrToNum("944C549D"), Shader::Hash_StrToNum("4C48AF67"), Shader::Hash_StrToNum("D6937DB8"), Shader::Hash_StrToNum("0B16DD34"), Shader::Hash_StrToNum("2175B8F6"), Shader::Hash_StrToNum("00C1331B"), Shader::Hash_StrToNum("5EF35A1E"), Shader::Hash_StrToNum("C7F2C455"), Shader::Hash_StrToNum("EBE2567F"), Shader::Hash_StrToNum("0AB7755C"), Shader::Hash_StrToNum("7E526193"), Shader::Hash_StrToNum("C7B58EF0") }; // Some from OG, some from DC
 
