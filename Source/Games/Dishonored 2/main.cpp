@@ -55,6 +55,11 @@ namespace
    ShaderHashesList shader_hashes_UpscaleSharpen;
    ShaderHashesList shader_hashes_DownsampleDepth;
    ShaderHashesList shader_hashes_UnprojectDepth;
+   ShaderHashesList shader_hashes_SSAO;
+
+   // XeGTAO
+   constexpr size_t XE_GTAO_DEPTH_MIP_LEVELS = 5;
+   bool g_xegtao_enable = true;
 
 #if DEVELOPMENT
    std::thread::id global_cbuffer_thread_id;
@@ -138,6 +143,15 @@ public:
       GetShaderDefineData(POST_PROCESS_SPACE_TYPE_HASH).SetDefaultValue('1');
       GetShaderDefineData(GAMMA_CORRECTION_TYPE_HASH).SetDefaultValue('1');
       GetShaderDefineData(UI_DRAW_TYPE_HASH).SetDefaultValue('3');
+
+      std::vector<ShaderDefineData> game_shader_defines_data = {
+         { "XE_GTAO_QUALITY", '2', true, false, "0 - Low\n1 - Medium\n2 - High\n3 - Very High\n4 - Ultra", 4 },
+      };
+
+      shader_defines_data.append_range(game_shader_defines_data);
+
+      native_shaders_definitions.emplace(CompileTimeStringHash("DS2 XeGTAO Prefilter Depths CS"), ShaderDefinition{ "Luma_XeGTAO", reshade::api::pipeline_subobject_type::compute_shader, nullptr, "prefilter_depths16x16_cs" });
+      native_shaders_definitions.emplace(CompileTimeStringHash("DS2 XeGTAO Main Pass PS"), ShaderDefinition{ "Luma_XeGTAO", reshade::api::pipeline_subobject_type::pixel_shader, nullptr, "main_pass_ps" });
    }
 
    // This needs to be overridden with your own "GameDeviceData" sub-class (destruction is automatically handled)
@@ -442,6 +456,86 @@ public:
          }
       }
 #endif
+
+      if (original_shader_hashes.Contains(shader_hashes_SSAO))
+      {
+         if (g_xegtao_enable)
+         {  
+            ComPtr<ID3D11ShaderResourceView> srv_original;
+            native_device_context->PSGetShaderResources(0, 1, srv_original.put());
+            ComPtr<ID3D11Buffer> cb_original;
+            native_device_context->PSGetConstantBuffers(1, 1, cb_original.put());
+            ComPtr<ID3D11SamplerState> smp_original;
+            native_device_context->PSGetSamplers(0, 1, smp_original.put());
+
+            // We have to manually set the LumaSettings CB even it's suposed to be already set.
+            SetLumaConstantBuffers(native_device_context, cmd_list_data, device_data, reshade::api::shader_stage::pixel | reshade::api::shader_stage::compute, LumaConstantBufferType::LumaSettings);
+
+            // XeGTAOPrefilterDepths16x16 pass
+            //
+
+            D3D11_TEXTURE2D_DESC tex_desc = {};
+            tex_desc.Width = device_data.render_resolution.x;
+            tex_desc.Height = device_data.render_resolution.y;
+            tex_desc.MipLevels = XE_GTAO_DEPTH_MIP_LEVELS;
+            tex_desc.ArraySize = 1;
+            tex_desc.Format = DXGI_FORMAT_R32_FLOAT;
+            tex_desc.SampleDesc.Count = 1;
+            tex_desc.BindFlags = D3D11_BIND_UNORDERED_ACCESS | D3D11_BIND_SHADER_RESOURCE;
+
+            // Create prefilter depths views.
+            ComPtr<ID3D11Texture2D> tex;
+            ensure(native_device->CreateTexture2D(&tex_desc, nullptr, tex.put()), >= 0);
+            std::array<ID3D11UnorderedAccessView*, XE_GTAO_DEPTH_MIP_LEVELS> uav_prefilter_depths = {};
+            D3D11_UNORDERED_ACCESS_VIEW_DESC uav_desc = {};
+            uav_desc.Format = tex_desc.Format;
+            uav_desc.ViewDimension = D3D11_UAV_DIMENSION_TEXTURE2D;
+            for (int i = 0; i < uav_prefilter_depths.size(); ++i)
+            {
+               uav_desc.Texture2D.MipSlice = i;
+               ensure(native_device->CreateUnorderedAccessView(tex.get(), &uav_desc, &uav_prefilter_depths[i]), >= 0);
+            }
+            ComPtr<ID3D11ShaderResourceView> srv_prefilter_depths;
+            ensure(native_device->CreateShaderResourceView(tex.get(), nullptr, srv_prefilter_depths.put()), >= 0);
+
+            // Bindings.
+            native_device_context->CSSetUnorderedAccessViews(0, uav_prefilter_depths.size(), uav_prefilter_depths.data(), nullptr);
+            native_device_context->CSSetShader(device_data.native_compute_shaders.at(CompileTimeStringHash("DS2 XeGTAO Prefilter Depths CS")).get(), nullptr, 0);
+            native_device_context->CSSetConstantBuffers(1, 1, &cb_original);
+            const std::array smps = { device_data.sampler_state_point.get() };
+            native_device_context->CSSetSamplers(0, smps.size(), smps.data());
+            native_device_context->CSSetShaderResources(0, 1, &srv_original);
+
+            native_device_context->Dispatch((tex_desc.Width + 16 - 1) / 16, (tex_desc.Height + 16 - 1) / 16, 1);
+
+            // Unbind and release uav_prefilter_depths.
+            static constexpr std::array<ID3D11UnorderedAccessView*, uav_prefilter_depths.size()> uav_nulls = {};
+            native_device_context->CSSetUnorderedAccessViews(0, uav_nulls.size(), uav_nulls.data(), nullptr);
+            auto release_com_array = [](auto& array){ for (auto* p : array) if (p) p->Release(); };
+            release_com_array(uav_prefilter_depths);
+
+            // XeGTAOMainPass pass
+            //
+            // We will render to the original RT.
+            //
+
+            // Bindings.
+            native_device_context->PSSetShader(device_data.native_pixel_shaders.at(CompileTimeStringHash("DS2 XeGTAO Main Pass PS")).get(), nullptr, 0);
+            native_device_context->PSSetSamplers(0, smps.size(), smps.data());
+            native_device_context->PSSetShaderResources(0, 1, &srv_prefilter_depths);
+
+            // Should match the original draw call. Just call the original instead?
+            native_device_context->Draw(3, 0);
+
+            //
+
+            // We won't do denoise here, will rely on game's denoiser.
+
+            return DrawOrDispatchOverrideType::Replaced;            
+         }
+
+         return DrawOrDispatchOverrideType::None;
+      }
 
       if (!device_data.has_drawn_main_post_processing && original_shader_hashes.Contains(shader_hashes_UpscaleSharpen))
       {
@@ -916,6 +1010,27 @@ public:
 #endif // ENABLE_SR
    }
 
+   void LoadConfigs() override
+   {
+      reshade::api::effect_runtime* runtime = nullptr;
+
+      reshade::get_config_value(runtime, NAME, "XeGTAOEnable", g_xegtao_enable);
+   }
+
+   void DrawImGuiSettings(DeviceData& device_data) override
+   {
+      reshade::api::effect_runtime* runtime = nullptr;
+
+      if (ImGui::Checkbox("XeGTAO Enable", &g_xegtao_enable))
+      {
+         reshade::set_config_value(runtime, NAME, "XeGTAOEnable", g_xegtao_enable);
+      }
+      if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
+      {
+         ImGui::SetTooltip("Replaces SSAO if enabled, HBAO+ has to be disabled in game.");
+      }
+   }
+
    void PrintImGuiAbout() override
    {
       ImGui::Text("Luma for \"Dishonored 2\" is developed by Pumbo and Musa and is open source and free.\nIf you enjoy it, consider donating.", "");
@@ -1035,6 +1150,7 @@ BOOL APIENTRY DllMain(HMODULE hModule, DWORD ul_reason_for_call, LPVOID lpReserv
       shader_hashes_DownsampleDepth.compute_shaders.emplace(std::stoul("27BD5265", nullptr, 16)); // DH2 + DH DOTO
       shader_hashes_UnprojectDepth.compute_shaders.emplace(std::stoul("223FB9DA", nullptr, 16)); // DH2
       shader_hashes_UnprojectDepth.compute_shaders.emplace(std::stoul("74E15FB8", nullptr, 16)); // DH DOTO
+      shader_hashes_SSAO.pixel_shaders.emplace(0x94445D2D); // DH2 + DH DOTO
       // All UI pixel shaders (these are all Shader Model 4.0, as opposed to the rest of the rendering using SM5.0)
       shader_hashes_UI.pixel_shaders = {
          std::stoul("6FE8114D", nullptr, 16),
@@ -1071,8 +1187,10 @@ BOOL APIENTRY DllMain(HMODULE hModule, DWORD ul_reason_for_call, LPVOID lpReserv
 
             reshade::api::format::r11g11b10_float,
       };
-      texture_format_upgrades_lut_size = 32;
-      texture_format_upgrades_lut_dimensions = LUTDimensions::_3D;
+
+      // FIXME: These are asserting.
+      //texture_format_upgrades_lut_size = 32;
+      //texture_format_upgrades_lut_dimensions = LUTDimensions::_3D;
 
       enable_samplers_upgrade = true;
 
