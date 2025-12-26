@@ -1433,7 +1433,7 @@ void DrawSMAA(ID3D11Device* device, ID3D11DeviceContext* device_context, const D
    release_com_array(ps_srvs_original);
 }
 
-void DrawBloom(ID3D11Device* device, ID3D11DeviceContext* device_context, const DeviceData& device_data, ID3D11ShaderResourceView* srv_scene, ID3D11ShaderResourceView** srv_bloom)
+void DrawBloom(ID3D11Device* device, ID3D11DeviceContext* device_context, const DeviceData& device_data, ID3D11ShaderResourceView* srv_scene, int nmips, ID3D11ShaderResourceView** srv_bloom)
 {
     // Backup IA.
    D3D11_PRIMITIVE_TOPOLOGY primitive_topology_original;
@@ -1483,17 +1483,15 @@ void DrawBloom(ID3D11Device* device, ID3D11DeviceContext* device_context, const 
    D3D11_TEXTURE2D_DESC tex_desc;
    tex->GetDesc(&tex_desc);
 
-   constexpr int num_mips = 4;
-
    tex_desc.Width /= 2;
    tex_desc.Height /= 2;
-   tex_desc.MipLevels = num_mips;
+   tex_desc.MipLevels = nmips;
    tex_desc.Format = DXGI_FORMAT_R16G16B16A16_FLOAT;
    tex_desc.BindFlags = D3D11_BIND_SHADER_RESOURCE | D3D11_BIND_RENDER_TARGET;
    ensure(device->CreateTexture2D(&tex_desc, nullptr, tex.put()), >= 0);
 
-   ID3D11RenderTargetView* rtv_mips[num_mips] = {};
-   ID3D11ShaderResourceView* srv_mips[num_mips] = {};
+   std::vector<ID3D11RenderTargetView*> rtv_mips(nmips);
+   std::vector<ID3D11ShaderResourceView*> srv_mips(nmips);
 
    D3D11_RENDER_TARGET_VIEW_DESC rtv_desc = {};
    rtv_desc.Format = tex_desc.Format;
@@ -1504,7 +1502,7 @@ void DrawBloom(ID3D11Device* device, ID3D11DeviceContext* device_context, const 
    srv_desc.ViewDimension = D3D11_SRV_DIMENSION_TEXTURE2D;
    srv_desc.Texture2D.MipLevels = 1;
 
-   for (int i = 0; i < num_mips; ++i)
+   for (int i = 0; i < nmips; ++i)
    {
        rtv_desc.Texture2D.MipSlice = i;
        ensure(device->CreateRenderTargetView(tex.get(), &rtv_desc, &rtv_mips[i]), >= 0);
@@ -1517,9 +1515,9 @@ void DrawBloom(ID3D11Device* device, ID3D11DeviceContext* device_context, const 
    // Prefilter (downsample) pass
    //
 
-   D3D11_VIEWPORT viewport = {};
-   viewport.Width = tex_desc.Width;
-   viewport.Height = tex_desc.Height;
+   std::vector<D3D11_VIEWPORT> viewports(nmips);
+   viewports[0].Width = tex_desc.Width;
+   viewports[0].Height = tex_desc.Height;
 
    device_context->OMSetRenderTargets(1, &rtv_mips[0], nullptr);
    device_context->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
@@ -1528,7 +1526,7 @@ void DrawBloom(ID3D11Device* device, ID3D11DeviceContext* device_context, const 
    const std::array ps_samplers = { device_data.sampler_state_linear.get() };
    device_context->PSSetSamplers(0, ps_samplers.size(), ps_samplers.data());
    device_context->PSSetShaderResources(0, 1, &srv_scene);
-   device_context->RSSetViewports(1, &viewport);
+   device_context->RSSetViewports(1, &viewports[0]);
    device_context->RSSetState(nullptr);
 
    device_context->Draw(3, 0);
@@ -1540,14 +1538,14 @@ void DrawBloom(ID3D11Device* device, ID3D11DeviceContext* device_context, const 
 
    device_context->PSSetShader(device_data.native_pixel_shaders.at(Math::CompileTimeStringHash("Bloom Downsample PS")).get(), nullptr, 0);
    
-   for (int i = 1; i < num_mips; ++i)
+   for (int i = 1; i < nmips; ++i)
    {
-       viewport.Width /= 2;
-       viewport.Height /= 2;
+       viewports[i].Width = max(1.0f, tex_desc.Width >> i);
+       viewports[i].Height = max(1.0f, tex_desc.Height >> i);
 
        device_context->OMSetRenderTargets(1, &rtv_mips[i], nullptr);
        device_context->PSSetShaderResources(0, 1, &srv_mips[i - 1]);
-       device_context->RSSetViewports(1, &viewport);
+       device_context->RSSetViewports(1, &viewports[i]);
 
        device_context->Draw(3, 0);
    }
@@ -1566,14 +1564,11 @@ void DrawBloom(ID3D11Device* device, ID3D11DeviceContext* device_context, const 
    ensure(device->CreateBlendState(&blend_desc, blend.put()), >= 0);
    device_context->OMSetBlendState(blend.get(), nullptr, UINT_MAX);
 
-   for (int i = num_mips - 1; i > 0; --i)
+   for (int i = nmips - 1; i > 0; --i)
    {
-       viewport.Width *= 2;
-       viewport.Height *= 2;
-
        device_context->OMSetRenderTargets(1, &rtv_mips[i - 1], nullptr);
        device_context->PSSetShaderResources(0, 1, &srv_mips[i]);
-       device_context->RSSetViewports(1, &viewport);
+       device_context->RSSetViewports(1, &viewports[i - 1]);
 
        device_context->Draw(3, 0);
    }

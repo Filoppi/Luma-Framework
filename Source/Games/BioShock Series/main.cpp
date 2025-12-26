@@ -759,7 +759,7 @@ public:
             native_device_context->PSGetShaderResources(0, 1, srv_original.put());
 
             ComPtr<ID3D11ShaderResourceView> srv_bloom;
-            DrawBloom(native_device, native_device_context, device_data, srv_original.get(), srv_bloom.put());
+            DrawBloom(native_device, native_device_context, device_data, srv_original.get(), 4, srv_bloom.put());
 
             if (bioshock_game == BioShockGame::BioShock_Infinite)
             {
