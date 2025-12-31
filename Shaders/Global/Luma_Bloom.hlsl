@@ -33,7 +33,7 @@ void bloom_main_vs(uint vid : SV_VertexID, out float4 pos : SV_Position, out flo
     pos = float4(texcoord * float2(2.0, -2.0) + float2(-1.0, 1.0), 0.0, 1.0);
 }
 
-// Prefilter (downsample) PS.
+// Prefilter + downsample PS.
 //
 
 float karis_average(float3 color)
@@ -44,17 +44,21 @@ float karis_average(float3 color)
 
 float3 quadratic_threshold(float3 color)
 {
-    // Pixel brightness.
-    const float br = max(max(color.r, color.g), color.b);
+    const float epsilon = 1e-6;
 
-    // Under-threshold part: quadratic curve.
-    const float3 curve = float3(BLOOM_THRESHOLD - BLOOM_SOFT_KNEE, BLOOM_SOFT_KNEE * 2.0, 0.25 / BLOOM_SOFT_KNEE);
+    // Pixel brightness.
+    float br = max(max(color.r, color.g), color.b);
+    br = max(epsilon, br);
+
+    // Under the threshold part, a quadratic curve.
+    // Above the threshold part will be a linear curve.
+    const float k = max(epsilon, BLOOM_SOFT_KNEE);
+    const float3 curve = float3(BLOOM_THRESHOLD - k, k * 2.0, 0.25 / k);
     float rq = clamp(br - curve.x, 0.0, curve.y);
     rq = curve.z * rq * rq;
 
     // Combine and apply the brightness response curve.
-    const float epsilon = 1e-6;
-    return br >= epsilon ? color * max(rq, br - BLOOM_THRESHOLD) * rcp(br) : 0.0;
+    return color * max(rq, br - BLOOM_THRESHOLD) * rcp(br);
 }
 
 float4 bloom_prefilter_ps(float4 pos : SV_Position, float2 texcoord : TEXCOORD) : SV_Target

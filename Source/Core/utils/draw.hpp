@@ -1433,7 +1433,7 @@ void DrawSMAA(ID3D11Device* device, ID3D11DeviceContext* device_context, const D
    release_com_array(ps_srvs_original);
 }
 
-void DrawBloom(ID3D11Device* device, ID3D11DeviceContext* device_context, const DeviceData& device_data, ID3D11ShaderResourceView* srv_scene, int nmips, ID3D11ShaderResourceView** srv_bloom)
+void DrawBloom(ID3D11Device* device, ID3D11DeviceContext* device_context, const DeviceData& device_data, ID3D11ShaderResourceView* srv_scene, int nmips, float attenuation, ID3D11ShaderResourceView** srv_bloom)
 {
     // Backup IA.
    D3D11_PRIMITIVE_TOPOLOGY primitive_topology_original;
@@ -1556,19 +1556,28 @@ void DrawBloom(ID3D11Device* device, ID3D11DeviceContext* device_context, const 
    //
 
    device_context->PSSetShader(device_data.native_pixel_shaders.at(Math::CompileTimeStringHash("Bloom Upsample PS")).get(), nullptr, 0);
+   
    CD3D11_BLEND_DESC blend_desc(D3D11_DEFAULT);
    blend_desc.RenderTarget[0].BlendEnable = TRUE;
+   blend_desc.RenderTarget[0].SrcBlend = D3D11_BLEND_BLEND_FACTOR;
    blend_desc.RenderTarget[0].DestBlend = D3D11_BLEND_ONE;
-
    ComPtr<ID3D11BlendState> blend;
    ensure(device->CreateBlendState(&blend_desc, blend.put()), >= 0);
-   device_context->OMSetBlendState(blend.get(), nullptr, UINT_MAX);
-
+   
+   attenuation = 1.0f - attenuation;
+   
    for (int i = nmips - 1; i > 0; --i)
    {
+       // Calculate the blend factor.
+	   float t = (float)(nmips - 1 - i) / max(1e-6f, (float)(nmips - 2)); // Normalize to [0, 1].
+	   t = std::sqrt(t); // Falloff.
+	   const float f = std::lerp(attenuation, 1.0f, t);
+	   const float blend_factor[4] = { f, f, f, 1.0f };
+
        device_context->OMSetRenderTargets(1, &rtv_mips[i - 1], nullptr);
        device_context->PSSetShaderResources(0, 1, &srv_mips[i]);
        device_context->RSSetViewports(1, &viewports[i - 1]);
+       device_context->OMSetBlendState(blend.get(), blend_factor, UINT_MAX);
 
        device_context->Draw(3, 0);
    }
