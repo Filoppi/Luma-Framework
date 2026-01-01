@@ -12,16 +12,20 @@ Texture2D tex : register(t0);
 // User configurable
 //
 
-#ifndef BLOOM_THRESHOLD
-#define BLOOM_THRESHOLD 1.0
+#ifndef LUMA_BLOOM_THRESHOLD
+#define LUMA_BLOOM_THRESHOLD 1.0
 #endif
 
-#ifndef BLOOM_SOFT_KNEE
-#define BLOOM_SOFT_KNEE 0.5
+#ifndef LUMA_BLOOM_SOFT_KNEE
+#define LUMA_BLOOM_SOFT_KNEE 0.5
 #endif
 
-#ifndef BLOOM_RADIUS
-#define BLOOM_RADIUS 1.0
+#ifndef LUMA_BLOOM_RADIUS
+#define LUMA_BLOOM_RADIUS 1.0
+#endif
+
+#ifndef LUMA_BLOOM_TINT
+#define LUMA_BLOOM_TINT float3(1.0, 1.0, 1.0)
 #endif
 
 //
@@ -36,10 +40,20 @@ void bloom_main_vs(uint vid : SV_VertexID, out float4 pos : SV_Position, out flo
 // Prefilter + downsample PS.
 //
 
-float karis_average(float3 color)
+float get_karis_weight(float3 color)
 {
-    const float luma = dot(color, Rec709_Luminance);
+    const float luma = GetLuminance(color);
     return rcp(1.0 + luma);
+}
+
+float3 karis_average(float3 a, float3 b, float3 c, float3 d)
+{
+    float4 sum = float4(a.rgb, 1.0) * get_karis_weight(a);
+    sum += float4(b.rgb, 1.0) * get_karis_weight(b);
+    sum += float4(c.rgb, 1.0) * get_karis_weight(c);
+    sum += float4(d.rgb, 1.0) * get_karis_weight(d);
+
+    return sum.rgb / sum.a;
 }
 
 float3 quadratic_threshold(float3 color)
@@ -52,13 +66,13 @@ float3 quadratic_threshold(float3 color)
 
     // Under the threshold part, a quadratic curve.
     // Above the threshold part will be a linear curve.
-    const float k = max(epsilon, BLOOM_SOFT_KNEE);
-    const float3 curve = float3(BLOOM_THRESHOLD - k, k * 2.0, 0.25 / k);
+    const float k = max(epsilon, LUMA_BLOOM_SOFT_KNEE);
+    const float3 curve = float3(LUMA_BLOOM_THRESHOLD - k, k * 2.0, 0.25 / k);
     float rq = clamp(br - curve.x, 0.0, curve.y);
     rq = curve.z * rq * rq;
 
     // Combine and apply the brightness response curve.
-    return color * max(rq, br - BLOOM_THRESHOLD) * rcp(br);
+    return color * max(rq, br - LUMA_BLOOM_THRESHOLD) * rcp(br);
 }
 
 float4 bloom_prefilter_ps(float4 pos : SV_Position, float2 texcoord : TEXCOORD) : SV_Target
@@ -90,24 +104,22 @@ float4 bloom_prefilter_ps(float4 pos : SV_Position, float2 texcoord : TEXCOORD) 
 
     //
 
-    // Partial Karis average.
-    // Apply the Karis average in blocks of 4 samples,
-    // and additionaly apply weighted distribution.
+    // Apply partial Karis average in blocks of 4 samples.
     float3 groups[5];
-    groups[0] = (d + e + i + j);
-    groups[1] = (a + b + g + f);
-    groups[2] = (b + c + h + g);
-    groups[3] = (f + g + l + k);
-    groups[4] = (g + h + m + l);
-    float weights[5];
-    weights[0] = karis_average(groups[0]);
-    weights[1] = karis_average(groups[1]);
-    weights[2] = karis_average(groups[2]);
-    weights[3] = karis_average(groups[3]);
-    weights[4] = karis_average(groups[4]);
-    float3 color = (groups[0] * weights[0] * 0.125 + groups[1] * weights[1] * 0.03125 + groups[2] * weights[2] * 0.03125 + groups[3] * weights[3] * 0.03125 + groups[4] * weights[4] * 0.03125) * rcp(weights[0] + weights[1] + weights[2] + weights[3] + weights[4]);
+    groups[0] = karis_average(d, e, i, j);
+    groups[1] = karis_average(a, b, g, f);
+    groups[2] = karis_average(b, c, h, g);
+    groups[3] = karis_average(f, g, l, k);
+    groups[4] = karis_average(g, h, m, l);
 
+    // Apply weighted distribution.
+    float3 color = groups[0] * 0.125 + groups[1] * 0.03125 + groups[2] * 0.03125 + groups[3] * 0.03125 + groups[4] * 0.03125;
+
+    // Apply threshold.
     color = quadratic_threshold(color);
+
+    // Apply tint.
+    color = RestoreLuminance(color * LUMA_BLOOM_TINT, color);
 
     return float4(color, 1.0);
 }
@@ -165,23 +177,23 @@ float4 bloom_upsample_ps(float4 pos : SV_Position, float2 texcoord : TEXCOORD) :
 
     // Can't use float in preprocessor.
     // This should get optimized out.
-    if (BLOOM_RADIUS != 1.0)
+    if (LUMA_BLOOM_RADIUS != 1.0)
     {
         float x, y;
         tex.GetDimensions(x, y);
         const float2 texel_size = 1.0 / float2(x, y);
 
-        a = tex.SampleLevel(smp, texcoord + float2(-1.0, 1.0) * BLOOM_RADIUS * texel_size, 0.0).rgb;
-        b = tex.SampleLevel(smp, texcoord + float2(0.0, 1.0) * BLOOM_RADIUS * texel_size, 0.0).rgb;
-        c = tex.SampleLevel(smp, texcoord + float2(1.0, 1.0) * BLOOM_RADIUS * texel_size, 0.0).rgb;
+        a = tex.SampleLevel(smp, texcoord + float2(-1.0, 1.0) * LUMA_BLOOM_RADIUS * texel_size, 0.0).rgb;
+        b = tex.SampleLevel(smp, texcoord + float2(0.0, 1.0) * LUMA_BLOOM_RADIUS * texel_size, 0.0).rgb;
+        c = tex.SampleLevel(smp, texcoord + float2(1.0, 1.0) * LUMA_BLOOM_RADIUS * texel_size, 0.0).rgb;
 
-        d = tex.SampleLevel(smp, texcoord + float2(-1.0, 0.0) * BLOOM_RADIUS * texel_size, 0.0).rgb;
+        d = tex.SampleLevel(smp, texcoord + float2(-1.0, 0.0) * LUMA_BLOOM_RADIUS * texel_size, 0.0).rgb;
         e = tex.SampleLevel(smp, texcoord, 0.0).rgb;
-        f = tex.SampleLevel(smp, texcoord + float2(1.0, 0.0) * BLOOM_RADIUS * texel_size, 0.0).rgb;
+        f = tex.SampleLevel(smp, texcoord + float2(1.0, 0.0) * LUMA_BLOOM_RADIUS * texel_size, 0.0).rgb;
 
-        g = tex.SampleLevel(smp, texcoord + float2(-1.0, -1.0) * BLOOM_RADIUS * texel_size, 0.0).rgb;
-        h = tex.SampleLevel(smp, texcoord + float2(0.0, -1.0) * BLOOM_RADIUS * texel_size, 0.0).rgb;
-        i = tex.SampleLevel(smp, texcoord + float2(1.0, -1.0) * BLOOM_RADIUS * texel_size, 0.0).rgb;
+        g = tex.SampleLevel(smp, texcoord + float2(-1.0, -1.0) * LUMA_BLOOM_RADIUS * texel_size, 0.0).rgb;
+        h = tex.SampleLevel(smp, texcoord + float2(0.0, -1.0) * LUMA_BLOOM_RADIUS * texel_size, 0.0).rgb;
+        i = tex.SampleLevel(smp, texcoord + float2(1.0, -1.0) * LUMA_BLOOM_RADIUS * texel_size, 0.0).rgb;
 
     }
     else // Optimized for radius 1.
