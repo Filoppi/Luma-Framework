@@ -172,6 +172,15 @@ float3 safePow(float3 base, float exponent)
   return pow(abs(base), exponent) * Sign_Fast(base);
 }
 
+float safeSqrt(float base)
+{
+  return sqrt(abs(base)) * Sign_Fast(base);
+}
+float3 safeSqrt(float3 base)
+{
+  return sqrt(abs(base)) * Sign_Fast(base);
+}
+
 float sqr(float x) { return x * x; }
 float2 sqr(float2 x) { return x * x; }
 float3 sqr(float3 x) { return x * x; }
@@ -183,6 +192,13 @@ float min3(float3 _a) { return min(_a.x, min(_a.y, _a.z)); }
 float3 max3(float3 _a, float3 _b, float3 _c) { return max(_a, max(_b, _c)); }
 float max3(float _a, float _b, float _c) { return max(_a, max(_b, _c)); }
 float max3(float3 _a) { return max(_a.x, max(_a.y, _a.z)); }
+
+float4 min4(float4 _a, float4 _b, float4 _c, float4 _d) { return min(_a, min(_b, min(_c, _d))); }
+float min4(float _a, float _b, float _c, float _d) { return min(_a, min(_b, min(_c, _d))); }
+float min4(float4 _a) { return min(_a.x, min(_a.y, min(_a.z, _a.w))); }
+float4 max4(float4 _a, float4 _b, float4 _c, float4 _d) { return max(_a, max(_b, max(_c, _d))); }
+float max4(float _a, float _b, float _c, float _d) { return max(_a, max(_b, max(_c, _d))); }
+float max4(float4 _a) { return max(_a.x, max(_a.y, max(_a.z, _a.w))); }
 
 // Returns the median value of 3 channels
 float GetMidValue(float3 x)
