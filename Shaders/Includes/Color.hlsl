@@ -162,7 +162,7 @@ float3 CorrectPerChannelTonemapHiglightsDesaturation(float3 color, float peakBri
 	// Desaturate more if the mid brightness was close to the max brightness, as that's how per channel tonemappers work too.
 	// Do a sqrt on the brightness ratio to get closer to perception (pow 1/3 might be even better but whatever, we can expose it if necessary).
 	// Note that we could go even more aggressive here than a sqrt.
-	brightnessRatio = lerp(brightnessRatio, sqrt(brightnessRatio), sqrt(InverseLerp(minBrightness, maxBrightness, midBrightness)));
+	brightnessRatio = lerp(brightnessRatio, sqrt(brightnessRatio), sqrt_mirrored(InverseLerp(minBrightness, maxBrightness, midBrightness)));
 
     // Use pow to modulate chrominance, because if it was ~1, we need to keep it intact, given that per channel tonemapping wouldn't affect it.
     // We only desaturate highlights, to keep mid tones punchy.
