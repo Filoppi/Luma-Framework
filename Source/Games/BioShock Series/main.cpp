@@ -148,6 +148,7 @@ struct GameDeviceDataBioshockSeries final : public GameDeviceData
 
    ComPtr<ID3D11ShaderResourceView> srv_depth;
    DrawSMAAData draw_smaa_data;
+   DrawLumaBloomData draw_luma_bloom_data;
 };
 
 class BioshockSeries final : public Game
@@ -759,7 +760,9 @@ public:
             native_device_context->PSGetShaderResources(0, 1, srv_original.put());
 
             ComPtr<ID3D11ShaderResourceView> srv_bloom;
-            DrawBloom(native_device, native_device_context, device_data, srv_original.get(), 5, 0.8f, srv_bloom.put());
+            constexpr int nmips = 4;
+            std::array<float, nmips> sigmas = { 2.0f, 2.0f, 2.0f, 2.0f };
+            DrawBloom(native_device, native_device_context, device_data, game_device_data.draw_luma_bloom_data, srv_original.get(), nmips, sigmas.data(), srv_bloom.put());
 
             if (bioshock_game == BioShockGame::BioShock_Infinite)
             {

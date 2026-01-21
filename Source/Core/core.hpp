@@ -565,10 +565,10 @@ namespace
 #endif
 
 #if ENABLE_BLOOM
-      { CompileTimeStringHash("Bloom VS"), { "Luma_Bloom", reshade::api::pipeline_subobject_type::vertex_shader, nullptr, "bloom_main_vs" } },
-      { CompileTimeStringHash("Bloom Prefilter PS"), { "Luma_Bloom", reshade::api::pipeline_subobject_type::pixel_shader, nullptr, "bloom_prefilter_ps" } },
-      { CompileTimeStringHash("Bloom Downsample PS"), { "Luma_Bloom", reshade::api::pipeline_subobject_type::pixel_shader, nullptr, "bloom_downsample_ps" } },
-      { CompileTimeStringHash("Bloom Upsample PS"), { "Luma_Bloom", reshade::api::pipeline_subobject_type::pixel_shader, nullptr, "bloom_upsample_ps" } },
+      { CompileTimeStringHash("Bloom VS"), { "Luma_Bloom_impl", reshade::api::pipeline_subobject_type::vertex_shader, nullptr, "bloom_main_vs" } },
+      { CompileTimeStringHash("Bloom Prefilter PS"), { "Luma_Bloom_impl", reshade::api::pipeline_subobject_type::pixel_shader, nullptr, "bloom_prefilter_ps" } },
+      { CompileTimeStringHash("Bloom Downsample PS"), { "Luma_Bloom_impl", reshade::api::pipeline_subobject_type::pixel_shader, nullptr, "bloom_downsample_ps" } },
+      { CompileTimeStringHash("Bloom Upsample PS"), { "Luma_Bloom_impl", reshade::api::pipeline_subobject_type::pixel_shader, nullptr, "bloom_upsample_ps" } },
 #endif
 
    };
