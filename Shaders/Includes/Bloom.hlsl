@@ -3,7 +3,7 @@
 
 #include "Color.hlsl"
 
-cbuffer graphical_upgrade : register(b11)
+cbuffer LumaBloom : register(b11)
 {
 	float2 src_size;
 	float2 inv_src_size;
