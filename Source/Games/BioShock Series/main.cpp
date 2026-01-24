@@ -12,6 +12,7 @@
 namespace
 {
    ShaderHashesList pixel_shader_hashes_Bloom;
+   ShaderHashesList pixel_shader_hashes_BSI_BloomPrefilter;
    ShaderHashesList pixel_shader_hashes_Tonemap;
    ShaderHashesList pixel_shader_hashes_AA;
    ShaderHashesList pixel_shader_hashes_depth_copy;
@@ -39,6 +40,8 @@ namespace
    bool g_smaa_enable = true;
    bool g_luma_bloom_enable = true; // BSI needs more testing, enable or disable by default?
    bool g_lens_flare_enable = true;
+   int g_bloom_nmips;
+   std::vector<float> g_bloom_sigmas;
 
    // User settings:
    bool enable_luts_normalization = true; // TODO: try it (in BS2 luts are written on the CPU, they might be raised?)
@@ -149,6 +152,7 @@ struct GameDeviceDataBioshockSeries final : public GameDeviceData
    ComPtr<ID3D11ShaderResourceView> srv_depth;
    DrawSMAAData draw_smaa_data;
    DrawLumaBloomData draw_luma_bloom_data;
+   ComPtr<ID3D11Buffer> cb_bloom;
 };
 
 class BioshockSeries final : public Game
@@ -183,15 +187,21 @@ public:
          "\nMode 1 and 2 are different ways or applying the gamma correction, so pick what you prefer.", 2},
       };
 
-      if (bioshock_game == BioShockGame::BioShock_Infinite)
+      if (bioshock_game == BioShockGame::BioShock_Remastered)
       {
+         game_shader_defines_data.push_back({ "GAME_BIOSHOCK", '1', true, true });
+      }
+      else if (bioshock_game == BioShockGame::BioShock_2_Remastered)
+      {
+         game_shader_defines_data.push_back({ "GAME_BIOSHOCK", '2', true, true });
+      }
+      else // bioshock_game == BioShockGame::BioShock_Infinite
+      {
+         game_shader_defines_data.push_back({ "GAME_BIOSHOCK", '3', true, true });
          game_shader_defines_data.push_back({ "XE_GTAO_QUALITY", '2', true, false, "0 - Low\n1 - Medium\n2 - High\n3 - Very High\n4 - Ultra", 4 });
       }
 
       shader_defines_data.append_range(game_shader_defines_data);
-
-      // SMAA
-      native_shaders_definitions.emplace(CompileTimeStringHash("SMAA Linear To sRGB CS"), ShaderDefinition("Luma_SMAA_LinearTosRGB_CS", reshade::api::pipeline_subobject_type::compute_shader));
 
       // Other games don't need this. BS2 uses "SetDeviceGammaRamp" and defaulted to 1.2. BS1 uses "IDXGIOutput::SetGammaControl" but defaults to a neutral value. BSI doesn't seem to use either.
       if (bioshock_game != BioShockGame::BioShock_2_Remastered)
@@ -207,6 +217,9 @@ public:
 
       GetShaderDefineData(TEST_SDR_HDR_SPLIT_VIEW_MODE_NATIVE_IMPL_HASH).SetDefaultValue('1'); // The game just clipped, so HDR is an extension of SDR (except for some shaders that we adjust)
 
+      // SMAA
+      native_shaders_definitions.emplace(CompileTimeStringHash("SMAA Linear To sRGB CS"), ShaderDefinition("Luma_SMAA_LinearTosRGB_CS", reshade::api::pipeline_subobject_type::compute_shader));
+
       if (bioshock_game == BioShockGame::BioShock_Infinite)
       {
          // XeGTAO
@@ -214,6 +227,37 @@ public:
          native_shaders_definitions.emplace(CompileTimeStringHash("BSI XeGTAO Main Pass CS"), ShaderDefinition{ "Luma_BSI_XeGTAO", reshade::api::pipeline_subobject_type::compute_shader, nullptr, "main_pass_cs" });
          native_shaders_definitions.emplace(CompileTimeStringHash("BSI XeGTAO Denoise Pass 1 CS"), ShaderDefinition{ "Luma_BSI_XeGTAO", reshade::api::pipeline_subobject_type::compute_shader, nullptr, "denoise_pass_cs", { { "XE_GTAO_FINAL_APPLY", "0" } } });
          native_shaders_definitions.emplace(CompileTimeStringHash("BSI XeGTAO Denoise Pass 2 CS"), ShaderDefinition{ "Luma_BSI_XeGTAO", reshade::api::pipeline_subobject_type::compute_shader, nullptr, "denoise_pass_cs", { { "XE_GTAO_FINAL_APPLY", "1" } } });
+      }
+
+      // Luma bloom
+      if (bioshock_game == BioShockGame::BioShock_Remastered)
+      {
+         g_bloom_nmips = 4;
+         g_bloom_sigmas.resize(g_bloom_nmips);
+         g_bloom_sigmas[0] = 2.0f;
+         g_bloom_sigmas[1] = 2.0f;
+         g_bloom_sigmas[2] = 2.0f;
+         g_bloom_sigmas[3] = 2.0f;
+      }
+      else if (bioshock_game == BioShockGame::BioShock_2_Remastered)
+      {
+         g_bloom_nmips = 5;
+         g_bloom_sigmas.resize(g_bloom_nmips);
+         g_bloom_sigmas[0] = 2.0f;
+         g_bloom_sigmas[1] = 2.0f;
+         g_bloom_sigmas[2] = 2.0f;
+         g_bloom_sigmas[3] = 1.0f;
+         g_bloom_sigmas[4] = 1.0f;
+      }
+      else // bioshock_game == BioShockGame::BioShock_Infinite
+      {
+         g_bloom_nmips = 5;
+         g_bloom_sigmas.resize(g_bloom_nmips);
+         g_bloom_sigmas[0] = 2.0f;
+         g_bloom_sigmas[1] = 2.0f;
+         g_bloom_sigmas[2] = 2.0f;
+         g_bloom_sigmas[3] = 1.0f;
+         g_bloom_sigmas[4] = 1.0f;
       }
    }
 
@@ -260,7 +304,7 @@ public:
          reshade::get_config_value(runtime, NAME, "XeGTAOEnable", g_xegtao_enable);
          reshade::get_config_value(runtime, NAME, "LensFlareEnable", g_lens_flare_enable);
       }
-      
+
       // "device_data.cb_luma_global_settings_dirty" should already be true at this point
    }
 
@@ -324,6 +368,19 @@ public:
 
       if (ImGui::Checkbox("Luma Bloom Enable", &g_luma_bloom_enable))
          reshade::set_config_value(runtime, NAME, "LumaBloomEnable", g_luma_bloom_enable);
+
+#if DEVELOPMENT
+      if (ImGui::SliderInt("Luma Bloom nmips", &g_bloom_nmips, 1.0, 10.0))
+      {
+		 g_bloom_sigmas.resize(g_bloom_nmips);
+	  }
+
+	  for (int i = 0; i < g_bloom_nmips; ++i)
+      {
+		 const std::string name = "Luma Bloom Sigma" + std::to_string(i);
+		 ImGui::SliderFloat(name.c_str(), &g_bloom_sigmas[i], 0.0f, 15.0f, "%.3f", ImGuiSliderFlags_AlwaysClamp);
+	  }
+#endif
       
       if (ImGui::SliderFloat("Bloom Intensity", &cb_luma_global_settings.GameSettings.BloomIntensity, 0.f, 2.f))
          reshade::set_config_value(runtime, NAME, "BloomIntensity", cb_luma_global_settings.GameSettings.BloomIntensity);
@@ -671,11 +728,25 @@ public:
          return DrawOrDispatchOverrideType::Skip;
       }
 
+      if (original_shader_hashes.Contains(pixel_shader_hashes_BSI_BloomPrefilter))
+      {
+         if (!game_device_data.cb_bloom)
+         {
+            native_device_context->PSGetConstantBuffers(0, 1, game_device_data.cb_bloom.put());
+         }
+      }
+
       // Bloom
       if (is_custom_pass && !game_device_data.drew_tonemap && original_shader_hashes.Contains(pixel_shader_hashes_Bloom))
       {
          if (g_luma_bloom_enable)
-         {
+         {  
+            // Bloom prefilter should always run first.
+            if (!game_device_data.cb_bloom)
+            {
+               native_device_context->PSGetConstantBuffers(0, 1, game_device_data.cb_bloom.put());
+            }
+
             return DrawOrDispatchOverrideType::Skip;
          }
 
@@ -759,10 +830,14 @@ public:
             ComPtr<ID3D11ShaderResourceView> srv_original;
             native_device_context->PSGetShaderResources(0, 1, srv_original.put());
 
+            ComPtr<ID3D11Buffer> cb_original;
+            native_device_context->PSGetConstantBuffers(0, 1, cb_original.put());
+            native_device_context->PSSetConstantBuffers(0, 1, &game_device_data.cb_bloom);
+
             ComPtr<ID3D11ShaderResourceView> srv_bloom;
-            constexpr int nmips = 4;
-            std::array<float, nmips> sigmas = { 2.0f, 2.0f, 2.0f, 2.0f };
-            DrawBloom(native_device, native_device_context, device_data, game_device_data.draw_luma_bloom_data, srv_original.get(), nmips, sigmas.data(), srv_bloom.put());
+            DrawBloom(native_device, native_device_context, device_data, game_device_data.draw_luma_bloom_data, srv_original.get(), g_bloom_nmips, g_bloom_sigmas.data(), srv_bloom.put());
+
+            native_device_context->PSSetConstantBuffers(0, 1, &cb_original);
 
             if (bioshock_game == BioShockGame::BioShock_Infinite)
             {
@@ -800,6 +875,7 @@ public:
 
       game_device_data.drew_tonemap = false;
       game_device_data.drew_aa = false;
+      game_device_data.cb_bloom.reset();
 
       if (bioshock_game == BioShockGame::BioShock_2_Remastered)
       {
@@ -967,6 +1043,7 @@ BOOL APIENTRY DllMain(HMODULE hModule, DWORD ul_reason_for_call, LPVOID lpReserv
       }
       else if (bioshock_game == BioShockGame::BioShock_Infinite)
       {
+         pixel_shader_hashes_BSI_BloomPrefilter.pixel_shaders = { 0xC39285AF, 0x6F4F1E8F };
          pixel_shader_hashes_Tonemap.pixel_shaders = { Shader::Hash_StrToNum("29D570D8") };
          pixel_shader_hashes_AA.pixel_shaders = { Shader::Hash_StrToNum("27BD2A2E"), Shader::Hash_StrToNum("5CDD5AB1") }; // Different qualities
          pixel_shader_hashes_depth_copy.pixel_shaders = { Shader::Hash_StrToNum("496E549B") };

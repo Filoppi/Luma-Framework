@@ -1707,6 +1707,11 @@ void DrawBloom(ID3D11Device* device, ID3D11DeviceContext* device_context, const 
       // factor of 0.5 will be enegrgy preserving.
       static constexpr FLOAT blend_factor[] = { 0.5f, 0.5f, 0.5f, 0.0f };
 
+      // Update CB.
+      cb_data.src_size = float2(viewports_y[i].Width, viewports_y[i].Height);
+      cb_data.inv_src_size = float2(1.0f / cb_data.src_size.x, 1.0f / cb_data.src_size.y);
+      update_constant_buffer();
+
        device_context->OMSetRenderTargets(1, &rtv_mips_y[i - 1], nullptr);
        device_context->PSSetShaderResources(0, 1, &srv_mips_y[i]);
        device_context->RSSetViewports(1, &viewports_y[i - 1]);

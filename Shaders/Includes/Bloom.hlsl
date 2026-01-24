@@ -5,11 +5,11 @@
 
 cbuffer LumaBloom : register(b11)
 {
-	float2 src_size;
-	float2 inv_src_size;
-	float2 axis;
-	float sigma;
-	float tex_noise_index;
+    float2 src_size;
+    float2 inv_src_size;
+    float2 axis;
+    float sigma;
+    float tex_noise_index;
 }
 
 SamplerState smp : register(s0);
@@ -60,86 +60,102 @@ float3 quadratic_threshold(float3 color)
 
 float get_gaussian_weight(float x)
 {
-	return exp(-x * x * rcp(2.0 * sigma * sigma));
+    return exp(-x * x * rcp(2.0 * sigma * sigma));
 }
 
 float4 bloom_prefilter_ps(float4 pos : SV_Position, float2 texcoord : TEXCOORD) : SV_Target
 {
     // Calculate fractional part and texel center.
-	const float f = dot(frac(texcoord * src_size - 0.5), axis);
-	const float2 tc = texcoord - f * inv_src_size * axis;
+    const float f = dot(frac(texcoord * src_size - 0.5), axis);
+    const float2 tc = texcoord - f * inv_src_size * axis;
 
-	float3 csum = 0.0;
-	float wsum = 0.0;
+    float3 csum = 0.0;
+    float wsum = 0.0;
 
-	// Calculate kernel radius.
-	const float radius = ceil(sigma * 3.0);
+    // Calculate kernel radius.
+    const float radius = ceil(sigma * 3.0);
 
-	for (float i = 1.0 - radius; i <= radius; ++i) {
-		const float weight = get_gaussian_weight(i - f);
-		csum += tex.SampleLevel(smp, tc + i * inv_src_size * axis, 0.0).rgb * weight;
-		wsum += weight;
-	}
+    for (float i = 1.0 - radius; i <= radius; ++i) {
+        const float weight = get_gaussian_weight(i - f);
+        csum += tex.SampleLevel(smp, tc + i * inv_src_size * axis, 0.0).rgb * weight;
+        wsum += weight;
+    }
 
-	// Normalize.
-	csum *= rcp(wsum);
+    // Normalize.
+    csum *= rcp(wsum);
 
-	// Apply threshold.
-	float3 color = quadratic_threshold(csum);
+    // Apply threshold.
+    float3 color = quadratic_threshold(csum);
 
-	// Apply tint.
-	const float luma = GetLuminance(color);
-	color *= LUMA_BLOOM_TINT;
-	color *= luma * rcp(max(1e-6, GetLuminance(color)));
+    // Apply tint.
+    const float luma = GetLuminance(color);
+    color *= LUMA_BLOOM_TINT;
+    color *= luma * rcp(max(1e-6, GetLuminance(color)));
 
-	return float4(color, 1.0);
+    return float4(color, 1.0);
 }
 
 float4 bloom_downsample_ps(float4 pos : SV_Position, float2 texcoord : TEXCOORD) : SV_Target
 {
     // Calculate fractional part and texel center.
-	const float f = dot(frac(texcoord * src_size - 0.5), axis);
-	const float2 tc = texcoord - f * inv_src_size * axis;
+    const float f = dot(frac(texcoord * src_size - 0.5), axis);
+    const float2 tc = texcoord - f * inv_src_size * axis;
 
-	float3 csum = 0.0;
-	float wsum = 0.0;
+    float3 csum = 0.0;
+    float wsum = 0.0;
 
-	// Calculate kernel radius.
-	const float radius = ceil(sigma * 3.0);
+    // Calculate kernel radius.
+    const float radius = ceil(sigma * 3.0);
 
-	for (float i = 1.0 - radius; i <= radius; ++i) {
-		const float weight = get_gaussian_weight(i - f);
-		csum += tex.SampleLevel(smp, tc + i * inv_src_size * axis, 0.0).rgb * weight;
-		wsum += weight;
-	}
+    for (float i = 1.0 - radius; i <= radius; ++i) {
+        const float weight = get_gaussian_weight(i - f);
+        csum += tex.SampleLevel(smp, tc + i * inv_src_size * axis, 0.0).rgb * weight;
+        wsum += weight;
+    }
 
-	// Normalize.
-	csum *= rcp(wsum);
+    // Normalize.
+    csum *= rcp(wsum);
 
-	return float4(csum, 1.0);
+    return float4(csum, 1.0);
 }
 
+// Bicubic upsampling in 4 texture fetches.
+//
+// f(x) = (4 + 3 * |x|^3 – 6 * |x|^2) / 6 for 0 <= |x| <= 1
+// f(x) = (2 – |x|)^3 / 6 for 1 < |x| <= 2
+// f(x) = 0 otherwise
+//
+// Source: https://www.researchgate.net/publication/220494113_Efficient_GPU-Based_Texture_Interpolation_using_Uniform_B-Splines
 float4 bloom_upsample_ps(float4 pos : SV_Position, float2 texcoord : TEXCOORD) : SV_Target
 {
-    // a - b - c
-    // d - e - f
-    // g - h - i
-    const float3 a = tex.SampleLevel(smp, texcoord, 0.0, int2(-1, 1)).rgb;
-    const float3 b = tex.SampleLevel(smp, texcoord, 0.0, int2(0, 1)).rgb;
-    const float3 c = tex.SampleLevel(smp, texcoord, 0.0, int2(1, 1)).rgb;
+    // transform the coordinate from [0,extent] to [-0.5, extent-0.5]
+    float2 coord_grid = texcoord * src_size - 0.5;
+    float2 index = floor(coord_grid);
+    float2 fraction = coord_grid - index;
+    float2 one_frac = 1.0 - fraction;
+    float2 one_frac2 = one_frac * one_frac;
+    float2 fraction2 = fraction * fraction;
+    float2 w0 = 1.0 / 6.0 * one_frac2 * one_frac;
+    float2 w1 = 2.0 / 3.0 - 0.5 * fraction2 * (2.0 - fraction);
+    float2 w2 = 2.0 / 3.0 - 0.5 * one_frac2 * (2.0 - one_frac);
+    float2 w3 = 1.0 / 6.0 * fraction2 * fraction;
+    float2 g0 = w0 + w1;
+    float2 g1 = w2 + w3;
 
-    const float3 d = tex.SampleLevel(smp, texcoord, 0.0, int2(-1, 0)).rgb;
-    const float3 e = tex.SampleLevel(smp, texcoord, 0.0).rgb;
-    const float3 f = tex.SampleLevel(smp, texcoord, 0.0, int2(1, 0)).rgb;
+    // h0 = w1/g0 - 1, move from [-0.5, extent-0.5] to [0, extent]
+    float2 h0 = (w1 / g0) - 0.5 + index;
+    float2 h1 = (w3 / g1) + 1.5 + index;
 
-    const float3 g = tex.SampleLevel(smp, texcoord, 0.0, int2(-1, -1)).rgb;
-    const float3 h = tex.SampleLevel(smp, texcoord, 0.0, int2(0, -1)).rgb;
-    const float3 i = tex.SampleLevel(smp, texcoord, 0.0, int2(1, -1)).rgb;
+    // fetch the four linear interpolations
+    float3 tex00 = tex.SampleLevel(smp, float2(h0.x, h0.y) * inv_src_size, 0.0).rgb;
+    float3 tex10 = tex.SampleLevel(smp, float2(h1.x, h0.y) * inv_src_size, 0.0).rgb;
+    float3 tex01 = tex.SampleLevel(smp, float2(h0.x, h1.y) * inv_src_size, 0.0).rgb;
+    float3 tex11 = tex.SampleLevel(smp, float2(h1.x, h1.y) * inv_src_size, 0.0).rgb;
 
-    // Apply weighted distribution.
-    float3 color = e * 0.25;
-    color += (b + d + f + h) * 0.125;
-    color += (a + c + g + i) * 0.0625;
+    // weigh along the y-direction
+    tex00 = lerp(tex01, tex00, g0.y);
+    tex10 = lerp(tex11, tex10, g0.y);
 
-    return float4(color, 1.0);
+    // weigh along the x-direction
+    return float4(lerp(tex10, tex00, g0.x), 1.0);
 }
