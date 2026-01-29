@@ -1433,6 +1433,50 @@ void DrawSMAA(ID3D11Device* device, ID3D11DeviceContext* device_context, const D
    release_com_array(ps_srvs_original);
 }
 
+void DrawKarisAverage(ID3D11Device* device, ID3D11DeviceContext* device_context, const DeviceData& device_data, ID3D11ShaderResourceView* srv_source, ID3D11ShaderResourceView** srv_out)
+{
+   // Backup CS.
+   ComPtr<ID3D11ComputeShader> cs_original;
+   device_context->CSGetShader(cs_original.put(), nullptr, nullptr);
+   ComPtr<ID3D11UnorderedAccessView> uav_original;
+   device_context->CSGetUnorderedAccessViews(0, 1, uav_original.put());
+   ComPtr<ID3D11ShaderResourceView> srv_original;
+   device_context->CSGetShaderResources(0, 1, srv_original.put());
+
+   // Get the source resource and texture description.
+   ComPtr<ID3D11Resource> resource;
+   srv_source->GetResource(resource.put());
+   ComPtr<ID3D11Texture2D> tex;
+   ensure(resource->QueryInterface(tex.put()), >= 0);
+   D3D11_TEXTURE2D_DESC tex_desc;
+   tex->GetDesc(&tex_desc);
+
+   // Create RT and views.
+   tex_desc.MipLevels = 1;
+   tex_desc.ArraySize = 1;
+   tex_desc.Format = DXGI_FORMAT_R16G16B16A16_FLOAT;
+   tex_desc.SampleDesc.Count = 1;
+   tex_desc.BindFlags = D3D11_BIND_SHADER_RESOURCE | D3D11_BIND_UNORDERED_ACCESS;
+   ensure(device->CreateTexture2D(&tex_desc, nullptr, tex.put()), >= 0);
+   ComPtr<ID3D11UnorderedAccessView> uav;
+   ensure(device->CreateUnorderedAccessView(tex.get(), nullptr, uav.put()), >= 0);
+
+   // Bindings.
+   device_context->CSSetUnorderedAccessViews(0, 1, &uav, nullptr);
+   device_context->CSSetShader(device_data.native_compute_shaders.at(Math::CompileTimeStringHash("Karis Average CS")).get(), nullptr, 0);
+   device_context->CSSetShaderResources(0, 1, &srv_source);
+
+   device_context->Dispatch((tex_desc.Width + 8 - 1) / 8, (tex_desc.Height + 8 - 1) / 8, 1);
+
+   // Karis averaged out.
+   ensure(device->CreateShaderResourceView(tex.get(), nullptr, srv_out), >= 0);
+
+   // Restore.
+   device_context->CSSetUnorderedAccessViews(0, 1, &uav_original, nullptr);
+   device_context->CSSetShader(cs_original.get(), nullptr, 0);
+   device_context->CSSetShaderResources(0, 1, &srv_original);
+}
+
 struct alignas(16) CBLumaBloomData
 {
    float2 src_size;

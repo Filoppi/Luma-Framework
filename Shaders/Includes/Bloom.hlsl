@@ -18,10 +18,17 @@ Texture2D tex : register(t0);
 // User configurable
 //
 
+// Allows you to define a custom threshold funcion that takes one float3 argument (color).
+#ifndef LUMA_BLOOM_THRESHOLD_FUNCTION
+#define LUMA_BLOOM_THRESHOLD_FUNCTION(color) quadratic_threshold(color)
+#endif
+
+// Only used in the default threshold function. 
 #ifndef LUMA_BLOOM_THRESHOLD
 #define LUMA_BLOOM_THRESHOLD 1.0
 #endif
 
+// Only used in the default threshold function.
 #ifndef LUMA_BLOOM_SOFT_KNEE
 #define LUMA_BLOOM_SOFT_KNEE 1.0
 #endif
@@ -85,7 +92,7 @@ float4 bloom_prefilter_ps(float4 pos : SV_Position, float2 texcoord : TEXCOORD) 
     csum *= rcp(wsum);
 
     // Apply threshold.
-    float3 color = quadratic_threshold(csum);
+    float3 color = LUMA_BLOOM_THRESHOLD_FUNCTION(csum);
 
     // Apply tint.
     const float luma = GetLuminance(color);

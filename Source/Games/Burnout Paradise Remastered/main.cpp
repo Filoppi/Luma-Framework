@@ -1,6 +1,7 @@
 #define GAME_BURNOUT_PARADISE_REMASTERED 1
 
 #define ENABLE_ORIGINAL_SHADERS_MEMORY_EDITS 1
+#define ENABLE_BLOOM 1
 
 #include "..\..\Core\core.hpp"
 
@@ -15,6 +16,8 @@ namespace
    constexpr bool smooth_motion_blur_parameters = true; // Mirrored in shaders
    
    bool g_luma_bloom_enable = false;
+   int g_bloom_nmips;
+   std::vector<float> g_bloom_sigmas;
 
    // XeGTAO
    constexpr size_t XE_GTAO_DEPTH_MIP_LEVELS = 5;
@@ -63,6 +66,7 @@ struct GameDeviceDataBurnoutParadise final : public GameDeviceData
    ComPtr<ID3D11Buffer> motion_blur_ps_cb_copy;
    ComPtr<ID3D11Buffer> motion_blur_vs_cb_copy;
 
+   DrawLumaBloomData draw_luma_bloom_data;
    ComPtr<ID3D11ShaderResourceView> srv_luma_bloom;
    ComPtr<ID3D11ShaderResourceView> srv_xegtao;
 };
@@ -120,11 +124,16 @@ public:
       native_shaders_definitions.emplace(CompileTimeStringHash("BurnoutPR XeGTAO Denoise Pass 1 CS"), ShaderDefinition{ "Luma_BurnoutPR_XeGTAO", reshade::api::pipeline_subobject_type::compute_shader, nullptr, "denoise_pass_cs", { { "XE_GTAO_FINAL_APPLY", "0" } } });
       native_shaders_definitions.emplace(CompileTimeStringHash("BurnoutPR XeGTAO Denoise Pass 2 CS"), ShaderDefinition{ "Luma_BurnoutPR_XeGTAO", reshade::api::pipeline_subobject_type::compute_shader, nullptr, "denoise_pass_cs", { { "XE_GTAO_FINAL_APPLY", "1" } } });
 
-      // Bloom
-      native_shaders_definitions.emplace(CompileTimeStringHash("BurnoutPR Bloom VS"), ShaderDefinition{ "Luma_BurnoutPR_Bloom", reshade::api::pipeline_subobject_type::vertex_shader, nullptr, "bloom_main_vs" });
-      native_shaders_definitions.emplace(CompileTimeStringHash("BurnoutPR Bloom Prefilter PS"), ShaderDefinition{ "Luma_BurnoutPR_Bloom", reshade::api::pipeline_subobject_type::pixel_shader, nullptr, "bloom_prefilter_ps" });
-      native_shaders_definitions.emplace(CompileTimeStringHash("BurnoutPR Bloom Downsample PS"), ShaderDefinition{ "Luma_BurnoutPR_Bloom", reshade::api::pipeline_subobject_type::pixel_shader, nullptr, "bloom_downsample_ps" });
-      native_shaders_definitions.emplace(CompileTimeStringHash("BurnoutPR Bloom Upsample PS"), ShaderDefinition{ "Luma_BurnoutPR_Bloom", reshade::api::pipeline_subobject_type::pixel_shader, nullptr, "bloom_upsample_ps" });
+      native_shaders_definitions.emplace(CompileTimeStringHash("BurnoutPR Linearize CS"), ShaderDefinition{ "Luma_BurnoutPR_Linearize", reshade::api::pipeline_subobject_type::compute_shader });
+      native_shaders_definitions.emplace(CompileTimeStringHash("BurnoutPR Delinearize CS"), ShaderDefinition{ "Luma_BurnoutPR_Delinearize", reshade::api::pipeline_subobject_type::compute_shader });
+
+      // Luma bloom.
+      g_bloom_nmips = 4;
+      g_bloom_sigmas.resize(g_bloom_nmips);
+      g_bloom_sigmas[0] = 1.5f;
+      g_bloom_sigmas[1] = 1.0f;
+      g_bloom_sigmas[2] = 1.0f;
+      g_bloom_sigmas[3] = 0.6f;
    }
 
    void OnCreateDevice(ID3D11Device* native_device, DeviceData& device_data) override
@@ -534,162 +543,65 @@ public:
             ComPtr<ID3D11ShaderResourceView> srv_scene;
             native_device_context->PSGetShaderResources(0, 1, srv_scene.put());
 
-            // Backup IA.
-            D3D11_PRIMITIVE_TOPOLOGY primitive_topology_original;
-            native_device_context->IAGetPrimitiveTopology(&primitive_topology_original);
-
-            // Backup VS.
-            ComPtr<ID3D11VertexShader> vs_original;
-            native_device_context->VSGetShader(vs_original.put(), nullptr, nullptr);
-
-            ComPtr<ID3D11SamplerState> ps_sampler_original;
-            native_device_context->PSGetSamplers(0, 1, ps_sampler_original.put());
-            ComPtr<ID3D11ShaderResourceView> ps_srv_original;
-            native_device_context->PSGetShaderResources(0, 1, ps_srv_original.put());
-
-            // Backup Viewports.
-            UINT num_viewports;
-            native_device_context->RSGetViewports(&num_viewports, nullptr);
-            std::vector<D3D11_VIEWPORT> viewports_original(num_viewports);
-            native_device_context->RSGetViewports(&num_viewports, viewports_original.data());
-
-            // Backup Rasterizer.
-            ComPtr<ID3D11RasterizerState> rasterizer_original;
-            native_device_context->RSGetState(rasterizer_original.put());
-
-            // Backup Blend.
-            ComPtr<ID3D11BlendState> blend_original;
-            FLOAT blend_factor_original[4];
-            UINT sample_mask_original;
-            native_device_context->OMGetBlendState(blend_original.put(), blend_factor_original, &sample_mask_original);
-
-            // Backup RTs.
-            std::array<ID3D11RenderTargetView*, D3D11_SIMULTANEOUS_RENDER_TARGET_COUNT> rtvs_original = {};
-            ComPtr<ID3D11DepthStencilView> dsv_original;
-            native_device_context->OMGetRenderTargets(rtvs_original.size(), rtvs_original.data(), dsv_original.put());
-
-            // Create MIPs and views.
+            // Linearize scene pass
             //
 
-            // Get the scene resource and texture description from the SRV.
-            ComPtr<ID3D11Resource> resource;
-            srv_scene->GetResource(resource.put());
+            // Create RT and views.
+            D3D11_TEXTURE2D_DESC tex_desc = {};
+            tex_desc.Width = device_data.render_resolution.x;
+            tex_desc.Height = device_data.render_resolution.y;
+            tex_desc.MipLevels = 1;
+            tex_desc.ArraySize = 1;
+            tex_desc.Format = DXGI_FORMAT_R16G16B16A16_FLOAT;
+            tex_desc.SampleDesc.Count = 1;
+            tex_desc.BindFlags = D3D11_BIND_SHADER_RESOURCE | D3D11_BIND_UNORDERED_ACCESS;
             ComPtr<ID3D11Texture2D> tex;
-            ensure(resource->QueryInterface(tex.put()), >= 0);
-            D3D11_TEXTURE2D_DESC tex_desc;
-            tex->GetDesc(&tex_desc);
+            ensure(native_device->CreateTexture2D(&tex_desc, nullptr, tex.put()), >= 0);
+            ComPtr<ID3D11UnorderedAccessView> uav_linear_scene;
+            ensure(native_device->CreateUnorderedAccessView(tex.get(), nullptr, uav_linear_scene.put()), >= 0);
+            ComPtr<ID3D11ShaderResourceView> srv_linear_scene;
+            ensure(native_device->CreateShaderResourceView(tex.get(), nullptr, srv_linear_scene.put()), >= 0);
 
-            constexpr int nmips = 6;
+            // Bindings.
+            native_device_context->CSSetUnorderedAccessViews(0, 1, &uav_linear_scene, nullptr);
+            native_device_context->CSSetShader(device_data.native_compute_shaders.at(CompileTimeStringHash("BurnoutPR Linearize CS")).get(), nullptr, 0);
+            native_device_context->CSSetShaderResources(0, 1, &srv_scene);
+
+            native_device_context->Dispatch((tex_desc.Width + 8 - 1) / 8, (tex_desc.Height + 8 - 1) / 8, 1);
+            
+            constexpr ID3D11UnorderedAccessView* uav_null = nullptr;
+            native_device_context->CSSetUnorderedAccessViews(0, 1, &uav_null, nullptr);
+
+            //
+
+            ComPtr<ID3D11ShaderResourceView> srv_karis_averaged_scene;
+            DrawKarisAverage(native_device, native_device_context, device_data, srv_linear_scene.get(), srv_karis_averaged_scene.put());
+
+            DrawBloom(native_device, native_device_context, device_data, game_device_data.draw_luma_bloom_data, srv_karis_averaged_scene.get(), g_bloom_nmips, g_bloom_sigmas.data(), game_device_data.srv_luma_bloom.put());
+
+            // Delinearize bloom pass
+            //
+
+            // Create RT and views.
             tex_desc.Width /= 2;
             tex_desc.Height /= 2;
-            tex_desc.MipLevels = nmips;
-            tex_desc.Format = DXGI_FORMAT_R16G16B16A16_FLOAT;
-            tex_desc.BindFlags = D3D11_BIND_SHADER_RESOURCE | D3D11_BIND_RENDER_TARGET;
             ensure(native_device->CreateTexture2D(&tex_desc, nullptr, tex.put()), >= 0);
+            ComPtr<ID3D11UnorderedAccessView> uav_srgb_bloom;
+            ensure(native_device->CreateUnorderedAccessView(tex.get(), nullptr, uav_srgb_bloom.put()), >= 0);
 
-            std::array<ID3D11RenderTargetView*, nmips> rtv_mips = {};
-            std::array<ID3D11ShaderResourceView*, nmips> srv_mips = {};
+            // Bindings.
+            native_device_context->CSSetUnorderedAccessViews(0, 1, &uav_srgb_bloom, nullptr);
+            native_device_context->CSSetShader(device_data.native_compute_shaders.at(CompileTimeStringHash("BurnoutPR Delinearize CS")).get(), nullptr, 0);
+            native_device_context->CSSetShaderResources(0, 1, &game_device_data.srv_luma_bloom);
 
-            D3D11_RENDER_TARGET_VIEW_DESC rtv_desc = {};
-            rtv_desc.Format = tex_desc.Format;
-            rtv_desc.ViewDimension = D3D11_RTV_DIMENSION_TEXTURE2D;
+            native_device_context->Dispatch((tex_desc.Width + 8 - 1) / 8, (tex_desc.Height + 8 - 1) / 8, 1);
 
-            D3D11_SHADER_RESOURCE_VIEW_DESC srv_desc = {};
-            srv_desc.Format = tex_desc.Format;
-            srv_desc.ViewDimension = D3D11_SRV_DIMENSION_TEXTURE2D;
-            srv_desc.Texture2D.MipLevels = 1;
-
-            for (int i = 0; i < nmips; ++i)
-            {
-                rtv_desc.Texture2D.MipSlice = i;
-                ensure(native_device->CreateRenderTargetView(tex.get(), &rtv_desc, &rtv_mips[i]), >= 0);
-                srv_desc.Texture2D.MostDetailedMip = i;
-                ensure(native_device->CreateShaderResourceView(tex.get(), &srv_desc, &srv_mips[i]), >= 0);
-            }
+            native_device_context->CSSetUnorderedAccessViews(0, 1, &uav_null, nullptr);
 
             //
 
-            // Prefilter (downsample) pass
-            //
-
-            std::vector<D3D11_VIEWPORT> viewports(nmips);
-            viewports[0].Width = tex_desc.Width;
-            viewports[0].Height = tex_desc.Height;
-
-            native_device_context->OMSetRenderTargets(1, &rtv_mips[0], nullptr);
-            native_device_context->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
-            native_device_context->VSSetShader(device_data.native_vertex_shaders.at(CompileTimeStringHash("BurnoutPR Bloom VS")).get(), nullptr, 0);
-            native_device_context->PSSetShader(device_data.native_pixel_shaders.at(CompileTimeStringHash("BurnoutPR Bloom Prefilter PS")).get(), nullptr, 0);
-            const std::array ps_samplers = { device_data.sampler_state_linear.get() };
-            native_device_context->PSSetSamplers(0, ps_samplers.size(), ps_samplers.data());
-            native_device_context->PSSetShaderResources(0, 1, &srv_scene);
-            native_device_context->RSSetViewports(1, &viewports[0]);
-            native_device_context->RSSetState(nullptr);
-
-            native_device_context->Draw(3, 0);
-
-            //
-
-            // Downsample passes
-            //
-
-            native_device_context->PSSetShader(device_data.native_pixel_shaders.at(CompileTimeStringHash("BurnoutPR Bloom Downsample PS")).get(), nullptr, 0);
-            
-            for (int i = 1; i < nmips; ++i)
-            {
-                viewports[i].Width = max(1.0f, tex_desc.Width >> i);
-                viewports[i].Height = max(1.0f, tex_desc.Height >> i);
-
-                native_device_context->OMSetRenderTargets(1, &rtv_mips[i], nullptr);
-                native_device_context->PSSetShaderResources(0, 1, &srv_mips[i - 1]);
-                native_device_context->RSSetViewports(1, &viewports[i]);
-
-                native_device_context->Draw(3, 0);
-            }
-
-            //
-
-            // Upsample passes
-            //
-
-            native_device_context->PSSetShader(device_data.native_pixel_shaders.at(CompileTimeStringHash("BurnoutPR Bloom Upsample PS")).get(), nullptr, 0);
-            
-            CD3D11_BLEND_DESC blend_desc(D3D11_DEFAULT);
-            blend_desc.RenderTarget[0].BlendEnable = TRUE;
-            blend_desc.RenderTarget[0].DestBlend = D3D11_BLEND_ONE;
-            ComPtr<ID3D11BlendState> blend;
-            ensure(native_device->CreateBlendState(&blend_desc, blend.put()), >= 0);
-            
-            for (int i = nmips - 1; i > 0; --i)
-            {
-                // Bindings.
-                native_device_context->OMSetRenderTargets(1, &rtv_mips[i - 1], nullptr);
-                native_device_context->PSSetShaderResources(0, 1, &srv_mips[i]);
-                native_device_context->RSSetViewports(1, &viewports[i - 1]);
-                native_device_context->OMSetBlendState(blend.get(), nullptr, UINT_MAX);
-
-                native_device_context->Draw(3, 0);
-            }
-
-            //
-
-            game_device_data.srv_luma_bloom = srv_mips[0];
-
-            // Restore.
-            native_device_context->OMSetBlendState(blend_original.get(), blend_factor_original, sample_mask_original);
-            native_device_context->OMSetRenderTargets(rtvs_original.size(), rtvs_original.data(), dsv_original.get());
-            native_device_context->IASetPrimitiveTopology(primitive_topology_original);
-            native_device_context->VSSetShader(vs_original.get(), nullptr, 0);
-            native_device_context->PSSetSamplers(0, 1, &ps_sampler_original);
-            native_device_context->PSSetShaderResources(0, 1, &ps_srv_original);
-            native_device_context->RSSetViewports(viewports_original.size(), viewports_original.data());
-            native_device_context->RSSetState(rasterizer_original.get());
-
-            // Release com arrays.
-            auto release_com_array = [](auto& array){ for (auto* p : array) if (p) p->Release(); };
-            release_com_array(rtvs_original);
-            release_com_array(rtv_mips);
-            release_com_array(srv_mips);
+            // Create sRGB bloom SRV, used later.
+            ensure(native_device->CreateShaderResourceView(tex.get(), nullptr, game_device_data.srv_luma_bloom.put()), >= 0);
 
             game_device_data.has_drawn_bloom = true;
 
@@ -826,6 +738,19 @@ public:
       {
          reshade::set_config_value(runtime, NAME, "LumaBloomEnable", g_luma_bloom_enable);
       }
+
+#if DEVELOPMENT
+      if (ImGui::SliderInt("Luma Bloom nmips", &g_bloom_nmips, 1.0, 10.0))
+      {
+		 g_bloom_sigmas.resize(g_bloom_nmips);
+	  }
+
+	  for (int i = 0; i < g_bloom_nmips; ++i)
+      {
+		 const std::string name = "Luma Bloom Sigma" + std::to_string(i);
+		 ImGui::SliderFloat(name.c_str(), &g_bloom_sigmas[i], 0.0f, 15.0f, "%.3f", ImGuiSliderFlags_AlwaysClamp);
+	  }
+#endif
 
       if (ImGui::SliderFloat("Bloom Intensity", &cb_luma_global_settings.GameSettings.BloomIntensity, 0.f, 2.f))
       {
@@ -1040,7 +965,7 @@ BOOL APIENTRY DllMain(HMODULE hModule, DWORD ul_reason_for_call, LPVOID lpReserv
          "FDE602F4",
       };
 
-      default_luma_global_game_settings.BloomIntensity = 0.5f; // Reduce default given that on modern resolutions and displays, it doesn't look good, especially not in HDR. Also "ENABLE_IMPROVED_MOTION_BLUR" make bloom stronger by default.
+      default_luma_global_game_settings.BloomIntensity = 1.0f;
       default_luma_global_game_settings.MotionBlurIntensity = 1.f;
       default_luma_global_game_settings.ColorGradingIntensity = 0.8f; // It was a bit too strong for 2025 standards, and kinda crushed blacks and distorted colors in weird ways for HDR
       default_luma_global_game_settings.ColorGradingFilterReductionIntensity = 0.f;
