@@ -25,7 +25,7 @@ cbuffer _Globals : register(b0)
 //
 
 #ifndef EFFECT_RADIUS
-#define EFFECT_RADIUS 0.3 // Default 0.5
+#define EFFECT_RADIUS 0.4 // Default 0.5
 #endif
 
 #ifndef RADIUS_MULTIPLIER
@@ -45,7 +45,7 @@ cbuffer _Globals : register(b0)
 #endif
 
 #ifndef FINAL_VALUE_POWER
-#define FINAL_VALUE_POWER 0.55 // Default 2.2
+#define FINAL_VALUE_POWER 0.6 // Default 2.2
 #endif
 
 #ifndef DEPTH_MIP_SAMPLING_OFFSET

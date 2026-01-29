@@ -128,12 +128,13 @@ public:
       native_shaders_definitions.emplace(CompileTimeStringHash("BurnoutPR Delinearize CS"), ShaderDefinition{ "Luma_BurnoutPR_Delinearize", reshade::api::pipeline_subobject_type::compute_shader });
 
       // Luma bloom.
-      g_bloom_nmips = 4;
+      g_bloom_nmips = 5;
       g_bloom_sigmas.resize(g_bloom_nmips);
       g_bloom_sigmas[0] = 1.5f;
       g_bloom_sigmas[1] = 1.0f;
       g_bloom_sigmas[2] = 1.0f;
-      g_bloom_sigmas[3] = 0.6f;
+      g_bloom_sigmas[3] = 1.0f;
+      g_bloom_sigmas[4] = 1.0f;
    }
 
    void OnCreateDevice(ID3D11Device* native_device, DeviceData& device_data) override
@@ -965,7 +966,7 @@ BOOL APIENTRY DllMain(HMODULE hModule, DWORD ul_reason_for_call, LPVOID lpReserv
          "FDE602F4",
       };
 
-      default_luma_global_game_settings.BloomIntensity = 1.0f;
+      default_luma_global_game_settings.BloomIntensity = 0.5f; // Reduce default given that on modern resolutions and displays, it doesn't look good, especially not in HDR. Also "ENABLE_IMPROVED_MOTION_BLUR" make bloom stronger by default.
       default_luma_global_game_settings.MotionBlurIntensity = 1.f;
       default_luma_global_game_settings.ColorGradingIntensity = 0.8f; // It was a bit too strong for 2025 standards, and kinda crushed blacks and distorted colors in weird ways for HDR
       default_luma_global_game_settings.ColorGradingFilterReductionIntensity = 0.f;
