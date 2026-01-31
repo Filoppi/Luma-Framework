@@ -15,7 +15,7 @@ namespace
 
    constexpr bool smooth_motion_blur_parameters = true; // Mirrored in shaders
    
-   bool g_luma_bloom_enable = false;
+   bool g_luma_bloom_enable = true;
    int g_bloom_nmips;
    std::vector<float> g_bloom_sigmas;
 
@@ -23,7 +23,7 @@ namespace
    constexpr size_t XE_GTAO_DEPTH_MIP_LEVELS = 5;
    constexpr UINT XE_GTAO_NUMTHREADS_X = 8;
    constexpr UINT XE_GTAO_NUMTHREADS_Y = 8;
-   bool g_xegtao_enable = false;
+   bool g_xegtao_enable = true;
 
    ShaderHashesList pixel_shader_hashes_Sky;
    ShaderHashesList pixel_shader_hashes_DownscaleDepth;
