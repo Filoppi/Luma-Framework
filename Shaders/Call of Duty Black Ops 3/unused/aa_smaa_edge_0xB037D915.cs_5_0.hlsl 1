@@ -1,0 +1,133 @@
+// ---- Created with 3Dmigoto v1.3.16 on Thu Nov 27 11:19:12 2025
+
+RWBuffer<uint4> indirectRWBuffer : register(u0);
+RWStructuredBuffer<uint3> morphologicalWorkQueueRWBufferH : register(u4);
+RWStructuredBuffer<uint3> morphologicalWorkQueueRWBufferV : register(u5);
+
+
+// 3Dmigoto declarations
+#define cmp -
+
+[numthreads(1,1,1)] // dcl_thread_group 64, 1, 1
+void main(uint3 vThreadIDInGroupFlattened : SV_DispatchThreadID)
+{
+  indirectRWBuffer[vThreadIDInGroupFlattened.x] = 0;
+
+
+
+
+
+
+// // unknown dcl_: dcl_uav_typed_buffer (uint,uint,uint,uint) u0
+// // unknown dcl_: dcl_uav_structured_opc u4, 12
+// // unknown dcl_: dcl_uav_structured_opc u5, 12
+
+//   float4 r0,r1;
+//   uint4 bitmask, uiDest;
+//   float4 fDest;
+
+
+// // unknown dcl_: dcl_tgsm_raw g0, 4
+
+// // unknown dcl_: dcl_tgsm_raw g1, 4
+
+//   if (vThreadIDInGroupFlattened.x == 0) {
+    
+//     imm_atomic_alloc r0.x, u4
+//     InterlockedExchange ?(dest, value, orig_value);
+//   // No code for instruction (needs manual fix):
+//     store_raw g0.x, l(0), r0.x
+    
+//     imm_atomic_alloc r0.x, u5
+//     InterlockedExchange ?(dest, value, orig_value);
+//   // No code for instruction (needs manual fix):
+//     store_raw g1.x, l(0), r0.x
+//   }
+//   GroupMemoryBarrierWithGroupSync();
+// // No code for instruction (needs manual fix):
+// ld_raw r0.x, l(0), g0.xxxx
+//   r0.y = (int)r0.x + 63;
+//   r0.z = (int)r0.y & -64;
+// // No code for instruction (needs manual fix):
+// ld_raw r0.w, l(0), g1.xxxx
+//   r1.x = (int)r0.w + 63;
+//   r1.y = (int)r1.x & -64;
+//   r0.x = (int)r0.x + (int)vThreadIDInGroupFlattened.x;
+//   r0.z = cmp((uint)r0.x < (uint)r0.z);
+//   if (r0.z != 0) {
+//     morphologicalWorkQueueRWBufferH[r0.x].xyz = float3(0,0,0);
+//   }
+//   r0.x = (int)r0.w + (int)vThreadIDInGroupFlattened.x;
+//   r0.z = cmp((uint)r0.x < (uint)r1.y);
+//   if (r0.z != 0) {
+//     morphologicalWorkQueueRWBufferV[r0.x].xyz = float3(0,0,0);
+//   }
+//   if (vThreadIDInGroupFlattened.x == 0) {
+//     r0.x = (uint)r1.x >> 6;
+//   // No code for instruction (needs manual fix):
+//     store_uav_typed u0.xyzw, l(0,0,0,0), r0.xxxx
+//   // No code for instruction (needs manual fix):
+//     store_uav_typed u0.xyzw, l(1,1,1,1), l(1,1,1,1)
+//   // No code for instruction (needs manual fix):
+//     store_uav_typed u0.xyzw, l(2,2,2,2), l(1,1,1,1)
+//     r0.x = (uint)r0.y >> 6;
+//   // No code for instruction (needs manual fix):
+//     store_uav_typed u0.xyzw, l(3,3,3,3), r0.xxxx
+//   // No code for instruction (needs manual fix):
+//     store_uav_typed u0.xyzw, l(4,4,4,4), l(1,1,1,1)
+//   // No code for instruction (needs manual fix):
+//     store_uav_typed u0.xyzw, l(5,5,5,5), l(1,1,1,1)
+//   }
+//   return;
+}
+
+/*
+
+Shader hash 79fcca3c-5dae7031-29a14184-6594df00
+
+cs_5_0
+      dcl_globalFlags refactoringAllowed
+      dcl_uav_typed_buffer (uint,uint,uint,uint) indirectRWBuffer (u0)
+      dcl_uav_structured morphologicalWorkQueueRWBufferH (u4), 12, hasOrderPreservingCounter
+      dcl_uav_structured morphologicalWorkQueueRWBufferV (u5), 12, hasOrderPreservingCounter
+      dcl_input vThreadIDInGroupFlattened
+      dcl_temps 2
+      dcl_tgsm_raw g0, 4
+      dcl_tgsm_raw g1, 4
+      dcl_thread_group 64, 1, 1
+   0: if_z vThreadIDInGroupFlattened.x
+   1:   imm_atomic_alloc r0.x, morphologicalWorkQueueRWBufferH
+   2:   store_raw g0.x, l(0), r0.x
+   3:   imm_atomic_alloc r0.x, morphologicalWorkQueueRWBufferV
+   4:   store_raw g1.x, l(0), r0.x
+   5: endif
+   6: sync_g_t
+   7: ld_raw r0.x, l(0), g0.xxxx
+   8: iadd r0.y, r0.x, l(63)
+   9: and r0.z, r0.y, l(-64)
+  10: ld_raw r0.w, l(0), g1.xxxx
+  11: iadd r1.x, r0.w, l(63)
+  12: and r1.y, r1.x, l(-64)
+  13: iadd r0.x, r0.x, vThreadIDInGroupFlattened.x
+  14: ult r0.z, r0.x, r0.z
+  15: if_nz r0.z
+  16:   store_structured morphologicalWorkQueueRWBufferH.xyz, r0.x, l(0), l(0, 0, 0, 0)
+  17: endif
+  18: iadd r0.x, r0.w, vThreadIDInGroupFlattened.x
+  19: ult r0.z, r0.x, r1.y
+  20: if_nz r0.z
+  21:   store_structured morphologicalWorkQueueRWBufferV.xyz, r0.x, l(0), l(0, 0, 0, 0)
+  22: endif
+  23: if_z vThreadIDInGroupFlattened.x
+  24:   ushr r0.x, r1.x, l(6)
+  25:   store_uav_typed indirectRWBuffer.xyzw, l(0, 0, 0, 0), r0.xxxx
+  26:   store_uav_typed indirectRWBuffer.xyzw, l(1, 1, 1, 1), l(1, 1, 1, 1)
+  27:   store_uav_typed indirectRWBuffer.xyzw, l(2, 2, 2, 2), l(1, 1, 1, 1)
+  28:   ushr r0.x, r0.y, l(6)
+  29:   store_uav_typed indirectRWBuffer.xyzw, l(3, 3, 3, 3), r0.xxxx
+  30:   store_uav_typed indirectRWBuffer.xyzw, l(4, 4, 4, 4), l(1, 1, 1, 1)
+  31:   store_uav_typed indirectRWBuffer.xyzw, l(5, 5, 5, 5), l(1, 1, 1, 1)
+  32: endif
+  33: ret
+
+*/

@@ -1,0 +1,539 @@
+// ---- Created with 3Dmigoto v1.3.16 on Thu Nov 27 11:19:04 2025
+
+cbuffer PerSceneConsts : register(b1)
+{
+  row_major float4x4 projectionMatrix : packoffset(c0);
+  row_major float4x4 viewMatrix : packoffset(c4);
+  row_major float4x4 viewProjectionMatrix : packoffset(c8);
+  row_major float4x4 inverseProjectionMatrix : packoffset(c12);
+  row_major float4x4 inverseViewMatrix : packoffset(c16);
+  row_major float4x4 inverseViewProjectionMatrix : packoffset(c20);
+  float4 eyeOffset : packoffset(c24);
+  float4 adsZScale : packoffset(c25);
+  float4 hdrControl0 : packoffset(c26);
+  float4 hdrControl1 : packoffset(c27);
+  float4 fogColor : packoffset(c28);
+  float4 fogConsts : packoffset(c29);
+  float4 fogConsts2 : packoffset(c30);
+  float4 fogConsts3 : packoffset(c31);
+  float4 fogConsts4 : packoffset(c32);
+  float4 fogConsts5 : packoffset(c33);
+  float4 fogConsts6 : packoffset(c34);
+  float4 fogConsts7 : packoffset(c35);
+  float4 fogConsts8 : packoffset(c36);
+  float4 fogConsts9 : packoffset(c37);
+  float3 sunFogDir : packoffset(c38);
+  float4 sunFogColor : packoffset(c39);
+  float2 sunFog : packoffset(c40);
+  float4 zNear : packoffset(c41);
+  float3 clothPrimaryTint : packoffset(c42);
+  float3 clothSecondaryTint : packoffset(c43);
+  float4 renderTargetSize : packoffset(c44);
+  float4 upscaledTargetSize : packoffset(c45);
+  float4 materialColor : packoffset(c46);
+  float4 cameraUp : packoffset(c47);
+  float4 cameraLook : packoffset(c48);
+  float4 cameraSide : packoffset(c49);
+  float4 cameraVelocity : packoffset(c50);
+  float4 skyMxR : packoffset(c51);
+  float4 skyMxG : packoffset(c52);
+  float4 skyMxB : packoffset(c53);
+  float4 sunMxR : packoffset(c54);
+  float4 sunMxG : packoffset(c55);
+  float4 sunMxB : packoffset(c56);
+  float4 skyRotationTransition : packoffset(c57);
+  float4 debugColorOverride : packoffset(c58);
+  float4 debugAlphaOverride : packoffset(c59);
+  float4 debugNormalOverride : packoffset(c60);
+  float4 debugSpecularOverride : packoffset(c61);
+  float4 debugGlossOverride : packoffset(c62);
+  float4 debugOcclusionOverride : packoffset(c63);
+  float4 debugStreamerControl : packoffset(c64);
+  float4 emblemLUTSelector : packoffset(c65);
+  float4 colorMatrixR : packoffset(c66);
+  float4 colorMatrixG : packoffset(c67);
+  float4 colorMatrixB : packoffset(c68);
+  float4 gameTime : packoffset(c69);
+  float4 gameTick : packoffset(c70);
+  float4 subpixelOffset : packoffset(c71);
+  float4 viewportDimensions : packoffset(c72);
+  float4 viewSpaceScaleBias : packoffset(c73);
+  float4 ui3dUVSetup0 : packoffset(c74);
+  float4 ui3dUVSetup1 : packoffset(c75);
+  float4 ui3dUVSetup2 : packoffset(c76);
+  float4 ui3dUVSetup3 : packoffset(c77);
+  float4 ui3dUVSetup4 : packoffset(c78);
+  float4 ui3dUVSetup5 : packoffset(c79);
+  float4 clipSpaceLookupScale : packoffset(c80);
+  float4 clipSpaceLookupOffset : packoffset(c81);
+  uint4 computeSpriteControl : packoffset(c82);
+  float4 invBcTexSizes : packoffset(c83);
+  float4 invMaskTexSizes : packoffset(c84);
+  float4 relHDRExposure : packoffset(c85);
+  uint4 triDensityFlags : packoffset(c86);
+  float4 triDensityParams : packoffset(c87);
+  float4 voldecalRevealTextureInfo : packoffset(c88);
+  float4 extraClipPlane0 : packoffset(c89);
+  float4 extraClipPlane1 : packoffset(c90);
+  float4 shaderDebug : packoffset(c91);
+  uint isDepthHack : packoffset(c92);
+}
+
+SamplerState bilinearSampler_s : register(s0);
+Texture2D<float4> smaaTex : register(t0);
+Texture2D<float4> edgesTex : register(t4);
+RWTexture2D<float4> dstRWTex : register(u2); // dcl_uav_typed_texture2d (float,float,float,float) u2 / 2: dstRWTex 2D Render Target 1005 Texture 2D 2560 1440 1 1 R11G11B10_FLOAT
+RWStructuredBuffer<uint3> morphologicalWorkQueueRWBufferV : register(u5);
+
+// 3Dmigoto declarations
+#define cmp -
+#include "./common1.hlsl"
+
+[numthreads(8,8,1)] // dcl_thread_group 64, 1, 1
+void main(uint3 vThreadID : SV_DispatchThreadID)
+{
+  uint w, h;
+  dstRWTex.GetDimensions(w, h);
+
+  if (vThreadID.x > w) return;
+  
+  // for (uint i = vThreadID.x; i < w; i++) {
+  //   for (uint j = 0; j < h; j++) {
+  //     dstRWTex[uint2(i,j)].xyzw = float4(Trade_Out_NoCS(dstRWTex[uint2(i,j)].xyz) * 0, 1);
+  //   }
+  // }
+
+  for (uint j = 0; j < h; j++) {
+    uint w = (uint)vThreadID.x;
+    dstRWTex[uint2(w,j)].xyzw = float4(Trade_Out_NoCS(dstRWTex[uint2(w,j)].xyz * 0.5), 1);
+  }
+
+
+
+  // if (vThreadID.x > 0) return;
+
+  // float3 r0;
+
+  // for (int i = vThreadID.x * 100; i < 5; i++) {
+  //   for (int j = 0; j < 1440; j++) {
+  //     dstRWTex[uint2(i,j)].xyzw = 0;
+  //   }
+  // }
+  // // r0 = morphologicalWorkQueueRWBufferV[vThreadID.x].xyz;
+  // // r0 = Trade_Out_NoCS(r0);
+  // // dstRWTex[vThreadID.x] = float4(10000);
+  // return;
+
+
+
+
+//   float4 r0,r1,r2,r3,r4,r5,r6,r7;
+//   uint4 bitmask, uiDest;
+//   float4 fDest;
+
+//   r0.xyz = morphologicalWorkQueueRWBufferV[vThreadID.x].xyz;
+//   r0.w = (uint)r0.x >> 12;
+//   r1.xyzw = (int4)r0.xwww & int4(4095,4095,4095,4095);
+//   r0.xw = (int2)r1.xw;
+//   r0.xw = float2(0.5,0.5) + r0.xw;
+//   r2.yz = renderTargetSize.zw * r0.xw;
+//   r3.xy = float2(-0.125,-0.25) * renderTargetSize.zw;
+//   r3.xy = r0.xw * renderTargetSize.zw + r3.xy;
+//   r3.zw = float2(0,1);
+//   r4.xy = r3.xy;
+//   r4.zw = float2(-3,61);
+//   while (true) {
+//     r5.x = cmp(r4.z >= r4.w);
+//     if (r5.x != 0) break;
+//     r3.zw = edgesTex.SampleLevel(bilinearSampler_s, r4.xy, 0).yx;
+//     r4.xy = renderTargetSize.zw * float2(-0,-2) + r4.xy;
+//     r5.x = -r3.z * 32 + r3.w;
+//     r5.x = cmp(0.828125 < r5.x);
+//     r4.w = r5.x ? r4.w : r4.z;
+//     r4.z = 2 + r4.z;
+//   }
+//   r3.xy = float2(32,32) * r3.zw;
+//   r3.xy = round(r3.xy);
+//   r3.xy = (int2)r3.xy;
+//   r3.zw = float2(0,0);
+//   r3.xy = smaaTex.Load(r3.xyz).xy;
+//   r3.y = 3 * r3.y;
+//   r3.x = r3.x * 2.00787401 + r4.z;
+//   r4.y = round(r3.x);
+//   r3.x = round(r3.y);
+//   r3.zw = float2(-0.125,1.75) * renderTargetSize.zw;
+//   r0.xw = r0.xw * renderTargetSize.zw + r3.zw;
+//   r3.zw = float2(0,1);
+//   r4.zw = r0.xw;
+//   r5.xy = float2(-2,62);
+//   while (true) {
+//     r5.z = cmp(r5.x >= r5.y);
+//     if (r5.z != 0) break;
+//     r3.zw = edgesTex.SampleLevel(bilinearSampler_s, r4.zw, 0).yx;
+//     r4.zw = renderTargetSize.zw * float2(0,2) + r4.zw;
+//     r5.z = -r3.z * 32 + r3.w;
+//     r5.z = cmp(0.828125 < r5.z);
+//     r5.y = r5.z ? r5.y : r5.x;
+//     r5.x = 2 + r5.x;
+//   }
+//   r0.xw = r3.zw * float2(32,32) + float2(33,0);
+//   r0.xw = round(r0.xw);
+//   r6.xy = (int2)r0.xw;
+//   r6.zw = float2(0,0);
+//   r0.xw = smaaTex.Load(r6.xyz).xy;
+//   r0.w = 3 * r0.w;
+//   r0.x = r0.x * 2.00787401 + r5.x;
+//   r4.x = round(r0.x);
+//   r3.y = round(r0.w);
+//   r0.xw = abs(r4.yx);
+//   r0.xw = (uint2)r0.xw >> int2(1,1);
+//   r0.xw = (int2)r0.xw + int2(0x1fbd1df5,0x1fbd1df5);
+//   r0.xw = min(float2(19,19), r0.xw);
+//   r0.xw = r3.xy * float2(20,20) + r0.xw;
+//   r0.xw = r0.xw * float2(0.0125000002,0.00510204071) + float2(0.00625000009,0.18622449);
+//   r0.xw = smaaTex.SampleLevel(bilinearSampler_s, r0.xw, 0).xy;
+//   r3.x = max(r0.x, r0.w);
+//   r3.x = cmp(0 < r3.x);
+//   if (r3.x != 0) {
+//     r2.x = -renderTargetSize.w * r4.y + r2.z;
+//     r2.w = renderTargetSize.w * r4.x + r2.z;
+//     r3.xy = cmp(r4.xy >= r4.yx);
+//     r3.zw = r3.xy ? float2(1,1) : 0;
+//     r2.z = cmp(r3.w == r3.z);
+//     r3.xy = (int2)r2.zz | (int2)r3.xy;
+//     r3.xy = r3.xy ? float2(1,1) : 0;
+//     r3.zw = renderTargetSize.zw * float2(0,0.25) + r2.yx;
+//     r3.zw = renderTargetSize.zw * float2(1,-1) + r3.zw;
+//     r3.zw = edgesTex.SampleLevel(bilinearSampler_s, r3.zw, 0).xy;
+//     r2.z = r3.w * 5 + -3.75;
+//     r2.z = r3.w * abs(r2.z);
+//     r5.y = round(r2.z);
+//     r5.x = round(r3.z);
+//     r3.zw = r5.xy * r3.xx;
+//     r4.zw = renderTargetSize.zw + r2.yw;
+//     r4.zw = edgesTex.SampleLevel(bilinearSampler_s, r4.zw, 0).xy;
+//     r5.zw = r4.zw * r3.yy;
+//     r6.xyzw = renderTargetSize.zwzw * float4(-2,0,0.25,0) + r2.yxyw;
+//     r2.w = edgesTex.SampleLevel(bilinearSampler_s, r6.xy, 0).y;
+//     r2.xy = -renderTargetSize.zw + r2.yx;
+//     r2.z = edgesTex.SampleLevel(bilinearSampler_s, r2.xy, 0).x;
+//     r2.xy = r3.xx * r2.zw;
+//     r6.xy = renderTargetSize.zw * float2(-2,1) + r6.zw;
+//     r6.xy = edgesTex.SampleLevel(bilinearSampler_s, r6.xy, 0).xy;
+//     r6.z = r6.x * 5 + -3.75;
+//     r6.x = r6.x * abs(r6.z);
+//     r6.zw = round(r6.xy);
+//     r6.xy = r6.zw * r3.yy;
+//     r4.x = r4.y + r4.x;
+//     r4.x = cmp(0 < r4.x);
+//     r7.xy = saturate(r3.xx * r5.xy + r5.zw);
+//     r7.zw = saturate(r3.xx * r2.zw + r6.xy);
+//     r2.z = r3.w + r3.z;
+//     r2.z = r3.y * r4.w + r2.z;
+//     r2.z = saturate(r3.y * r4.z + r2.z);
+//     r2.x = r2.y + r2.x;
+//     r2.x = r3.y * r6.w + r2.x;
+//     r2.x = saturate(r3.y * r6.z + r2.x);
+//     r2.y = -r3.x * r5.y + 2;
+//     r2.y = saturate(-r3.y * r4.w + r2.y);
+//     r5.x = r2.z * r2.y;
+//     r2.y = -r3.x * r2.w + 2;
+//     r2.y = saturate(-r3.y * r6.w + r2.y);
+//     r5.y = r2.x * r2.y;
+//     r2.xy = r4.xx ? r7.xz : r5.xy;
+//     r2.zw = float2(1,1) + -r7.yw;
+//     r2.xy = r2.xy * r2.zw;
+//     r2.xy = r4.xx ? r2.xy : r5.xy;
+//     r0.xw = r2.xy * r0.xw;
+//   }
+//   r2.x = max(r0.x, r0.w);
+//   r2.x = cmp(0 < r2.x);
+//   if (r2.x != 0) {
+//     bitmask.x = ((~(-1 << 11)) << 4) & 0xffffffff;  r2.x = (((uint)r0.y << 4) & bitmask.x) | ((uint)0 & ~bitmask.x);
+//     bitmask.y = ((~(-1 << 11)) << 4) & 0xffffffff;  r2.y = (((uint)r0.z << 4) & bitmask.y) | ((uint)0 & ~bitmask.y);
+//     r3.xyzw = (uint4)r0.yyzz >> int4(7,17,7,17);
+//     r3.xyzw = (int4)r3.xyzw & int4(0x7ff0,0x7fe0,0x7ff0,0x7fe0);
+//     r4.xw = f16tof32(r2.xx);
+//     r4.yz = f16tof32(r3.xy);
+//     r2.xw = f16tof32(r2.yy);
+//     r2.yz = f16tof32(r3.zw);
+//     r3.xyzw = r2.wyzw + -r4.wyzw;
+//     r3.xyzw = r0.xxxx * r3.xyzw + r4.wyzw;
+//   // No code for instruction (needs manual fix):
+//     store_uav_typed u2.xyzw, r1.xwww, r3.xyzw
+//     r1.xyzw = (int4)r1.xyzw + int4(-1,0,0,0);
+//     r3.xyzw = r4.xyzw + -r2.wyzw;
+//     r0.xyzw = r0.wwww * r3.xyzw + r2.xyzw;
+//   // No code for instruction (needs manual fix):
+//     store_uav_typed u2.xyzw, r1.xyzw, r0.xyzw
+//   }
+}
+
+/*
+//
+// Generated by Microsoft (R) HLSL Shader Compiler 9.30.9200.16384
+//
+//
+// Buffer Definitions: 
+//
+// cbuffer PerSceneConsts
+// {
+//
+//   row_major float4x4 projectionMatrix;// Offset:    0 Size:    64 [unused]
+//   row_major float4x4 viewMatrix;     // Offset:   64 Size:    64 [unused]
+//   row_major float4x4 viewProjectionMatrix;// Offset:  128 Size:    64 [unused]
+//   row_major float4x4 inverseProjectionMatrix;// Offset:  192 Size:    64 [unused]
+//   row_major float4x4 inverseViewMatrix;// Offset:  256 Size:    64 [unused]
+//   row_major float4x4 inverseViewProjectionMatrix;// Offset:  320 Size:    64 [unused]
+//   float4 eyeOffset;                  // Offset:  384 Size:    16 [unused]
+//   float4 adsZScale;                  // Offset:  400 Size:    16 [unused]
+//   float4 hdrControl0;                // Offset:  416 Size:    16 [unused]
+//   float4 hdrControl1;                // Offset:  432 Size:    16 [unused]
+//   float4 fogColor;                   // Offset:  448 Size:    16 [unused]
+//   float4 fogConsts;                  // Offset:  464 Size:    16 [unused]
+//   float4 fogConsts2;                 // Offset:  480 Size:    16 [unused]
+//   float4 fogConsts3;                 // Offset:  496 Size:    16 [unused]
+//   float4 fogConsts4;                 // Offset:  512 Size:    16 [unused]
+//   float4 fogConsts5;                 // Offset:  528 Size:    16 [unused]
+//   float4 fogConsts6;                 // Offset:  544 Size:    16 [unused]
+//   float4 fogConsts7;                 // Offset:  560 Size:    16 [unused]
+//   float4 fogConsts8;                 // Offset:  576 Size:    16 [unused]
+//   float4 fogConsts9;                 // Offset:  592 Size:    16 [unused]
+//   float3 sunFogDir;                  // Offset:  608 Size:    12 [unused]
+//   float4 sunFogColor;                // Offset:  624 Size:    16 [unused]
+//   float2 sunFog;                     // Offset:  640 Size:     8 [unused]
+//   float4 zNear;                      // Offset:  656 Size:    16 [unused]
+//   float3 clothPrimaryTint;           // Offset:  672 Size:    12 [unused]
+//   float3 clothSecondaryTint;         // Offset:  688 Size:    12 [unused]
+//   float4 renderTargetSize;           // Offset:  704 Size:    16
+//   float4 upscaledTargetSize;         // Offset:  720 Size:    16 [unused]
+//   float4 materialColor;              // Offset:  736 Size:    16 [unused]
+//   float4 cameraUp;                   // Offset:  752 Size:    16 [unused]
+//   float4 cameraLook;                 // Offset:  768 Size:    16 [unused]
+//   float4 cameraSide;                 // Offset:  784 Size:    16 [unused]
+//   float4 cameraVelocity;             // Offset:  800 Size:    16 [unused]
+//   float4 skyMxR;                     // Offset:  816 Size:    16 [unused]
+//   float4 skyMxG;                     // Offset:  832 Size:    16 [unused]
+//   float4 skyMxB;                     // Offset:  848 Size:    16 [unused]
+//   float4 sunMxR;                     // Offset:  864 Size:    16 [unused]
+//   float4 sunMxG;                     // Offset:  880 Size:    16 [unused]
+//   float4 sunMxB;                     // Offset:  896 Size:    16 [unused]
+//   float4 skyRotationTransition;      // Offset:  912 Size:    16 [unused]
+//   float4 debugColorOverride;         // Offset:  928 Size:    16 [unused]
+//   float4 debugAlphaOverride;         // Offset:  944 Size:    16 [unused]
+//   float4 debugNormalOverride;        // Offset:  960 Size:    16 [unused]
+//   float4 debugSpecularOverride;      // Offset:  976 Size:    16 [unused]
+//   float4 debugGlossOverride;         // Offset:  992 Size:    16 [unused]
+//   float4 debugOcclusionOverride;     // Offset: 1008 Size:    16 [unused]
+//   float4 debugStreamerControl;       // Offset: 1024 Size:    16 [unused]
+//   float4 emblemLUTSelector;          // Offset: 1040 Size:    16 [unused]
+//   float4 colorMatrixR;               // Offset: 1056 Size:    16 [unused]
+//   float4 colorMatrixG;               // Offset: 1072 Size:    16 [unused]
+//   float4 colorMatrixB;               // Offset: 1088 Size:    16 [unused]
+//   float4 gameTime;                   // Offset: 1104 Size:    16 [unused]
+//   float4 gameTick;                   // Offset: 1120 Size:    16 [unused]
+//   float4 subpixelOffset;             // Offset: 1136 Size:    16 [unused]
+//   float4 viewportDimensions;         // Offset: 1152 Size:    16 [unused]
+//   float4 viewSpaceScaleBias;         // Offset: 1168 Size:    16 [unused]
+//   float4 ui3dUVSetup0;               // Offset: 1184 Size:    16 [unused]
+//   float4 ui3dUVSetup1;               // Offset: 1200 Size:    16 [unused]
+//   float4 ui3dUVSetup2;               // Offset: 1216 Size:    16 [unused]
+//   float4 ui3dUVSetup3;               // Offset: 1232 Size:    16 [unused]
+//   float4 ui3dUVSetup4;               // Offset: 1248 Size:    16 [unused]
+//   float4 ui3dUVSetup5;               // Offset: 1264 Size:    16 [unused]
+//   float4 clipSpaceLookupScale;       // Offset: 1280 Size:    16 [unused]
+//   float4 clipSpaceLookupOffset;      // Offset: 1296 Size:    16 [unused]
+//   uint4 computeSpriteControl;        // Offset: 1312 Size:    16 [unused]
+//   float4 invBcTexSizes;              // Offset: 1328 Size:    16 [unused]
+//   float4 invMaskTexSizes;            // Offset: 1344 Size:    16 [unused]
+//   float4 relHDRExposure;             // Offset: 1360 Size:    16 [unused]
+//   uint4 triDensityFlags;             // Offset: 1376 Size:    16 [unused]
+//   float4 triDensityParams;           // Offset: 1392 Size:    16 [unused]
+//   float4 voldecalRevealTextureInfo;  // Offset: 1408 Size:    16 [unused]
+//   float4 extraClipPlane0;            // Offset: 1424 Size:    16 [unused]
+//   float4 extraClipPlane1;            // Offset: 1440 Size:    16 [unused]
+//   float4 shaderDebug;                // Offset: 1456 Size:    16 [unused]
+//   uint isDepthHack;                  // Offset: 1472 Size:     4 [unused]
+//
+// }
+//
+// Resource bind info for morphologicalWorkQueueRWBufferV
+// {
+//
+//   uint3 $Element;                    // Offset:    0 Size:    12
+//
+// }
+//
+//
+// Resource Bindings:
+//
+// Name                                 Type  Format         Dim      HLSL Bind  Count
+// ------------------------------ ---------- ------- ----------- -------------- ------
+// bilinearSampler                   sampler      NA          NA             s0      1 
+// smaaTex                           texture  float4          2d             t0      1 
+// edgesTex                          texture  float4          2d             t4      1 
+// dstRWTex                              UAV  float3          2d             u2      1 
+// morphologicalWorkQueueRWBufferV        UAV  struct         r/w             u5      1 
+// PerSceneConsts                    cbuffer      NA          NA            cb1      1 
+//
+//
+//
+// Input signature:
+//
+// Name                 Index   Mask Register SysValue  Format   Used
+// -------------------- ----- ------ -------- -------- ------- ------
+// no Input
+//
+// Output signature:
+//
+// Name                 Index   Mask Register SysValue  Format   Used
+// -------------------- ----- ------ -------- -------- ------- ------
+// no Output
+      0x00000000: cs_5_0
+      0x00000008: dcl_globalFlags refactoringAllowed
+      0x0000000C: dcl_constantbuffer CB1[45], immediateIndexed
+      0x0000001C: dcl_sampler s0, mode_default
+      0x00000028: dcl_resource_texture2d (float,float,float,float) t0
+      0x00000038: dcl_resource_texture2d (float,float,float,float) t4
+      0x00000048: dcl_uav_typed_texture2d (float,float,float,float) u2
+      0x00000058: dcl_uav_structured u5, 12
+      0x00000068: dcl_input vThreadID.x
+      0x00000070: dcl_temps 8
+      0x00000078: dcl_thread_group 64, 1, 1
+   0  0x00000088: ld_structured_indexable(structured_buffer, stride=12)(mixed,mixed,mixed,mixed) r0.xyz, vThreadID.x, l(0), u5.xyzx
+   1  0x000000B0: ushr r0.w, r0.x, l(12)
+   2  0x000000CC: and r1.xyzw, r0.xwww, l(4095, 4095, 4095, 4095)
+   3  0x000000F4: itof r0.xw, r1.xxxw
+   4  0x00000108: add r0.xw, r0.xxxw, l(0.500000, 0.000000, 0.000000, 0.500000)
+   5  0x00000130: mul r2.yz, r0.xxwx, cb1[44].zzwz
+   6  0x00000150: mul r3.xy, cb1[44].zwzz, l(-0.125000, -0.250000, 0.000000, 0.000000)
+   7  0x0000017C: mad r3.xy, r0.xwxx, cb1[44].zwzz, r3.xyxx
+   8  0x000001A4: mov r3.zw, l(0,0,0,1.000000)
+   9  0x000001C4: mov r4.xy, r3.xyxx
+  10  0x000001D8: mov r4.zw, l(0,0,-3.000000,61.000000)
+  11  0x000001F8: loop 
+  12  0x000001FC:   ge r5.x, r4.z, r4.w
+  13  0x00000218:   breakc_nz r5.x
+  14  0x00000224:   sample_l_indexable(texture2d)(float,float,float,float) r3.zw, r4.xyxx, t4.zwyx, s0, l(0.000000)
+  15  0x00000258:   mad r4.xy, cb1[44].zwzz, l(-0.000000, -2.000000, 0.000000, 0.000000), r4.xyxx
+  16  0x0000028C:   mad r5.x, -r3.z, l(32.000000), r3.w
+  17  0x000002B4:   lt r5.x, l(0.828125), r5.x
+  18  0x000002D0:   movc r4.w, r5.x, r4.w, r4.z
+  19  0x000002F4:   add r4.z, r4.z, l(2.000000)
+  20  0x00000310: endloop 
+  21  0x00000314: mul r3.xy, r3.zwzz, l(32.000000, 32.000000, 0.000000, 0.000000)
+  22  0x0000033C: round_ne r3.xy, r3.xyxx
+  23  0x00000350: ftoi r3.xy, r3.xyxx
+  24  0x00000364: mov r3.zw, l(0,0,0,0)
+  25  0x00000384: ld_indexable(texture2d)(float,float,float,float) r3.xy, r3.xyzw, t0.xyzw
+  26  0x000003A8: mul r3.y, r3.y, l(3.000000)
+  27  0x000003C4: mad r3.x, r3.x, l(2.007874), r4.z
+  28  0x000003E8: round_ne r4.y, r3.x
+  29  0x000003FC: round_ne r3.x, r3.y
+  30  0x00000410: mul r3.zw, cb1[44].zzzw, l(0.000000, 0.000000, -0.125000, 1.750000)
+  31  0x0000043C: mad r0.xw, r0.xxxw, cb1[44].zzzw, r3.zzzw
+  32  0x00000464: mov r3.zw, l(0,0,0,1.000000)
+  33  0x00000484: mov r4.zw, r0.xxxw
+  34  0x00000498: mov r5.xy, l(-2.000000,62.000000,0,0)
+  35  0x000004B8: loop 
+  36  0x000004BC:   ge r5.z, r5.x, r5.y
+  37  0x000004D8:   breakc_nz r5.z
+  38  0x000004E4:   sample_l_indexable(texture2d)(float,float,float,float) r3.zw, r4.zwzz, t4.zwyx, s0, l(0.000000)
+  39  0x00000518:   mad r4.zw, cb1[44].zzzw, l(0.000000, 0.000000, 0.000000, 2.000000), r4.zzzw
+  40  0x0000054C:   mad r5.z, -r3.z, l(32.000000), r3.w
+  41  0x00000574:   lt r5.z, l(0.828125), r5.z
+  42  0x00000590:   movc r5.y, r5.z, r5.y, r5.x
+  43  0x000005B4:   add r5.x, r5.x, l(2.000000)
+  44  0x000005D0: endloop 
+  45  0x000005D4: mad r0.xw, r3.zzzw, l(32.000000, 0.000000, 0.000000, 32.000000), l(33.000000, 0.000000, 0.000000, 0.000000)
+  46  0x00000610: round_ne r0.xw, r0.xxxw
+  47  0x00000624: ftoi r6.xy, r0.xwxx
+  48  0x00000638: mov r6.zw, l(0,0,0,0)
+  49  0x00000658: ld_indexable(texture2d)(float,float,float,float) r0.xw, r6.xyzw, t0.xzwy
+  50  0x0000067C: mul r0.w, r0.w, l(3.000000)
+  51  0x00000698: mad r0.x, r0.x, l(2.007874), r5.x
+  52  0x000006BC: round_ne r4.x, r0.x
+  53  0x000006D0: round_ne r3.y, r0.w
+  54  0x000006E4: mov r0.xw, |r4.yyyx|
+  55  0x000006FC: ishr r0.xw, r0.xxxw, l(1, 0, 0, 1)
+  56  0x00000724: iadd r0.xw, r0.xxxw, l(0x1fbd1df5, 0, 0, 0x1fbd1df5)
+  57  0x0000074C: min r0.xw, r0.xxxw, l(19.000000, 0.000000, 0.000000, 19.000000)
+  58  0x00000774: mad r0.xw, r3.xxxy, l(20.000000, 0.000000, 0.000000, 20.000000), r0.xxxw
+  59  0x000007A4: mad r0.xw, r0.xxxw, l(0.012500, 0.000000, 0.000000, 0.005102), l(0.006250, 0.000000, 0.000000, 0.186224)
+  60  0x000007E0: sample_l_indexable(texture2d)(float,float,float,float) r0.xw, r0.xwxx, t0.xzwy, s0, l(0.000000)
+  61  0x00000814: max r3.x, r0.w, r0.x
+  62  0x00000830: lt r3.x, l(0.000000), r3.x
+  63  0x0000084C: if_nz r3.x
+  64  0x00000858:   mad r2.x, -cb1[44].w, r4.y, r2.z
+  65  0x00000884:   mad r2.w, cb1[44].w, r4.x, r2.z
+  66  0x000008AC:   ge r3.xy, r4.xyxx, r4.yxyy
+  67  0x000008C8:   and r3.zw, r3.xxxy, l(0, 0, 0x3f800000, 0x3f800000)
+  68  0x000008F0:   eq r2.z, r3.w, r3.z
+  69  0x0000090C:   or r3.xy, r2.zzzz, r3.xyxx
+  70  0x00000928:   and r3.xy, r3.xyxx, l(0x3f800000, 0x3f800000, 0, 0)
+  71  0x00000950:   mad r3.zw, cb1[44].zzzw, l(0.000000, 0.000000, 0.000000, 0.250000), r2.yyyx
+  72  0x00000984:   mad r3.zw, cb1[44].zzzw, l(0.000000, 0.000000, 1.000000, -1.000000), r3.zzzw
+  73  0x000009B8:   sample_l_indexable(texture2d)(float,float,float,float) r3.zw, r3.zwzz, t4.zwxy, s0, l(0.000000)
+  74  0x000009EC:   mad r2.z, r3.w, l(5.000000), l(-3.750000)
+  75  0x00000A10:   mul r2.z, |r2.z|, r3.w
+  76  0x00000A30:   round_ne r5.y, r2.z
+  77  0x00000A44:   round_ne r5.x, r3.z
+  78  0x00000A58:   mul r3.zw, r3.xxxx, r5.xxxy
+  79  0x00000A74:   add r4.zw, r2.yyyw, cb1[44].zzzw
+  80  0x00000A94:   sample_l_indexable(texture2d)(float,float,float,float) r4.zw, r4.zwzz, t4.zwxy, s0, l(0.000000)
+  81  0x00000AC8:   mul r5.zw, r3.yyyy, r4.zzzw
+  82  0x00000AE4:   mad r6.xyzw, cb1[44].zwzw, l(-2.000000, 0.000000, 0.250000, 0.000000), r2.yxyw
+  83  0x00000B18:   sample_l_indexable(texture2d)(float,float,float,float) r2.w, r6.xyxx, t4.xzwy, s0, l(0.000000)
+  84  0x00000B4C:   add r2.xy, r2.yxyy, -cb1[44].zwzz
+  85  0x00000B70:   sample_l_indexable(texture2d)(float,float,float,float) r2.z, r2.xyxx, t4.yzxw, s0, l(0.000000)
+  86  0x00000BA4:   mul r2.xy, r2.zwzz, r3.xxxx
+  87  0x00000BC0:   mad r6.xy, cb1[44].zwzz, l(-2.000000, 1.000000, 0.000000, 0.000000), r6.zwzz
+  88  0x00000BF4:   sample_l_indexable(texture2d)(float,float,float,float) r6.xy, r6.xyxx, t4.xyzw, s0, l(0.000000)
+  89  0x00000C28:   mad r6.z, r6.x, l(5.000000), l(-3.750000)
+  90  0x00000C4C:   mul r6.x, |r6.z|, r6.x
+  91  0x00000C6C:   round_ne r6.zw, r6.xxxy
+  92  0x00000C80:   mul r6.xy, r3.yyyy, r6.zwzz
+  93  0x00000C9C:   add r4.x, r4.x, r4.y
+  94  0x00000CB8:   lt r4.x, l(0.000000), r4.x
+  95  0x00000CD4:   mad_sat r7.xy, r3.xxxx, r5.xyxx, r5.zwzz
+  96  0x00000CF8:   mad_sat r7.zw, r3.xxxx, r2.zzzw, r6.xxxy
+  97  0x00000D1C:   add r2.z, r3.z, r3.w
+  98  0x00000D38:   mad r2.z, r3.y, r4.w, r2.z
+  99  0x00000D5C:   mad_sat r2.z, r3.y, r4.z, r2.z
+ 100  0x00000D80:   add r2.x, r2.x, r2.y
+ 101  0x00000D9C:   mad r2.x, r3.y, r6.w, r2.x
+ 102  0x00000DC0:   mad_sat r2.x, r3.y, r6.z, r2.x
+ 103  0x00000DE4:   mad r2.y, -r3.x, r5.y, l(2.000000)
+ 104  0x00000E0C:   mad_sat r2.y, -r3.y, r4.w, r2.y
+ 105  0x00000E34:   mul r5.x, r2.y, r2.z
+ 106  0x00000E50:   mad r2.y, -r3.x, r2.w, l(2.000000)
+ 107  0x00000E78:   mad_sat r2.y, -r3.y, r6.w, r2.y
+ 108  0x00000EA0:   mul r5.y, r2.y, r2.x
+ 109  0x00000EBC:   movc r2.xy, r4.xxxx, r7.xzxx, r5.xyxx
+ 110  0x00000EE0:   add r2.zw, -r7.yyyw, l(0.000000, 0.000000, 1.000000, 1.000000)
+ 111  0x00000F0C:   mul r2.xy, r2.zwzz, r2.xyxx
+ 112  0x00000F28:   movc r2.xy, r4.xxxx, r2.xyxx, r5.xyxx
+ 113  0x00000F4C:   mul r0.xw, r0.xxxw, r2.xxxy
+ 114  0x00000F68: endif 
+ 115  0x00000F6C: max r2.x, r0.w, r0.x
+ 116  0x00000F88: lt r2.x, l(0.000000), r2.x
+ 117  0x00000FA4: if_nz r2.x
+ 118  0x00000FB0:   bfi r2.xy, l(11, 11, 0, 0), l(4, 4, 0, 0), r0.yzyy, l(0, 0, 0, 0)
+ 119  0x00001000:   ushr r3.xyzw, r0.yyzz, l(7, 17, 7, 17)
+ 120  0x00001028:   and r3.xyzw, r3.xyzw, l(0x00007ff0, 0x00007fe0, 0x00007ff0, 0x00007fe0)
+ 121  0x00001050:   f16tof32 r4.xw, r2.xxxx
+ 122  0x00001064:   f16tof32 r4.yz, r3.xxyx
+ 123  0x00001078:   f16tof32 r2.xw, r2.yyyy
+ 124  0x0000108C:   f16tof32 r2.yz, r3.zzwz
+ 125  0x000010A0:   add r3.xyzw, -r4.wyzw, r2.wyzw
+ 126  0x000010C0:   mad r3.xyzw, r0.xxxx, r3.xyzw, r4.wyzw
+ 127  0x000010E4:   store_uav_typed u2.xyzw, r1.xwww, r3.xyzw
+ 128  0x00001100:   iadd r1.xyzw, r1.xyzw, l(-1, 0, 0, 0)
+ 129  0x00001128:   add r3.xyzw, -r2.wyzw, r4.xyzw
+ 130  0x00001148:   mad r0.xyzw, r0.wwww, r3.xyzw, r2.xyzw
+ 131  0x0000116C:   store_uav_typed u2.xyzw, r1.xyzw, r0.xyzw
+ 132  0x00001188: endif 
+ 133  0x0000118C: ret 
+// Approximately 134 instruction slots used
+
+*/
