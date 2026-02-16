@@ -79,6 +79,8 @@ Project("{8BC9CEB8-8B4A-11D0-8D11-00A0C91BC942}") = "Call of Duty Black Ops 3", 
 EndProject
 Project("{8BC9CEB8-8B4A-11D0-8D11-00A0C91BC942}") = "Granblue Fantasy Relink", "Source\Games\Granblue Fantasy Relink\Granblue Fantasy Relink.vcxproj", "{36D63B53-C40A-479C-94F9-FC93CBB49FEB}"
 EndProject
+Project("{8BC9CEB8-8B4A-11D0-8D11-00A0C91BC942}") = "Persona 5", "Source\Games\Persona 5\Persona 5.vcxproj", "{D947ACC3-CDAC-4227-8809-AABF39B1C75B}"
+EndProject
 Global
 	GlobalSection(SolutionConfigurationPlatforms) = preSolution
 		Development-Debug|Win32 = Development-Debug|Win32
@@ -563,6 +565,18 @@ Global
 		{36D63B53-C40A-479C-94F9-FC93CBB49FEB}.Test-Release|Win32.Build.0 = Test-Release|Win32
 		{36D63B53-C40A-479C-94F9-FC93CBB49FEB}.Test-Release|x64.ActiveCfg = Test-Release|x64
 		{36D63B53-C40A-479C-94F9-FC93CBB49FEB}.Test-Release|x64.Build.0 = Test-Release|x64
+		{D947ACC3-CDAC-4227-8809-AABF39B1C75B}.Development-Debug|Win32.ActiveCfg = Development-Debug|x64
+		{D947ACC3-CDAC-4227-8809-AABF39B1C75B}.Development-Debug|x64.ActiveCfg = Development-Debug|x64
+		{D947ACC3-CDAC-4227-8809-AABF39B1C75B}.Development-Debug|x64.Build.0 = Development-Debug|x64
+		{D947ACC3-CDAC-4227-8809-AABF39B1C75B}.Development-Release|Win32.ActiveCfg = Development-Release|x64
+		{D947ACC3-CDAC-4227-8809-AABF39B1C75B}.Development-Release|x64.ActiveCfg = Development-Release|x64
+		{D947ACC3-CDAC-4227-8809-AABF39B1C75B}.Development-Release|x64.Build.0 = Development-Release|x64
+		{D947ACC3-CDAC-4227-8809-AABF39B1C75B}.Publishing-Release|Win32.ActiveCfg = Publishing-Release|x64
+		{D947ACC3-CDAC-4227-8809-AABF39B1C75B}.Publishing-Release|x64.ActiveCfg = Publishing-Release|x64
+		{D947ACC3-CDAC-4227-8809-AABF39B1C75B}.Publishing-Release|x64.Build.0 = Publishing-Release|x64
+		{D947ACC3-CDAC-4227-8809-AABF39B1C75B}.Test-Release|Win32.ActiveCfg = Test-Release|x64
+		{D947ACC3-CDAC-4227-8809-AABF39B1C75B}.Test-Release|x64.ActiveCfg = Test-Release|x64
+		{D947ACC3-CDAC-4227-8809-AABF39B1C75B}.Test-Release|x64.Build.0 = Test-Release|x64
 	EndGlobalSection
 	GlobalSection(SolutionProperties) = preSolution
 		HideSolutionNode = FALSE
@@ -603,6 +617,7 @@ Global
 		{E9C6A0CB-74CC-4202-855B-FA91EBA2104B} = {02EA681E-C7D8-13C7-8484-4AC65E1B71E8}
 		{ADAE0E50-F63A-4FA5-BC6A-E1D974CC2D2C} = {02EA681E-C7D8-13C7-8484-4AC65E1B71E8}
 		{36D63B53-C40A-479C-94F9-FC93CBB49FEB} = {02EA681E-C7D8-13C7-8484-4AC65E1B71E8}
+		{D947ACC3-CDAC-4227-8809-AABF39B1C75B} = {02EA681E-C7D8-13C7-8484-4AC65E1B71E8}
 	EndGlobalSection
 	GlobalSection(ExtensibilityGlobals) = postSolution
 		SolutionGuid = {8B799422-BA66-3174-B21F-B9FA07C4B2E3}
