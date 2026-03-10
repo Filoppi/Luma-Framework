@@ -18,11 +18,11 @@ namespace CB
 		//uint LumaSR; // TODO: add?
 	};
 	
-	struct LumaGameData
-	{
-    	column_major float4x4 ViewProjectionMatrix;
-    	column_major float4x4 PrevViewProjectionMatrix;
-	};
+    struct LumaGameData
+    {
+        float2 CurrJitters;
+        float2 PrevJitters;
+    };
 }
 
 #endif // LUMA_GAME_CB_STRUCTS

@@ -2767,7 +2767,7 @@ namespace
          if (window_changed)
          {
             game_window = swapchain_desc.OutputWindow; // This shouldn't really need any thread safety protection
-#if DEVELOPMENT //TODOFT: test/fix/finish
+#if (DEVELOPMENT && !GAME_WATCH_DOGS) //TODOFT: test/fix/finish
             if (game_window)
             {
 #if 1
