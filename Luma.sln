@@ -11,6 +11,8 @@ Project("{2150E333-8FDC-42A3-9474-1A3956D46DE8}") = "Games", "Games", "{02EA681E
 EndProject
 Project("{8BC9CEB8-8B4A-11D0-8D11-00A0C91BC942}") = "_Template", "Source\Games\_Template\Template.vcxproj", "{08143144-3ABB-D7B3-815C-7A798924E8E6}"
 EndProject
+Project("{8BC9CEB8-8B4A-11D0-8D11-00A0C91BC942}") = "Quantum Break", "Source\Games\Quantum Break\Quantum Break.vcxproj", "{3898C29D-83BD-406E-B891-7E2D4BDB34DF}"
+EndProject
 Project("{8BC9CEB8-8B4A-11D0-8D11-00A0C91BC942}") = "Unity Engine", "Source\Games\Unity Engine\Unity Engine.vcxproj", "{14E5D475-764C-35B7-7A7F-EA9C910C41BB}"
 EndProject
 Project("{8BC9CEB8-8B4A-11D0-8D11-00A0C91BC942}") = "BioShock Series", "Source\Games\BioShock Series\BioShock Series.vcxproj", "{2D83616E-813C-DB05-0623-2E25145C8CCF}"
@@ -137,6 +139,22 @@ Global
 		{08143144-3ABB-D7B3-815C-7A798924E8E6}.Test-Release|Win32.Build.0 = Test-Release|Win32
 		{08143144-3ABB-D7B3-815C-7A798924E8E6}.Test-Release|x64.ActiveCfg = Test-Release|x64
 		{08143144-3ABB-D7B3-815C-7A798924E8E6}.Test-Release|x64.Build.0 = Test-Release|x64
+		{3898C29D-83BD-406E-B891-7E2D4BDB34DF}.Development-Debug|Win32.ActiveCfg = Development-Debug|Win32
+		{3898C29D-83BD-406E-B891-7E2D4BDB34DF}.Development-Debug|Win32.Build.0 = Development-Debug|Win32
+		{3898C29D-83BD-406E-B891-7E2D4BDB34DF}.Development-Debug|x64.ActiveCfg = Development-Debug|x64
+		{3898C29D-83BD-406E-B891-7E2D4BDB34DF}.Development-Debug|x64.Build.0 = Development-Debug|x64
+		{3898C29D-83BD-406E-B891-7E2D4BDB34DF}.Development-Release|Win32.ActiveCfg = Development-Release|Win32
+		{3898C29D-83BD-406E-B891-7E2D4BDB34DF}.Development-Release|Win32.Build.0 = Development-Release|Win32
+		{3898C29D-83BD-406E-B891-7E2D4BDB34DF}.Development-Release|x64.ActiveCfg = Development-Release|x64
+		{3898C29D-83BD-406E-B891-7E2D4BDB34DF}.Development-Release|x64.Build.0 = Development-Release|x64
+		{3898C29D-83BD-406E-B891-7E2D4BDB34DF}.Publishing-Release|Win32.ActiveCfg = Publishing-Release|Win32
+		{3898C29D-83BD-406E-B891-7E2D4BDB34DF}.Publishing-Release|Win32.Build.0 = Publishing-Release|Win32
+		{3898C29D-83BD-406E-B891-7E2D4BDB34DF}.Publishing-Release|x64.ActiveCfg = Publishing-Release|x64
+		{3898C29D-83BD-406E-B891-7E2D4BDB34DF}.Publishing-Release|x64.Build.0 = Publishing-Release|x64
+		{3898C29D-83BD-406E-B891-7E2D4BDB34DF}.Test-Release|Win32.ActiveCfg = Test-Release|Win32
+		{3898C29D-83BD-406E-B891-7E2D4BDB34DF}.Test-Release|Win32.Build.0 = Test-Release|Win32
+		{3898C29D-83BD-406E-B891-7E2D4BDB34DF}.Test-Release|x64.ActiveCfg = Test-Release|x64
+		{3898C29D-83BD-406E-B891-7E2D4BDB34DF}.Test-Release|x64.Build.0 = Test-Release|x64
 		{14E5D475-764C-35B7-7A7F-EA9C910C41BB}.Development-Debug|Win32.ActiveCfg = Development-Debug|Win32
 		{14E5D475-764C-35B7-7A7F-EA9C910C41BB}.Development-Debug|Win32.Build.0 = Development-Debug|Win32
 		{14E5D475-764C-35B7-7A7F-EA9C910C41BB}.Development-Debug|x64.ActiveCfg = Development-Debug|x64
@@ -584,6 +602,7 @@ Global
 	GlobalSection(NestedProjects) = preSolution
 		{3DA928FD-9A18-473E-8D05-F22B96A30197} = {02EA681E-C7D8-13C7-8484-4AC65E1B71E8}
 		{08143144-3ABB-D7B3-815C-7A798924E8E6} = {02EA681E-C7D8-13C7-8484-4AC65E1B71E8}
+		{3898C29D-83BD-406E-B891-7E2D4BDB34DF} = {02EA681E-C7D8-13C7-8484-4AC65E1B71E8}
 		{14E5D475-764C-35B7-7A7F-EA9C910C41BB} = {02EA681E-C7D8-13C7-8484-4AC65E1B71E8}
 		{2D83616E-813C-DB05-0623-2E25145C8CCF} = {02EA681E-C7D8-13C7-8484-4AC65E1B71E8}
 		{A2C1A344-DB26-1518-2783-C64CF97DD969} = {02EA681E-C7D8-13C7-8484-4AC65E1B71E8}
