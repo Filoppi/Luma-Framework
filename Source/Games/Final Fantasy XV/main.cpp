@@ -782,29 +782,12 @@ BOOL APIENTRY DllMain(HMODULE hModule, DWORD ul_reason_for_call, LPVOID lpReserv
 
 #endif
 
-      // ### Check which of these are needed and remove the rest ###
-      texture_upgrade_formats = {
-         reshade::api::format::r8g8b8a8_unorm,
-         // reshade::api::format::r8g8b8a8_unorm_srgb,
-         // reshade::api::format::r8g8b8a8_typeless,
-         // reshade::api::format::r8g8b8x8_unorm,
-         // reshade::api::format::r8g8b8x8_unorm_srgb,
-         reshade::api::format::b8g8r8a8_unorm,
-         // reshade::api::format::b8g8r8a8_unorm_srgb,
-         // reshade::api::format::b8g8r8a8_typeless,
-         // reshade::api::format::b8g8r8x8_unorm,
-         // reshade::api::format::b8g8r8x8_unorm_srgb,
-         // reshade::api::format::b8g8r8x8_typeless,
+      texture_upgrade_formats = {};
+      enable_chain_indirect_texture_format_upgrades = ChainTextureFormatUpgradesType::DirectDependencies;
 
-         reshade::api::format::r11g11b10_float,
-         reshade::api::format::r10g10b10a2_typeless,
-         reshade::api::format::r10g10b10a2_unorm,
-         // reshade::api::format::r16g16_float,
-         // reshade::api::format::r16g16_unorm,
-         // reshade::api::format::r32_g8_typeless
-      };
-      // ### Check these if textures are not upgraded ###
-      texture_format_upgrades_2d_size_filters = 0 | (uint32_t)TextureFormatUpgrades2DSizeFilters::SwapchainResolution | (uint32_t)TextureFormatUpgrades2DSizeFilters::SwapchainAspectRatio;
+      auto_texture_format_upgrade_shader_hashes[std::stoul("75DFE4B0", nullptr, 16)] = { {0}, {} }; // Main game tonemapping
+      auto_texture_format_upgrade_shader_hashes[std::stoul("18EF8C72", nullptr, 16)] = { {0}, {} }; // Title screen tonemapping
+      auto_texture_format_upgrade_shader_hashes[std::stoul("DD4C5B74", nullptr, 16)] = { {0}, {} }; // Post-processing / swapchain
 
       game = new FinalFantasyXV();
    }
