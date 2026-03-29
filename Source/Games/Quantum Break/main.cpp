@@ -15,7 +15,7 @@ public:
 
    void PrintImGuiAbout() override
    {
-      ImGui::Text("Luma for \"Quantum Break\" is developed by Musa and is open source and free.\nIf you enjoy it, consider donating.");
+      ImGui::Text("Luma for \"Quantum Break\" is developed by Musa and is open source and free.\nIf you enjoy it, consider donating.\n");
 
       ImGui::PushStyleColor(ImGuiCol_Button, IM_COL32(70, 134, 0, 255));
       ImGui::PushStyleColor(ImGuiCol_ButtonHovered, IM_COL32(70 + 9, 134 + 9, 0, 255));
@@ -35,11 +35,14 @@ public:
          static const std::string obfuscated_link = std::string("start https://discord.gg/J9fM") + std::string("3EVuEZ");
          system(obfuscated_link.c_str());
       }
+      static const std::string contributing_link = std::string("Contribute on Github ") + std::string(ICON_FK_FILE_CODE);
+      if (ImGui::Button(contributing_link.c_str()))
+      {
+         system("start https://github.com/Filoppi/Luma-Framework");
+      }
 
       ImGui::NewLine();
-      ImGui::Text("Build Date:");
-      ImGui::Text(__DATE__);
-      ImGui::Text(__TIME__);
+      ImGui::Text("Build Date: %s %s", __DATE__, __TIME__);
       ImGui::NewLine();
 
       ImGui::Text("Credits:"
@@ -48,8 +51,13 @@ public:
                   "\n\nThird Party:"
                   "\nReShade"
                   "\nImGui"
-                  "\nShortFuse (Neutwo tonemapper)"
+                  "\nNeutwo (from RenoDX) - Copyright (c) 2026 Carlos Lopez Jr. Licensed under MIT."
                   "");
+      static const std::string neutwo_license_link = std::string("RenoDX MIT License ") + std::string(ICON_FK_SEARCH);
+      if (ImGui::Button(neutwo_license_link.c_str()))
+      {
+         system("start https://github.com/clshortfuse/renodx/blob/main/LICENSE");
+      }
    }
 };
 
