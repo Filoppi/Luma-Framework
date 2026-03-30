@@ -1003,10 +1003,9 @@ public:
             draw_data.exposure = nullptr;
             draw_data.pre_exposure = dlss_pre_exposure;
 
-            // We need to swap jitters. Are they originally swapped or it's just DLSS things?
             // Jitters are in UV offsets so we need to scale them to pixel offsets for DLSS.
-            draw_data.jitter_x = cb_per_view_global.cb_jittervectors.y * (float)render_height_dlss;
-            draw_data.jitter_y = cb_per_view_global.cb_jittervectors.x * (float)render_width_dlss;
+            draw_data.jitter_x = cb_per_view_global.cb_projectionmatrix.m20 * (float)render_width_dlss * -0.5;
+            draw_data.jitter_y = cb_per_view_global.cb_projectionmatrix.m21 * (float)render_height_dlss * 0.5;
 
             draw_data.reset = reset_dlss;
             draw_data.render_width = render_width_dlss;
