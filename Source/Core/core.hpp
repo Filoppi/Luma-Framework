@@ -2605,7 +2605,7 @@ namespace
             desc.back_buffer.texture.format = reshade::api::format::b8g8r8a8_unorm;
          changed = true;
       }
-
+#if !GAME_WATCH_DOGS
       // TODO: add a flag to disable these for the "GRAPHICS_ANALYZER"? They are still needed for HDR though
       // Generally we want to add these flags in all cases, they seem to work in all games
       {
@@ -2650,7 +2650,7 @@ namespace
          desc.back_buffer.texture.format = swapchain_upgrade_type == SwapchainUpgradeType::scRGB ? reshade::api::format::r16g16b16a16_float : reshade::api::format::r10g10b10a2_unorm;
          changed = true;
       }
-
+#endif
       return changed;
    }
 
@@ -2833,7 +2833,7 @@ namespace
 #endif
          }
 
-#if !GAME_PREY
+#if !GAME_PREY || !GAME_WATCH_DOGS
          DXGI_COLOR_SPACE_TYPE color_space;
          bool set_color_space = false;
          if (swapchain_format_upgrade_type == TextureFormatUpgradesType::AllowedEnabled && swapchain_upgrade_type > SwapchainUpgradeType::None)

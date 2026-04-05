@@ -518,7 +518,6 @@ Global
 		{0922E565-0317-403C-A86E-0B3477264973}.Development-Debug|Win32.ActiveCfg = Development-Debug|x64
 		{0922E565-0317-403C-A86E-0B3477264973}.Development-Debug|Win32.Build.0 = Development-Debug|x64
 		{0922E565-0317-403C-A86E-0B3477264973}.Development-Debug|x64.ActiveCfg = Development-Debug|x64
-		{0922E565-0317-403C-A86E-0B3477264973}.Development-Debug|x64.Build.0 = Development-Debug|x64
 		{0922E565-0317-403C-A86E-0B3477264973}.Development-Release|Win32.ActiveCfg = Development-Release|x64
 		{0922E565-0317-403C-A86E-0B3477264973}.Development-Release|Win32.Build.0 = Development-Release|x64
 		{0922E565-0317-403C-A86E-0B3477264973}.Development-Release|x64.ActiveCfg = Development-Release|x64
@@ -531,6 +530,7 @@ Global
 		{0922E565-0317-403C-A86E-0B3477264973}.Test-Release|Win32.Build.0 = Test-Release|x64
 		{0922E565-0317-403C-A86E-0B3477264973}.Test-Release|x64.ActiveCfg = Test-Release|x64
 		{0922E565-0317-403C-A86E-0B3477264973}.Test-Release|x64.Build.0 = Test-Release|x64
+		{0922E565-0317-403C-A86E-0B3477264973}.Development-Debug|x64.Build.0 = Development-Debug|x64
 	EndGlobalSection
 	GlobalSection(SolutionProperties) = preSolution
 		HideSolutionNode = FALSE

@@ -205,17 +205,26 @@ void main(
 	float4 gBufferVelocity = DeferredFXAntialias__GBufferVelocityTexture__TexObj__.Sample(DeferredFXAntialias__GBufferVelocityTexture__SampObj___s, v1.xy);
 
 	bool isDynamicObject = (gBufferVelocity.g != VELOCITYBUFFER_DEFAULT_GREEN);
+    bool isExcludedObject = false;
 
 	if (isDynamicObject)
 	{
 		if (gBufferVelocity.r > VELOCITYBUFFER_MASK_THRESHOLD_RED)
 		{
 			gBufferVelocity.r -= VELOCITYBUFFER_MASK_OFFSET_RED;
+            isExcludedObject = true;
 		}
-	  velocity.xy = gBufferVelocity.xy;
+        
+        // The game uses it to mask out the TV screen velocity but it's still wrong!
+        if (!isExcludedObject)
+        {
+	        velocity.xy = gBufferVelocity.xy;
+        }
 	  //velocity += jitterDelta;
 	}
 	velocity += jitterDelta;
+    
+    //velocity = 0;
 
 	const float velocityConfidenceFactor = saturate( float( 1.f ) - length( velocity.xy * _ViewportSize.xy ) / FRAME_VELOCITY_IN_PIXELS_DIFF );
 
