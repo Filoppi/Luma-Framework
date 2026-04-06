@@ -815,7 +815,7 @@ public:
              game_device_data.render_resolution.y > 0.0f &&
              game_device_data.target_resolution.y > 0.0f)
          {
-            device_data.texture_mip_lod_bias_offset = std::log2(game_device_data.render_resolution.y / game_device_data.target_resolution.y) - 1.f; // This results in -1 at output res
+            device_data.texture_mip_lod_bias_offset = SR::GetMipLODBias(game_device_data.render_resolution.y, game_device_data.target_resolution.y); // This results in -1 at output res
          }
          else
          {
@@ -1147,6 +1147,8 @@ BOOL APIENTRY DllMain(HMODULE hModule, DWORD ul_reason_for_call, LPVOID lpReserv
       Globals::SetGlobals(PROJECT_NAME, "Persona 5 Luma mod");
       Globals::DEVELOPMENT_STATE = Globals::ModDevelopmentState::Finished;
       Globals::VERSION = 1;
+
+      enable_samplers_upgrade = true;
 
       shader_hashes_light.pixel_shaders.emplace(std::stoul("D434C03A", nullptr, 16));
       shader_hashes_light.pixel_shaders.emplace(std::stoul("5C4DD977", nullptr, 16));
