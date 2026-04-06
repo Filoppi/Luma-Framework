@@ -211,7 +211,8 @@ jobs:
               -or $projectName -like '*Unreal Engine' `
               -or $projectName -like '*Granblue Fantasy Relink*' `
               -or $projectName -like '*Persona 5*' `
-              -or $projectName -like '*Batman Arkham Knight*') {
+              -or $projectName -like '*Batman Arkham Knight*' `
+              -or $projectName -like '*GreedFall*') {
             # Source path for NGX DLSS DLL
             
             if (("${{ matrix.config }}" -eq "Development-Debug") -or ("${{ matrix.config }}" -eq "Development-Release")) {

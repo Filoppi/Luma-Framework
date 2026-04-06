@@ -83,6 +83,8 @@ Project("{8BC9CEB8-8B4A-11D0-8D11-00A0C91BC942}") = "Persona 5", "Source\Games\P
 EndProject
 Project("{8BC9CEB8-8B4A-11D0-8D11-00A0C91BC942}") = "Batman Arkham Knight", "Source\Games\Batman Arkham Knight\Batman Arkham Knight.vcxproj", "{5DDD2903-527F-4CB2-9EEB-D4BAD4253B71}"
 EndProject
+Project("{8BC9CEB8-8B4A-11D0-8D11-00A0C91BC942}") = "GreedFall", "Source\Games\GreedFall\GreedFall.vcxproj", "{E25F53A3-9BC6-4E7B-B652-023FDAFF167C}"
+EndProject
 Global
 	GlobalSection(SolutionConfigurationPlatforms) = preSolution
 		Development-Debug|Win32 = Development-Debug|Win32
@@ -595,6 +597,22 @@ Global
 		{5DDD2903-527F-4CB2-9EEB-D4BAD4253B71}.Test-Release|Win32.Build.0 = Test-Release|Win32
 		{5DDD2903-527F-4CB2-9EEB-D4BAD4253B71}.Test-Release|x64.ActiveCfg = Test-Release|x64
 		{5DDD2903-527F-4CB2-9EEB-D4BAD4253B71}.Test-Release|x64.Build.0 = Test-Release|x64
+		{E25F53A3-9BC6-4E7B-B652-023FDAFF167C}.Development-Debug|Win32.ActiveCfg = Development-Debug|x64
+		{E25F53A3-9BC6-4E7B-B652-023FDAFF167C}.Development-Debug|Win32.Build.0 = Development-Debug|x64
+		{E25F53A3-9BC6-4E7B-B652-023FDAFF167C}.Development-Debug|x64.ActiveCfg = Development-Debug|x64
+		{E25F53A3-9BC6-4E7B-B652-023FDAFF167C}.Development-Debug|x64.Build.0 = Development-Debug|x64
+		{E25F53A3-9BC6-4E7B-B652-023FDAFF167C}.Development-Release|Win32.ActiveCfg = Development-Release|x64
+		{E25F53A3-9BC6-4E7B-B652-023FDAFF167C}.Development-Release|Win32.Build.0 = Development-Release|x64
+		{E25F53A3-9BC6-4E7B-B652-023FDAFF167C}.Development-Release|x64.ActiveCfg = Development-Release|x64
+		{E25F53A3-9BC6-4E7B-B652-023FDAFF167C}.Development-Release|x64.Build.0 = Development-Release|x64
+		{E25F53A3-9BC6-4E7B-B652-023FDAFF167C}.Publishing-Release|Win32.ActiveCfg = Publishing-Release|x64
+		{E25F53A3-9BC6-4E7B-B652-023FDAFF167C}.Publishing-Release|Win32.Build.0 = Publishing-Release|x64
+		{E25F53A3-9BC6-4E7B-B652-023FDAFF167C}.Publishing-Release|x64.ActiveCfg = Publishing-Release|x64
+		{E25F53A3-9BC6-4E7B-B652-023FDAFF167C}.Publishing-Release|x64.Build.0 = Publishing-Release|x64
+		{E25F53A3-9BC6-4E7B-B652-023FDAFF167C}.Test-Release|Win32.ActiveCfg = Test-Release|x64
+		{E25F53A3-9BC6-4E7B-B652-023FDAFF167C}.Test-Release|Win32.Build.0 = Test-Release|x64
+		{E25F53A3-9BC6-4E7B-B652-023FDAFF167C}.Test-Release|x64.ActiveCfg = Test-Release|x64
+		{E25F53A3-9BC6-4E7B-B652-023FDAFF167C}.Test-Release|x64.Build.0 = Test-Release|x64
 	EndGlobalSection
 	GlobalSection(SolutionProperties) = preSolution
 		HideSolutionNode = FALSE
@@ -637,6 +655,7 @@ Global
 		{36D63B53-C40A-479C-94F9-FC93CBB49FEB} = {02EA681E-C7D8-13C7-8484-4AC65E1B71E8}
 		{D947ACC3-CDAC-4227-8809-AABF39B1C75B} = {02EA681E-C7D8-13C7-8484-4AC65E1B71E8}
 		{5DDD2903-527F-4CB2-9EEB-D4BAD4253B71} = {02EA681E-C7D8-13C7-8484-4AC65E1B71E8}
+		{E25F53A3-9BC6-4E7B-B652-023FDAFF167C} = {02EA681E-C7D8-13C7-8484-4AC65E1B71E8}
 	EndGlobalSection
 	GlobalSection(ExtensibilityGlobals) = postSolution
 		SolutionGuid = {8B799422-BA66-3174-B21F-B9FA07C4B2E3}
