@@ -147,6 +147,12 @@ public:
     {
         PatchBuildProjectionMatrixFunc();
 
+        std::vector<ShaderDefineData> game_shader_defines_data = {
+            { "DISABLE_LENS_FLARE_AND_LENS_DIRT", '0', true, false, "Disables lens flare and lens dirt effects.", 1 }
+        };
+
+        shader_defines_data.append_range(game_shader_defines_data);
+
         luma_settings_cbuffer_index = 13;
         luma_data_cbuffer_index = 12;
     }

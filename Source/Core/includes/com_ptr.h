@@ -130,7 +130,7 @@ public:
 		return ptr;
 	}
 
-	T*const* get_address() const noexcept
+	T*const* get_addressof() const noexcept
 	{
 		return &ptr;
 	}
