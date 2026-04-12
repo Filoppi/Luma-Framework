@@ -4,7 +4,7 @@
 #define ALLOW_SHADERS_DUMPING 0
 #define ENABLE_NGX 1
 #define ENABLE_FIDELITY_SK 1
-#define DEBUG_LOG 1
+#define DEBUG_LOG 0
 
 #include "..\..\Core\core.hpp"
 #include "includes\cbuffers.h"
@@ -206,7 +206,14 @@ public:
 
          // If using upscaling, don't draw SR here - let the upscale pass handle it
          if (game_device_data.is_using_upscaling)
-            return DrawOrDispatchOverrideType::None;
+         {
+#if DEVELOPMENT && DEBUG_LOG
+            reshade::log::message(
+               reshade::log::level::info,
+               "Skipping SR draw in TAA pass (will be drawn in upscale pass)");
+#endif // DEVELOPMENT
+            return DrawOrDispatchOverrideType::Skip;
+         }
 
          // =====================================================================
          // Not using upscaling - replace TAA with SR (DLAA/FSRAA mode)
@@ -665,11 +672,25 @@ public:
       ID3D11Buffer* buffer = reinterpret_cast<ID3D11Buffer*>(resource.handle);
       DeviceData& device_data = *device->get_private_data<DeviceData>();
       auto& game_device_data = GetGameDeviceData(device_data);
+      uint64_t buffer_size = size;
 
-      if (size != CBView_buffer_size || game_device_data.has_processed_view_buffer || buffer == nullptr || !device_data.taa_detected)
+      if ( game_device_data.has_processed_view_buffer || buffer == nullptr || !device_data.taa_detected)
       {
          return false;
       }
+
+      if (size == UINT64_MAX)
+      {
+         D3D11_BUFFER_DESC buffer_desc;
+         buffer->GetDesc(&buffer_desc);
+         buffer_size = buffer_desc.ByteWidth;
+      }
+
+      if (size != CBView_buffer_size )
+      {
+         return false;
+      }
+      
       if (game_device_data.found_per_view_globals && buffer == game_device_data.cached_view_buffer)
       {
 #if DEVELOPMENT && DEBUG_LOG

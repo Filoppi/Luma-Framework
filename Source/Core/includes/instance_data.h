@@ -1,5 +1,21 @@
 #pragma once
 
+#include <algorithm>
+#include <array>
+#include <atomic>
+#include <cstddef>
+#include <cstdint>
+#include <map>
+#include <memory>
+#include <shared_mutex>
+#include <string>
+#include <thread>
+#include <tuple>
+#include <unordered_map>
+#include <unordered_set>
+#include <utility>
+#include <vector>
+
 // Forward declarations
 struct GameDeviceData;
 
@@ -124,6 +140,9 @@ struct TraceDrawCallData
 
    bool cbs[D3D11_COMMONSHADER_CONSTANT_BUFFER_API_SLOT_COUNT] = {};
    std::string cb_hash[D3D11_COMMONSHADER_CONSTANT_BUFFER_API_SLOT_COUNT] = {}; // Ptr hash (not content hash)
+   // D3D11.1 partial buffer binding offsets (0/0 means data not available or full-buffer bind via legacy API)
+   UINT cb_first_constant[D3D11_COMMONSHADER_CONSTANT_BUFFER_API_SLOT_COUNT] = {};
+   UINT cb_num_constants[D3D11_COMMONSHADER_CONSTANT_BUFFER_API_SLOT_COUNT] = {};
 
    D3D11_FILTER samplers_filter[D3D11_COMMONSHADER_SAMPLER_SLOT_COUNT] = {};
    D3D11_TEXTURE_ADDRESS_MODE samplers_address_u[D3D11_COMMONSHADER_SAMPLER_SLOT_COUNT] = {};
@@ -419,7 +438,22 @@ struct __declspec(uuid("cfebf6d4-d184-4e1a-ac14-09d088e560ca")) DeviceData
    struct TrackBufferData
    {
       std::string hash; // Resource ptr hash
+      bool data_valid = false;
       std::vector<float> data;
+      com_ptr<ID3D11Buffer> cb;
+      
+      UINT first_constant = 0; // D3D11.1: start offset in float4 units (0 if D3D11.0 or full-buffer bind)
+      UINT num_constants = 0;  // D3D11.1: count in float4 units (0 if D3D11.0 info unavailable)
+
+      void Clear()
+      {
+         hash.clear();
+         data_valid = false;
+         data.clear();
+         cb.reset();
+         first_constant = 0;
+         num_constants = 0;
+      }
    };
    TrackBufferData track_buffer_data;
 #endif

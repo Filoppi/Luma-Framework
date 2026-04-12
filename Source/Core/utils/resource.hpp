@@ -961,8 +961,36 @@ bool CopyDebugDrawTexture(DebugDrawMode debug_draw_mode, int32_t debug_draw_view
    return false;
 }
 
-bool CopyBuffer(com_ptr<ID3D11Buffer> cb, ID3D11DeviceContext* native_device_context, std::vector<float>& buffer_data)
+bool MapBufferData(com_ptr<ID3D11Buffer>& cb, ID3D11DeviceContext* native_device_context, std::vector<float>& buffer_data, UINT byte_width)
 {
+   D3D11_MAPPED_SUBRESOURCE mapped = {};
+   // Map in DX11 here can only be done on non deferred contexts; it will stall the CPU until the GPU has the latest values (no need to flush the command list)
+   HRESULT hr = native_device_context->Map(cb.get(), 0, D3D11_MAP_READ, 0, &mapped);
+   if (FAILED(hr))
+   {
+      buffer_data.clear();
+      ASSERT_ONCE(native_device_context->GetType() != D3D11_DEVICE_CONTEXT_IMMEDIATE);
+      return false;
+   }
+
+   bool remainder = byte_width % sizeof(float) != 0;
+   size_t num_floats = byte_width / sizeof(float);
+   buffer_data.resize(num_floats + (remainder ? 1 : 0)); // Add 1 for safety (the last value might be half trash)
+   if (remainder)
+   {
+      buffer_data[buffer_data.size() - 1] = 0.f; // Clear the last slot as it might not get fully copied
+   }
+   std::memcpy(buffer_data.data(), mapped.pData, byte_width);
+
+   native_device_context->Unmap(cb.get(), 0);
+   return true;
+}
+
+bool CopyBuffer(com_ptr<ID3D11Buffer> cb, ID3D11DeviceContext* native_device_context, std::vector<float>& buffer_data, com_ptr<ID3D11Buffer>& cb_copy)
+{
+   // Always recreate it for now (we could skip doing so if the descs matched, but whatever)
+   cb_copy.reset();
+
    if (cb.get() == nullptr)
    {
       buffer_data.clear();
@@ -972,15 +1000,16 @@ bool CopyBuffer(com_ptr<ID3D11Buffer> cb, ID3D11DeviceContext* native_device_con
    D3D11_BUFFER_DESC desc = {};
    cb->GetDesc(&desc);
 
-   // Clone it if it can't be read by the CPU
-   if ((desc.CPUAccessFlags & D3D11_CPU_ACCESS_READ) == 0 || desc.Usage != D3D11_USAGE_STAGING)
+   // Clone it if it can't be read by the CPU, or if we are in a deferred context as we won't be able to map the buffer
+   if ((desc.CPUAccessFlags & D3D11_CPU_ACCESS_READ) == 0 || desc.Usage != D3D11_USAGE_STAGING || native_device_context->GetType() == D3D11_DEVICE_CONTEXT_DEFERRED)
    {
-      com_ptr<ID3D11Buffer> cb_copy;
-      com_ptr<ID3D11Device> native_device;
       desc.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
       desc.Usage = D3D11_USAGE_STAGING;
       desc.BindFlags = 0;
+      desc.MiscFlags = 0; // Some flags might be incompatible with staging
+      desc.StructureByteStride = 0; // Must be zero for safety, as we cleared "D3D11_RESOURCE_MISC_BUFFER_STRUCTURED"
 
+      com_ptr<ID3D11Device> native_device;
       native_device_context->GetDevice(&native_device);
       HRESULT hr = native_device->CreateBuffer(&desc, nullptr, &cb_copy);
       if (FAILED(hr))
@@ -993,26 +1022,7 @@ bool CopyBuffer(com_ptr<ID3D11Buffer> cb, ID3D11DeviceContext* native_device_con
       cb = cb_copy;
    }
 
-   D3D11_MAPPED_SUBRESOURCE mapped = {};
-   // Map in DX11 here can seemengly be done on deferred contexts too, it will stall the CPU until the GPU has the latest values (no need to flush the command list)
-   HRESULT hr = native_device_context->Map(cb.get(), 0, D3D11_MAP_READ, 0, &mapped);
-   if (FAILED(hr))
-   {
-      buffer_data.clear();
-      ASSERT_ONCE(false);
-      return false;
-   }
-
-   bool remainder = desc.ByteWidth % sizeof(float) != 0;
-   size_t num_floats = desc.ByteWidth / sizeof(float);
-   buffer_data.resize(num_floats + (remainder ? 1 : 0)); // Add 1 for safety (the last value might be half trash
-   if (remainder)
-   {
-      buffer_data[buffer_data.size() - 1] = 0.f; // Clear the last slot as it might not get fully copied
-   }
-   std::memcpy(buffer_data.data(), mapped.pData, desc.ByteWidth);
-
-   native_device_context->Unmap(cb.get(), 0);
-   return true;
+   // This will fail on deferred contexts, that's by design
+   return MapBufferData(cb, native_device_context, buffer_data, desc.ByteWidth);
 }
 #endif // DEVELOPMENT

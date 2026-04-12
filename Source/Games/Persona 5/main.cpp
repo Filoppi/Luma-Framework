@@ -1,6 +1,5 @@
 #define GAME_PERSONA_5 1
 
-#define ALLOW_SHADERS_DUMPING 0
 #define DISABLE_DISPLAY_COMPOSITION 1
 #define ENABLE_NGX 1
 #define ENABLE_FIDELITY_SK 1
@@ -15,7 +14,7 @@ enum class FramePhase
    LIGHTING,
    DEFERRED,
    POSTPROCESSING_AND_UI,
-   UI
+   UI_ONLY
 };
 
 struct ReplacementTexture
@@ -25,6 +24,15 @@ struct ReplacementTexture
    com_ptr<ID3D11RenderTargetView> rtv;
    D3D11_TEXTURE2D_DESC desc;
    bool in_use = false;
+};
+
+struct GFD_VSCONST_VIEWPROJ
+{
+   float4x4 mtxViewProj;
+   float4x4 mtxView;
+   float3 eyePosition;
+   float _reserved_b2;
+   float4x4 mtxPrevViewProj;
 };
 
 namespace
@@ -37,6 +45,11 @@ namespace
    ShaderHashesList shader_hashes_bloom_select;
    ShaderHashesList shader_hashes_bloom_filter;
    ShaderHashesList shader_hashes_copy;
+   ShaderHashesList shader_hashes_fxaa;
+   ShaderHashesList shader_hashes_smaa_edge_detection;
+   ShaderHashesList shader_hashes_smaa_weight_calculation;
+   ShaderHashesList shader_hashes_smaa_blending;
+   ShaderHashesList shader_hashes_ui;
    uint32_t hash_identity = 0;
 } // namespace
 
@@ -76,6 +89,7 @@ struct GameDeviceDataPersona5 final : public GameDeviceData
    com_ptr<ID3D11Buffer> modifiable_index_vertex_buffer;
    uint2 render_resolution = {};
    uint2 target_resolution = {};
+   float fov = 0.0f;
 
    // variables used to fix motion vectors on non-skinned moving objects
    std::unordered_map<uint32_t, float4x4> prev_local_to_view_lookup;
@@ -105,7 +119,6 @@ class Persona5 final : public Game
 public:
    void OnInit(bool async) override
    {
-      native_shaders_definitions.emplace(CompileTimeStringHash("Add Jitter"), ShaderDefinition{"Luma_ViewProjAddJitter", reshade::api::pipeline_subobject_type::compute_shader});
       native_shaders_definitions.emplace(CompileTimeStringHash("Update Shadow Constants"), ShaderDefinition{"Luma_UpdateShadowConstants", reshade::api::pipeline_subobject_type::compute_shader});
       native_shaders_definitions.emplace(CompileTimeStringHash("Decode Motion Vector"), ShaderDefinition{"Luma_DecodeMotionVector", reshade::api::pipeline_subobject_type::compute_shader});
       native_shaders_definitions.emplace(CompileTimeStringHash("Merge"), ShaderDefinition{"Luma_CopyDsrResult", reshade::api::pipeline_subobject_type::compute_shader});
@@ -142,12 +155,12 @@ public:
       auto& game_device_data = GetGameDeviceData(device_data);
       {
          D3D11_BUFFER_DESC bd;
-         bd.ByteWidth = 208;
+         bd.ByteWidth = 80;
          bd.Usage = D3D11_USAGE_DEFAULT;
          bd.BindFlags = D3D11_BIND_UNORDERED_ACCESS;
          bd.CPUAccessFlags = 0;
          bd.MiscFlags = D3D11_RESOURCE_MISC_BUFFER_STRUCTURED;
-         bd.StructureByteStride = 208;
+         bd.StructureByteStride = 80;
          native_device->CreateBuffer(&bd, nullptr, &game_device_data.scratch_constant_buffer);
       }
 
@@ -499,7 +512,7 @@ public:
       auto CheckAndHandleRenderPassTransition = [native_device_context, &cmd_list_data, &device_data, &game_device_data](ID3D11RenderTargetView** render_target_views, ID3D11DepthStencilView* depth_stencil_view)
       {
          com_ptr<ID3D11Resource> resource;
-         render_target_views[0]->GetResource(&resource);
+         render_target_views[1]->GetResource(&resource);
          if (!resource)
          {
             return DrawOrDispatchOverrideType::None;
@@ -513,9 +526,10 @@ public:
          D3D11_TEXTURE2D_DESC tex_desc;
          tex->GetDesc(&tex_desc);
 
-         // the normal gbuffer is DXGI_FORMAT_R11G11B10_FLOAT
-         // for planar reflection it will be the standart scene color format(DXGI_FORMAT_R10G10B10A2_UNORM)
-         if (tex_desc.Format != DXGI_FORMAT_R11G11B10_FLOAT)
+         // the normal gbuffer is DXGI_FORMAT_R10G10B10A2_UNORM (or DXGI_FORMAT_R16G16B16A16_FLOAT when upgraded by renodx)
+         // for planar reflections render target 1 is DXGI_FORMAT_R8G8B8A8_UNORM
+         if (tex_desc.Format != DXGI_FORMAT_R10G10B10A2_UNORM &&
+             tex_desc.Format != DXGI_FORMAT_R16G16B16A16_FLOAT)
          {
             game_device_data.frame_phase = FramePhase::REFLECTION;
          }
@@ -551,20 +565,26 @@ public:
 
                if (constant_buffers[1])
                {
-                  cb_luma_global_settings.GameSettings.JitterOffset.x = 2.0f * projection_jitters.x / (float)target_desc.Width;
-                  cb_luma_global_settings.GameSettings.JitterOffset.y = 2.0f * projection_jitters.y / (float)target_desc.Height;
-                  device_data.cb_luma_global_settings_dirty = true;
-                  SetLumaConstantBuffers(native_device_context, cmd_list_data, device_data, reshade::api::shader_stage::compute, LumaConstantBufferType::LumaSettings);
+                  auto it = game_device_data.cbuffer_cache.find(constant_buffers[1].get());
+                  if (it != game_device_data.cbuffer_cache.cend())
+                  {
+                     GFD_VSCONST_VIEWPROJ* view_proj_data = (GFD_VSCONST_VIEWPROJ*)it->second.data();
+                     float4x4 inv_view = view_proj_data->mtxView.GetTransposed().GetInverted();
+                     float4x4 proj = inv_view * view_proj_data->mtxViewProj.GetTransposed();
+                     float4x4 inv_proj = proj.GetInverted();
+                     // assume that projection doesn't change between frames
+                     float4x4 prev_view = view_proj_data->mtxPrevViewProj.GetTransposed() * inv_proj;
 
-                  ID3D11Buffer* cbs[] = {constant_buffers[1].get()};
-                  ID3D11UnorderedAccessView* uavs[] = {game_device_data.scratch_constant_buffer_uav.get()};
+                     proj.m20 -= 2.0f * projection_jitters.x / (float)target_desc.Width;
+                     proj.m21 += 2.0f * projection_jitters.y / (float)target_desc.Height;
 
-                  native_device_context->CSSetShader(device_data.native_compute_shaders[CompileTimeStringHash("Add Jitter")].get(), nullptr, 0);
-                  native_device_context->CSSetConstantBuffers(0, 1, cbs);
-                  native_device_context->CSSetUnorderedAccessViews(0, 1, uavs, nullptr);
-                  native_device_context->Dispatch(1, 1, 1);
+                     view_proj_data->mtxViewProj = (view_proj_data->mtxView.GetTransposed() * proj).GetTransposed();
+                     view_proj_data->mtxPrevViewProj = (prev_view * proj).GetTransposed();
 
-                  native_device_context->CopySubresourceRegion(constant_buffers[1].get(), 0, 0, 0, 0, game_device_data.scratch_constant_buffer.get(), 0, nullptr);
+                     native_device_context->UpdateSubresource(constant_buffers[1].get(), 0, nullptr, it->second.data(), 0, 0);
+
+                     game_device_data.fov = 2.0f * atan(1.0f / proj.m11);
+                  }
                }
             }
          }
@@ -573,6 +593,11 @@ public:
 
       if (game_device_data.frame_phase == FramePhase::SHADOW_MAP)
       {
+         if (original_shader_hashes.Contains(shader_hashes_ui))
+         {
+            game_device_data.frame_phase = FramePhase::UI_ONLY;
+            return DrawOrDispatchOverrideType::None;
+         }
          if (!game_device_data.render_target_changed)
          {
             return DrawOrDispatchOverrideType::None;
@@ -777,6 +802,32 @@ public:
          }
       }
 
+      if (SrActive(device_data) &&
+          (original_shader_hashes.Contains(shader_hashes_fxaa) ||
+             original_shader_hashes.Contains(shader_hashes_smaa_blending)))
+      {
+         com_ptr<ID3D11ShaderResourceView> srv;
+         native_device_context->PSGetShaderResources(0, 4, &srv);
+         com_ptr<ID3D11RenderTargetView> rtv;
+         native_device_context->OMGetRenderTargets(1, &rtv, nullptr);
+
+         com_ptr<ID3D11Resource> srv_resource;
+         srv->GetResource(&srv_resource);
+
+         com_ptr<ID3D11Resource> rtv_resource;
+         rtv->GetResource(&rtv_resource);
+
+         native_device_context->CopySubresourceRegion(rtv_resource.get(), 0, 0, 0, 0, srv_resource.get(), 0, nullptr);
+
+         return DrawOrDispatchOverrideType::Skip;
+      }
+      else if (SrActive(device_data) &&
+               (original_shader_hashes.Contains(shader_hashes_smaa_edge_detection) ||
+                  original_shader_hashes.Contains(shader_hashes_smaa_weight_calculation)))
+      {
+         return DrawOrDispatchOverrideType::Skip;
+      }
+
       return DrawOrDispatchOverrideType::None;
    }
 
@@ -812,9 +863,10 @@ public:
          std::shared_lock shared_lock_samplers(s_mutex_samplers);
          if (SrActive(device_data) &&
              game_device_data.render_resolution.y > 0.0f &&
-             game_device_data.target_resolution.y > 0.0f)
+             game_device_data.target_resolution.y > 0.0f &&
+             game_device_data.render_resolution.x != 3840.0f) // upgrading samplers break mip based effect at 4K
          {
-            device_data.texture_mip_lod_bias_offset = std::log2(game_device_data.render_resolution.y / game_device_data.target_resolution.y) - 1.f; // This results in -1 at output res
+            device_data.texture_mip_lod_bias_offset = SR::GetMipLODBias(game_device_data.render_resolution.y, game_device_data.target_resolution.y); // This results in -1 at output res
          }
          else
          {
@@ -892,17 +944,17 @@ public:
 
                com_ptr<ID3D11ShaderResourceView> motion_vectors_srv;
                {
-                   D3D11_SHADER_RESOURCE_VIEW_DESC srv_desc;
-                   srv_desc.Format = motion_vectors_desc.Format;
-                   srv_desc.ViewDimension = D3D11_SRV_DIMENSION_TEXTURE2D;
-                   srv_desc.Texture2D.MostDetailedMip = 0;
-                   srv_desc.Texture2D.MipLevels = 1;
-                   device->CreateShaderResourceView(game_device_data.motion_vectors.get(),
-                       &srv_desc,
-                       &motion_vectors_srv);
+                  D3D11_SHADER_RESOURCE_VIEW_DESC srv_desc;
+                  srv_desc.Format = motion_vectors_desc.Format;
+                  srv_desc.ViewDimension = D3D11_SRV_DIMENSION_TEXTURE2D;
+                  srv_desc.Texture2D.MostDetailedMip = 0;
+                  srv_desc.Texture2D.MipLevels = 1;
+                  device->CreateShaderResourceView(game_device_data.motion_vectors.get(),
+                     &srv_desc,
+                     &motion_vectors_srv);
                }
 
-               ID3D11ShaderResourceView* srvs[] = { motion_vectors_srv.get()};
+               ID3D11ShaderResourceView* srvs[] = {motion_vectors_srv.get()};
                ID3D11UnorderedAccessView* uavs[] = {game_device_data.decoded_motion_vectors_uav.get()};
                native_device_context->CSSetShader(device_data.native_compute_shaders[CompileTimeStringHash("Decode Motion Vector")].get(), 0, 0);
                native_device_context->CSSetShaderResources(0, 1, srvs);
@@ -916,9 +968,12 @@ public:
                draw_data.output_color = game_device_data.resolve_texture.get();
                draw_data.motion_vectors = game_device_data.decoded_motion_vectors.get();
                draw_data.depth_buffer = game_device_data.depth_texture.get();
+               draw_data.render_width = game_device_data.render_resolution.x;
+               draw_data.render_height = game_device_data.render_resolution.y;
                draw_data.pre_exposure = 0.0f;
                draw_data.jitter_x = projection_jitters.x;
                draw_data.jitter_y = projection_jitters.y;
+               draw_data.vert_fov = game_device_data.fov;
                draw_data.reset = device_data.force_reset_sr;
 
                bool dlss_succeeded = sr_implementations[device_data.sr_type]->Draw(sr_instance_data, native_device_context.get(), draw_data);
@@ -963,7 +1018,10 @@ public:
                   native_device_context->Dispatch((game_device_data.target_resolution.x + 7) / 8, (game_device_data.target_resolution.y + 7) / 8, 1);
                }
 
-               native_device_context->CopySubresourceRegion(game_device_data.source_color.get(), 0, 0, 0, 0, game_device_data.merged_texture.get(), 0, nullptr);
+               if (game_device_data.render_resolution == game_device_data.target_resolution)
+               {
+                  native_device_context->CopySubresourceRegion(game_device_data.source_color.get(), 0, 0, 0, 0, game_device_data.merged_texture.get(), 0, nullptr);
+               }
             }
          }
       }
@@ -1089,7 +1147,7 @@ public:
       }
       if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
       {
-          ImGui::SetTooltip("When enabled setting Rendering Scale to 50%% or 75%% will use Super Resolution (DLSS or FSR) to scale the image to the output resolution.\nOtherwise Super Resolution will only be used as AA and the image is bilinearly upscaled.");
+         ImGui::SetTooltip("When enabled setting Rendering Scale to 50%% or 75%% will use Super Resolution (DLSS or FSR) to scale the image to the output resolution.\nOtherwise Super Resolution will only be used as AA and the image is bilinearly upscaled.");
       }
 
       const char* previewString;
@@ -1129,7 +1187,7 @@ public:
       }
       if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
       {
-          ImGui::SetTooltip("Set ingame Shadow Quality to Medium. Requires restart/resetting Shadow Quality in settings.\nIn game settings:\nLow - 1024\nMedium - 2048\nHigh - 4096");
+         ImGui::SetTooltip("Set ingame Shadow Quality to Medium. Requires restart/resetting Shadow Quality in settings.\nIn game settings:\nLow - 1024\nMedium - 2048\nHigh - 4096");
       }
    }
 
@@ -1147,6 +1205,9 @@ BOOL APIENTRY DllMain(HMODULE hModule, DWORD ul_reason_for_call, LPVOID lpReserv
       Globals::DEVELOPMENT_STATE = Globals::ModDevelopmentState::Finished;
       Globals::VERSION = 1;
 
+      enable_samplers_upgrade = true;
+      samplers_upgrade_mode = 3;
+
       shader_hashes_light.pixel_shaders.emplace(std::stoul("D434C03A", nullptr, 16));
       shader_hashes_light.pixel_shaders.emplace(std::stoul("5C4DD977", nullptr, 16));
 
@@ -1162,6 +1223,15 @@ BOOL APIENTRY DllMain(HMODULE hModule, DWORD ul_reason_for_call, LPVOID lpReserv
       shader_hashes_bloom_filter.pixel_shaders.emplace(std::stoul("526CA67C", nullptr, 16));
 
       shader_hashes_copy.pixel_shaders.emplace(std::stoul("B6E26AC7", nullptr, 16));
+
+      shader_hashes_fxaa.pixel_shaders.emplace(std::stoul("9EE7A272", nullptr, 16));
+
+      shader_hashes_smaa_edge_detection.pixel_shaders.emplace(std::stoul("BB722F0A", nullptr, 16));
+      shader_hashes_smaa_weight_calculation.pixel_shaders.emplace(std::stoul("4016ED43", nullptr, 16));
+      shader_hashes_smaa_blending.pixel_shaders.emplace(std::stoul("960502CC", nullptr, 16));
+
+      // not exhaustive but the first shader used in frames during which only the UI is active
+      shader_hashes_ui.pixel_shaders.emplace(std::stoul("5E008C96", nullptr, 16));
 
       // cbuffer slots are fairly spread out for compute shaders any slot from 2 upwards is free,
       // for pixel shaders 7 seem unused, for vertex shaders no slots are unused

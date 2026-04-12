@@ -105,7 +105,7 @@
   <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Development-Release|x64'" Label="Vcpkg" />
   <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Development-Debug|x64'">
     <ClCompile>
-      <AdditionalIncludeDirectories>..\..\External\reshade;..\..\External\NGX;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+      <AdditionalIncludeDirectories>..\..\External\reshade;..\..\External\NGX;$(SolutionDir)\Source\External\FidelityFX;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
       <BasicRuntimeChecks>EnableFastChecks</BasicRuntimeChecks>
       <DebugInformationFormat>ProgramDatabase</DebugInformationFormat>
       <ExceptionHandling>Sync</ExceptionHandling>
@@ -136,8 +136,8 @@
       <ProxyFileName>%(Filename)_p.c</ProxyFileName>
     </Midl>
     <Link>
-      <AdditionalDependencies>nvsdk_ngx_d_dbg.lib</AdditionalDependencies>
-      <AdditionalLibraryDirectories>..\..\External\NGX\libs</AdditionalLibraryDirectories>
+      <AdditionalDependencies>nvsdk_ngx_d_dbg.lib;ffx_backend_dx11_x64d.lib;ffx_fsr3_x64d.lib;ffx_frameinterpolation_x64d.lib;ffx_fsr3upscaler_x64d.lib;ffx_opticalflow_x64d.lib</AdditionalDependencies>
+      <AdditionalLibraryDirectories>..\..\External\NGX\libs;..\..\External\FidelityFX\libs</AdditionalLibraryDirectories>
       <AdditionalOptions>%(AdditionalOptions) /machine:x64</AdditionalOptions>
       <GenerateDebugInformation>DebugFull</GenerateDebugInformation>
       <ImportLibrary>
@@ -155,7 +155,7 @@
   </ItemDefinitionGroup>
   <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Publishing-Release|x64'">
     <ClCompile>
-      <AdditionalIncludeDirectories>..\..\External\reshade;..\..\External\NGX;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+      <AdditionalIncludeDirectories>..\..\External\reshade;..\..\External\NGX;$(SolutionDir)\Source\External\FidelityFX;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
       <ExceptionHandling>Sync</ExceptionHandling>
       <InlineFunctionExpansion>Default</InlineFunctionExpansion>
       <LanguageStandard>stdcpplatest</LanguageStandard>
@@ -184,8 +184,8 @@
       <ProxyFileName>%(Filename)_p.c</ProxyFileName>
     </Midl>
     <Link>
-      <AdditionalDependencies>nvsdk_ngx_d.lib</AdditionalDependencies>
-      <AdditionalLibraryDirectories>..\..\External\NGX\libs</AdditionalLibraryDirectories>
+      <AdditionalDependencies>nvsdk_ngx_d.lib;ffx_backend_dx11_x64.lib;ffx_fsr3_x64.lib;ffx_frameinterpolation_x64.lib;ffx_fsr3upscaler_x64.lib;ffx_opticalflow_x64.lib</AdditionalDependencies>
+      <AdditionalLibraryDirectories>..\..\External\NGX\libs;..\..\External\FidelityFX\libs</AdditionalLibraryDirectories>
       <AdditionalOptions>%(AdditionalOptions) /machine:x64</AdditionalOptions>
       <GenerateDebugInformation>false</GenerateDebugInformation>
       <ImportLibrary>
@@ -201,7 +201,7 @@
   </ItemDefinitionGroup>
   <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Test-Release|x64'">
     <ClCompile>
-      <AdditionalIncludeDirectories>..\..\External\reshade;..\..\External\NGX;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+      <AdditionalIncludeDirectories>..\..\External\reshade;..\..\External\NGX;$(SolutionDir)\Source\External\FidelityFX;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
       <ExceptionHandling>Sync</ExceptionHandling>
       <InlineFunctionExpansion>Default</InlineFunctionExpansion>
       <LanguageStandard>stdcpplatest</LanguageStandard>
@@ -230,8 +230,8 @@
       <ProxyFileName>%(Filename)_p.c</ProxyFileName>
     </Midl>
     <Link>
-      <AdditionalDependencies>nvsdk_ngx_d.lib</AdditionalDependencies>
-      <AdditionalLibraryDirectories>..\..\External\NGX\libs</AdditionalLibraryDirectories>
+      <AdditionalDependencies>nvsdk_ngx_d.lib;ffx_backend_dx11_x64.lib;ffx_fsr3_x64.lib;ffx_frameinterpolation_x64.lib;ffx_fsr3upscaler_x64.lib;ffx_opticalflow_x64.lib</AdditionalDependencies>
+      <AdditionalLibraryDirectories>..\..\External\NGX\libs;..\..\External\FidelityFX\libs</AdditionalLibraryDirectories>
       <AdditionalOptions>%(AdditionalOptions) /machine:x64</AdditionalOptions>
       <GenerateDebugInformation>false</GenerateDebugInformation>
       <ImportLibrary>
@@ -247,7 +247,7 @@
   </ItemDefinitionGroup>
   <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Development-Release|x64'">
     <ClCompile>
-      <AdditionalIncludeDirectories>..\..\External\reshade;..\..\External\NGX;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+      <AdditionalIncludeDirectories>..\..\External\reshade;..\..\External\NGX;$(SolutionDir)\Source\External\FidelityFX;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
       <ExceptionHandling>Sync</ExceptionHandling>
       <InlineFunctionExpansion>Default</InlineFunctionExpansion>
       <LanguageStandard>stdcpplatest</LanguageStandard>
@@ -276,8 +276,8 @@
       <ProxyFileName>%(Filename)_p.c</ProxyFileName>
     </Midl>
     <Link>
-      <AdditionalDependencies>nvsdk_ngx_d.lib</AdditionalDependencies>
-      <AdditionalLibraryDirectories>..\..\External\NGX\libs</AdditionalLibraryDirectories>
+      <AdditionalDependencies>nvsdk_ngx_d.lib;ffx_backend_dx11_x64.lib;ffx_fsr3_x64.lib;ffx_frameinterpolation_x64.lib;ffx_fsr3upscaler_x64.lib;ffx_opticalflow_x64.lib</AdditionalDependencies>
+      <AdditionalLibraryDirectories>..\..\External\NGX\libs;..\..\External\FidelityFX\libs</AdditionalLibraryDirectories>
       <AdditionalOptions>%(AdditionalOptions) /machine:x64</AdditionalOptions>
       <GenerateDebugInformation>false</GenerateDebugInformation>
       <ImportLibrary>

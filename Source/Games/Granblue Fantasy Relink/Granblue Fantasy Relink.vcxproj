@@ -122,7 +122,7 @@
       <MultiProcessorCompilation>true</MultiProcessorCompilation>
       <EnforceTypeConversionRules>true</EnforceTypeConversionRules>
       <LanguageStandard_C>stdclatest</LanguageStandard_C>
-      <ForcedIncludeFiles>%(ForcedIncludeFiles)</ForcedIncludeFiles>
+      <ForcedIncludeFiles>../../../Shaders/$(ProjectName)/Includes/GameCBuffers.hlsl;%(ForcedIncludeFiles)</ForcedIncludeFiles>
     </ClCompile>
     <ResourceCompile>
       <PreprocessorDefinitions>%(PreprocessorDefinitions);_DEBUG;_WINDOWS</PreprocessorDefinitions>
@@ -171,7 +171,7 @@
       <EnforceTypeConversionRules>true</EnforceTypeConversionRules>
       <MultiProcessorCompilation>true</MultiProcessorCompilation>
       <LanguageStandard_C>stdclatest</LanguageStandard_C>
-      <ForcedIncludeFiles>%(ForcedIncludeFiles)</ForcedIncludeFiles>
+      <ForcedIncludeFiles>../../../Shaders/$(ProjectName)/Includes/GameCBuffers.hlsl;%(ForcedIncludeFiles)</ForcedIncludeFiles>
     </ClCompile>
     <ResourceCompile>
       <PreprocessorDefinitions>%(PreprocessorDefinitions);_WINDOWS;NDEBUG</PreprocessorDefinitions>
@@ -218,7 +218,7 @@
       <EnforceTypeConversionRules>true</EnforceTypeConversionRules>
       <MultiProcessorCompilation>true</MultiProcessorCompilation>
       <LanguageStandard_C>stdclatest</LanguageStandard_C>
-      <ForcedIncludeFiles>%(ForcedIncludeFiles)</ForcedIncludeFiles>
+      <ForcedIncludeFiles>../../../Shaders/$(ProjectName)/Includes/GameCBuffers.hlsl;%(ForcedIncludeFiles)</ForcedIncludeFiles>
     </ClCompile>
     <ResourceCompile>
       <PreprocessorDefinitions>%(PreprocessorDefinitions);_WINDOWS;NDEBUG</PreprocessorDefinitions>
@@ -265,7 +265,7 @@
       <EnforceTypeConversionRules>true</EnforceTypeConversionRules>
       <MultiProcessorCompilation>true</MultiProcessorCompilation>
       <LanguageStandard_C>stdclatest</LanguageStandard_C>
-      <ForcedIncludeFiles>%(ForcedIncludeFiles)</ForcedIncludeFiles>
+      <ForcedIncludeFiles>../../../Shaders/$(ProjectName)/Includes/GameCBuffers.hlsl;%(ForcedIncludeFiles)</ForcedIncludeFiles>
     </ClCompile>
     <ResourceCompile>
       <PreprocessorDefinitions>%(PreprocessorDefinitions);_WINDOWS;NDEBUG</PreprocessorDefinitions>
@@ -298,9 +298,16 @@
   <ItemGroup>
     <ClCompile Include="..\..\Core\unity_build.cpp" />
     <ClCompile Include="main.cpp" />
+    <ClCompile Include="includes\safetyhook.cpp" />
+    <ClCompile Include="includes\Zydis.c">
+      <ForcedIncludeFiles></ForcedIncludeFiles>
+      <AdditionalIncludeDirectories>$(ProjectDir)includes;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+    </ClCompile>
   </ItemGroup>
   <ItemGroup>
     <ClInclude Include="includes\cbuffers.h" />
+    <ClInclude Include="includes\safetyhook.hpp" />
+    <ClInclude Include="includes\Zydis.h" />
   </ItemGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
   <ImportGroup Label="ExtensionTargets">

@@ -7,7 +7,7 @@ Luma also acts as a graphics analyzer, having deep debugging capabilities (captu
 
 # Development requirements
 - Windows 11 (Windows 10 probably works fine too)
-- Visual Studio 2022 (older versions might work too)
+- Visual Studio 2026 (2022 works, older versions might work too)
 - Windows 11 SDK 10.0.26100.0 (older versions work, but don't support HDR as well)
 
 # Instructions
@@ -18,7 +18,7 @@ Luma also acts as a graphics analyzer, having deep debugging capabilities (captu
 - Luma uses the game project for developing and shipping mods. Simply toggle between DEVELOPMENT, TEST and PUBLISHING configurations to enable their respective features. They automatically spread to shaders on the next load/compile. Both Development-Release and Development-Debug builds should have debug symbols (and thus allow break points), however "Debug" builds have optimizations disabled and more logs, so they are exponentially slower and should only be used if debugging is required (VS might default to them, so change it manually).
 
 # Adding a new game mod
-- Add the template file from the ".\Templates\VisualStudio" folder to (e.g.) "%USERPROFILE%\Documents\Visual Studio 2022\Templates\ProjectTemplates\Visual C++".
+- Add the template file from the ".\Templates\VisualStudio" folder to (e.g.) "%USERPROFILE%\Documents\Visual Studio 18\Templates\ProjectTemplates\Visual C++" (or "Visual Studio 2022" for VS 2022).
 - Add a new project to the solution and select the Luma Template project, add it under ".\Source\Games". You can name it with the full game name, including spaces etc. You can manually check out the Template project that is already in the Luma solution for more information.
 - Check the newly created main.cpp file and replace what you need to replace, everything is explained there. Check out other game's mods for further inspiration.
 - Each mod's version is stored in "Globals::VERSION" and can be increased there.

@@ -1,8 +1,9 @@
+#if 0 // TODO!!!
 #include "instance_data.h"
 
+#if DEVELOPMENT
 void CommandListData::AddGraphicsCaptureCustomDrawCall(const char* name, ID3D11DeviceContext* native_device_context, ID3D11Resource* resource, ID3D11View* resource_view)
 {
-#if DEVELOPMENT && 0 // TODO!!!
    const std::shared_lock lock_trace(s_mutex_trace);
    if (trace_running)
    {
@@ -20,5 +21,6 @@ void CommandListData::AddGraphicsCaptureCustomDrawCall(const char* name, ID3D11D
       trace_draw_calls_data.insert(trace_draw_calls_data.end() - 1, trace_draw_call_data);
    }
    trace_draw_calls_data;
-#endif
 }
+#endif
+#endif

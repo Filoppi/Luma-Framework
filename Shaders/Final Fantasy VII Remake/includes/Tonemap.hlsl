@@ -1,10 +1,9 @@
 #include "renodx/tonemap.hlsl"
 #include "renodx/effects.hlsl"
 #include "renodx/hermite_spline.hlsl"
+#include "renodx/neutwo.hlsl"
 #include "../../Includes/Color.hlsl"
 #include "../../Includes/Oklab.hlsl"
-#include "../../Includes/DarktableUCS.hlsl"
-#include "../../Includes/ACES.hlsl"
 #include "../../Includes/Reinhard.hlsl"
 
 float UpgradeToneMapRatio(float ap1_color_hdr, float ap1_color_sdr, float ap1_post_process_color) {
@@ -107,7 +106,7 @@ float3 UpgradeToneMapPerChannel(float3 color_hdr, float3 color_sdr, float3 post_
   float3 color_scaled = max(0, ap1_post_process * ratio);
   color_scaled = AP1_To_BT709(color_scaled);
   float peak_correction = saturate(1.f - GetLuminance(ap1_post_process, CS_AP1));
-  color_scaled = RestoreHueAndChrominance(color_scaled, post_process_color, peak_correction, 1.f);
+  color_scaled = RestoreHueAndChrominance(color_scaled, post_process_color, peak_correction, 0.75f);
   return lerp(color_hdr, color_scaled, post_process_strength);
 }
 
@@ -192,6 +191,7 @@ float3 ApplyExposureContrastFlareHighlightsShadowsByLuminance(float3 untonemappe
     float3 color = untonemapped;
 
     color *= config.exposure;
+    y *= config.exposure;
 
     // contrast & flare
     const float y_normalized = y / mid_gray;
@@ -277,10 +277,6 @@ float3 ApplyHermiteSplineByMaxChannel(float3 input, float diffuse_nits, float pe
 float3 extractColorGradeAndApplyTonemap(float3 ungraded_bt709, float3 lutOutputColor_bt2020, float midGray, float2 position) {
     // normalize LUT output paper white and convert to BT.709
     // ungraded_bt709 = ungraded_bt709 * 1.5f;
-  float tonemap_type = 1.f;
-#if TEST || DEVELOPMENT
-    tonemap_type = LumaSettings.GameSettings.tonemap_type;
-#endif
   if (LumaSettings.GameSettings.tonemap_type == 0.f) {
     return lutOutputColor_bt2020;
   }
@@ -289,7 +285,6 @@ float3 extractColorGradeAndApplyTonemap(float3 ungraded_bt709, float3 lutOutputC
   float ACES_MIN;
   float aces_min;
   float aces_max;
-  float3 graded_bt709;
   float3 tonemapped_bt709;
   float3 pq_color;
 
@@ -304,34 +299,14 @@ float3 extractColorGradeAndApplyTonemap(float3 ungraded_bt709, float3 lutOutputC
   cg_config.hue_correction_strength = LumaSettings.GameSettings.hue_correction_strength;
   cg_config.blowout = -1.f * (LumaSettings.GameSettings.highlight_saturation - 1.f);
 
-  if (LumaSettings.GameSettings.tonemap_type == 1.f) {
-    float3 reference_tonemap_bt709 = Reinhard::ReinhardScalable(ungraded_bt709, 1000.f / 250.f, 0.f, 0.18f, 0.18f);
-    float3 graded_untonemapped_bt709 = UpgradeToneMapPerChannel(ungraded_bt709, reference_tonemap_bt709, graded_aces_bt709, 1.f);
-    float y = GetLuminance(graded_untonemapped_bt709, CS_BT709);
-    float3 graded_bt709 = ApplyExposureContrastFlareHighlightsShadowsByLuminance(graded_untonemapped_bt709, y, cg_config);
-    graded_bt709 = ApplySaturationBlowoutHueCorrectionHighlightSaturation(graded_bt709, graded_aces_bt709, y, cg_config);
-    tonemapped_bt709 = graded_bt709;
-    if (LumaSettings.GameSettings.custom_lut_strength != 1.f) {
-      tonemapped_bt709 = lerp(ungraded_bt709, tonemapped_bt709, LumaSettings.GameSettings.custom_lut_strength);
-    }
-  }
-  else {
-      ungraded_bt709 = ungraded_bt709 * 1.5f;
-      ACES_MIN = 0.0001f;
-    aces_min = ACES_MIN / LumaSettings.GamePaperWhiteNits;
-    aces_max = (LumaSettings.PeakWhiteNits / LumaSettings.GamePaperWhiteNits);
-    graded_bt709 = ApplyExposureContrastFlareHighlightsShadowsByLuminance(ungraded_bt709, GetLuminance(ungraded_bt709, CS_BT709), cg_config, 0.18f);
-    graded_bt709 = max(0, graded_bt709);
-    float y_in = GetLuminance(graded_bt709, CS_BT709);
-    float y_out = ACES::ODTToneMap(y_in, aces_min * 48.f, aces_max * 48.f) / 48.f;
-
-    // float3 channel_tonemappe_ap1 = ACES::ODTToneMap(graded_bt709, aces_min * 48.f, aces_max * 48.f) / 48.f;
-    float3 luminance_tonemapped_ap1 = RestoreLuminance(graded_bt709, y_out);
-    luminance_tonemapped_ap1 = BT709_To_AP1(RestoreHueAndChrominance(AP1_To_BT709(luminance_tonemapped_ap1), (graded_bt709), 1.f, 0.f));
-    float lum = GetLuminance(luminance_tonemapped_ap1, CS_AP1);
-    tonemapped_bt709 = AP1_To_BT709(lerp(luminance_tonemapped_ap1, BT709_To_AP1(graded_bt709), saturate(lum / 1.f)));
-    tonemapped_bt709 = ApplySaturationBlowoutHueCorrectionHighlightSaturation(tonemapped_bt709, graded_bt709, GetLuminance(graded_bt709, CS_BT709), cg_config);
-
+  float3 reference_tonemap_bt709 = Reinhard::ReinhardScalable(ungraded_bt709, 1000.f / 250.f, 0.f, 0.18f, 0.18f);
+  float3 graded_untonemapped_bt709 = UpgradeToneMapPerChannel(ungraded_bt709, reference_tonemap_bt709, graded_aces_bt709, 1.f);
+  float y = GetLuminance(graded_untonemapped_bt709, CS_BT709);
+  float3 graded_bt709 = ApplyExposureContrastFlareHighlightsShadowsByLuminance(graded_untonemapped_bt709, y, cg_config);
+  graded_bt709 = ApplySaturationBlowoutHueCorrectionHighlightSaturation(graded_bt709, graded_aces_bt709, y, cg_config);
+  tonemapped_bt709 = graded_bt709;
+  if (LumaSettings.GameSettings.custom_lut_strength != 1.f) {
+    tonemapped_bt709 = lerp(ungraded_bt709, tonemapped_bt709, LumaSettings.GameSettings.custom_lut_strength);
   }
 
   if (LumaSettings.GameSettings.custom_film_grain_strength != 0) {
@@ -343,11 +318,13 @@ float3 extractColorGradeAndApplyTonemap(float3 ungraded_bt709, float3 lutOutputC
         1.f);
   }
 
-//   tonemapped_bt709 = convertColorSpace(tonemapped_bt709);
+  float peak_ratio = LumaSettings.PeakWhiteNits / LumaSettings.GamePaperWhiteNits;
+
+  tonemapped_bt709 = renodx::tonemap::neutwo::MaxChannel(tonemapped_bt709, peak_ratio);
 
   float3 tonemapped_bt2020 = BT709_To_BT2020(tonemapped_bt709);
 
-  tonemapped_bt2020 = ApplyHermiteSplineByMaxChannel(tonemapped_bt2020, LumaSettings.GamePaperWhiteNits, LumaSettings.PeakWhiteNits);
+//   tonemapped_bt2020 = ApplyHermiteSplineByMaxChannel(tonemapped_bt2020, LumaSettings.GamePaperWhiteNits, LumaSettings.PeakWhiteNits);
 
   return tonemapped_bt2020 * (LumaSettings.GamePaperWhiteNits);
   // return lutOutputColor_bt2020;

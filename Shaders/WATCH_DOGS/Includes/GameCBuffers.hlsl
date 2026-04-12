@@ -22,6 +22,9 @@ namespace CB
     {
         float2 CurrJitters;
         float2 PrevJitters;
+		float4x4 CameraSpaceToPreviousProjectedSpace;
+		float4x4 PreviousProjectionMatrix;
+		float4x4 PreviousViewMatrix;
     };
 }
 

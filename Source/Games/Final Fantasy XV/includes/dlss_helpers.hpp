@@ -429,7 +429,7 @@ static void CheckAndExtractTAABuffer(reshade::api::device* device, reshade::api:
 
       // Consider upscaling active if render resolution is notably smaller than output
       // Use a small epsilon to avoid floating point issues
-      game_device_data.is_using_upscaling = (render_width < output_width - 1.0f) || (render_height < output_height - 1.0f);
+      game_device_data.is_using_upscaling = (render_width < output_width - FLT_EPSILON) || (render_height < output_height - FLT_EPSILON);
 #if DEVELOPMENT && DEBUG_LOG
       if (game_device_data.is_using_upscaling)
       {

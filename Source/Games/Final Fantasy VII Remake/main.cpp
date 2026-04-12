@@ -46,6 +46,17 @@ namespace
    ShaderHashesList shader_hashes_Output_HDR;
    ShaderHashesList shader_hashes_Output_SDR;
 
+#if ENABLE_FRAMEGEN
+   // Map from game PS hash to native shader key for Output HDR UI composition pass
+   std::unordered_map<uint32_t, size_t> output_hdr_ui_shader_keys;
+   // Map from game PS hash to native shader key for Output HDR tonemap pass
+   std::unordered_map<uint32_t, size_t> output_hdr_tonemap_shader_keys;
+   // Map from game PS hash to native shader key for Output SDR UI composition pass
+   std::unordered_map<uint32_t, size_t> output_sdr_ui_shader_keys;
+   // Map from game PS hash to native shader key for Output SDR tonemap pass
+   std::unordered_map<uint32_t, size_t> output_sdr_tonemap_shader_keys;
+#endif // ENABLE_FRAMEGEN
+
    const uint32_t CBPerViewGlobal_buffer_size = 4096;
    std::atomic<bool> can_sharpen = true;
    float enabled_dithering_fix = 1.f;
@@ -141,7 +152,7 @@ namespace
       new Luma::Settings::Section{
          .label = "Color Grading",
          .is_visible = []()
-         { return cb_luma_global_settings.DisplayMode == DisplayModeType::HDR && (TEST || DEVELOPMENT); },
+         { return cb_luma_global_settings.DisplayMode == DisplayModeType::HDR; },
          .settings = {
             new Luma::Settings::Setting{
                .key = "TonemapType",
@@ -151,9 +162,9 @@ namespace
                .can_reset = true,
                .label = "Tone Map Type",
                .tooltip = "Tone mapping algorithm to use",
-               .labels = {"Vanilla","Reinhard", "ACES"},
+               .labels = {"Vanilla","Neutwo"},
                .min = 0.f,
-               .max = 2.f,
+               .max = 1.f,
                .is_enabled = []()
                { return cb_luma_global_settings.DisplayMode == DisplayModeType::HDR; },
                .is_visible = []()
@@ -379,6 +390,40 @@ struct GameDeviceDataFF7Remake final : public GameDeviceData
    float2 upscaled_render_resolution = {1, 1};
    float resolution_scale = 1.0f;
    uint4 viewport_rect = {0, 0, 1, 1};
+
+   // Output HDR two-pass split: intermediate hudless render target (R10G10B10A2_UNORM, PQ-encoded)
+#if ENABLE_FRAMEGEN
+   com_ptr<ID3D11Texture2D> output_hdr_hudless_texture;
+   com_ptr<ID3D11ShaderResourceView> output_hdr_hudless_srv;
+   com_ptr<ID3D11RenderTargetView> output_hdr_hudless_rtv;
+   UINT output_hdr_hudless_width = 0;
+   UINT output_hdr_hudless_height = 0;
+
+   void CleanOutputHDRHudlessResources()
+   {
+      output_hdr_hudless_texture = nullptr;
+      output_hdr_hudless_srv = nullptr;
+      output_hdr_hudless_rtv = nullptr;
+      output_hdr_hudless_width = 0;
+      output_hdr_hudless_height = 0;
+   }
+
+   // Output SDR two-pass split: intermediate hudless render target (R10G10B10A2_UNORM, linear)
+   com_ptr<ID3D11Texture2D> output_sdr_hudless_texture;
+   com_ptr<ID3D11ShaderResourceView> output_sdr_hudless_srv;
+   com_ptr<ID3D11RenderTargetView> output_sdr_hudless_rtv;
+   UINT output_sdr_hudless_width = 0;
+   UINT output_sdr_hudless_height = 0;
+
+   void CleanOutputSDRHudlessResources()
+   {
+      output_sdr_hudless_texture = nullptr;
+      output_sdr_hudless_srv = nullptr;
+      output_sdr_hudless_rtv = nullptr;
+      output_sdr_hudless_width = 0;
+      output_sdr_hudless_height = 0;
+   }
+#endif // ENABLE_FRAMEGEN
 };
 
 class FF7Remake final : public Game
@@ -417,6 +462,114 @@ public:
          ShaderDefinition("Luma_FF7R_XeGTAO_impl", reshade::api::pipeline_subobject_type::compute_shader, nullptr, "main_pass_cs"));
       native_shaders_definitions.emplace(CompileTimeStringHash("FF7R XeGTAO Denoise Pass"), 
          ShaderDefinition("Luma_FF7R_XeGTAO_impl", reshade::api::pipeline_subobject_type::compute_shader, nullptr, "denoise_pass_cs"));
+
+#if ENABLE_FRAMEGEN
+      // Register Output HDR UI composition pixel shaders (one per permutation)
+      // Each is compiled from the wrapper file with UI_COMPOSITION_PASS=1 and the hash-specific define
+      native_shaders_definitions.emplace(CompileTimeStringHash("FF7R Output HDR UI 922A71D1"),
+         ShaderDefinition{"Luma_FF7R_Output_HDR_UI_Composition", reshade::api::pipeline_subobject_type::pixel_shader, nullptr, nullptr,
+            {{"UI_COMPOSITION_PASS", "1"}, {"_922A71D1", "1"}}});
+      native_shaders_definitions.emplace(CompileTimeStringHash("FF7R Output HDR UI A8EB118F"),
+         ShaderDefinition{"Luma_FF7R_Output_HDR_UI_Composition", reshade::api::pipeline_subobject_type::pixel_shader, nullptr, nullptr,
+            {{"UI_COMPOSITION_PASS", "1"}, {"_A8EB118F", "1"}}});
+      native_shaders_definitions.emplace(CompileTimeStringHash("FF7R Output HDR UI 3A4D858E"),
+         ShaderDefinition{"Luma_FF7R_Output_HDR_UI_Composition", reshade::api::pipeline_subobject_type::pixel_shader, nullptr, nullptr,
+            {{"UI_COMPOSITION_PASS", "1"}, {"_3A4D858E", "1"}}});
+      native_shaders_definitions.emplace(CompileTimeStringHash("FF7R Output HDR UI D950DA01"),
+         ShaderDefinition{"Luma_FF7R_Output_HDR_UI_Composition", reshade::api::pipeline_subobject_type::pixel_shader, nullptr, nullptr,
+            {{"UI_COMPOSITION_PASS", "1"}, {"_D950DA01", "1"}}});
+      native_shaders_definitions.emplace(CompileTimeStringHash("FF7R Output HDR UI 5CD12E67"),
+         ShaderDefinition{"Luma_FF7R_Output_HDR_UI_Composition", reshade::api::pipeline_subobject_type::pixel_shader, nullptr, nullptr,
+            {{"UI_COMPOSITION_PASS", "1"}, {"_5CD12E67", "1"}}});
+      native_shaders_definitions.emplace(CompileTimeStringHash("FF7R Output HDR UI 3B489929"),
+         ShaderDefinition{"Luma_FF7R_Output_HDR_UI_Composition", reshade::api::pipeline_subobject_type::pixel_shader, nullptr, nullptr,
+            {{"UI_COMPOSITION_PASS", "1"}, {"_3B489929", "1"}}});
+      native_shaders_definitions.emplace(CompileTimeStringHash("FF7R Output HDR UI 8D04181D"),
+         ShaderDefinition{"Luma_FF7R_Output_HDR_UI_Composition", reshade::api::pipeline_subobject_type::pixel_shader, nullptr, nullptr,
+            {{"UI_COMPOSITION_PASS", "1"}, {"_8D04181D", "1"}}});
+      native_shaders_definitions.emplace(CompileTimeStringHash("FF7R Output HDR UI 6846FF90"),
+         ShaderDefinition{"Luma_FF7R_Output_HDR_UI_Composition", reshade::api::pipeline_subobject_type::pixel_shader, nullptr, nullptr,
+            {{"UI_COMPOSITION_PASS", "1"}, {"_6846FF90", "1"}}});
+
+      // Register Output HDR tonemap pixel shaders (one per permutation)
+      // Each is compiled from the tonemap wrapper file with TONEMAP_PASS=1 and the hash-specific define
+      native_shaders_definitions.emplace(CompileTimeStringHash("FF7R Output HDR TM 922A71D1"),
+         ShaderDefinition{"Luma_FF7R_Output_HDR_Tonemap", reshade::api::pipeline_subobject_type::pixel_shader, nullptr, nullptr,
+            {{"TONEMAP_PASS", "1"}, {"_922A71D1", "1"}}});
+      native_shaders_definitions.emplace(CompileTimeStringHash("FF7R Output HDR TM A8EB118F"),
+         ShaderDefinition{"Luma_FF7R_Output_HDR_Tonemap", reshade::api::pipeline_subobject_type::pixel_shader, nullptr, nullptr,
+            {{"TONEMAP_PASS", "1"}, {"_A8EB118F", "1"}}});
+      native_shaders_definitions.emplace(CompileTimeStringHash("FF7R Output HDR TM 3A4D858E"),
+         ShaderDefinition{"Luma_FF7R_Output_HDR_Tonemap", reshade::api::pipeline_subobject_type::pixel_shader, nullptr, nullptr,
+            {{"TONEMAP_PASS", "1"}, {"_3A4D858E", "1"}}});
+      native_shaders_definitions.emplace(CompileTimeStringHash("FF7R Output HDR TM D950DA01"),
+         ShaderDefinition{"Luma_FF7R_Output_HDR_Tonemap", reshade::api::pipeline_subobject_type::pixel_shader, nullptr, nullptr,
+            {{"TONEMAP_PASS", "1"}, {"_D950DA01", "1"}}});
+      native_shaders_definitions.emplace(CompileTimeStringHash("FF7R Output HDR TM 5CD12E67"),
+         ShaderDefinition{"Luma_FF7R_Output_HDR_Tonemap", reshade::api::pipeline_subobject_type::pixel_shader, nullptr, nullptr,
+            {{"TONEMAP_PASS", "1"}, {"_5CD12E67", "1"}}});
+      native_shaders_definitions.emplace(CompileTimeStringHash("FF7R Output HDR TM 3B489929"),
+         ShaderDefinition{"Luma_FF7R_Output_HDR_Tonemap", reshade::api::pipeline_subobject_type::pixel_shader, nullptr, nullptr,
+            {{"TONEMAP_PASS", "1"}, {"_3B489929", "1"}}});
+      native_shaders_definitions.emplace(CompileTimeStringHash("FF7R Output HDR TM 8D04181D"),
+         ShaderDefinition{"Luma_FF7R_Output_HDR_Tonemap", reshade::api::pipeline_subobject_type::pixel_shader, nullptr, nullptr,
+            {{"TONEMAP_PASS", "1"}, {"_8D04181D", "1"}}});
+      native_shaders_definitions.emplace(CompileTimeStringHash("FF7R Output HDR TM 6846FF90"),
+         ShaderDefinition{"Luma_FF7R_Output_HDR_Tonemap", reshade::api::pipeline_subobject_type::pixel_shader, nullptr, nullptr,
+            {{"TONEMAP_PASS", "1"}, {"_6846FF90", "1"}}});
+
+      // Register Output SDR UI composition pixel shaders (one per permutation)
+      native_shaders_definitions.emplace(CompileTimeStringHash("FF7R Output SDR UI 506D5998"),
+         ShaderDefinition{"Luma_FF7R_Output_SDR_UI_Composition", reshade::api::pipeline_subobject_type::pixel_shader, nullptr, nullptr,
+            {{"UI_COMPOSITION_PASS", "1"}, {"_506D5998", "1"}}});
+      native_shaders_definitions.emplace(CompileTimeStringHash("FF7R Output SDR UI F68D39B5"),
+         ShaderDefinition{"Luma_FF7R_Output_SDR_UI_Composition", reshade::api::pipeline_subobject_type::pixel_shader, nullptr, nullptr,
+            {{"UI_COMPOSITION_PASS", "1"}, {"_F68D39B5", "1"}}});
+      native_shaders_definitions.emplace(CompileTimeStringHash("FF7R Output SDR UI BBB9CE42"),
+         ShaderDefinition{"Luma_FF7R_Output_SDR_UI_Composition", reshade::api::pipeline_subobject_type::pixel_shader, nullptr, nullptr,
+            {{"UI_COMPOSITION_PASS", "1"}, {"_BBB9CE42", "1"}}});
+      native_shaders_definitions.emplace(CompileTimeStringHash("FF7R Output SDR UI 51E2B894"),
+         ShaderDefinition{"Luma_FF7R_Output_SDR_UI_Composition", reshade::api::pipeline_subobject_type::pixel_shader, nullptr, nullptr,
+            {{"UI_COMPOSITION_PASS", "1"}, {"_51E2B894", "1"}}});
+      native_shaders_definitions.emplace(CompileTimeStringHash("FF7R Output SDR UI 803889E8"),
+         ShaderDefinition{"Luma_FF7R_Output_SDR_UI_Composition", reshade::api::pipeline_subobject_type::pixel_shader, nullptr, nullptr,
+            {{"UI_COMPOSITION_PASS", "1"}, {"_803889E8", "1"}}});
+      native_shaders_definitions.emplace(CompileTimeStringHash("FF7R Output SDR UI D96EF76D"),
+         ShaderDefinition{"Luma_FF7R_Output_SDR_UI_Composition", reshade::api::pipeline_subobject_type::pixel_shader, nullptr, nullptr,
+            {{"UI_COMPOSITION_PASS", "1"}, {"_D96EF76D", "1"}}});
+      native_shaders_definitions.emplace(CompileTimeStringHash("FF7R Output SDR UI 5C2D3A71"),
+         ShaderDefinition{"Luma_FF7R_Output_SDR_UI_Composition", reshade::api::pipeline_subobject_type::pixel_shader, nullptr, nullptr,
+            {{"UI_COMPOSITION_PASS", "1"}, {"_5C2D3A71", "1"}}});
+      native_shaders_definitions.emplace(CompileTimeStringHash("FF7R Output SDR UI 66162229"),
+         ShaderDefinition{"Luma_FF7R_Output_SDR_UI_Composition", reshade::api::pipeline_subobject_type::pixel_shader, nullptr, nullptr,
+            {{"UI_COMPOSITION_PASS", "1"}, {"_66162229", "1"}}});
+
+      // Register Output SDR tonemap pixel shaders (one per permutation)
+      native_shaders_definitions.emplace(CompileTimeStringHash("FF7R Output SDR TM 506D5998"),
+         ShaderDefinition{"Luma_FF7R_Output_SDR_Tonemap", reshade::api::pipeline_subobject_type::pixel_shader, nullptr, nullptr,
+            {{"TONEMAP_PASS", "1"}, {"_506D5998", "1"}}});
+      native_shaders_definitions.emplace(CompileTimeStringHash("FF7R Output SDR TM F68D39B5"),
+         ShaderDefinition{"Luma_FF7R_Output_SDR_Tonemap", reshade::api::pipeline_subobject_type::pixel_shader, nullptr, nullptr,
+            {{"TONEMAP_PASS", "1"}, {"_F68D39B5", "1"}}});
+      native_shaders_definitions.emplace(CompileTimeStringHash("FF7R Output SDR TM BBB9CE42"),
+         ShaderDefinition{"Luma_FF7R_Output_SDR_Tonemap", reshade::api::pipeline_subobject_type::pixel_shader, nullptr, nullptr,
+            {{"TONEMAP_PASS", "1"}, {"_BBB9CE42", "1"}}});
+      native_shaders_definitions.emplace(CompileTimeStringHash("FF7R Output SDR TM 51E2B894"),
+         ShaderDefinition{"Luma_FF7R_Output_SDR_Tonemap", reshade::api::pipeline_subobject_type::pixel_shader, nullptr, nullptr,
+            {{"TONEMAP_PASS", "1"}, {"_51E2B894", "1"}}});
+      native_shaders_definitions.emplace(CompileTimeStringHash("FF7R Output SDR TM 803889E8"),
+         ShaderDefinition{"Luma_FF7R_Output_SDR_Tonemap", reshade::api::pipeline_subobject_type::pixel_shader, nullptr, nullptr,
+            {{"TONEMAP_PASS", "1"}, {"_803889E8", "1"}}});
+      native_shaders_definitions.emplace(CompileTimeStringHash("FF7R Output SDR TM D96EF76D"),
+         ShaderDefinition{"Luma_FF7R_Output_SDR_Tonemap", reshade::api::pipeline_subobject_type::pixel_shader, nullptr, nullptr,
+            {{"TONEMAP_PASS", "1"}, {"_D96EF76D", "1"}}});
+      native_shaders_definitions.emplace(CompileTimeStringHash("FF7R Output SDR TM 5C2D3A71"),
+         ShaderDefinition{"Luma_FF7R_Output_SDR_Tonemap", reshade::api::pipeline_subobject_type::pixel_shader, nullptr, nullptr,
+            {{"TONEMAP_PASS", "1"}, {"_5C2D3A71", "1"}}});
+      native_shaders_definitions.emplace(CompileTimeStringHash("FF7R Output SDR TM 66162229"),
+         ShaderDefinition{"Luma_FF7R_Output_SDR_Tonemap", reshade::api::pipeline_subobject_type::pixel_shader, nullptr, nullptr,
+            {{"TONEMAP_PASS", "1"}, {"_66162229", "1"}}});
+#endif // ENABLE_FRAMEGEN
 
       luma_settings_cbuffer_index = 13;
       luma_data_cbuffer_index = 12;
@@ -1179,6 +1332,340 @@ public:
          device_data.has_drawn_main_post_processing = true; // Post processing is finished, nothing more to fix
       }
 
+      // ============================================================================
+      // Output two-pass split: tonemap to intermediate, then composite UI
+      // ============================================================================
+#if ENABLE_FRAMEGEN
+      if (is_tonemapping_hdr)
+      {
+         // Look up UI composition native PS for the current permutation
+         uint32_t current_ps_hash = static_cast<uint32_t>(original_shader_hashes.pixel_shaders[0]);
+         auto ui_key_it = output_hdr_ui_shader_keys.find(current_ps_hash);
+         auto tm_key_it = output_hdr_tonemap_shader_keys.find(current_ps_hash);
+         if (ui_key_it == output_hdr_ui_shader_keys.end() || tm_key_it == output_hdr_tonemap_shader_keys.end())
+         {
+            // Unknown permutation — fall through to single-pass
+            return DrawOrDispatchOverrideType::None;
+         }
+
+         auto ui_ps_it = device_data.native_pixel_shaders.find(ui_key_it->second);
+         auto tm_ps_it = device_data.native_pixel_shaders.find(tm_key_it->second);
+         auto copy_vs_it = device_data.native_vertex_shaders.find(CompileTimeStringHash("Copy VS"));
+         if (ui_ps_it == device_data.native_pixel_shaders.end() || !ui_ps_it->second.get()
+             || tm_ps_it == device_data.native_pixel_shaders.end() || !tm_ps_it->second.get()
+             || copy_vs_it == device_data.native_vertex_shaders.end() || !copy_vs_it->second.get())
+         {
+            // Native shaders not compiled yet — fall through to single-pass
+            return DrawOrDispatchOverrideType::None;
+         }
+
+         // Get the game's current RTV to determine dimensions and to restore later
+         com_ptr<ID3D11RenderTargetView> original_rtvs[D3D11_SIMULTANEOUS_RENDER_TARGET_COUNT];
+         com_ptr<ID3D11DepthStencilView> original_dsv;
+         native_device_context->OMGetRenderTargets(D3D11_SIMULTANEOUS_RENDER_TARGET_COUNT, &original_rtvs[0], &original_dsv);
+
+         if (!original_rtvs[0].get())
+         {
+            return DrawOrDispatchOverrideType::None;
+         }
+
+         // Get render target dimensions
+         com_ptr<ID3D11Resource> rtv_resource;
+         original_rtvs[0]->GetResource(&rtv_resource);
+         com_ptr<ID3D11Texture2D> rtv_texture;
+         rtv_resource->QueryInterface(&rtv_texture);
+         D3D11_TEXTURE2D_DESC rtv_desc;
+         rtv_texture->GetDesc(&rtv_desc);
+
+         // Create/recreate intermediate hudless RT if dimensions changed
+         if (!game_device_data.output_hdr_hudless_texture.get()
+             || game_device_data.output_hdr_hudless_width != rtv_desc.Width
+             || game_device_data.output_hdr_hudless_height != rtv_desc.Height)
+         {
+            game_device_data.CleanOutputHDRHudlessResources();
+
+            D3D11_TEXTURE2D_DESC desc = {};
+            desc.Width = rtv_desc.Width;
+            desc.Height = rtv_desc.Height;
+            desc.MipLevels = 1;
+            desc.ArraySize = 1;
+            desc.Format = DXGI_FORMAT_R10G10B10A2_UNORM;
+            desc.SampleDesc.Count = 1;
+            desc.Usage = D3D11_USAGE_DEFAULT;
+            desc.BindFlags = D3D11_BIND_RENDER_TARGET | D3D11_BIND_SHADER_RESOURCE;
+
+            HRESULT hr = native_device->CreateTexture2D(&desc, nullptr, &game_device_data.output_hdr_hudless_texture);
+            ASSERT_ONCE(SUCCEEDED(hr));
+            if (SUCCEEDED(hr))
+            {
+               hr = native_device->CreateRenderTargetView(game_device_data.output_hdr_hudless_texture.get(), nullptr, &game_device_data.output_hdr_hudless_rtv);
+               ASSERT_ONCE(SUCCEEDED(hr));
+               hr = native_device->CreateShaderResourceView(game_device_data.output_hdr_hudless_texture.get(), nullptr, &game_device_data.output_hdr_hudless_srv);
+               ASSERT_ONCE(SUCCEEDED(hr));
+            }
+
+            if (FAILED(hr))
+            {
+               game_device_data.CleanOutputHDRHudlessResources();
+               return DrawOrDispatchOverrideType::None;
+            }
+
+            game_device_data.output_hdr_hudless_width = rtv_desc.Width;
+            game_device_data.output_hdr_hudless_height = rtv_desc.Height;
+         }
+
+         // Cache GPU state
+         com_ptr<ID3D11VertexShader> prev_vs;
+         com_ptr<ID3D11PixelShader> prev_ps;
+         native_device_context->VSGetShader(&prev_vs, nullptr, nullptr);
+         native_device_context->PSGetShader(&prev_ps, nullptr, nullptr);
+         D3D11_PRIMITIVE_TOPOLOGY prev_topology;
+         native_device_context->IAGetPrimitiveTopology(&prev_topology);
+
+         // ===== Pass 1: Tonemap to intermediate (hudless) =====
+         // Redirect output to intermediate RT and set the native tonemap PS (with TONEMAP_PASS=1).
+         // All other state (VS, SRVs, CBs, samplers) stays as-is from the game.
+         ID3D11RenderTargetView* const hudless_rtv = game_device_data.output_hdr_hudless_rtv.get();
+         native_device_context->OMSetRenderTargets(1, &hudless_rtv, nullptr);
+         native_device_context->PSSetShader(tm_ps_it->second.get(), nullptr, 0);
+
+         // Ensure Luma CBs are bound for the PS stage
+         if (!updated_cbuffers)
+         {
+            SetLumaConstantBuffers(native_device_context, cmd_list_data, device_data, reshade::api::shader_stage::pixel, LumaConstantBufferType::LumaSettings);
+            SetLumaConstantBuffers(native_device_context, cmd_list_data, device_data, reshade::api::shader_stage::pixel, LumaConstantBufferType::LumaData);
+            updated_cbuffers = true;
+         }
+
+         // Issue the game's original draw call with our tonemap PS
+         if (original_draw_dispatch_func)
+         {
+            (*original_draw_dispatch_func)();
+         }
+         else
+         {
+            native_device_context->DrawIndexed(3, 6, 0);
+         }
+
+         // ===== Pass 2: UI Composition to final RT =====
+         // Restore original RTV
+         ID3D11RenderTargetView* const* restored_rtvs = (ID3D11RenderTargetView**)std::addressof(original_rtvs[0]);
+         native_device_context->OMSetRenderTargets(D3D11_SIMULTANEOUS_RENDER_TARGET_COUNT, restored_rtvs, original_dsv.get());
+
+         // Rebind t1 (colorTex register) to the intermediate hudless SRV
+         ID3D11ShaderResourceView* const hudless_srv = game_device_data.output_hdr_hudless_srv.get();
+         native_device_context->PSSetShaderResources(1, 1, &hudless_srv);
+
+         // Set UI composition PS and Copy VS
+         native_device_context->PSSetShader(ui_ps_it->second.get(), nullptr, 0);
+         native_device_context->VSSetShader(copy_vs_it->second.get(), nullptr, 0);
+         native_device_context->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLESTRIP);
+
+         // Ensure Luma CBs are bound for the PS stage
+         if (!updated_cbuffers)
+         {
+            SetLumaConstantBuffers(native_device_context, cmd_list_data, device_data, reshade::api::shader_stage::pixel, LumaConstantBufferType::LumaSettings);
+            SetLumaConstantBuffers(native_device_context, cmd_list_data, device_data, reshade::api::shader_stage::pixel, LumaConstantBufferType::LumaData);
+            updated_cbuffers = true;
+         }
+
+         // Draw fullscreen quad
+         native_device_context->Draw(4, 0);
+
+         // Restore VS, PS, topology
+         native_device_context->VSSetShader(prev_vs.get(), nullptr, 0);
+         native_device_context->PSSetShader(prev_ps.get(), nullptr, 0);
+         native_device_context->IASetPrimitiveTopology(prev_topology);
+
+         // Restore original SRV on t1 (so we don't leave the intermediate bound)
+         com_ptr<ID3D11ShaderResourceView> original_color_srv;
+         // We don't have the original t1 cached, but it's no longer needed since post-processing is done.
+         // Just unbind to be safe.
+         ID3D11ShaderResourceView* null_srv = nullptr;
+         native_device_context->PSSetShaderResources(1, 1, &null_srv);
+
+#if DEVELOPMENT
+         {
+            const std::shared_lock lock_trace(s_mutex_trace);
+            if (trace_running)
+            {
+               const std::unique_lock lock_trace_2(cmd_list_data.mutex_trace);
+               TraceDrawCallData trace_draw_call_data;
+               trace_draw_call_data.type = TraceDrawCallData::TraceDrawCallType::Custom;
+               trace_draw_call_data.command_list = native_device_context;
+               trace_draw_call_data.custom_name = "Output HDR Two-Pass (Tonemap + UI Composition)";
+               cmd_list_data.trace_draw_calls_data.push_back(trace_draw_call_data);
+            }
+         }
+#endif
+
+         return DrawOrDispatchOverrideType::Replaced;
+      }
+
+      // ============================================================================
+      // Output SDR two-pass split: tonemap to intermediate, then composite UI
+      // ============================================================================
+      if (is_tonemapping_sdr)
+      {
+         // Look up UI composition and tonemap native PS for the current SDR permutation
+         uint32_t current_ps_hash = static_cast<uint32_t>(original_shader_hashes.pixel_shaders[0]);
+         auto ui_key_it = output_sdr_ui_shader_keys.find(current_ps_hash);
+         auto tm_key_it = output_sdr_tonemap_shader_keys.find(current_ps_hash);
+         if (ui_key_it == output_sdr_ui_shader_keys.end() || tm_key_it == output_sdr_tonemap_shader_keys.end())
+         {
+            // Unknown permutation — fall through to single-pass
+            return DrawOrDispatchOverrideType::None;
+         }
+
+         auto ui_ps_it = device_data.native_pixel_shaders.find(ui_key_it->second);
+         auto tm_ps_it = device_data.native_pixel_shaders.find(tm_key_it->second);
+         auto copy_vs_it = device_data.native_vertex_shaders.find(CompileTimeStringHash("Copy VS"));
+         if (ui_ps_it == device_data.native_pixel_shaders.end() || !ui_ps_it->second.get()
+             || tm_ps_it == device_data.native_pixel_shaders.end() || !tm_ps_it->second.get()
+             || copy_vs_it == device_data.native_vertex_shaders.end() || !copy_vs_it->second.get())
+         {
+            // Native shaders not compiled yet — fall through to single-pass
+            return DrawOrDispatchOverrideType::None;
+         }
+
+         // Get the game's current RTV to determine dimensions and to restore later
+         com_ptr<ID3D11RenderTargetView> original_rtvs[D3D11_SIMULTANEOUS_RENDER_TARGET_COUNT];
+         com_ptr<ID3D11DepthStencilView> original_dsv;
+         native_device_context->OMGetRenderTargets(D3D11_SIMULTANEOUS_RENDER_TARGET_COUNT, &original_rtvs[0], &original_dsv);
+
+         if (!original_rtvs[0].get())
+         {
+            return DrawOrDispatchOverrideType::None;
+         }
+
+         // Get render target dimensions
+         com_ptr<ID3D11Resource> rtv_resource;
+         original_rtvs[0]->GetResource(&rtv_resource);
+         com_ptr<ID3D11Texture2D> rtv_texture;
+         rtv_resource->QueryInterface(&rtv_texture);
+         D3D11_TEXTURE2D_DESC rtv_desc;
+         rtv_texture->GetDesc(&rtv_desc);
+
+         // Create/recreate intermediate hudless RT if dimensions changed
+         if (!game_device_data.output_sdr_hudless_texture.get()
+             || game_device_data.output_sdr_hudless_width != rtv_desc.Width
+             || game_device_data.output_sdr_hudless_height != rtv_desc.Height)
+         {
+            game_device_data.CleanOutputSDRHudlessResources();
+
+            D3D11_TEXTURE2D_DESC desc = {};
+            desc.Width = rtv_desc.Width;
+            desc.Height = rtv_desc.Height;
+            desc.MipLevels = 1;
+            desc.ArraySize = 1;
+            desc.Format = DXGI_FORMAT_R10G10B10A2_UNORM;
+            desc.SampleDesc.Count = 1;
+            desc.Usage = D3D11_USAGE_DEFAULT;
+            desc.BindFlags = D3D11_BIND_RENDER_TARGET | D3D11_BIND_SHADER_RESOURCE;
+
+            HRESULT hr = native_device->CreateTexture2D(&desc, nullptr, &game_device_data.output_sdr_hudless_texture);
+            ASSERT_ONCE(SUCCEEDED(hr));
+            if (SUCCEEDED(hr))
+            {
+               hr = native_device->CreateRenderTargetView(game_device_data.output_sdr_hudless_texture.get(), nullptr, &game_device_data.output_sdr_hudless_rtv);
+               ASSERT_ONCE(SUCCEEDED(hr));
+               hr = native_device->CreateShaderResourceView(game_device_data.output_sdr_hudless_texture.get(), nullptr, &game_device_data.output_sdr_hudless_srv);
+               ASSERT_ONCE(SUCCEEDED(hr));
+            }
+
+            if (FAILED(hr))
+            {
+               game_device_data.CleanOutputSDRHudlessResources();
+               return DrawOrDispatchOverrideType::None;
+            }
+
+            game_device_data.output_sdr_hudless_width = rtv_desc.Width;
+            game_device_data.output_sdr_hudless_height = rtv_desc.Height;
+         }
+
+         // Cache GPU state
+         com_ptr<ID3D11VertexShader> prev_vs;
+         com_ptr<ID3D11PixelShader> prev_ps;
+         native_device_context->VSGetShader(&prev_vs, nullptr, nullptr);
+         native_device_context->PSGetShader(&prev_ps, nullptr, nullptr);
+         D3D11_PRIMITIVE_TOPOLOGY prev_topology;
+         native_device_context->IAGetPrimitiveTopology(&prev_topology);
+
+         // ===== Pass 1: Tonemap to intermediate (hudless) =====
+         ID3D11RenderTargetView* const hudless_rtv = game_device_data.output_sdr_hudless_rtv.get();
+         native_device_context->OMSetRenderTargets(1, &hudless_rtv, nullptr);
+         native_device_context->PSSetShader(tm_ps_it->second.get(), nullptr, 0);
+
+         // Ensure Luma CBs are bound for the PS stage
+         if (!updated_cbuffers)
+         {
+            SetLumaConstantBuffers(native_device_context, cmd_list_data, device_data, reshade::api::shader_stage::pixel, LumaConstantBufferType::LumaSettings);
+            SetLumaConstantBuffers(native_device_context, cmd_list_data, device_data, reshade::api::shader_stage::pixel, LumaConstantBufferType::LumaData);
+            updated_cbuffers = true;
+         }
+
+         // Issue the game's original draw call with our tonemap PS
+         if (original_draw_dispatch_func)
+         {
+            (*original_draw_dispatch_func)();
+         }
+         else
+         {
+            native_device_context->DrawIndexed(3, 6, 0);
+         }
+
+         // ===== Pass 2: UI Composition to final RT =====
+         ID3D11RenderTargetView* const* restored_rtvs = (ID3D11RenderTargetView**)std::addressof(original_rtvs[0]);
+         native_device_context->OMSetRenderTargets(D3D11_SIMULTANEOUS_RENDER_TARGET_COUNT, restored_rtvs, original_dsv.get());
+
+         // Rebind t1 (colorTex register) to the intermediate hudless SRV
+         ID3D11ShaderResourceView* const hudless_srv = game_device_data.output_sdr_hudless_srv.get();
+         native_device_context->PSSetShaderResources(1, 1, &hudless_srv);
+
+         // Set UI composition PS and Copy VS
+         native_device_context->PSSetShader(ui_ps_it->second.get(), nullptr, 0);
+         native_device_context->VSSetShader(copy_vs_it->second.get(), nullptr, 0);
+         native_device_context->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLESTRIP);
+
+         // Ensure Luma CBs are bound for the PS stage
+         if (!updated_cbuffers)
+         {
+            SetLumaConstantBuffers(native_device_context, cmd_list_data, device_data, reshade::api::shader_stage::pixel, LumaConstantBufferType::LumaSettings);
+            SetLumaConstantBuffers(native_device_context, cmd_list_data, device_data, reshade::api::shader_stage::pixel, LumaConstantBufferType::LumaData);
+            updated_cbuffers = true;
+         }
+
+         // Draw fullscreen quad
+         native_device_context->Draw(4, 0);
+
+         // Restore VS, PS, topology
+         native_device_context->VSSetShader(prev_vs.get(), nullptr, 0);
+         native_device_context->PSSetShader(prev_ps.get(), nullptr, 0);
+         native_device_context->IASetPrimitiveTopology(prev_topology);
+
+         // Unbind intermediate from t1
+         ID3D11ShaderResourceView* null_srv = nullptr;
+         native_device_context->PSSetShaderResources(1, 1, &null_srv);
+
+#if DEVELOPMENT
+         {
+            const std::shared_lock lock_trace(s_mutex_trace);
+            if (trace_running)
+            {
+               const std::unique_lock lock_trace_2(cmd_list_data.mutex_trace);
+               TraceDrawCallData trace_draw_call_data;
+               trace_draw_call_data.type = TraceDrawCallData::TraceDrawCallType::Custom;
+               trace_draw_call_data.command_list = native_device_context;
+               trace_draw_call_data.custom_name = "Output SDR Two-Pass (Tonemap + UI Composition)";
+               cmd_list_data.trace_draw_calls_data.push_back(trace_draw_call_data);
+            }
+         }
+#endif
+
+         return DrawOrDispatchOverrideType::Replaced;
+      }
+#endif // ENABLE_FRAMEGEN
+
 #if ENABLE_SR
       if (is_taa && device_data.sr_type != SR::Type::None && !device_data.sr_suppressed)
       {
@@ -1403,7 +1890,7 @@ public:
 
                bool reset_dlss = device_data.force_reset_sr || dlss_output_changed || game_device_data.camera_cut;
                device_data.force_reset_sr = false;
-
+               game_device_data.camera_cut = false;
                // Render resolution doesn't necessarily match with the source texture size, DRS draws on the top left of textures
                uint32_t render_width_dlss = 0;
                uint32_t render_height_dlss = 0;
@@ -1529,13 +2016,12 @@ public:
       //    ASSERT_ONCE(game_device_data.found_per_view_globals);
       // }
 
-      game_device_data.camera_cut = !device_data.taa_detected && !device_data.has_drawn_sr && !device_data.force_reset_sr;
+      game_device_data.camera_cut = (!game_device_data.has_drawn_taa && !device_data.has_drawn_sr && !device_data.force_reset_sr) || game_device_data.camera_cut;
       device_data.has_drawn_main_post_processing = false;
       game_device_data.has_drawn_upscaling = false;
       if (!game_device_data.has_drawn_taa)
       {
          device_data.sr_suppressed = false;
-         device_data.taa_detected = false;
       }
       game_device_data.has_drawn_taa = false;
       device_data.has_drawn_sr = false;
@@ -1812,7 +2298,7 @@ public:
             if (vert_fov < (10.f * (M_PI / 180.f)) || vert_fov > (170.f * (M_PI / 180.f)))
                vert_fov = 60.f * (M_PI / 180.f);
 
-            // game_device_data.camera_cut = float_data[140].y != 0.f;
+            game_device_data.camera_cut = float_data[140].y != 0.f;
          }
         
          device_data.cb_per_view_global_buffer_map_data = nullptr;
@@ -2003,11 +2489,15 @@ BOOL APIENTRY DllMain(HMODULE hModule, DWORD ul_reason_for_call, LPVOID lpReserv
       old_shader_file_names.emplace("Velocity_Flatten_0x4EB2EA5B.cs_5_0.hlsl");
       old_shader_file_names.emplace("Velocity_Gather_0xFEE03685.cs_5_0.hlsl");
 #endif
+
 #if !DEVELOPMENT
-      force_disable_display_composition = true; // Game already has an HDR toggle and we just inherit that
-#endif
+      swapchain_format_upgrade_type = TextureFormatUpgradesType::AllowedEnabled;
+      swapchain_upgrade_type = SwapchainUpgradeType::HDR10;
+#else
       swapchain_format_upgrade_type = TextureFormatUpgradesType::AllowedEnabled;
       swapchain_upgrade_type = SwapchainUpgradeType::scRGB;
+#endif
+
       texture_format_upgrades_type = TextureFormatUpgradesType::AllowedEnabled;
       // Texture upgrades (8 bit unorm and 11 bit float etc to 16 bit float)
       texture_upgrade_formats = {
@@ -2045,6 +2535,48 @@ BOOL APIENTRY DllMain(HMODULE hModule, DWORD ul_reason_for_call, LPVOID lpReserv
       {
          shader_hashes_Output_HDR.pixel_shaders.emplace(std::stoul(output_hdr_shader_hash, nullptr, 16));
       }
+
+      // Build mapping from game PS hash to native UI composition shader key
+#if ENABLE_FRAMEGEN
+      output_hdr_ui_shader_keys[0x922A71D1] = CompileTimeStringHash("FF7R Output HDR UI 922A71D1");
+      output_hdr_ui_shader_keys[0xA8EB118F] = CompileTimeStringHash("FF7R Output HDR UI A8EB118F");
+      output_hdr_ui_shader_keys[0x3A4D858E] = CompileTimeStringHash("FF7R Output HDR UI 3A4D858E");
+      output_hdr_ui_shader_keys[0xD950DA01] = CompileTimeStringHash("FF7R Output HDR UI D950DA01");
+      output_hdr_ui_shader_keys[0x5CD12E67] = CompileTimeStringHash("FF7R Output HDR UI 5CD12E67");
+      output_hdr_ui_shader_keys[0x3B489929] = CompileTimeStringHash("FF7R Output HDR UI 3B489929");
+      output_hdr_ui_shader_keys[0x8D04181D] = CompileTimeStringHash("FF7R Output HDR UI 8D04181D");
+      output_hdr_ui_shader_keys[0x6846FF90] = CompileTimeStringHash("FF7R Output HDR UI 6846FF90");
+
+      // Build mapping from game PS hash to native tonemap shader key
+      output_hdr_tonemap_shader_keys[0x922A71D1] = CompileTimeStringHash("FF7R Output HDR TM 922A71D1");
+      output_hdr_tonemap_shader_keys[0xA8EB118F] = CompileTimeStringHash("FF7R Output HDR TM A8EB118F");
+      output_hdr_tonemap_shader_keys[0x3A4D858E] = CompileTimeStringHash("FF7R Output HDR TM 3A4D858E");
+      output_hdr_tonemap_shader_keys[0xD950DA01] = CompileTimeStringHash("FF7R Output HDR TM D950DA01");
+      output_hdr_tonemap_shader_keys[0x5CD12E67] = CompileTimeStringHash("FF7R Output HDR TM 5CD12E67");
+      output_hdr_tonemap_shader_keys[0x3B489929] = CompileTimeStringHash("FF7R Output HDR TM 3B489929");
+      output_hdr_tonemap_shader_keys[0x8D04181D] = CompileTimeStringHash("FF7R Output HDR TM 8D04181D");
+      output_hdr_tonemap_shader_keys[0x6846FF90] = CompileTimeStringHash("FF7R Output HDR TM 6846FF90");
+
+      // Build mapping from game PS hash to native SDR UI composition shader key
+      output_sdr_ui_shader_keys[0x506D5998] = CompileTimeStringHash("FF7R Output SDR UI 506D5998");
+      output_sdr_ui_shader_keys[0xF68D39B5] = CompileTimeStringHash("FF7R Output SDR UI F68D39B5");
+      output_sdr_ui_shader_keys[0xBBB9CE42] = CompileTimeStringHash("FF7R Output SDR UI BBB9CE42");
+      output_sdr_ui_shader_keys[0x51E2B894] = CompileTimeStringHash("FF7R Output SDR UI 51E2B894");
+      output_sdr_ui_shader_keys[0x803889E8] = CompileTimeStringHash("FF7R Output SDR UI 803889E8");
+      output_sdr_ui_shader_keys[0xD96EF76D] = CompileTimeStringHash("FF7R Output SDR UI D96EF76D");
+      output_sdr_ui_shader_keys[0x5C2D3A71] = CompileTimeStringHash("FF7R Output SDR UI 5C2D3A71");
+      output_sdr_ui_shader_keys[0x66162229] = CompileTimeStringHash("FF7R Output SDR UI 66162229");
+
+      // Build mapping from game PS hash to native SDR tonemap shader key
+      output_sdr_tonemap_shader_keys[0x506D5998] = CompileTimeStringHash("FF7R Output SDR TM 506D5998");
+      output_sdr_tonemap_shader_keys[0xF68D39B5] = CompileTimeStringHash("FF7R Output SDR TM F68D39B5");
+      output_sdr_tonemap_shader_keys[0xBBB9CE42] = CompileTimeStringHash("FF7R Output SDR TM BBB9CE42");
+      output_sdr_tonemap_shader_keys[0x51E2B894] = CompileTimeStringHash("FF7R Output SDR TM 51E2B894");
+      output_sdr_tonemap_shader_keys[0x803889E8] = CompileTimeStringHash("FF7R Output SDR TM 803889E8");
+      output_sdr_tonemap_shader_keys[0xD96EF76D] = CompileTimeStringHash("FF7R Output SDR TM D96EF76D");
+      output_sdr_tonemap_shader_keys[0x5C2D3A71] = CompileTimeStringHash("FF7R Output SDR TM 5C2D3A71");
+      output_sdr_tonemap_shader_keys[0x66162229] = CompileTimeStringHash("FF7R Output SDR TM 66162229");
+#endif // ENABLE_FRAMEGEN
       for (const auto& output_sdr_shader_hash : redirected_shader_hashes["Output_SDR"])
       {
          shader_hashes_Output_SDR.pixel_shaders.emplace(std::stoul(output_sdr_shader_hash, nullptr, 16));

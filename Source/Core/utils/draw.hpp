@@ -342,6 +342,10 @@ void AddTraceDrawCallData(std::vector<TraceDrawCallData>& trace_draw_calls_data,
 
    trace_draw_call_data.command_list = native_device_context;
 
+   // Query D3D11.1 context once for the whole function (used to retrieve CB partial-binding offsets)
+   com_ptr<ID3D11DeviceContext1> device_context_1;
+   native_device_context->QueryInterface(&device_context_1);
+
    // In case we redirected resource views (indirect texture upgrades), force print back the original one here,
    // the upgraded one will be visible in the lists anyway
    auto RedirectMirroredRVS = [&]<typename T>(T* ptr) -> T*
@@ -600,13 +604,20 @@ void AddTraceDrawCallData(std::vector<TraceDrawCallData>& trace_draw_calls_data,
          }
 
          com_ptr<ID3D11Buffer> cbs[D3D11_COMMONSHADER_CONSTANT_BUFFER_API_SLOT_COUNT];
-         native_device_context->PSGetConstantBuffers(0, D3D11_COMMONSHADER_CONSTANT_BUFFER_API_SLOT_COUNT, &cbs[0]);
+         UINT cbs_first_constant[D3D11_COMMONSHADER_CONSTANT_BUFFER_API_SLOT_COUNT] = {};
+         UINT cbs_num_constants[D3D11_COMMONSHADER_CONSTANT_BUFFER_API_SLOT_COUNT] = {};
+         if (device_context_1)
+            device_context_1->PSGetConstantBuffers1(0, D3D11_COMMONSHADER_CONSTANT_BUFFER_API_SLOT_COUNT, &cbs[0], cbs_first_constant, cbs_num_constants);
+         else
+            native_device_context->PSGetConstantBuffers(0, D3D11_COMMONSHADER_CONSTANT_BUFFER_API_SLOT_COUNT, &cbs[0]);
          for (UINT i = 0; i < D3D11_COMMONSHADER_CONSTANT_BUFFER_API_SLOT_COUNT; i++)
          {
             if ((cbs[i] != nullptr || (show_used_unbound_resources && cached_shader->cbs[i])) && (show_unused_bound_resources || cached_shader->cbs[i]))
             {
                trace_draw_call_data.cbs[i] = true;
                trace_draw_call_data.cb_hash[i] = std::to_string(std::hash<void*>{}(cbs[i].get()));
+               trace_draw_call_data.cb_first_constant[i] = cbs_first_constant[i];
+               trace_draw_call_data.cb_num_constants[i] = cbs_num_constants[i];
             }
          }
 
@@ -617,7 +628,7 @@ void AddTraceDrawCallData(std::vector<TraceDrawCallData>& trace_draw_calls_data,
             if ((sampler_states[i] != nullptr || (show_used_unbound_resources && cached_shader->samplers[i])) && (show_unused_bound_resources || cached_shader->samplers[i]))
             {
                D3D11_SAMPLER_DESC desc = {};
-               desc.Filter = D3D11_FILTER(-1);
+               desc.Filter = D3D11_FILTER(-1); // TODO: walk back to the source sampler instead of the one luma possibly replaced?
                if (sampler_states[i]) sampler_states[i]->GetDesc(&desc);
                trace_draw_call_data.samplers_filter[i] = desc.Filter;
                trace_draw_call_data.samplers_address_u[i] = desc.AddressU;
@@ -678,13 +689,20 @@ void AddTraceDrawCallData(std::vector<TraceDrawCallData>& trace_draw_calls_data,
          native_device_context->IAGetPrimitiveTopology(&trace_draw_call_data.primitive_topology);
 
          com_ptr<ID3D11Buffer> cbs[D3D11_COMMONSHADER_CONSTANT_BUFFER_API_SLOT_COUNT];
-         native_device_context->VSGetConstantBuffers(0, D3D11_COMMONSHADER_CONSTANT_BUFFER_API_SLOT_COUNT, &cbs[0]);
+         UINT cbs_first_constant[D3D11_COMMONSHADER_CONSTANT_BUFFER_API_SLOT_COUNT] = {};
+         UINT cbs_num_constants[D3D11_COMMONSHADER_CONSTANT_BUFFER_API_SLOT_COUNT] = {};
+         if (device_context_1)
+            device_context_1->VSGetConstantBuffers1(0, D3D11_COMMONSHADER_CONSTANT_BUFFER_API_SLOT_COUNT, &cbs[0], cbs_first_constant, cbs_num_constants);
+         else
+            native_device_context->VSGetConstantBuffers(0, D3D11_COMMONSHADER_CONSTANT_BUFFER_API_SLOT_COUNT, &cbs[0]);
          for (UINT i = 0; i < D3D11_COMMONSHADER_CONSTANT_BUFFER_API_SLOT_COUNT; i++)
          {
             if ((cbs[i] != nullptr || (show_used_unbound_resources && cached_shader->cbs[i])) && (show_unused_bound_resources || cached_shader->cbs[i]))
             {
                trace_draw_call_data.cbs[i] = true;
                trace_draw_call_data.cb_hash[i] = std::to_string(std::hash<void*>{}(cbs[i].get()));
+               trace_draw_call_data.cb_first_constant[i] = cbs_first_constant[i];
+               trace_draw_call_data.cb_num_constants[i] = cbs_num_constants[i];
             }
          }
 
@@ -755,13 +773,20 @@ void AddTraceDrawCallData(std::vector<TraceDrawCallData>& trace_draw_calls_data,
          trace_draw_call_data.draw_dispatch_data = draw_dispatch_data;
 
          com_ptr<ID3D11Buffer> cbs[D3D11_COMMONSHADER_CONSTANT_BUFFER_API_SLOT_COUNT];
-         native_device_context->CSGetConstantBuffers(0, D3D11_COMMONSHADER_CONSTANT_BUFFER_API_SLOT_COUNT, &cbs[0]);
+         UINT cbs_first_constant[D3D11_COMMONSHADER_CONSTANT_BUFFER_API_SLOT_COUNT] = {};
+         UINT cbs_num_constants[D3D11_COMMONSHADER_CONSTANT_BUFFER_API_SLOT_COUNT] = {};
+         if (device_context_1)
+            device_context_1->CSGetConstantBuffers1(0, D3D11_COMMONSHADER_CONSTANT_BUFFER_API_SLOT_COUNT, &cbs[0], cbs_first_constant, cbs_num_constants);
+         else
+            native_device_context->CSGetConstantBuffers(0, D3D11_COMMONSHADER_CONSTANT_BUFFER_API_SLOT_COUNT, &cbs[0]);
          for (UINT i = 0; i < D3D11_COMMONSHADER_CONSTANT_BUFFER_API_SLOT_COUNT; i++)
          {
             if ((cbs[i] != nullptr || (show_used_unbound_resources && cached_shader->cbs[i])) && (show_unused_bound_resources || cached_shader->cbs[i]))
             {
                trace_draw_call_data.cbs[i] = true;
                trace_draw_call_data.cb_hash[i] = std::to_string(std::hash<void*>{}(cbs[i].get()));
+               trace_draw_call_data.cb_first_constant[i] = cbs_first_constant[i];
+               trace_draw_call_data.cb_num_constants[i] = cbs_num_constants[i];
             }
          }
 

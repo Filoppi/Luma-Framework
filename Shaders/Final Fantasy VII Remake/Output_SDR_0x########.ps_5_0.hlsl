@@ -342,6 +342,7 @@ void main(
     float2 pixelPos = r1.xy;
     float2 uvCoord = r1.zw;
 
+#if !UI_COMPOSITION_PASS
     r2.xyz = colorTex.SampleLevel(colorSampler, uvCoord, 0).xyz;
     if (LumaData.GameData.DrewUpscaling && LumaSettings.GameSettings.can_sharpen != 0.f) {
       r2.xyz = RCAS(int2(v0.xy), 0, 0x7FFFFFFF, LumaSettings.GameSettings.custom_sharpness_strength, colorTex, dummyFloat2Texture, 1.f, true , float4(r2.xyz, 1.0f)).rgb;
@@ -449,10 +450,23 @@ void main(
 
 #if _506D5998
     float noise = SampleNoiseTexture(r3.xyz, v0);
-    r0.w = noise;
-    r3.xyz = r2.xyz * r0.www;
-    // r0.w = 1;
+    r2.xyz = r2.xyz * noise; // pre-apply noise to tonemapped result
+    r3.xyz = r2.xyz;
+    r0.w = 1;
 #endif
+
+#if TONEMAP_PASS
+    // --- Pass 1 output (hudless tonemapped SDR, linear [0,1]) ---
+    o0.xyz = r2.xyz;
+    o0.w = 1;
+    return;
+#endif // TONEMAP_PASS
+#else // UI_COMPOSITION_PASS
+    // --- Pass 2 input: read hudless tonemapped from colorTex (rebound by C++ to intermediate RT) ---
+    r2.xyz = colorTex.SampleLevel(colorSampler, uvCoord, 0).xyz;
+    r3.xyz = r2.xyz;
+    r0.w = 1;
+#endif // !UI_COMPOSITION_PASS
 
     r1.xyzw = uiTex.SampleLevel(uiSampler, pixelPos, 0).xyzw;
     r2.w = dot(r3.xyz, float3(0.212599993,0.715200007,0.0722000003));
@@ -490,7 +504,7 @@ void main(
       color.xyz = saturate(r0.yzw ? r2.xyz : r1.xyz);
     }
 
-#if EARLY_DISPLAY_ENCODING
+#if DEVELOPMENT && EARLY_DISPLAY_ENCODING
     color.xyz = gamma_to_linear(color.xyz, GCT_MIRROR, 2.2f);
 #endif
 

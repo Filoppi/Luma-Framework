@@ -52,7 +52,7 @@ void main(uint2 tid : SV_DispatchThreadID, uint3 gid : SV_GroupId, uint gix : SV
 	float4 beforeRain = g_outputColor[tid];
 	float4 afterRain = g_sourceColor.Load(int3(tid.xy, 0));
 	
-	beforeRain = max(g_srColor[tid] + (afterRain - beforeRain), (float4)0.0);
+	beforeRain = g_srColor[tid] + max(afterRain - beforeRain, (float4)0.0);
 	
 	g_outputColor[tid] = float4(beforeRain.xyz, afterRain.w);
 }

@@ -813,7 +813,7 @@ namespace Display
 		DISPLAYCONFIG_GET_ADVANCED_COLOR_INFO_2 colorInfo2{};
 		if (GetColorInfo2(hwnd, colorInfo2))
 		{
-			if (colorInfo2.highDynamicRangeSupported && (!enabled || !colorInfo2.advancedColorLimitedByPolicy) && (colorInfo2.activeColorMode != DISPLAYCONFIG_ADVANCED_COLOR_MODE_HDR) != enabled)
+			if (colorInfo2.highDynamicRangeSupported && (!enabled || !colorInfo2.advancedColorLimitedByPolicy) && (colorInfo2.activeColorMode == DISPLAYCONFIG_ADVANCED_COLOR_MODE_HDR) != enabled)
 			{
 				DISPLAYCONFIG_SET_HDR_STATE setHDRState{};
 				setHDRState.header.type = DISPLAYCONFIG_DEVICE_INFO_SET_HDR_STATE;

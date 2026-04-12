@@ -38,8 +38,10 @@ cbuffer Viewport : register(b0)
 }
 
 Texture2D<float4> DeferredFXAntialias__GBufferVelocityTexture__TexObj__ : register(t0);
+SamplerState Viewport__DepthVPSampler__SampObj___s : register(s0);
 Texture2D<float4> Viewport__DepthVPSampler__TexObj__ : register(t1);
 RWTexture2D<float2> g_updatedVelocityTex : register(u0);
+RWTexture2D<float> g_unjitteredDepthTex : register(u1);
 
 // Objects to be excluded from certain velocity effects signal it by adding a large offset to the velocity red channel.
 #define VELOCITYBUFFER_MASK_OFFSET_RED      2.f
@@ -63,11 +65,13 @@ float3 UVToView(float2 uv, uint2 xy)
     float4 viewPos = mul(clipPos, _InvProjectionMatrix);
     
     return viewPos.xyz / viewPos.w;
+
 }
 
 // Calculate the pixel's UV-space movement since last frame due to camera movement, and its view-space depth
 void CalculateCameraBasedVelocity_ViewSpaceDepth(out float2 velocity, in const float2 uv, in const uint2 xy)
 {
+/*
     float3 eyePos   = UVToView(uv, xy);
 
     float3 worldPos =  mul( float4(eyePos.xy,eyePos.z,1) , _InvViewMatrix);
@@ -79,6 +83,38 @@ void CalculateCameraBasedVelocity_ViewSpaceDepth(out float2 velocity, in const f
     float2 prevUV = prevProj.xy * float2(0.5f,-0.5f) + 0.5f;
  
     velocity = (uv - prevUV);
+*/
+	float depth = Viewport__DepthVPSampler__TexObj__.Load(int3((int2)xy, 0)).x;
+	float4 depth4 = mul( float4(0.0f, 0.0f, depth, 1.0f), _InvProjectionMatrix );
+	float worldDepth = -depth4.z / depth4.w;
+
+	float2 uv_color = (xy + 0.5) * _ViewportSize.zw;
+	float4 positionCS;
+	positionCS.xy = (uv_color - 0.5) * float2(2.0, -2.0);
+	positionCS.xy *= _CameraNearPlaneSize.xy * 0.5f;
+	positionCS.z = -_CameraDistances.x;
+	positionCS.w = 1.0f;
+	
+	float3 currentPosCS;
+	currentPosCS.xyz = positionCS.xyz;
+	currentPosCS.xyz *= -worldDepth / currentPosCS.z;
+	
+	float4 projectedPosition = mul( float4(currentPosCS, 1.0), _ProjectionMatrix );
+	
+    float3 worldPos =  mul( float4(currentPosCS.xy,currentPosCS.z,1) , _InvViewMatrix);
+    float4 previousPos2D = mul( float4(currentPosCS,1) , LumaData.GameData.CameraSpaceToPreviousProjectedSpace);
+	//float4 previousPos2D = mul( float4(worldPos - _UncompressDepthWeights_ShadowProjDepthMinValue.xyz,1) , _PreviousViewProjectionMatrix);
+	previousPos2D /= max( previousPos2D.w, 0.00001f );
+	
+	float3 currentPos2D = projectedPosition.xyz / projectedPosition.w;
+	
+	float3 velocityVector = 0;
+	
+	velocityVector = currentPos2D.xyz - previousPos2D.xyz;
+	velocityVector.xy /= 2.0;
+	velocityVector.y = -velocityVector.y;
+	
+    velocity = velocityVector.xy;
 }
 
 [numthreads(8, 8, 1)]
@@ -93,7 +129,7 @@ void main(uint2 tid : SV_DispatchThreadID, uint3 gid : SV_GroupId, uint gix : SV
 	float2 pixelUV = ((float2)tid + 0.5f) * _ViewportSize.zw;
 	CalculateCameraBasedVelocity_ViewSpaceDepth(velocity, pixelUV, tid);
 	
-	float2 jitterDelta = LumaData.GameData.CurrJitters;
+	float2 jitterDelta = LumaData.GameData.CurrJitters - LumaData.GameData.PrevJitters;
 	
 	float4 gBufferVelocity = DeferredFXAntialias__GBufferVelocityTexture__TexObj__[tid];
 	
@@ -113,10 +149,14 @@ void main(uint2 tid : SV_DispatchThreadID, uint3 gid : SV_GroupId, uint gix : SV
         {
 	        velocity.xy = gBufferVelocity.xy;
         }
-	  //velocity += jitterDelta;
 	}
 
 	velocity += jitterDelta;
 
-	g_updatedVelocityTex[tid] = velocity;
+	g_updatedVelocityTex[tid] = velocity;// * 1000.f;
+	
+	float4 depth4 = Viewport__DepthVPSampler__TexObj__.GatherRed(Viewport__DepthVPSampler__SampObj___s, pixelUV.xy - LumaData.GameData.CurrJitters, int2(0, 0));
+	float minDepth = min(min(depth4.x, depth4.y), min(depth4.z, depth4.w));
+	
+	g_unjitteredDepthTex[tid] = minDepth;//Viewport__DepthVPSampler__TexObj__.SampleLevel(Viewport__DepthVPSampler__SampObj___s, pixelUV.xy - LumaData.GameData.CurrJitters, 0).x;
 }

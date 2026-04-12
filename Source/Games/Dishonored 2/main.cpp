@@ -1,6 +1,8 @@
 #define GAME_DISHONORED_2 1
 
 #define ENABLE_NGX 1
+#define ENABLE_FIDELITY_SK 1
+
 // Hangs on boot
 #define DISABLE_AUTO_DEBUGGER
 // Previously disabled as it made boot extremely slow, it should now be fine as we optimized the code
@@ -25,7 +27,7 @@ struct CBPerViewGlobals
    Matrix44F cb_previousprojectionmatrix;
    float4 cb_mousecursorposition;
    float4 cb_mousebuttonsdown;
-   // xy and the jitter offsets in uv space (y is flipped), zw might be the same in another space or the ones from the previous frame
+   // Jitters in UV space (not Halton, R2, or Sobol. Custom sequence?). xy current frame, zw previous frame.
    float4 cb_jittervectors;
    Matrix44F cb_inverseviewprojectionmatrix;
    Matrix44F cb_inverseviewmatrix;
@@ -99,6 +101,11 @@ struct GameDeviceDataDishonored2 final : public GameDeviceData
    com_ptr<ID3D11Resource> sr_motion_vectors;
    //com_ptr<ID3D11Texture2D> sr_output_color_2; //TODOFT: delete this and related code
 
+   // We are getting these from the game's TAA.
+   ComPtr<ID3D11Buffer> cb_taa_b1;
+   ComPtr<ID3D11Buffer> cb_taa_b2;
+   ComPtr<ID3D11ShaderResourceView> srv_ro_postfx_luminance_buffautoexposure;
+
    // Game state
    com_ptr<ID3D11Resource> depth_buffer;
 
@@ -146,12 +153,15 @@ public:
 
       std::vector<ShaderDefineData> game_shader_defines_data = {
          { "XE_GTAO_QUALITY", '2', true, false, "0 - Low\n1 - Medium\n2 - High\n3 - Very High\n4 - Ultra", 4 },
+         { "DISABLE_LENS_DISTORTION", '0', true, false, "Disable lens distortion while running or ducked.", 1 }
       };
 
       shader_defines_data.append_range(game_shader_defines_data);
 
       native_shaders_definitions.emplace(CompileTimeStringHash("DS2 XeGTAO Prefilter Depths CS"), ShaderDefinition{ "Luma_XeGTAO", reshade::api::pipeline_subobject_type::compute_shader, nullptr, "prefilter_depths16x16_cs" });
       native_shaders_definitions.emplace(CompileTimeStringHash("DS2 XeGTAO Main Pass PS"), ShaderDefinition{ "Luma_XeGTAO", reshade::api::pipeline_subobject_type::pixel_shader, nullptr, "main_pass_ps" });
+      native_shaders_definitions.emplace(CompileTimeStringHash("DS2 Pre DLSS CS"), ShaderDefinition{ "Luma_PreDLSS_CS", reshade::api::pipeline_subobject_type::compute_shader });
+      native_shaders_definitions.emplace(CompileTimeStringHash("DS2 Post DLSS CS"), ShaderDefinition{ "Luma_PostDLSS_CS", reshade::api::pipeline_subobject_type::compute_shader });
    }
 
    // This needs to be overridden with your own "GameDeviceData" sub-class (destruction is automatically handled)
@@ -561,6 +571,13 @@ public:
       // SR/TAA
       if (device_data.sr_type != SR::Type::None && !device_data.sr_suppressed && original_shader_hashes.Contains(shader_hashes_TAA))
       {
+         native_device_context->CSGetConstantBuffers(1, 1, game_device_data.cb_taa_b1.put());
+         native_device_context->CSGetConstantBuffers(2, 1, game_device_data.cb_taa_b2.put());
+         native_device_context->CSGetShaderResources(3, 1, game_device_data.srv_ro_postfx_luminance_buffautoexposure.put());
+
+         // TODO: Clean up all this, I think game will always use deferred rendering, so most of this is not needed.
+         assert(native_device_context->GetType() == D3D11_DEVICE_CONTEXT_DEFERRED);
+
          com_ptr<ID3D11ShaderResourceView> srvs[2]; // TODO: rename
          // 1 motion vectors
          // 2 color source (pre TAA, jittered)
@@ -611,7 +628,7 @@ public:
                settings_data.render_height = dlss_render_resolution[1];
                settings_data.dynamic_resolution = game_device_data.prey_drs_detected;
                settings_data.hdr = true; // The "HDR" flag in DLSS SR actually means whether the color is in linear space or "sRGB gamma" (apparently not 2.2) (SDR) space, colors beyond 0-1 don't seem to be clipped either way
-               settings_data.inverted_depth = false;
+               settings_data.inverted_depth = true;
                settings_data.mvs_jittered = false;
                settings_data.render_preset = dlss_render_preset;
                sr_implementations[device_data.sr_type]->UpdateSettings(sr_instance_data, native_device_context, settings_data);
@@ -701,8 +718,8 @@ public:
                   // Theoretically knowing the average exposure of the frame would still be beneficial to it (somehow) so maybe we could simply let the auto exposure in,
                   D3D11_SUBRESOURCE_DATA exposure_texture_data;
                   exposure_texture_data.pSysMem = &sr_scene_exposure; // This needs to be "static" data in case the texture initialization was somehow delayed and read the data after the stack destroyed it
-                  exposure_texture_data.SysMemPitch = 32;
-                  exposure_texture_data.SysMemSlicePitch = 32;
+                  exposure_texture_data.SysMemPitch = sizeof(float);
+                  exposure_texture_data.SysMemSlicePitch = sizeof(float);
 
                   device_data.sr_exposure = nullptr; // Make sure we discard the previous one
                   hr = native_device->CreateTexture2D(&exposure_texture_desc, &exposure_texture_data, &device_data.sr_exposure);
@@ -929,6 +946,32 @@ public:
             ASSERT_ONCE(sr_instance_data);
 
             std::array<uint32_t, 2> dlss_render_resolution = FindClosestIntegerResolutionForAspectRatio((double)device_data.output_resolution.x * (double)device_data.sr_render_resolution_scale, (double)device_data.output_resolution.y * (double)device_data.sr_render_resolution_scale, (double)device_data.output_resolution.x / (double)device_data.output_resolution.y);
+            uint32_t render_width_dlss = std::lrintf(device_data.render_resolution.x);
+            uint32_t render_height_dlss = std::lrintf(device_data.render_resolution.y);
+
+            // PreDLSS pass
+		    //
+            // The game does some HDR compression/decompression before and after the TAA,
+            // so we replicate that here in PreDLSS pass and PostDLSS pass (immediately after DLSS draw).
+            //
+
+		    // Create UAV.
+            ComPtr<ID3D11Device> native_device;
+            native_device_context->GetDevice(native_device.put());
+            ComPtr<ID3D11UnorderedAccessView> uav;
+		    ensure(native_device->CreateUnorderedAccessView(game_device_data.sr_source_color.get(), nullptr, uav.put()), >= 0);
+
+		    // Bindings.
+		    native_device_context->CSSetUnorderedAccessViews(0, 1, &uav, nullptr);
+		    native_device_context->CSSetShader(device_data.native_compute_shaders.at(CompileTimeStringHash("DS2 Pre DLSS CS")).get(), nullptr, 0);
+		    native_device_context->CSSetConstantBuffers(1, 1, &game_device_data.cb_taa_b1);
+		    native_device_context->CSSetConstantBuffers(2, 1, &game_device_data.cb_taa_b2);
+		    native_device_context->CSSetShaderResources(0, 1, &game_device_data.srv_ro_postfx_luminance_buffautoexposure);
+
+		    native_device_context->Dispatch((render_width_dlss + 8 - 1) / 8, (render_height_dlss + 8 - 1) / 8, 1);
+		    
+		    //
+
             SR::SettingsData settings_data;
             settings_data.output_width = device_data.output_resolution.x;
             settings_data.output_height = device_data.output_resolution.y;
@@ -936,16 +979,20 @@ public:
             settings_data.render_height = dlss_render_resolution[1];
             settings_data.dynamic_resolution = game_device_data.prey_drs_detected;
             settings_data.hdr = true; // The "HDR" flag in DLSS SR actually means whether the color is in linear space or "sRGB gamma" (apparently not 2.2) (SDR) space, colors beyond 0-1 don't seem to be clipped either way
-            settings_data.inverted_depth = false;
+            settings_data.inverted_depth = true;
             settings_data.mvs_jittered = false;
             settings_data.render_preset = dlss_render_preset;
+            settings_data.auto_exposure = true;
+
+            // MVs are in UV space so we need to scale them to screen space for DLSS,
+            // aslo we need to flip sign on both for DLSS.
+            settings_data.mvs_x_scale = -(float)render_width_dlss;
+            settings_data.mvs_y_scale = -(float)render_height_dlss;
+
             sr_implementations[device_data.sr_type]->UpdateSettings(sr_instance_data, native_device_context.get(), settings_data);
 
             bool reset_dlss = device_data.force_reset_sr;
             device_data.force_reset_sr = false;
-
-            uint32_t render_width_dlss = std::lrintf(device_data.render_resolution.x);
-            uint32_t render_height_dlss = std::lrintf(device_data.render_resolution.y);
 
             float dlss_pre_exposure = 1.0;
             SR::SuperResolutionImpl::DrawData draw_data;
@@ -953,16 +1000,40 @@ public:
             draw_data.output_color = device_data.sr_output_color.get();
             draw_data.motion_vectors = game_device_data.sr_motion_vectors.get();
             draw_data.depth_buffer = game_device_data.depth_buffer.get();
-            draw_data.exposure = device_data.sr_exposure.get();
+            draw_data.exposure = nullptr;
             draw_data.pre_exposure = dlss_pre_exposure;
-            draw_data.jitter_x = projection_jitters.x;
-            draw_data.jitter_y = projection_jitters.y;
+
+            // Jitters are in UV offsets so we need to scale them to pixel offsets for DLSS.
+            draw_data.jitter_x = cb_per_view_global.cb_projectionmatrix.m20 * (float)render_width_dlss * -0.5;
+            draw_data.jitter_y = cb_per_view_global.cb_projectionmatrix.m21 * (float)render_height_dlss * 0.5;
+
             draw_data.reset = reset_dlss;
             draw_data.render_width = render_width_dlss;
             draw_data.render_height = render_height_dlss;
+            draw_data.vert_fov = std::atan(1.0f / projection_matrix.m11) * 2.0;
+            draw_data.near_plane = cb_per_view_global.cb_globalviewinfos.z;
+            draw_data.far_plane = cb_per_view_global.cb_globalviewinfos.w;
+            draw_data.frame_index = cb_luma_global_settings.FrameIndex;
 
             bool dlss_succeeded = sr_implementations[device_data.sr_type]->Draw(sr_instance_data, native_device_context.get(), draw_data);
             ASSERT_ONCE(dlss_succeeded); // We can't restore the original TAA pass at this point (well, we could, but it's pointless, we'll just skip one frame) // TODO: copy the resource instead?
+
+            // PostDLSS pass
+		    //
+
+		    // Create UAV.
+		    ensure(native_device->CreateUnorderedAccessView(device_data.sr_output_color.get(), nullptr, uav.put()), >= 0);
+
+		    // Bindings.
+		    native_device_context->CSSetUnorderedAccessViews(0, 1, &uav, nullptr);
+		    native_device_context->CSSetShader(device_data.native_compute_shaders.at(CompileTimeStringHash("DS2 Post DLSS CS")).get(), nullptr, 0);
+		    native_device_context->CSSetConstantBuffers(1, 1, &game_device_data.cb_taa_b1);
+		    native_device_context->CSSetConstantBuffers(2, 1, &game_device_data.cb_taa_b2);
+		    native_device_context->CSSetShaderResources(0, 1, &game_device_data.srv_ro_postfx_luminance_buffautoexposure);
+
+		    native_device_context->Dispatch((device_data.output_resolution.x + 8 - 1) / 8, (device_data.output_resolution.y + 8 - 1) / 8, 1);
+		    
+		    //
 
             game_device_data.sr_source_color = nullptr;
             game_device_data.sr_motion_vectors = nullptr;

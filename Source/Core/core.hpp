@@ -688,6 +688,9 @@ namespace
    WNDPROC game_window_custom_proc = nullptr;
 #endif
    thread_local bool last_swapchain_linear_space = false;
+#if GAME_FF7_REMAKE
+   thread_local reshade::api::format last_swapchain_format = reshade::api::format::r10g10b10a2_unorm;
+#endif
    thread_local bool waiting_on_upgraded_resource_init = false;
    thread_local reshade::api::resource_desc upgraded_resource_init_desc = {};
    thread_local void* upgraded_resource_init_data = {};
@@ -2544,12 +2547,12 @@ namespace
    // Prevent games from pausing when alt tabbing out of it (e.g. when editing shaders) by silencing focus loss events
    LRESULT WINAPI CustomWndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam)
    {
-      if (lParam == WM_KILLFOCUS)
+      if (msg == WM_KILLFOCUS)
       {
          // Lost keyboard focus
          return 0; // block it
       }
-      else if (lParam == WM_ACTIVATE)
+      else if (msg == WM_ACTIVATE)
       {
          if (wParam == WA_INACTIVE)
          {
@@ -2642,7 +2645,9 @@ namespace
 
       // Note that occasionally this breaks after resizing the swapchain, because some games resize the swapchain maintaining whatever format it had before
       last_swapchain_linear_space = desc.back_buffer.texture.format == reshade::api::format::r8g8b8a8_unorm_srgb || desc.back_buffer.texture.format == reshade::api::format::b8g8r8a8_unorm_srgb || desc.back_buffer.texture.format == reshade::api::format::r16g16b16a16_float;
-
+#if GAME_FF7_REMAKE
+      last_swapchain_format = desc.back_buffer.texture.format;
+#endif
       if (swapchain_format_upgrade_type == TextureFormatUpgradesType::AllowedEnabled && swapchain_upgrade_type > SwapchainUpgradeType::None)
       {
          ASSERT_ONCE(desc.back_buffer.texture.format == reshade::api::format::r10g10b10a2_unorm || desc.back_buffer.texture.format == reshade::api::format::r8g8b8a8_unorm || desc.back_buffer.texture.format == reshade::api::format::r8g8b8a8_unorm_srgb || desc.back_buffer.texture.format == reshade::api::format::b8g8r8a8_unorm || desc.back_buffer.texture.format == reshade::api::format::b8g8r8a8_unorm_srgb || desc.back_buffer.texture.format == reshade::api::format::r16g16b16a16_float); // Just a bunch of formats we encountered and we are sure we can upgrade (or that have already been upgraded)
@@ -2767,7 +2772,7 @@ namespace
          if (window_changed)
          {
             game_window = swapchain_desc.OutputWindow; // This shouldn't really need any thread safety protection
-#if (DEVELOPMENT && !GAME_WATCH_DOGS) //TODOFT: test/fix/finish
+#if DEVELOPMENT && !defined(DISABLE_FOCUS_LOSS_SUPPRESSION) //TODOFT: test/fix/finish
             if (game_window)
             {
 #if 1
@@ -2838,10 +2843,28 @@ namespace
          bool set_color_space = false;
          if (swapchain_format_upgrade_type == TextureFormatUpgradesType::AllowedEnabled && swapchain_upgrade_type > SwapchainUpgradeType::None)
          {
+#if !GAME_FF7_REMAKE
             if (swapchain_upgrade_type == SwapchainUpgradeType::scRGB)
                color_space = DXGI_COLOR_SPACE_RGB_FULL_G10_NONE_P709;
             else         
                color_space = DXGI_COLOR_SPACE_RGB_FULL_G2084_NONE_P2020;
+#else // FF7 Remake 
+            if (swapchain_upgrade_type == SwapchainUpgradeType::scRGB)
+            {
+               color_space = DXGI_COLOR_SPACE_RGB_FULL_G10_NONE_P709;
+            }
+            else
+            {
+               if (last_swapchain_format == reshade::api::format::r16g16b16a16_float)
+               {
+                  color_space = DXGI_COLOR_SPACE_RGB_FULL_G2084_NONE_P2020;
+               }
+               else
+               {
+                  color_space = DXGI_COLOR_SPACE_RGB_FULL_G22_NONE_P709;
+               }
+            }
+#endif  
             set_color_space = true;
          }
          // Note: if we are not upgrading the swapchain, we don't know the original color space,
@@ -2856,8 +2879,8 @@ namespace
 #if 0 // 10 bit could be SDR or HDR, it's impossible to know for sure... For now, assume SDR given that Luma could always upgrade the swapchain to HDR10 anyway
             else if (swapchain_desc.BufferDesc.Format == DXGI_FORMAT_R10G10B10A2_UNORM)
             {
-               color_space = DXGI_COLOR_SPACE_RGB_FULL_G2084_NONE_P2020;
-            }
+                      color_space = DXGI_COLOR_SPACE_RGB_FULL_G2084_NONE_P2020;
+                   }
 #endif
             set_color_space = false;
          }
@@ -6204,17 +6227,28 @@ namespace
          if (track_buffer_pipeline_target_instance == -1 || local_track_buffer_pipeline_instance == track_buffer_pipeline_target_instance)
          {
             com_ptr<ID3D11Buffer> cb;
+            UINT cb_first = 0, cb_num = 0;
+            com_ptr<ID3D11DeviceContext1> native_device_context_1;
+            native_device_context->QueryInterface(&native_device_context_1);
             if (track_buffer_pipeline_ps)
             {
-               native_device_context->PSGetConstantBuffers(track_buffer_index, 1, &cb);
+               if (native_device_context_1)
+                  native_device_context_1->PSGetConstantBuffers1(track_buffer_index, 1, &cb, &cb_first, &cb_num);
+               else
+                  native_device_context->PSGetConstantBuffers(track_buffer_index, 1, &cb);
             }
             else if (track_buffer_pipeline_vs)
             {
-               native_device_context->VSGetConstantBuffers(track_buffer_index, 1, &cb);
+               if (native_device_context_1)
+                  native_device_context_1->VSGetConstantBuffers1(track_buffer_index, 1, &cb, &cb_first, &cb_num);
+               else
+                  native_device_context->VSGetConstantBuffers(track_buffer_index, 1, &cb);
             }
-            // Copy the buffer in our data
-            CopyBuffer(cb, native_device_context, device_data.track_buffer_data.data);
+            // Copy the buffer in our data, and make a copy if necessary, if we are in a deferred context
+            device_data.track_buffer_data.data_valid = CopyBuffer(cb, native_device_context, device_data.track_buffer_data.data, device_data.track_buffer_data.cb);
             device_data.track_buffer_data.hash = std::to_string(std::hash<void*>{}(cb.get()));
+            device_data.track_buffer_data.first_constant = cb_first;
+            device_data.track_buffer_data.num_constants = cb_num;
          }
       }
       if (cancelled_or_replaced)
@@ -6361,17 +6395,28 @@ namespace
          if (track_buffer_pipeline_target_instance == -1 || local_track_buffer_pipeline_instance == track_buffer_pipeline_target_instance)
          {
             com_ptr<ID3D11Buffer> cb;
+            UINT cb_first = 0, cb_num = 0;
+            com_ptr<ID3D11DeviceContext1> native_device_context_1;
+            native_device_context->QueryInterface(&native_device_context_1);
             if (track_buffer_pipeline_ps)
             {
-               native_device_context->PSGetConstantBuffers(track_buffer_index, 1, &cb);
+               if (native_device_context_1)
+                  native_device_context_1->PSGetConstantBuffers1(track_buffer_index, 1, &cb, &cb_first, &cb_num);
+               else
+                  native_device_context->PSGetConstantBuffers(track_buffer_index, 1, &cb);
             }
             else if (track_buffer_pipeline_vs)
             {
-               native_device_context->VSGetConstantBuffers(track_buffer_index, 1, &cb);
+               if (native_device_context_1)
+                  native_device_context_1->VSGetConstantBuffers1(track_buffer_index, 1, &cb, &cb_first, &cb_num);
+               else
+                  native_device_context->VSGetConstantBuffers(track_buffer_index, 1, &cb);
             }
-            // Copy the buffer in our data
-            CopyBuffer(cb, native_device_context, device_data.track_buffer_data.data);
+            // Copy the buffer in our data, and make a copy if necessary, if we are in a deferred context
+            device_data.track_buffer_data.data_valid = CopyBuffer(cb, native_device_context, device_data.track_buffer_data.data, device_data.track_buffer_data.cb);
             device_data.track_buffer_data.hash = std::to_string(std::hash<void*>{}(cb.get()));
+            device_data.track_buffer_data.first_constant = cb_first;
+            device_data.track_buffer_data.num_constants = cb_num;
          }
       }
       if (cancelled_or_replaced)
@@ -6477,10 +6522,18 @@ namespace
          if (track_buffer_pipeline_target_instance == -1 || local_track_buffer_pipeline_instance == track_buffer_pipeline_target_instance)
          {
             com_ptr<ID3D11Buffer> cb;
-            native_device_context->CSGetConstantBuffers(track_buffer_index, 1, &cb);
-            // Copy the buffer in our data
-            CopyBuffer(cb, native_device_context, device_data.track_buffer_data.data);
+            UINT cb_first = 0, cb_num = 0;
+            com_ptr<ID3D11DeviceContext1> native_device_context_1;
+            native_device_context->QueryInterface(&native_device_context_1);
+            if (native_device_context_1)
+               native_device_context_1->CSGetConstantBuffers1(track_buffer_index, 1, &cb, &cb_first, &cb_num);
+            else
+               native_device_context->CSGetConstantBuffers(track_buffer_index, 1, &cb);
+            // Copy the buffer in our data, and make a copy if necessary, if we are in a deferred context
+            device_data.track_buffer_data.data_valid = CopyBuffer(cb, native_device_context, device_data.track_buffer_data.data, device_data.track_buffer_data.cb);
             device_data.track_buffer_data.hash = std::to_string(std::hash<void*>{}(cb.get()));
+            device_data.track_buffer_data.first_constant = cb_first;
+            device_data.track_buffer_data.num_constants = cb_num;
          }
       }
       if (cancelled_or_replaced)
@@ -6649,21 +6702,35 @@ namespace
          if (track_buffer_pipeline_target_instance == -1 || local_track_buffer_pipeline_instance == track_buffer_pipeline_target_instance)
          {
             com_ptr<ID3D11Buffer> cb;
+            UINT cb_first = 0, cb_num = 0;
+            com_ptr<ID3D11DeviceContext1> native_device_context_1;
+            native_device_context->QueryInterface(&native_device_context_1);
             if (track_buffer_pipeline_ps)
             {
-               native_device_context->PSGetConstantBuffers(track_buffer_index, 1, &cb);
+               if (native_device_context_1)
+                  native_device_context_1->PSGetConstantBuffers1(track_buffer_index, 1, &cb, &cb_first, &cb_num);
+               else
+                  native_device_context->PSGetConstantBuffers(track_buffer_index, 1, &cb);
             }
             else if (track_buffer_pipeline_vs)
             {
-               native_device_context->VSGetConstantBuffers(track_buffer_index, 1, &cb);
+               if (native_device_context_1)
+                  native_device_context_1->VSGetConstantBuffers1(track_buffer_index, 1, &cb, &cb_first, &cb_num);
+               else
+                  native_device_context->VSGetConstantBuffers(track_buffer_index, 1, &cb);
             }
             else if (track_buffer_pipeline_cs)
             {
-               native_device_context->CSGetConstantBuffers(track_buffer_index, 1, &cb);
+               if (native_device_context_1)
+                  native_device_context_1->CSGetConstantBuffers1(track_buffer_index, 1, &cb, &cb_first, &cb_num);
+               else
+                  native_device_context->CSGetConstantBuffers(track_buffer_index, 1, &cb);
             }
-            // Copy the buffer in our data
-            CopyBuffer(cb, native_device_context, device_data.track_buffer_data.data);
+            // Copy the buffer in our data, and make a copy if necessary, if we are in a deferred context
+            device_data.track_buffer_data.data_valid = CopyBuffer(cb, native_device_context, device_data.track_buffer_data.data, device_data.track_buffer_data.cb);
             device_data.track_buffer_data.hash = std::to_string(std::hash<void*>{}(cb.get()));
+            device_data.track_buffer_data.first_constant = cb_first;
+            device_data.track_buffer_data.num_constants = cb_num;
          }
       }
       if (cancelled_or_replaced)
@@ -6702,7 +6769,7 @@ namespace
 
          desc.MaxAnisotropy = D3D11_REQ_MAXANISOTROPY;
 
-         if (samplers_upgrade_mode == 5) // Bruteforce the offset
+         if (samplers_upgrade_mode >= 5) // Bruteforce the offset
          {
             desc.MipLODBias = std::clamp(device_data.texture_mip_lod_bias_offset, D3D11_MIP_LOD_BIAS_MIN, D3D11_MIP_LOD_BIAS_MAX); // Setting this out of range (~ +/- 16) will make DX11 crash
          }
@@ -6710,6 +6777,15 @@ namespace
          {
             desc.MipLODBias = std::clamp(desc.MipLODBias + device_data.texture_mip_lod_bias_offset, D3D11_MIP_LOD_BIAS_MIN, D3D11_MIP_LOD_BIAS_MAX); // Setting this out of range (~ +/- 16) will make DX11 crash
          }
+         else if (samplers_upgrade_mode == 3) // TODO: Remove once mip based effects in Persona 5 are fixed 
+         {
+             desc.MipLODBias = (desc.MipLODBias == 0.0f) ? desc.MipLODBias + device_data.texture_mip_lod_bias_offset : desc.MipLODBias;
+             desc.MipLODBias = std::clamp(desc.MipLODBias, D3D11_MIP_LOD_BIAS_MIN, D3D11_MIP_LOD_BIAS_MAX); // Setting this out of range (~ +/- 16) will make DX11 crash
+         }
+
+         float bias_difference = desc.MipLODBias - original_desc.MipLODBias;
+         desc.MinLOD = max(desc.MinLOD + min(bias_difference, 0.f), 0.f);
+
          // TODO: Clean up the code. Other "samplers_upgrade_mode" values aren't supported outside of development (because they aren't even needed, until proven otherwise)
       }
       else
@@ -6781,7 +6857,12 @@ namespace
          }
          if (samplers_upgrade_mode >= 6)
          {
-            desc.MinLOD = min(desc.MinLOD, 0.f);
+            desc.MinLOD = 0.f;
+         }
+         else
+         {
+            float bias_difference = desc.MipLODBias - original_desc.MipLODBias;
+            desc.MinLOD = max(desc.MinLOD + min(bias_difference, 0.f), 0.f);
          }
       }
 #endif // !DEVELOPMENT
@@ -6871,8 +6952,11 @@ namespace
          return;
       // This only seems to happen when the game shuts down in Prey (as any destroy callback, it can be called from an arbitrary thread, but that's fine).
       // We don't need to check the custom samplers within the map even if they might be the same object, because they are strong pointers and thus wouldn't get destroyed if they were non null.
-      const std::unique_lock lock_samplers(s_mutex_samplers);
+      s_mutex_samplers.lock();
+      // Release custom samplers outside lock as OnDestroySampler can be called recursively
+      auto samplers = std::move(device_data.custom_sampler_by_original_sampler[sampler.handle]);
       device_data.custom_sampler_by_original_sampler.erase(sampler.handle);
+      s_mutex_samplers.unlock();
    }
 
    // Takes a view desc the game would have tried to use with a resource we upgraded (directly or indirectly),
@@ -7902,7 +7986,7 @@ namespace
 #if DEVELOPMENT && 0
                // If recursive (already cloned) sampler ptrs are set, it's either because:
                // - the game created the same sampler as one of our upgraded ones, and in DX11 state objects used a shared pool memory so if you try to create two with the same desc, it returns the previously created one
-               // - the game somehow got the pointers (e.g. DX get samples functions) and is re-using them
+               // - the game somehow got the Luma upgraded samplers pointers (e.g. DX get samples functions) and is re-using them
                // this seems to happen when we change the ImGui settings for samplers a lot and quickly in Prey. It also happens in Mafia III and BioShock 2 Remastered. It shouldn't really hurt as they don't pass through the same init function.
                bool recursive_or_null = sampler.handle == 0;
                for (const auto& samplers_handle : device_data.custom_sampler_by_original_sampler)
@@ -9584,8 +9668,7 @@ namespace
                   track_buffer_pipeline_target_instance = -1;
                   track_buffer_index = 0;
 
-                  device_data.track_buffer_data.hash.clear();
-                  device_data.track_buffer_data.data.clear();
+                  device_data.track_buffer_data.Clear();
                }
 
                highlighted_resource = "";
@@ -10497,11 +10580,36 @@ namespace
                                     {
                                        ImGui::SliderInt("Constant Buffer Tracked Index", &track_buffer_index, 0, D3D11_COMMONSHADER_CONSTANT_BUFFER_API_SLOT_COUNT - 1);
 
-                                       if (!device_data.track_buffer_data.data.empty())
+                                       // Hacky way of retrieving the data if the tracked buffer was in a deferred command list and hence couldn't be mapped there
+                                       if (!device_data.track_buffer_data.data_valid && device_data.track_buffer_data.cb)
+                                       {
+                                          // Make sure we have the immediate context, because MapBufferData will fail otherwise.
+                                          ComPtr<ID3D11Device> native_device;
+                                          draw_call_data.command_list->GetDevice(native_device.put());
+                                          ComPtr<ID3D11DeviceContext> native_device_context;
+                                          native_device->GetImmediateContext(native_device_context.put());
+
+                                          D3D11_BUFFER_DESC desc = {};
+                                          device_data.track_buffer_data.cb->GetDesc(&desc);
+                                          device_data.track_buffer_data.data_valid = MapBufferData(device_data.track_buffer_data.cb, native_device_context.get(), device_data.track_buffer_data.data, desc.ByteWidth);
+                                       }
+
+                                       if (device_data.track_buffer_data.data_valid && !device_data.track_buffer_data.data.empty())
                                        {
                                           ImGui::NewLine();
                                           ImGui::Text("Tracked Constant Buffer:");
                                           ImGui::Text("Resource Hash: %s", device_data.track_buffer_data.hash.c_str());
+                                          const UINT tb_first = device_data.track_buffer_data.first_constant;
+                                          const UINT tb_num = device_data.track_buffer_data.num_constants;
+                                          // Each D3D11.1 "constant" is a float4 = 4 floats in our data vector.
+                                          // tb_num == 0 means D3D11.0 path (no partial-bind info): show the whole buffer.
+                                          const size_t tb_display_begin = (tb_num != 0) ? (size_t)tb_first * 4 : 0;
+                                          const size_t tb_display_end = (tb_num != 0) ? (size_t)(tb_first + tb_num) * 4 : device_data.track_buffer_data.data.size();
+                                          const size_t tb_display_end_clamped = (std::min)(tb_display_end, device_data.track_buffer_data.data.size());
+                                          if (tb_num != 0)
+                                          {
+                                             ImGui::Text("Partial Bind: first constant %u, %u constants (floats %zu..%zu)", tb_first, tb_num, tb_display_begin, tb_display_end_clamped);
+                                          }
                                           if (ImGui::BeginChild("TrackBufferScroll", ImVec2(0, 500), ImGuiChildFlags_Borders))
                                           {
                                              // TODO: match with the shader assembly cbs etc (if the data is available)
@@ -10512,14 +10620,15 @@ namespace
                                                 ImGui::TableSetupColumn("Int Value", ImGuiTableColumnFlags_WidthStretch);
                                                 ImGui::TableHeadersRow();
 
-                                                for (size_t i = 0; i < device_data.track_buffer_data.data.size(); ++i)
+                                                for (size_t i = tb_display_begin; i < tb_display_end_clamped; ++i)
                                                 {
                                                    float this_data = device_data.track_buffer_data.data[i];
                                                    ImGui::TableNextRow();
                                                    ImGui::TableSetColumnIndex(0);
                                                    static const char* components[] = { "x", "y", "z", "w" };
-                                                   size_t group = i / 4; // Split index by float4
-                                                   size_t comp_index = i % 4; // Print out the x/y/w/z identifier
+                                                   size_t relative_i = i - tb_display_begin; // 0-based offset within the visible slice
+                                                   size_t group = relative_i / 4; // Split index by float4
+                                                   size_t comp_index = relative_i % 4; // Print out the x/y/w/z identifier
                                                    ImGui::Text("%zu:%s", group, components[comp_index]);
                                                    // First print as float
                                                    ImGui::TableSetColumnIndex(1);
@@ -10548,9 +10657,9 @@ namespace
                                           if (ImGui::Button("Copy Constant Buffer Data to Clipboard (float)"))
                                           {
                                              std::ostringstream oss;
-                                             for (size_t i = 0; i < device_data.track_buffer_data.data.size(); ++i) {
+                                             for (size_t i = tb_display_begin; i < tb_display_end_clamped; ++i) {
                                                 oss << device_data.track_buffer_data.data[i];
-                                                if (i + 1 < device_data.track_buffer_data.data.size())
+                                                if (i + 1 < tb_display_end_clamped)
                                                    oss << '\n';
                                              }
                                              System::CopyToClipboard(oss.str());
@@ -10560,8 +10669,7 @@ namespace
                                     // Hacky: clear the data here...
                                     else
                                     {
-                                       device_data.track_buffer_data.hash.clear();
-                                       device_data.track_buffer_data.data.clear();
+                                       device_data.track_buffer_data.Clear();
                                     }
                                  }
 
@@ -11435,6 +11543,12 @@ namespace
                                              ImGui::Text("");
                                              ImGui::Text("CB Index: %u", i);
                                              ImGui::Text("CB Hash: %s", draw_call_data.cb_hash[i].c_str());
+                                             if (draw_call_data.cb_num_constants[i] != 0)
+                                             {
+                                                const bool is_partial = draw_call_data.cb_first_constant[i] != 0 || draw_call_data.cb_num_constants[i] != D3D11_REQ_CONSTANT_BUFFER_ELEMENT_COUNT;
+                                                ImGui::Text("CB First Constant: %u%s", draw_call_data.cb_first_constant[i], is_partial ? " (partial)" : "");
+                                                ImGui::Text("CB Num Constants: %u", draw_call_data.cb_num_constants[i]);
+                                             }
                                              const bool is_highlighted_resource = highlighted_resource == draw_call_data.cb_hash[i];
                                              if (is_highlighted_resource ? ImGui::Button("Unhighlight Resource") : ImGui::Button("Highlight Resource"))
                                              {

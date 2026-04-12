@@ -173,7 +173,7 @@ public:
          {"ENABLE_LUT_EXTRAPOLATION", '1', true, false, "Use Luma's signature technique for expanding Color Grading LUTs from SDR to HDR", 1},
          {"ENABLE_COLOR_GRADING", '1', true, false, "Allows disabling the color grading LUT (some other color filters might still get applied)", 1},
          {"DISABLE_BLACK_BARS", '0', true, false,
-         "Disable broken black bars in UltraWide in BioShock 2, given that they only cover an horizontal part of the screen, leaving the vertical view visible.\nThis will remove them from 16:9 too", 1}, // TODO: fix this. It breaks the minimap in BS2. We could simply skip drawing the shader if its run immediately after scene rendering, before UI, and has a specific vertex shader
+         "Disable broken black bars in UltraWide in BioShock 2, given that they only cover an horizontal part of the screen, leaving the vertical view visible.\nThis will remove them from 16:9 too.\nIt will also remove some other black UI elements, but it may not be a significant issue.", 1},
          {"LUT_SAMPLING_ERROR_EMULATION_MODE", '1', true, false,
          "BioShock 2 Remastered had a bug in the color grading shader that accidentally boosted contrast and clipped both shadow and highlight."
          "\nLuma fixes that, however without the bug shadows are fairly raised, so this attempts to emulate the error without clipping detail."
@@ -199,6 +199,7 @@ public:
       {
          game_shader_defines_data.push_back({ "GAME_BIOSHOCK", '3', true, true });
          game_shader_defines_data.push_back({ "XE_GTAO_QUALITY", '2', true, false, "0 - Low\n1 - Medium\n2 - High\n3 - Very High\n4 - Ultra", 4 });
+         game_shader_defines_data.push_back({ "DISABLE_LENS_DIRT", '0', true, false, "Disables lens dirt.", 1 });
       }
 
       shader_defines_data.append_range(game_shader_defines_data);
@@ -254,9 +255,9 @@ public:
          g_bloom_nmips = 6;
          g_bloom_sigmas.resize(g_bloom_nmips);
          g_bloom_sigmas[0] = 1.5f;
-         g_bloom_sigmas[1] = 1.0f;
-         g_bloom_sigmas[2] = 1.0f;
-         g_bloom_sigmas[3] = 1.0f;
+         g_bloom_sigmas[1] = 2.0f;
+         g_bloom_sigmas[2] = 2.0f;
+         g_bloom_sigmas[3] = 2.0f;
          g_bloom_sigmas[4] = 1.0f;
          g_bloom_sigmas[5] = 1.0f;
       }

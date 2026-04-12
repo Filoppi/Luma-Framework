@@ -197,7 +197,7 @@ float3 DICETonemap(
     // but tests showed scaling it in linear actually produces a better curve and more consistently follows the peak across different values
     const float shoulderStartPerceptual = DICE::ToPerceptual(shoulderStart / normalizationRange, Settings).x;
     const float inputMaxPerceptual = DICE::ToPerceptual(Settings.InputMax / normalizationRange, Settings).x;
-    const float peakWhitePerceptual = DICE::ToPerceptual(PeakWhite / normalizationRange, Settings).x;
+    const float peakWhitePerceptual = DICE::ToPerceptual(PeakWhite / normalizationRange, Settings).x; // TODO: review. Should we just apply "Settings.ShoulderStart" in perceptual space to this? It might be more consistent and avoid highlights getting too aggressive at very high peak brightnesses?
     
     // Convert to the display primaries, for example in HDR it's good to tonemap in BT.2020.
     // Theoretically some modes (e.g. "DICE_TYPE_BY_LUMINANCE_PQ") don't need this conversion as results would be identical, but we do it anyway for simplicity.

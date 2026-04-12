@@ -506,6 +506,7 @@ void main(
     float2 pixelPos = r1.xy;
     float2 uvCoord = r1.zw;
 
+#if !UI_COMPOSITION_PASS
     r2.xyz = colorTex.SampleLevel(colorSampler, uvCoord, 0).xyz;
     if (LumaData.GameData.DrewUpscaling && LumaSettings.GameSettings.can_sharpen != 0.f) {
       r2.xyz = RCAS(int2(v0.xy), 0, 0x7FFFFFFF, LumaSettings.GameSettings.custom_sharpness_strength, colorTex, dummyFloat2Texture, 1.f, true , float4(r2.xyz, 1.0f)).rgb;
@@ -651,9 +652,9 @@ void main(
 
   #if _3A4D858E // Chapter 2 specific effect?
     r0.w = SampleNoiseTexture(gradedAces, v0);
-    r3.xyz = gradedAces * r0.www;
-    r2.w = dot(r3.xyz, float3(0.262699991,0.677999973,0.0593000017));
-    // r2.xyz = r2.xyz * r0.www + -r2.www;
+    r2.xyz = r2.xyz * r0.www; // pre-apply noise to tonemapped result
+    r2.w = dot(r2.xyz, float3(0.262699991,0.677999973,0.0593000017));
+    r0.w = 1;
   #elif _6846FF90
     // HDR overlay + monochrome mask branch
     r2.xyz = ApplyOverlay(r2.xyz, overlayTex, overlaySampler, pixelPos.xy);
@@ -686,6 +687,20 @@ void main(
   #endif
 
 #endif //3 lut branch
+
+#if TONEMAP_PASS
+    // --- Pass 1 output (hudless tonemapped PQ) ---
+    o0.xyz = Linear_to_PQ(r2.xyz / HDR10_MaxWhiteNits);
+    o0.w = 1;
+    return;
+#endif // TONEMAP_PASS
+#else // UI_COMPOSITION_PASS
+    // --- Pass 2 input: read hudless tonemapped PQ from colorTex (rebound by C++ to intermediate RT) ---
+    float3 pqScene = colorTex.SampleLevel(colorSampler, uvCoord, 0).xyz;
+    r2.xyz = PQ_to_Linear(pqScene) * HDR10_MaxWhiteNits;
+    r2.w = dot(r2.xyz, float3(0.262699991,0.677999973,0.0593000017));
+    r0.w = 1;
+#endif // !UI_COMPOSITION_PASS
 
     r1.xyzw = uiTex.SampleLevel(uiSampler, pixelPos.xy, 0).xyzw;
     // r2.w = dot(r3.xyz, float3(0.262699991,0.677999973,0.0593000017));
@@ -749,8 +764,8 @@ void main(
     r0.x = r0.x * 0.000977517106 + r0.w;
     color.z = saturate(r0.y ? r0.x : r0.w);
   }
-    
-#if EARLY_DISPLAY_ENCODING //scRGB OUTPUT
+
+#if DEVELOPMENT && EARLY_DISPLAY_ENCODING //scRGB OUTPUT
     color = PQ_to_Linear(color);
     color *= (HDR10_MaxWhiteNits / sRGB_WhiteLevelNits);
     color = BT2020_To_BT709(color);

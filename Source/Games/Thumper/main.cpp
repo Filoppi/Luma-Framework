@@ -101,7 +101,7 @@ public:
          {
             uint32_t opcode_token = code_u32[i];
             D3D10_SB_OPCODE_TYPE opcode_type = DECODE_D3D10_SB_OPCODE_TYPE(opcode_token);
-            uint8_t instruction_size = opcode_type == D3D10_SB_OPCODE_CUSTOMDATA ? code_u32[i+1] : DECODE_D3D10_SB_TOKENIZED_INSTRUCTION_LENGTH(opcode_token); // Includes itself
+            size_t instruction_size = opcode_type == D3D10_SB_OPCODE_CUSTOMDATA ? code_u32[i+1] : DECODE_D3D10_SB_TOKENIZED_INSTRUCTION_LENGTH(opcode_token); // Includes itself
             
             if (opcode_type == D3D10_SB_OPCODE_IF
                || opcode_type == D3D10_SB_OPCODE_LOOP

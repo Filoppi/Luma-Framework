@@ -7,12 +7,12 @@ namespace Reinhard
 {
   float ReinhardSimple(float x, float peak = 1.0)
   {
-    return x / ((x / peak) + 1.0);
+    return x / ((abs(x) / peak) + 1.0);
   }
 
   float3 ReinhardSimple(float3 x, float peak = 1.0)
   {
-    return x / ((x / peak) + 1.0);
+    return x / ((abs(x) / peak) + 1.0);
   }
   
   // Compresses the range from "ShoulderStart" to "In_Peak", onto "ShoulderStart" to "Out_Peak".

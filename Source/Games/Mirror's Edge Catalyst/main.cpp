@@ -3,6 +3,8 @@
 // Any message box breaks the input of the game forever
 #define DISABLE_AUTO_DEBUGGER 1
 
+#define DISABLE_FOCUS_LOSS_SUPPRESSION 1
+
 #include "..\..\Core\core.hpp"
 
 class MirrorsEdgeCatalyst final : public Game // ### Rename this to your game's name ###

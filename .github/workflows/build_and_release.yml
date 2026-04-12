@@ -9,6 +9,7 @@ on:
 jobs:
   build:
     runs-on: windows-latest
+    # runs-on: windows-2025-vs2026
     strategy:
       matrix:
         config: [Development-Debug, Development-Release, Test-Release, Publishing-Release]
@@ -57,7 +58,19 @@ jobs:
       # We only build publishing and test for now, development builds can be built locally by devs (with the exclusion of the Generic and Graphics Analyzer mod, which can also be used to quickly download a dev/debug environment)
       if: matrix.config == 'Publishing-Release' || matrix.config == 'Test-Release' || matrix.config == 'Development-Release'
       run: |
-      
+        # Scan vcxproj files to find projects that use NGX (DLSS)
+        $ngxProjects = @()
+        $vcxprojFiles = Get-ChildItem -Path "Source/Games" -Filter "*.vcxproj" -Recurse
+        foreach ($vcxproj in $vcxprojFiles) {
+          $content = Get-Content $vcxproj.FullName -Raw
+          if ($content -match 'nvsdk_ngx') {
+            $projectName = [System.IO.Path]::GetFileNameWithoutExtension($vcxproj.Name)
+            $ngxProjects += $projectName
+            Write-Host "Found NGX project: $projectName"
+          }
+        }
+        Write-Host "NGX projects: $($ngxProjects -join ', ')"
+        
         # Find the addon file in the build folder (adjust path accordingly)
         $addonDir = "Binaries\${{ matrix.platform }}-${{ matrix.config }}"
         $addonFiles = Get-ChildItem -Path $addonDir -Filter "Luma-*.addon"
@@ -199,17 +212,8 @@ jobs:
             Write-Host "ReShade file not found at $rsSrc — skipping"
           }
 
-          # Add DLSS for the projects that need it (ideally we'd have a binary dependencies folder with all the dependencies needed by each project, but git would duplicate the files and that's a shame, so we do it manually)
-          if (
-              $projectName -like '*Prey*' `
-              -or $projectName -like '*Mafia III*' `
-              -or $projectName -like '*Dishonored 2*' `
-              -or $projectName -like '*Final Fantasy VII Remake*' `
-              -or $projectName -like '*Final Fantasy XV*' `
-              -or $projectName -like '*Trine 5*' `
-              -or $projectName -like '*Just Cause 3*' `
-              -or $projectName -like '*Unreal Engine' `
-              -or $projectName -like '*Granblue Fantasy Relink*') {
+          # Add DLSS for the projects that need it based on vcxproj analysis
+          if ($ngxProjects -contains $projectName) {
             # Source path for NGX DLSS DLL
             
             if (("${{ matrix.config }}" -eq "Development-Debug") -or ("${{ matrix.config }}" -eq "Development-Release")) {
@@ -250,8 +254,11 @@ jobs:
           Luma-*.zip
 
   release:
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main' # Don't run this on PRs but only on push, otherwise it will fail to upload release files
     runs-on: ubuntu-latest
     needs: build
+    permissions:
+      contents: write
     env:
       GITHUB_TOKEN: ${{ secrets.GH_PAT }}
     steps:

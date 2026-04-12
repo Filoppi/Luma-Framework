@@ -12,16 +12,16 @@ namespace
 {
    ShaderHashesList shader_hashes_TAA;
    ShaderHashesList shader_hashes_TAA_Candidates;
-   ShaderHashesList shader_hashes_SSAO; // Added SSAO list
+   ShaderHashesList shader_hashes_SSAO;      // Added SSAO list
    ShaderHashesList shader_hashes_Dithering; // Dithering shader list
    ShaderHashesList shader_hashes_tonemap_candidates;
    ShaderHashesList shader_hashes_tonemap_lut_candidates;
    GlobalCBInfo global_cb_info;
    std::shared_mutex taa_mutex;
-   std::shared_mutex ssao_mutex; // Added mutex for SSAO info
+   std::shared_mutex ssao_mutex;      // Added mutex for SSAO info
    std::shared_mutex dithering_mutex; // Mutex for dithering info
    std::unordered_map<uint64_t, TAAShaderInfo> taa_shader_candidate_info;
-   std::unordered_map<uint64_t, SSAOShaderInfo> ssao_shader_info_map; // Added map for SSAO info
+   std::unordered_map<uint64_t, SSAOShaderInfo> ssao_shader_info_map;           // Added map for SSAO info
    std::unordered_map<uint64_t, DitheringShaderInfo> dithering_shader_info_map; // Map for dithering info
 
    // User settings
@@ -31,11 +31,11 @@ namespace
       bool sr_auto_exposure = true;
 
       bool first_boot = true; // Automatic setting
-      bool enable_hdr = true;
+      bool enable_hdr = false;
       bool next_enable_hdr = enable_hdr; // The value we serialize, that will be ignored until reboot
 
       CB::LumaGameSettings cb_default_game_settings;
-   }
+   } // namespace
 
    constexpr UINT tonemap_lut_size = 32;
    constexpr UINT tonemap_lut_thread_size = 8; // Note: this might be 4 too in 3D textures, but 8 also works for our custom shaders
@@ -261,8 +261,8 @@ public:
       luma_settings_cbuffer_index = 9;
       luma_data_cbuffer_index = 8;
 
-      native_shaders_definitions.emplace(CompileTimeStringHash("Upgrade Tonemap LUT 3D"), ShaderDefinition{ "Luma_UpgradeTonemapLUT", reshade::api::pipeline_subobject_type::compute_shader, nullptr, nullptr, { { "DIMENSIONS_3D", "1" } } });
-      native_shaders_definitions.emplace(CompileTimeStringHash("Upgrade Tonemap LUT 2D"), ShaderDefinition{ "Luma_UpgradeTonemapLUT", reshade::api::pipeline_subobject_type::compute_shader, nullptr, nullptr, { { "DIMENSIONS_2D", "1" } } });
+      native_shaders_definitions.emplace(CompileTimeStringHash("Upgrade Tonemap LUT 3D"), ShaderDefinition{"Luma_UpgradeTonemapLUT", reshade::api::pipeline_subobject_type::compute_shader, nullptr, nullptr, {{"DIMENSIONS_3D", "1"}}});
+      native_shaders_definitions.emplace(CompileTimeStringHash("Upgrade Tonemap LUT 2D"), ShaderDefinition{"Luma_UpgradeTonemapLUT", reshade::api::pipeline_subobject_type::compute_shader, nullptr, nullptr, {{"DIMENSIONS_2D", "1"}}});
    }
 
    void OnCreateDevice(ID3D11Device* native_device, DeviceData& device_data) override
@@ -295,33 +295,30 @@ public:
       // TODO: not always there!?
       constexpr std::array<float, 9> aces_blue_correct_matrix = {
          0.9404372683f, -0.0183068787f, 0.0778696104f,
-         0.0083786969f,  0.8286599939f, 0.1629613092f,
-         0.0005471261f, -0.0008833746f, 1.0003362486f
-      };
+         0.0083786969f, 0.8286599939f, 0.1629613092f,
+         0.0005471261f, -0.0008833746f, 1.0003362486f};
       // x /= 1.05
-      const std::vector<uint8_t> pattern_lut_output_scaling_a = { 0x3E, 0xCF, 0x73, 0x3F, 0x3E, 0xCF, 0x73, 0x3F, 0x3E, 0xCF, 0x73, 0x3F };
-      const std::vector<uint8_t> pattern_lut_output_scaling_b = { 0x3D, 0xCF, 0x73, 0x3F, 0x3D, 0xCF, 0x73, 0x3F, 0x3D, 0xCF, 0x73, 0x3F };
+      const std::vector<uint8_t> pattern_lut_output_scaling_a = {0x3E, 0xCF, 0x73, 0x3F, 0x3E, 0xCF, 0x73, 0x3F, 0x3E, 0xCF, 0x73, 0x3F};
+      const std::vector<uint8_t> pattern_lut_output_scaling_b = {0x3D, 0xCF, 0x73, 0x3F, 0x3D, 0xCF, 0x73, 0x3F, 0x3D, 0xCF, 0x73, 0x3F};
       // sRGB identifier (1.055 etc)
-      const std::vector<uint8_t> pattern_srgb = { 0x3D, 0x0A, 0x87, 0x3F, 0x3D, 0x0A, 0x87, 0x3F, 0x3D, 0x0A, 0x87, 0x3F };
+      const std::vector<uint8_t> pattern_srgb = {0x3D, 0x0A, 0x87, 0x3F, 0x3D, 0x0A, 0x87, 0x3F, 0x3D, 0x0A, 0x87, 0x3F};
       // "6.10352e-5" from "x = max(6.10352e-5, x)" in the sRGB encode/decode conversions
-      const std::vector<uint8_t> pattern_srgb_conversion_max = { 0x06, 0x00, 0x80, 0x38, 0x06, 0x00, 0x80, 0x38, 0x06, 0x00, 0x80, 0x38 };
+      const std::vector<uint8_t> pattern_srgb_conversion_max = {0x06, 0x00, 0x80, 0x38, 0x06, 0x00, 0x80, 0x38, 0x06, 0x00, 0x80, 0x38};
       // float3(0.299, 0.587, 0.114)
       const std::vector<std::byte> pattern_bt_601_luminance_vector_a = {
-       std::byte{0x87}, std::byte{0x16}, std::byte{0x99}, std::byte{0x3E},
-       std::byte{0xA2}, std::byte{0x45}, std::byte{0x16}, std::byte{0x3F},
-       std::byte{0xD5}, std::byte{0x78}, std::byte{0xE9}, std::byte{0x3D}
-      };
+         std::byte{0x87}, std::byte{0x16}, std::byte{0x99}, std::byte{0x3E},
+         std::byte{0xA2}, std::byte{0x45}, std::byte{0x16}, std::byte{0x3F},
+         std::byte{0xD5}, std::byte{0x78}, std::byte{0xE9}, std::byte{0x3D}};
       // float3(0.3, 0.59, 0.11)
-      const std::vector<uint8_t> pattern_bt_601_luminance_vector_b = { 0x9A, 0x99, 0x99, 0x3E, 0x3D, 0x0A, 0x17, 0x3F, 0xAE, 0x47, 0xE1, 0x3D };
+      const std::vector<uint8_t> pattern_bt_601_luminance_vector_b = {0x9A, 0x99, 0x99, 0x3E, 0x3D, 0x0A, 0x17, 0x3F, 0xAE, 0x47, 0xE1, 0x3D};
       const std::vector<std::byte> pattern_bt_709_luminance_vector = {
-       std::byte{0xD0}, std::byte{0xB3}, std::byte{0x59}, std::byte{0x3E},
-       std::byte{0x59}, std::byte{0x17}, std::byte{0x37}, std::byte{0x3F},
-       std::byte{0x98}, std::byte{0xDD}, std::byte{0x93}, std::byte{0x3D}
-      };
-      const std::vector<uint8_t> pattern_zero = { 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00 };
+         std::byte{0xD0}, std::byte{0xB3}, std::byte{0x59}, std::byte{0x3E},
+         std::byte{0x59}, std::byte{0x17}, std::byte{0x37}, std::byte{0x3F},
+         std::byte{0x98}, std::byte{0xDD}, std::byte{0x93}, std::byte{0x3D}};
+      const std::vector<uint8_t> pattern_zero = {0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00};
 
       constexpr auto pattern_aces_blue_correct_matrix = MakeFloatsPattern(aces_blue_correct_matrix);
-      //if (!System::ScanMemoryForPattern(code, size, pattern_aces_blue_correct_matrix.data(), pattern_aces_blue_correct_matrix.size()).empty())
+      // if (!System::ScanMemoryForPattern(code, size, pattern_aces_blue_correct_matrix.data(), pattern_aces_blue_correct_matrix.size()).empty())
       if ((!System::ScanMemoryForPattern(code, size, pattern_lut_output_scaling_a).empty() || !System::ScanMemoryForPattern(code, size, pattern_lut_output_scaling_b).empty()) && !System::ScanMemoryForPattern(code, size, pattern_srgb).empty())
       {
          if (type == reshade::api::pipeline_subobject_type::pixel_shader)
@@ -331,8 +328,7 @@ public:
             auto_texture_format_upgrade_shader_hashes.try_emplace(
                uint32_t(shader_hash),
                std::vector<uint8_t>{0},
-               std::vector<uint8_t>{}
-            ); // TODO: make these thread safe
+               std::vector<uint8_t>{}); // TODO: make these thread safe
          }
          else
          {
@@ -340,8 +336,7 @@ public:
             auto_texture_format_upgrade_shader_hashes.try_emplace(
                uint32_t(shader_hash),
                std::vector<uint8_t>{},
-               std::vector<uint8_t>{0}
-            ); 
+               std::vector<uint8_t>{0});
          }
 
 #if DEVELOPMENT
@@ -397,30 +392,26 @@ public:
                std::memcpy(new_code.get() + offset, pattern_bt_709_luminance_vector.data(), pattern_bt_709_luminance_vector.size());
             }
          }
-         
+
          return new_code;
       }
 
       // x *= 1.05
       constexpr std::array<float, 1> lut_input_scaling = {
-         1.05f
-      };
+         1.05f};
       constexpr std::array<float, 2> lut_input_mapping_scale = {
-         0.96875f, 0.015625f
-      };
-      const std::vector<uint8_t> pattern_lut_input_scaling = { 0x66, 0x66, 0x86, 0x3F, 0x66, 0x66, 0x86, 0x3F, 0x66, 0x66, 0x86, 0x3F };
+         0.96875f, 0.015625f};
+      const std::vector<uint8_t> pattern_lut_input_scaling = {0x66, 0x66, 0x86, 0x3F, 0x66, 0x66, 0x86, 0x3F, 0x66, 0x66, 0x86, 0x3F};
       // mad (sat?) register_n.xyz * 0.96875f + 0.015625f (mapping for 32x LUT size)
       // Both patterns might happen depending on how the game compiled the shaders:
       // mad r0.xyz, r0.xyzx, l(0.968750, 0.968750, 0.968750, 0.000000), l(0.015625, 0.015625, 0.015625, 0.000000)
       // mad r0.yzw, r0.yyzw, l(0.000000, 0.968750, 0.968750, 0.968750), l(0.000000, 0.015625, 0.015625, 0.015625)
       // We could probably append further patterns to this, given they seem to always match, but it's not really needed for now.
-      const std::vector<uint8_t> pattern_lut_input_mapping_scale_a = { 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x78, 0x3F, 0x00, 0x00, 0x78, 0x3F, 0x00, 0x00, 0x78, 0x3F, 0x02, 0x40, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x80, 0x3C, 0x00, 0x00, 0x80, 0x3C, 0x00, 0x00, 0x80, 0x3C };
-      const std::vector<uint8_t> pattern_lut_input_mapping_scale_b = { 0x00, 0x00, 0x78, 0x3F, 0x00, 0x00, 0x78, 0x3F, 0x00, 0x00, 0x78, 0x3F, 0x00, 0x00, 0x00, 0x00, 0x02, 0x40, 0x00, 0x00, 0x00, 0x00, 0x80, 0x3C, 0x00, 0x00, 0x80, 0x3C, 0x00, 0x00, 0x80, 0x3C, 0x00, 0x00, 0x00, 0x00 };
-      //constexpr auto pattern_lut_input_scaling = MakeFloatsPattern(lut_input_scaling);
-      //constexpr auto pattern_lut_input_mapping_scale = MakeFloatsPattern(lut_input_mapping_scale); // TODO: turn into a mad etc, make all of these more safe!!!
-      if (!System::ScanMemoryForPattern(code, size, pattern_bt_601_luminance_vector_a.data(), pattern_bt_601_luminance_vector_a.size()).empty()
-         && !System::ScanMemoryForPattern(code, size, pattern_lut_input_scaling).empty()
-         && (!System::ScanMemoryForPattern(code, size, pattern_lut_input_mapping_scale_a).empty() || !System::ScanMemoryForPattern(code, size, pattern_lut_input_mapping_scale_b).empty()))
+      const std::vector<uint8_t> pattern_lut_input_mapping_scale_a = {0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x78, 0x3F, 0x00, 0x00, 0x78, 0x3F, 0x00, 0x00, 0x78, 0x3F, 0x02, 0x40, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x80, 0x3C, 0x00, 0x00, 0x80, 0x3C, 0x00, 0x00, 0x80, 0x3C};
+      const std::vector<uint8_t> pattern_lut_input_mapping_scale_b = {0x00, 0x00, 0x78, 0x3F, 0x00, 0x00, 0x78, 0x3F, 0x00, 0x00, 0x78, 0x3F, 0x00, 0x00, 0x00, 0x00, 0x02, 0x40, 0x00, 0x00, 0x00, 0x00, 0x80, 0x3C, 0x00, 0x00, 0x80, 0x3C, 0x00, 0x00, 0x80, 0x3C, 0x00, 0x00, 0x00, 0x00};
+      // constexpr auto pattern_lut_input_scaling = MakeFloatsPattern(lut_input_scaling);
+      // constexpr auto pattern_lut_input_mapping_scale = MakeFloatsPattern(lut_input_mapping_scale); // TODO: turn into a mad etc, make all of these more safe!!!
+      if (!System::ScanMemoryForPattern(code, size, pattern_bt_601_luminance_vector_a.data(), pattern_bt_601_luminance_vector_a.size()).empty() && !System::ScanMemoryForPattern(code, size, pattern_lut_input_scaling).empty() && (!System::ScanMemoryForPattern(code, size, pattern_lut_input_mapping_scale_a).empty() || !System::ScanMemoryForPattern(code, size, pattern_lut_input_mapping_scale_b).empty()))
       {
          if (type == reshade::api::pipeline_subobject_type::pixel_shader)
          {
@@ -432,7 +423,7 @@ public:
             shader_hashes_tonemap_candidates.compute_shaders.emplace(uint32_t(shader_hash));
             auto_texture_format_upgrade_shader_hashes.try_emplace(uint32_t(shader_hash), std::vector<uint8_t>{}, std::vector<uint8_t>{0});
          }
-         
+
 #if DEVELOPMENT
          forced_shader_names.emplace(uint32_t(shader_hash), "Tonemap");
 #endif
@@ -469,10 +460,10 @@ public:
                std::memcpy(new_code.get() + offset, pattern_bt_709_luminance_vector.data(), pattern_bt_709_luminance_vector.size());
             }
          }
-         
+
          return new_code;
       }
-      
+
 #if ENABLE_SR
       // SSAO Detection
       {
@@ -484,7 +475,7 @@ public:
                shader_hashes_SSAO.pixel_shaders.emplace(static_cast<unsigned long>(shader_hash));
             else
                shader_hashes_SSAO.compute_shaders.emplace(static_cast<unsigned long>(shader_hash));
-            
+
             const std::unique_lock ssao_lock(ssao_mutex);
             ssao_shader_info_map.emplace(shader_hash, ssao_info);
          }
@@ -499,20 +490,24 @@ public:
             const char* dither_type_str = "Unknown";
             switch (dither_info.type)
             {
-               case DitheringType::Texture_ScreenSpace: dither_type_str = "Texture_ScreenSpace"; break;
-               default: break;
+            case DitheringType::Texture_ScreenSpace:
+               dither_type_str = "Texture_ScreenSpace";
+               break;
+            default:
+               break;
             }
-            
-            reshade::log::message(reshade::log::level::info, 
-               std::format("UE4: Detected dithering shader. Hash: 0x{:08X}, Type: {}, TexSize: {}x{}, TextureReg: t{}, HasDiscard: {}, Modifiable: {}", 
+
+            reshade::log::message(reshade::log::level::info,
+               std::format("UE4: Detected dithering shader. Hash: 0x{:08X}, Type: {}, TexSize: {}x{}, TextureReg: t{}, HasDiscard: {}, Modifiable: {}",
                   shader_hash, dither_type_str, dither_info.noise_texture_size, dither_info.noise_texture_size,
-                  dither_info.noise_texture_register, dither_info.has_discard, dither_info.modification_supported).c_str());
-            
+                  dither_info.noise_texture_register, dither_info.has_discard, dither_info.modification_supported)
+                  .c_str());
+
             if (type == reshade::api::pipeline_subobject_type::pixel_shader)
                shader_hashes_Dithering.pixel_shaders.emplace(static_cast<unsigned long>(shader_hash));
             else
                shader_hashes_Dithering.compute_shaders.emplace(static_cast<unsigned long>(shader_hash));
-            
+
             {
                const std::unique_lock dither_lock(dithering_mutex);
                dithering_shader_info_map.emplace(shader_hash, dither_info);
@@ -529,7 +524,7 @@ public:
                auto modified = ModifyDitheringShader(code, size, dither_info);
                if (modified)
                {
-                  reshade::log::message(reshade::log::level::info, 
+                  reshade::log::message(reshade::log::level::info,
                      std::format("UE4: Successfully modified dithering shader. Hash: 0x{:08X}", shader_hash).c_str());
                   return modified;
                }
@@ -540,7 +535,7 @@ public:
       // TAA Detection (only if we haven't found TAA yet)
       if (!shader_hashes_TAA.Empty())
          return nullptr;
-         
+
       TAAShaderInfo taa_shader_info = {};
       bool is_taa_candidate = IsUE4TAACandidate(code, size, shader_hash, taa_shader_info) && FindShaderInfo(code, size, taa_shader_info);
       if (is_taa_candidate)
@@ -573,7 +568,7 @@ public:
       if (enable_hdr && original_shader_hashes.Contains(shader_hashes_tonemap_candidates) && test_index != 15 && custom_shaders_enabled)
       {
          com_ptr<ID3D11ShaderResourceView> shader_resources[8]; // Should always be enough
-         if (is_compute_shader) // Can be both compute or pixel shader
+         if (is_compute_shader)                                 // Can be both compute or pixel shader
             native_device_context->CSGetShaderResources(0, ARRAYSIZE(shader_resources), &shader_resources[0]);
          else
             native_device_context->PSGetShaderResources(0, ARRAYSIZE(shader_resources), &shader_resources[0]);
@@ -645,7 +640,7 @@ public:
                }
 
                // Always set both on slot 0 for simplicity
-               native_device_context->CSSetShaderResources(0, 1, &(ID3D11ShaderResourceView* const&)(shader_resources[lut_srv_index].get())); // Input
+               native_device_context->CSSetShaderResources(0, 1, &(ID3D11ShaderResourceView* const&)(shader_resources[lut_srv_index].get()));                         // Input
                native_device_context->CSSetUnorderedAccessViews(0, 1, &(ID3D11UnorderedAccessView* const&)(game_device_data.tonemap_lut_texture_uav.get()), nullptr); // Output
 
                native_device_context->CSSetShader(device_data.native_compute_shaders[shader_key].get(), nullptr, 0);
@@ -746,7 +741,7 @@ public:
             float swapchain_aspect_ratio = device_data.render_resolution.x / device_data.render_resolution.y;
 
             if (std::fabs(output_aspect_ratio - swapchain_aspect_ratio) > FLT_EPSILON)
-                continue;
+               continue;
             if (desc.Width < device_data.render_resolution.x || desc.Height < device_data.render_resolution.y)
                continue;
 
@@ -929,8 +924,8 @@ public:
             if (!dlss_output_supports_uav)
             {
                D3D11_TEXTURE2D_DESC dlss_output_texture_desc = taa_output_texture_desc;
-               //dlss_output_texture_desc.Width = std::lrintf(game_device_data.render_resolution.x);
-               //dlss_output_texture_desc.Height = std::lrintf(game_device_data.render_resolution.y);
+               // dlss_output_texture_desc.Width = std::lrintf(game_device_data.render_resolution.x);
+               // dlss_output_texture_desc.Height = std::lrintf(game_device_data.render_resolution.y);
                dlss_output_texture_desc.BindFlags |= D3D11_BIND_UNORDERED_ACCESS;
 
                if (device_data.sr_output_color.get())
@@ -1022,7 +1017,7 @@ public:
                // We don't actually replace the shaders with the classic luma shader swapping feature, so we need to set the CBs manually
                draw_state_stack.Cache(native_device_context, device_data.uav_max_count);
                compute_state_stack.Cache(native_device_context, device_data.uav_max_count);
-               
+
                if (!updated_cbuffers)
                {
                   constexpr bool do_safety_checks = false; // No need to check as we cache the states and restore them.
@@ -1306,7 +1301,7 @@ public:
       // Disable the checkbox if SR is not enabled
       bool sr_enabled = device_data.sr_type != SR::Type::None;
       bool sr_forces_auto_exposure = device_data.sr_type == SR::Type::DLSS && (dlss_render_preset == 0 /*NVSDK_NGX_DLSS_Hint_Render_Preset_Default*/ || dlss_render_preset >= 12 /*NVSDK_NGX_DLSS_Hint_Render_Preset_L*/); // L and M are now default and ignore the fixed exposure
-      
+
       if (!sr_enabled || sr_forces_auto_exposure)
          ImGui::BeginDisabled();
       ImGui::Checkbox("Super Resolution Auto Exposure", sr_forces_auto_exposure ? &sr_forces_auto_exposure : &sr_auto_exposure); // Force show it as enabled if it's always on
@@ -1580,7 +1575,7 @@ BOOL APIENTRY DllMain(HMODULE hModule, DWORD ul_reason_for_call, LPVOID lpReserv
          enable_chain_indirect_texture_format_upgrades = ChainTextureFormatUpgradesType::DirectAndIndirectDependencies;
 
 #if 0 // Not needed as it's done automatically now
-         // TODO: automatically upgrade all textures that sample the tonemap LUT, and all textures in between tonemapping and the swapchain final write
+      // TODO: automatically upgrade all textures that sample the tonemap LUT, and all textures in between tonemapping and the swapchain final write
          texture_upgrade_formats = {
             reshade::api::format::r8g8b8a8_unorm,
             reshade::api::format::r8g8b8a8_typeless,
@@ -1612,7 +1607,7 @@ BOOL APIENTRY DllMain(HMODULE hModule, DWORD ul_reason_for_call, LPVOID lpReserv
          }
 
 #if 0 // Not needed as we do it through "auto_texture_format_upgrade_shader_hashes"
-         // LUT is usually 3D 32x (occasionally 2D, especially in older games)
+      // LUT is usually 3D 32x (occasionally 2D, especially in older games)
          texture_format_upgrades_lut_size = 32; // TODO: upgrade both 2D and 3D (maybe manually by detecting the shaders?)
          texture_format_upgrades_lut_dimensions = LUTDimensions::_3D;
 #endif

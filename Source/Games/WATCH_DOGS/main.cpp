@@ -1,6 +1,7 @@
 #define GAME_WATCH_DOGS 1
 #define CHECK_GRAPHICS_API_COMPATIBILITY 1
 #define ALLOW_SHADERS_DUMPING 0
+#define DISABLE_AUTO_DEBUGGER 1
 
 // To access "last_draw_dispatch_data"
 #define ENABLE_DRAW_DISPATCH_DATA_CACHE 1
@@ -9,6 +10,7 @@
 #define ENABLE_FIDELITY_SK 1
 //#define AUTO_ENABLE_SR 1
 //#define DEBUG_MV 1
+#define DEBUG_LOG 0
 
 #include "..\..\Core\core.hpp"
 #include "..\..\External\MinHook\include\MinHook.h"
@@ -53,6 +55,8 @@ namespace
 
    ShaderHashesList shader_hashes_Downsample;
    ShaderHashesList shader_hashes_LightProbesUpdate;
+   
+   ShaderHashesList shader_hashes_DriverGenericRoad;
 
    static std::vector<std::byte*> pattern_1_addresses;
    static std::vector<std::byte*> pattern_2_addresses; // grid shading
@@ -109,20 +113,30 @@ namespace
          float dot = ax * bx + ay * by + az * bz;
          
          Nexus::m_noPreviousFrame = Nexus::m_noPreviousFrame || (dot < 0.80000001);
-
-#if DEVELOPMENT
-         /*
-         std::stringstream s;
-         s << "PrevCamDirDotCamDir = " << dot;
-         reshade::log::message(reshade::log::level::info, s.str().c_str());
-
+         
          float* m_lastGameDeltaTime = (float*)(a2[14] + 4928LL);
          Nexus::m_lastGameDeltaTime = *m_lastGameDeltaTime;
+
+#if DEVELOPMENT
+         
+         std::stringstream s;
+         s << "CDeferredFxRendererContext: 0x" << std::hex << a2[14];
+         s << " | ";
+         s << "m_lastGameDeltaTime: 0x" << std::hex << m_lastGameDeltaTime;
+         s << " | ";
+         s << "m_lastCurrentCamera: 0x" << std::hex << m_lastGameDeltaTime - 976/4;
+         s << " | ";
+         s << "m_lastPreviousCamera: 0x" << std::hex << m_lastGameDeltaTime - 976*2/4;
+         reshade::log::message(reshade::log::level::info, s.str().c_str());
+         /*
+         s << "PrevCamDirDotCamDir = " << dot;
+         reshade::log::message(reshade::log::level::info, s.str().c_str());
          s.clear();
          s.str("");
          s << "m_lastGameDeltaTime = " << *m_lastGameDeltaTime;
          reshade::log::message(reshade::log::level::info, s.str().c_str());
          */
+         
 #endif
       }
 
@@ -179,6 +193,10 @@ struct GameDeviceDataWatchDogs final : public GameDeviceData
    com_ptr<ID3D11Texture2D> motion_vector;
    com_ptr<ID3D11UnorderedAccessView> motion_vector_uav;
    
+   com_ptr<ID3D11Texture2D> unjitter_depth;
+   com_ptr<ID3D11ShaderResourceView> unjitter_depth_srv;
+   com_ptr<ID3D11UnorderedAccessView> unjitter_depth_uav;
+   
    com_ptr<ID3D11Texture2D> game_source_color_before_rain;
    com_ptr<ID3D11UnorderedAccessView> game_source_color_before_rain_uav;
    com_ptr<ID3D11RenderTargetView> game_source_color_before_rain_rtv;
@@ -186,12 +204,17 @@ struct GameDeviceDataWatchDogs final : public GameDeviceData
    com_ptr<ID3D11UnorderedAccessView> sr_output_uav;
    
    com_ptr<ID3D11ShaderResourceView> game_source_color_srv;
+   com_ptr<ID3D11RenderTargetView> game_source_color_rtv;
    com_ptr<ID3D11ShaderResourceView> game_depth_srv;
+   com_ptr<ID3D11DepthStencilView> game_depth_dsv;
    com_ptr<ID3D11ShaderResourceView> game_motion_vector_srv;
    com_ptr<ID3D11Buffer> game_viewport_cbv;
    
    com_ptr<ID3D11ShaderResourceView> game_reflection_srv;
    com_ptr<ID3D11SamplerState> game_reflection_sampler;
+   
+   com_ptr<ID3D11SamplerState> depth_sampler;
+   com_ptr<ID3D11DepthStencilState> depth_stencil_state;
 
    DirectX::XMMATRIX ViewRotProjectionMatrix;
    DirectX::XMMATRIX ViewProjectionMatrix;
@@ -206,6 +229,17 @@ struct GameDeviceDataWatchDogs final : public GameDeviceData
    DirectX::XMMATRIX InvProjectionMatrixOriginal;
    DirectX::XMMATRIX InvProjectionMatrixDepthOriginal;
    DirectX::XMMATRIX PreviousViewProjectionMatrixOriginal;
+   
+   
+   float3 camera_position_current = {};
+   float3 camera_position_previous = {};
+   DirectX::XMMATRIX PreviousInvViewMatrix;
+   DirectX::XMMATRIX PreviousViewMatrix;
+   DirectX::XMMATRIX PreviousProjectionMatrix;
+   
+   DirectX::XMMATRIX PreviousViewMatrixCopy;
+   DirectX::XMMATRIX PreviousProjectionMatrixCopy;
+   DirectX::XMMATRIX CameraSpaceToPreviousProjectedSpace;
    
    float2 CameraDistances = {};
 
@@ -224,6 +258,9 @@ struct GameDeviceDataWatchDogs final : public GameDeviceData
    {
       motion_vector = nullptr;
       motion_vector_uav = nullptr;
+      unjitter_depth = nullptr;
+      unjitter_depth_uav = nullptr;
+      unjitter_depth_srv = nullptr;
    }
    
    void CleanRainResources()
@@ -252,6 +289,8 @@ public:
       // ### See the "GameCBuffers.hlsl" in the shader directory to expand settings ###
       native_shaders_definitions.emplace(CompileTimeStringHash("Decode Motion Vector"), ShaderDefinition{"Luma_DecodeMotionVector", reshade::api::pipeline_subobject_type::compute_shader});
       native_shaders_definitions.emplace(CompileTimeStringHash("Composite Rain"), ShaderDefinition{"Luma_CompositeRain", reshade::api::pipeline_subobject_type::compute_shader});
+      native_shaders_definitions.emplace(CompileTimeStringHash("Unjitter Depth"), ShaderDefinition{"Luma_CopyDepth", reshade::api::pipeline_subobject_type::pixel_shader});
+      native_shaders_definitions.emplace(CompileTimeStringHash("Copy VS"), ShaderDefinition{"Luma_Copy_VS", reshade::api::pipeline_subobject_type::vertex_shader});
    }
 
    void OnLoad(std::filesystem::path& file_path, bool failed) override
@@ -261,6 +300,7 @@ public:
          reshade::register_event<reshade::addon_event::map_buffer_region>(WatchDogs::OnMapBufferRegion);
          reshade::register_event<reshade::addon_event::unmap_buffer_region>(WatchDogs::OnUnmapBufferRegion);
          reshade::register_event<reshade::addon_event::clear_render_target_view>(WatchDogs::OnClearRenderTargetView);
+         reshade::register_event<reshade::addon_event::clear_depth_stencil_view>(WatchDogs::OnClearDepthStencilView);
          
          //reshade::register_event<reshade::addon_event::create_resource>(WatchDogs::OnCreateResource);
          //reshade::register_event<reshade::addon_event::create_resource_view >(WatchDogs::OnCreateResourceView);
@@ -423,6 +463,48 @@ public:
       ImGui::Text("WATCH_DOGS Luma mod - about and credits section", "");
    }
    
+   static bool CreateTestSampler(ID3D11Device* native_device, GameDeviceDataWatchDogs& game_device_data)
+   {
+      // Return early if resources already exist with correct dimensions
+      if (game_device_data.depth_sampler.get())
+      {
+         /*
+         std::stringstream s;
+         s << "MV: Resource exists and resolution unchanged";
+         reshade::log::message(reshade::log::level::info, s.str().c_str());
+         */
+         return true;
+      }
+      
+      HRESULT hr;
+      
+      D3D11_SAMPLER_DESC sampler_desc = {};
+      // linear for fake depth
+      sampler_desc.Filter = D3D11_FILTER::D3D11_FILTER_MIN_MAG_MIP_LINEAR;
+      sampler_desc.AddressU = D3D11_TEXTURE_ADDRESS_MODE::D3D11_TEXTURE_ADDRESS_BORDER;
+      sampler_desc.AddressV = D3D11_TEXTURE_ADDRESS_MODE::D3D11_TEXTURE_ADDRESS_BORDER;
+      sampler_desc.AddressW = D3D11_TEXTURE_ADDRESS_MODE::D3D11_TEXTURE_ADDRESS_BORDER;
+      sampler_desc.MipLODBias = 0.0f;
+      sampler_desc.MaxAnisotropy = 0;
+      sampler_desc.ComparisonFunc = D3D11_COMPARISON_FUNC::D3D11_COMPARISON_NEVER;
+      sampler_desc.BorderColor[0] = 1.0f;
+      sampler_desc.BorderColor[1] = 1.0f;
+      sampler_desc.BorderColor[2] = 1.0f;
+      sampler_desc.BorderColor[3] = 1.0f;
+      sampler_desc.MinLOD = 0.0f;
+      sampler_desc.MaxLOD = D3D11_FLOAT32_MAX;
+      
+      hr = native_device->CreateSamplerState(&sampler_desc, &game_device_data.depth_sampler);
+      if (FAILED(hr))
+      {
+         std::stringstream s;
+         s << "Depth sampler: Creation Failed";
+         reshade::log::message(reshade::log::level::info, s.str().c_str());
+         return false;
+      }
+      return true;
+   }
+   
    static bool CreateMVResources(ID3D11Device* native_device, GameDeviceDataWatchDogs& game_device_data, float width, float height)
    {
       // Return early if resources already exist with correct dimensions
@@ -441,7 +523,7 @@ public:
       D3D11_TEXTURE2D_DESC depth_desc = {};
       depth_desc.Width = static_cast<UINT>(width);
       depth_desc.Height = static_cast<UINT>(height);
-      depth_desc.MipLevels = 0;
+      depth_desc.MipLevels = 1;
       depth_desc.ArraySize = 1;
       depth_desc.Format = DXGI_FORMAT_R16G16_FLOAT;
       depth_desc.SampleDesc.Count = 1;
@@ -466,6 +548,51 @@ public:
       {
          std::stringstream s;
          s << "MV: UAV Creation Failed";
+         reshade::log::message(reshade::log::level::info, s.str().c_str());
+         return false;
+      }
+      
+      depth_desc.Width = static_cast<UINT>(width);
+      depth_desc.Height = static_cast<UINT>(height);
+      depth_desc.MipLevels = 1;
+      depth_desc.ArraySize = 1;
+      depth_desc.Format = DXGI_FORMAT_R32_TYPELESS;
+      depth_desc.SampleDesc.Count = 1;
+      depth_desc.Usage = D3D11_USAGE_DEFAULT;
+      depth_desc.BindFlags = D3D11_BIND_UNORDERED_ACCESS | D3D11_BIND_SHADER_RESOURCE | D3D11_BIND_RENDER_TARGET;
+      
+      hr = native_device->CreateTexture2D(&depth_desc, nullptr, &game_device_data.unjitter_depth);
+      if (FAILED(hr))
+      {
+         std::stringstream s;
+         s << "Depth: Texture Creation Failed";
+         reshade::log::message(reshade::log::level::info, s.str().c_str());
+         return false;
+      }
+      
+      uav_desc = {};
+      uav_desc.Format = DXGI_FORMAT_R32_FLOAT;
+      uav_desc.ViewDimension = D3D11_UAV_DIMENSION_TEXTURE2D;
+      uav_desc.Texture2D.MipSlice = 0;
+      hr = native_device->CreateUnorderedAccessView(game_device_data.unjitter_depth.get(), &uav_desc, &game_device_data.unjitter_depth_uav);
+      if (FAILED(hr))
+      {
+         std::stringstream s;
+         s << "Depth: UAV Creation Failed";
+         reshade::log::message(reshade::log::level::info, s.str().c_str());
+         return false;
+      }
+      
+      D3D11_SHADER_RESOURCE_VIEW_DESC srv_desc = {};
+      srv_desc.Format = DXGI_FORMAT_R32_FLOAT;
+      srv_desc.ViewDimension = D3D11_SRV_DIMENSION_TEXTURE2D;
+      srv_desc.Texture2D.MostDetailedMip = 0;
+      srv_desc.Texture2D.MipLevels = 1;
+      hr = native_device->CreateShaderResourceView(game_device_data.unjitter_depth.get(), &srv_desc, &game_device_data.unjitter_depth_srv);
+      if (FAILED(hr))
+      {
+         std::stringstream s;
+         s << "Depth: SRV Creation Failed";
          reshade::log::message(reshade::log::level::info, s.str().c_str());
          return false;
       }
@@ -578,6 +705,7 @@ public:
    static void LogXMMatrix(const char* label, const DirectX::XMMATRIX& matrix, 
                     reshade::log::level level = reshade::log::level::debug)
    {
+#if DEBUG_LOG      
       std::stringstream s;
       s << label << ":\n";
     
@@ -596,6 +724,7 @@ public:
       }
     
       reshade::log::message(level, s.str().c_str());
+#endif
    }
    
    static void OnUnmapBufferRegion(reshade::api::device* device, reshade::api::resource resource)
@@ -679,6 +808,7 @@ public:
             if (!game_device_data.set_jitter)
             {
                game_device_data.CameraDistances = {float_data[34].x, float_data[34].y};
+               game_device_data.camera_position_current = {float_data[36].x, float_data[36].y, float_data[36].z};
                
                using namespace DirectX;
                
@@ -697,7 +827,12 @@ public:
                // ------------------------------------------------------------
                XMMATRIX view =
                   XMLoadFloat4x4(reinterpret_cast<XMFLOAT4X4*>(&float_data[24]));
+               
+               LogXMMatrix("View Matrix", view);
+               
                view.r[3] = XMVectorSet(0.f, 0.f, 0.f, 1.f); // Clear translation row
+               
+               LogXMMatrix("View Matrix Fixed", view);
 
                XMMATRIX baseProjection =
                   XMLoadFloat4x4(reinterpret_cast<XMFLOAT4X4*>(&float_data[8]));
@@ -710,15 +845,24 @@ public:
                // ------------------------------------------------------------
                
                // Don't jitter the previous vp seems to give better MV (dejitter) result
-               if (false)
+               if (game_device_data.is_last_frame_jittered)
                {
-                  XMMATRIX previousVP = game_device_data.ViewProjectionMatrix;
+                  XMMATRIX previousVP = game_device_data.ViewRotProjectionMatrix;
                   game_device_data.PreviousViewProjectionMatrix = previousVP;
+                  
+                  XMMATRIX previousVPOriginal =
+                  XMLoadFloat4x4(reinterpret_cast<XMFLOAT4X4*>(&float_data[30]));
+                  
+                  LogXMMatrix("Jittered PreviousViewProjectionMatrix", game_device_data.PreviousViewProjectionMatrix);
+                  LogXMMatrix("Original PreviousViewProjectionMatrix", previousVPOriginal);
 
                   XMStoreFloat4x4(
                      reinterpret_cast<XMFLOAT4X4*>(&float_data[30]),
                      previousVP);
                }
+               
+               // Copy prev came pos into "_UncompressDepthWeights_ShadowProjDepthMinValue.xyz"
+               memcpy(&float_data[46], &game_device_data.camera_position_previous, sizeof(game_device_data.camera_position_previous));
 
                // ------------------------------------------------------------
                // Apply jitter to proj
@@ -745,6 +889,8 @@ public:
                viewRot.r[0].m128_f32[3] = 0.f; // Clear X translation
                viewRot.r[1].m128_f32[3] = 0.f; // Clear Y translation
                viewRot.r[2].m128_f32[3] = 0.f; // Clear Z translation
+               
+               LogXMMatrix("View Rotation Matrix", viewRot);
 
                XMMATRIX viewRotProjection =
                   XMMatrixMultiply(jitteredProjection, viewRot);
@@ -803,6 +949,73 @@ public:
                
                LogXMMatrix("Jittered InvProjectionMatrixDepth", game_device_data.InvProjectionMatrixDepth);
                LogXMMatrix("Original InvProjectionMatrixDepth", game_device_data.InvProjectionMatrixDepthOriginal);
+               
+               //if (game_device_data.camera_position_previous.x != 0.0 && game_device_data.camera_position_previous.y != 0.0 && game_device_data.camera_position_previous.z != 0.0)
+               {
+                  XMMATRIX CurrInvView = XMLoadFloat4x4(reinterpret_cast<XMFLOAT4X4*>(&float_data[27]));
+                  
+                  CurrInvView.r[3] = XMVectorSet(0.0f, 0.0f, 0.0f, 1.0f);
+                  
+                  float4 positionDelta = {0.0,0.0,0.0,1.0};
+                  positionDelta.x = game_device_data.camera_position_current.x - game_device_data.camera_position_previous.x;
+                  positionDelta.y = game_device_data.camera_position_current.y - game_device_data.camera_position_previous.y;
+                  positionDelta.z = game_device_data.camera_position_current.z - game_device_data.camera_position_previous.z;
+                  
+                  XMMATRIX PrevInvViewFull = game_device_data.PreviousInvViewMatrix;
+
+                  // Zero translation in previous (keep only rotation)
+                  XMMATRIX PrevRotationOnly = PrevInvViewFull;
+                  PrevRotationOnly.r[0].m128_f32[3] = 0.0;
+                  PrevRotationOnly.r[1].m128_f32[3] = 0.0;
+                  PrevRotationOnly.r[2].m128_f32[3] = 0.0;
+                  PrevRotationOnly.r[3] = XMVectorSet(0.0f, 0.0f, 0.0f, 1.0f);
+                  
+                  // transpose, essentially previous view matrix but rotation only?
+                  {
+                     XMVECTOR c0 = PrevRotationOnly.r[0];
+                     XMVECTOR c1 = PrevRotationOnly.r[1];
+                     XMVECTOR c2 = PrevRotationOnly.r[2];
+
+                     PrevRotationOnly.r[0] = XMVectorSet(XMVectorGetX(c0), XMVectorGetX(c1), XMVectorGetX(c2), 0.0f);
+                     PrevRotationOnly.r[1] = XMVectorSet(XMVectorGetY(c0), XMVectorGetY(c1), XMVectorGetY(c2), 0.0f);
+                     PrevRotationOnly.r[2] = XMVectorSet(XMVectorGetZ(c0), XMVectorGetZ(c1), XMVectorGetZ(c2), 0.0f);
+                     PrevRotationOnly.r[3] = XMVectorSet(0.0f, 0.0f, 0.0f, 1.0f);
+                  }
+                  
+                  XMMATRIX CurrWithDelta = CurrInvView;
+                  CurrWithDelta.r[0].m128_f32[3] = positionDelta.x;
+                  CurrWithDelta.r[1].m128_f32[3] = positionDelta.y;
+                  CurrWithDelta.r[2].m128_f32[3] = positionDelta.z;
+                  
+                  LogXMMatrix("CurrentInvViewMatrix_CurrWithDelta", CurrWithDelta);
+                  LogXMMatrix("PreviousInvViewMatrix_PrevRotationOnly", PrevRotationOnly);
+                  
+                  XMMATRIX temp = XMMatrixMultiply(game_device_data.PreviousProjectionMatrix, PrevRotationOnly);
+                  game_device_data.CameraSpaceToPreviousProjectedSpace = XMMatrixMultiply(temp, CurrWithDelta);
+                  
+                  LogXMMatrix("CameraSpaceToPreviousProjectedSpace", game_device_data.CameraSpaceToPreviousProjectedSpace);
+#if DEBUG_LOG 
+                  {
+                     std::stringstream s;
+                     s.clear();
+                     s.str("");
+                     s << "current campos: " << game_device_data.camera_position_current.x;
+                     s << ", " << game_device_data.camera_position_current.y;
+                     s << ", " << game_device_data.camera_position_current.z;
+                     
+                     s << " | prev campos: " << game_device_data.camera_position_previous.x;
+                     s << ", " << game_device_data.camera_position_previous.y;
+                     s << ", " << game_device_data.camera_position_previous.z;
+                     reshade::log::message(reshade::log::level::info, s.str().c_str());
+                  }
+#endif
+                  game_device_data.PreviousProjectionMatrixCopy = game_device_data.PreviousProjectionMatrix;
+                  game_device_data.PreviousViewMatrixCopy = game_device_data.PreviousViewMatrix;
+                  
+                  game_device_data.PreviousViewMatrix = XMLoadFloat4x4(reinterpret_cast<XMFLOAT4X4*>(&float_data[24]));
+                  game_device_data.PreviousProjectionMatrix = game_device_data.ProjectionMatrix;
+                  game_device_data.PreviousInvViewMatrix = CurrInvView;
+               }
 
                game_device_data.set_jitter = true;
             }
@@ -831,17 +1044,38 @@ public:
                   game_device_data.InvProjectionMatrixDepth);
 
                // Don't jitter the previous vp seems to give better MV (dejitter) result
-               if (false)
+               if (game_device_data.is_last_frame_jittered)
                {
                   XMStoreFloat4x4(
                      reinterpret_cast<XMFLOAT4X4*>(&float_data[30]),
                      game_device_data.PreviousViewProjectionMatrix);
                }
+               
+               // Copy prev came pos into "_UncompressDepthWeights_ShadowProjDepthMinValue.xyz"
+               memcpy(&float_data[46], &game_device_data.camera_position_previous, sizeof(game_device_data.camera_position_previous));
             }
          }
       }
       device_data.cb_per_view_global_buffer_map_data = nullptr;
       device_data.cb_per_view_global_buffer = nullptr;
+   }
+   
+   static bool OnClearDepthStencilView(reshade::api::command_list* cmd_list, reshade::api::resource_view dsv, const float *depth, const uint8_t *stencil, uint32_t rect_count, const reshade::api::rect* rects)
+   {
+      auto* device = cmd_list->get_device();
+      DeviceData& device_data = *device->get_private_data<DeviceData>();
+      auto& game_device_data = GetGameDeviceData(device_data);
+      if (game_device_data.game_depth_dsv.get() == nullptr)
+      {
+         auto current_rtv_resource = device->get_resource_from_view(dsv);
+         auto current_rtv = device->get_resource_desc(current_rtv_resource);
+
+         if (current_rtv.texture.format == reshade::api::format::r24_g8_typeless && (current_rtv.texture.width == game_device_data.render_res.x && current_rtv.texture.height == game_device_data.render_res.y))
+         {
+            game_device_data.game_depth_dsv = reinterpret_cast<ID3D11DepthStencilView*>(dsv.handle);
+         }
+      }
+      return false;
    }
 
    static bool OnClearRenderTargetView(reshade::api::command_list* cmd_list, reshade::api::resource_view rtv, const float color[4], uint32_t rect_count, const reshade::api::rect* rects)
@@ -990,7 +1224,6 @@ public:
 
    DrawOrDispatchOverrideType OnDrawOrDispatch(ID3D11Device* native_device, ID3D11DeviceContext* native_device_context, CommandListData& cmd_list_data, DeviceData& device_data, reshade::api::shader_stage stages, const ShaderHashesList<OneShaderPerPipeline>& original_shader_hashes, bool is_custom_pass, bool& updated_cbuffers, std::function<void()>* original_draw_dispatch_func) override
    {
-      
       if (original_shader_hashes.Contains(shader_hashes_Downsample))
       {
          auto& game_device_data = GetGameDeviceData(device_data);
@@ -1005,10 +1238,16 @@ public:
          native_device_context->CSSetSamplers(12, 1, &game_device_data.game_reflection_sampler);
          native_device_context->CSSetShaderResources(12, 1, &game_device_data.game_reflection_srv);
          return DrawOrDispatchOverrideType::None;
+         native_device_context->CSSetShaderResources(12, 1, 0);
       }
       
       if (original_shader_hashes.Contains(shader_hashes_RainStreak))
       {
+         if (device_data.sr_type == SR::Type::None)
+         {
+            return DrawOrDispatchOverrideType::None;
+         }
+         
          will_draw_rain = true;
          auto& game_device_data = GetGameDeviceData(device_data);
          if (CreateBeforeRainResources(native_device, game_device_data, game_device_data.render_res.x, game_device_data.render_res.y))
@@ -1030,6 +1269,11 @@ public:
       // We will draw these twice, not a whole lot after rain so its okay
       if (will_draw_rain && !has_forward_pass_finished && !original_shader_hashes.Contains(shader_hashes_RainStreak))
       {
+         if (device_data.sr_type == SR::Type::None)
+         {
+            return DrawOrDispatchOverrideType::None;
+         }
+         
          //if (stages == reshade::api::shader_stage::pixel)
          {
             auto& game_device_data = GetGameDeviceData(device_data);
@@ -1098,6 +1342,7 @@ public:
       if (original_shader_hashes.Contains(shader_hashes_DeferredFXAntialias_RESOLVE))
       {
          auto& game_device_data = GetGameDeviceData(device_data);
+         native_device_context->OMGetRenderTargets(1, &game_device_data.game_source_color_rtv, 0);
 #if DEBUG_MV
          if (CreateMVResources(native_device, game_device_data, game_device_data.render_res.x, game_device_data.render_res.y))
          {
@@ -1163,17 +1408,27 @@ public:
                draw_state_stack.Cache(native_device_context, device_data.uav_max_count);
                compute_state_stack.Cache(native_device_context, device_data.uav_max_count);
                
+               if (CreateTestSampler(native_device, game_device_data))
                {
                   SetLumaConstantBuffers(native_device_context, cmd_list_data, device_data, reshade::api::shader_stage::compute, LumaConstantBufferType::LumaData);
                   ID3D11ShaderResourceView* srvs[] = {game_device_data.game_motion_vector_srv.get(), game_device_data.game_depth_srv.get()};
-                  ID3D11UnorderedAccessView* uavs[] = {game_device_data.motion_vector_uav.get()};
+                  ID3D11UnorderedAccessView* uavs[] = {game_device_data.motion_vector_uav.get(), game_device_data.unjitter_depth_uav.get()};
                   ID3D11Buffer* buffers[] = {game_device_data.game_viewport_cbv.get()};
                   native_device_context->CSSetShader(device_data.native_compute_shaders[CompileTimeStringHash("Decode Motion Vector")].get(), nullptr, 0);
                   native_device_context->CSSetShaderResources(0, 2, srvs);
                   native_device_context->CSSetConstantBuffers(0, 1, buffers);
-                  native_device_context->CSSetUnorderedAccessViews(0, 1, uavs, nullptr);
+                  native_device_context->CSSetSamplers(0, 1, &game_device_data.depth_sampler);
+                  native_device_context->CSSetUnorderedAccessViews(0, 2, uavs, nullptr);
                
                   native_device_context->Dispatch((game_device_data.render_res.x + 7) / 8, (game_device_data.render_res.y + 7) / 8, 1);
+                  
+                  //unbind the views for bindings
+                  uavs[0] = 0;
+                  uavs[1] = 0;
+                  native_device_context->CSSetUnorderedAccessViews(0, 2, uavs, nullptr);
+                  srvs[0] = 0;
+                  srvs[1] = 0;
+                  native_device_context->CSSetShaderResources(0, 2, srvs);
                }
                
                if(device_data.sr_type != SR::Type::None && !device_data.sr_suppressed)
@@ -1304,6 +1559,64 @@ public:
                         {
                            device_data.has_drawn_sr = true;
                         }
+                        
+                        if (game_device_data.game_depth_dsv.get() != nullptr)
+                        {
+                           //com_ptr<ID3D11DepthStencilState> ds_state;
+                           //ds_state.
+                           if (!game_device_data.depth_stencil_state.get())
+                           {
+                              std::stringstream s;
+                              s << "DS: Creating DS State";
+                              reshade::log::message(reshade::log::level::info, s.str().c_str());
+                              
+                              CD3D11_DEPTH_STENCIL_DESC ds_desc(D3D11_DEFAULT);
+                              ds_desc.DepthEnable = TRUE;
+                              ds_desc.DepthFunc = D3D11_COMPARISON_ALWAYS;
+
+                              HRESULT hr = native_device->CreateDepthStencilState(&ds_desc, &game_device_data.depth_stencil_state);
+                              if (FAILED(hr))
+                              {
+                                 std::stringstream s;
+                                 s << "DS: DS State Creation Failed";
+                                 reshade::log::message(reshade::log::level::info, s.str().c_str());
+                                 //return false;
+                              }
+                           }
+                           
+                           //DrawCustomPixelShader(native_device_context, nullptr, nullptr, game_device_data.depth_sampler.get(), device_data.native_vertex_shaders[CompileTimeStringHash("Copy VS")].get(), device_data.native_pixel_shaders[CompileTimeStringHash("Unjitter Depth")].get(), game_device_data.unjitter_depth_srv.get(), nullptr, game_device_data.render_res.x, game_device_data.render_res.y, false);
+                           
+                           // Set the new resources/states:
+                           native_device_context->IAGetVertexBuffers(0,1,0,0,0);
+                           
+                           constexpr FLOAT blend_factor_alpha[4] = { 1.f, 1.f, 1.f, 1.f };
+                           constexpr FLOAT blend_factor[4] = { 1.f, 1.f, 1.f, 0.f }; // TODO: this makes no sense as the blend state is unlikely to use it, use write mask instead
+                           native_device_context->OMSetBlendState(nullptr, false ? blend_factor_alpha : blend_factor, 0xFFFFFFFF);
+                           native_device_context->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLESTRIP);
+                           native_device_context->RSSetScissorRects(0, nullptr);
+                           D3D11_VIEWPORT viewport;
+                           viewport.TopLeftX = 0;
+                           viewport.TopLeftY = 0;
+                           viewport.Width = game_device_data.render_res.x;
+                           viewport.Height = game_device_data.render_res.y;
+                           viewport.MinDepth = 0;
+                           viewport.MaxDepth = 1;
+                           native_device_context->RSSetViewports(1, &viewport); // Viewport is always needed
+                           ID3D11ShaderResourceView* srvs[] = {game_device_data.unjitter_depth_srv.get()};
+                           native_device_context->PSSetShaderResources(0, 1, srvs);
+                           native_device_context->OMSetDepthStencilState(game_device_data.depth_stencil_state.get(), 0);
+                           native_device_context->OMSetRenderTargets(0, nullptr, game_device_data.game_depth_dsv.get());
+
+                           auto vs = device_data.native_vertex_shaders[CompileTimeStringHash("Copy VS")].get();
+                           auto ps = device_data.native_pixel_shaders[CompileTimeStringHash("Unjitter Depth")].get();
+                           native_device_context->VSSetShader(vs, nullptr, 0);
+                           native_device_context->PSSetShader(ps, nullptr, 0);
+                           native_device_context->IASetInputLayout(nullptr);
+                           native_device_context->RSSetState(nullptr);
+                           
+                           // Finally draw:
+                           native_device_context->Draw(4, 0);
+                        }
 
                         draw_state_stack.Restore(native_device_context, device_data.uav_max_count);
                         compute_state_stack.Restore(native_device_context, device_data.uav_max_count);
@@ -1382,6 +1695,10 @@ public:
       jitters.x /= game_device_data.render_res.x;
       jitters.y /= game_device_data.render_res.y;
       memcpy(&data.GameData.PrevJitters, &jitters, sizeof(jitters));
+      
+      memcpy(&data.GameData.CameraSpaceToPreviousProjectedSpace, &game_device_data.CameraSpaceToPreviousProjectedSpace, sizeof(game_device_data.CameraSpaceToPreviousProjectedSpace));
+      memcpy(&data.GameData.PreviousProjectionMatrix, &game_device_data.PreviousProjectionMatrixCopy, sizeof(game_device_data.PreviousProjectionMatrixCopy));
+      memcpy(&data.GameData.PreviousViewMatrix, &game_device_data.PreviousViewMatrixCopy, sizeof(game_device_data.PreviousViewMatrixCopy));
    }
 
    void OnPresent(ID3D11Device* native_device, DeviceData& device_data) override
@@ -1455,6 +1772,9 @@ public:
          prev_frame_jitters = {0.0, 0.0};
       }
       frame_jitters = game_device_data.taa_jitters;
+      
+      game_device_data.camera_position_previous = game_device_data.camera_position_current;
+      game_device_data.game_depth_dsv = nullptr;
    }
 
    // ### MINHOOK ADDITION ###
@@ -1494,17 +1814,19 @@ BOOL APIENTRY DllMain(HMODULE hModule, DWORD ul_reason_for_call, LPVOID lpReserv
       texture_upgrade_formats = {};
 
       shader_hashes_DeferredFXAntialias.pixel_shaders = {
-         0x0A2DA44D,
+         0x05200DB2,	//engine\shaders\obj\h64\pixel_85cb1ee4.pso
       };
       
       shader_hashes_DeferredFXAntialias_RESOLVE.pixel_shaders = {
-         0x32E76101,
+         0x525EF528,	//engine\shaders\obj\h02\pixel_f236ae02.pso
       };
       
       shader_hashes_DeferredFXAntialias_NO_PREVIOUS_FRAME.pixel_shaders = {
-         0x866A09BB,
-         0xEB14D99A,
-         0x8EBB1285,
+         0xAEC53111,	//engine\shaders\obj\h3e\pixel_8770b13e.pso
+         0xC8EAA873,	//engine\shaders\obj\h1a\pixel_689e4c1a.pso
+         0x4222D6F9,	//engine\shaders\obj\h2d\pixel_4cc59a2d.pso
+         0x44286B01,	//engine\shaders\obj\h67\pixel_6b8d4067.pso
+         0x52CA82EB,	//engine\shaders\obj\h21\pixel_04197c21.pso
       };
       
       shader_hashes_WaterHeightMap.pixel_shaders = {
@@ -1537,7 +1859,12 @@ BOOL APIENTRY DllMain(HMODULE hModule, DWORD ul_reason_for_call, LPVOID lpReserv
          0x43B14E6A,	//engine\shaders\obj\h68\compute_aac5d3e8.cso
       };
       
+      shader_hashes_DriverGenericRoad.pixel_shaders = {
+         0x9967F220,
+      };
+      
       enable_samplers_upgrade = true;
+      //force_upgrade_linear_samplers = true;
 
       game = new WatchDogs();
    }
@@ -1546,6 +1873,7 @@ BOOL APIENTRY DllMain(HMODULE hModule, DWORD ul_reason_for_call, LPVOID lpReserv
       reshade::unregister_event<reshade::addon_event::map_buffer_region>(WatchDogs::OnMapBufferRegion);
       reshade::unregister_event<reshade::addon_event::unmap_buffer_region>(WatchDogs::OnUnmapBufferRegion);
       reshade::unregister_event<reshade::addon_event::clear_render_target_view>(WatchDogs::OnClearRenderTargetView);
+      reshade::unregister_event<reshade::addon_event::clear_depth_stencil_view>(WatchDogs::OnClearDepthStencilView);
       
       //reshade::unregister_event<reshade::addon_event::create_resource>(WatchDogs::OnCreateResource);
       //reshade::unregister_event<reshade::addon_event::create_resource_view >(WatchDogs::OnCreateResourceView);

@@ -1,5 +1,9 @@
 #pragma once
 
+#include <algorithm>
+#include <cmath>
+#include <cfloat>
+
 struct ID3D11Device;
 struct ID3D11DeviceContext;
 struct ID3D11Resource;
@@ -60,7 +64,7 @@ namespace SR
 	
 	static float GetMipLODBias(float render_height, float output_height)
 	{
-		return std::log2(float(render_height) / float(max(render_height, output_height))) - 1.f;
+		return std::log2(float(render_height) / float((std::max)(render_height, output_height))) - 1.f;
 	}
 	static float GetMipLODBias(unsigned int render_height, unsigned int output_height)
 	{
@@ -166,10 +170,9 @@ namespace SR
 
 			// Optional data:
 			ID3D11Resource* exposure = nullptr; // Can be left nullptr to default to 1 or to auto exposure
-         ID3D11Resource* bias_mask = nullptr; // Reactivity/Bias mask (might not be used by all SR implementations)
-         ID3D11Resource* transparency_alpha = nullptr; // Amount of intensity in this pixel (only used by some FSR implementations)
+			ID3D11Resource* bias_mask = nullptr; // Reactivity/Bias mask (might not be used by all SR implementations)
+			ID3D11Resource* transparency_alpha = nullptr; // Amount of intensity in this pixel (only used by some FSR implementations)
 
-			// Can be left to 0 to pick the default/target render res.
 			unsigned int render_width = 0;
 			unsigned int render_height = 0;
 

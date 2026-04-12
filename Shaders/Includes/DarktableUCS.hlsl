@@ -209,6 +209,17 @@ namespace DarktableUcs
 
       return float3(J, C, H);
     }
+
+    float3 XYZ(float3 xyY)
+    {
+        float3 XYZ;
+
+        XYZ.xz = float2(xyY.x, (1.f - xyY.xy.x - xyY.xy.y)) / xyY.y * xyY[2];
+
+        XYZ.y = xyY[2];
+
+        return XYZ;
+    }
   } //xyYTo
 
   namespace LUVTo

@@ -46,7 +46,7 @@ public:
          else if (found_first_dcl) // Extra safety in case there were instructions before DCL ones
             break;
          
-         uint8_t instruction_size = opcode_type == D3D10_SB_OPCODE_CUSTOMDATA ? code_u32[i + 1] : DECODE_D3D10_SB_TOKENIZED_INSTRUCTION_LENGTH(opcode_token); // Includes itself
+         size_t instruction_size = opcode_type == D3D10_SB_OPCODE_CUSTOMDATA ? code_u32[i + 1] : DECODE_D3D10_SB_TOKENIZED_INSTRUCTION_LENGTH(opcode_token); // Includes itself
 
          if (opcode_type == D3D10_SB_OPCODE_DCL_OUTPUT)
          {
