@@ -2,6 +2,7 @@
 #define CHECK_GRAPHICS_API_COMPATIBILITY 1
 #define ALLOW_SHADERS_DUMPING 0
 #define DISABLE_AUTO_DEBUGGER 1
+#define DISABLE_FOCUS_LOSS_SUPPRESSION 1
 
 // To access "last_draw_dispatch_data"
 #define ENABLE_DRAW_DISPATCH_DATA_CACHE 1
@@ -10,7 +11,7 @@
 #define ENABLE_FIDELITY_SK 1
 //#define AUTO_ENABLE_SR 1
 //#define DEBUG_MV 1
-#define DEBUG_LOG 0
+#define DEBUG_LOG 1
 
 #include "..\..\Core\core.hpp"
 #include "..\..\External\MinHook\include\MinHook.h"
@@ -117,17 +118,34 @@ namespace
          float* m_lastGameDeltaTime = (float*)(a2[14] + 4928LL);
          Nexus::m_lastGameDeltaTime = *m_lastGameDeltaTime;
 
-#if DEVELOPMENT
+#if DEVELOPMENT && 0
          
          std::stringstream s;
          s << "CDeferredFxRendererContext: 0x" << std::hex << a2[14];
          s << " | ";
          s << "m_lastGameDeltaTime: 0x" << std::hex << m_lastGameDeltaTime;
          s << " | ";
-         s << "m_lastCurrentCamera: 0x" << std::hex << m_lastGameDeltaTime - 976/4;
+         s << "m_lastPreviousCamera: 0x" << std::hex << m_lastGameDeltaTime - 976/4; // this addr + 32 = View matrix start
          s << " | ";
-         s << "m_lastPreviousCamera: 0x" << std::hex << m_lastGameDeltaTime - 976*2/4;
+         s << "m_lastCurrentCamera: 0x" << std::hex << m_lastGameDeltaTime - 976*2/4;
          reshade::log::message(reshade::log::level::info, s.str().c_str());
+         // struct of CControlCamera
+         // byte unk[32];
+         // Matrix44 m_viewMatrix; //transposed
+         // Matrix44 m_viewMatrixInverse; //transposed
+         // Matrix44 m_viewMatrixPure; //not transposed
+         // Matrix44 m_projectionMatrix; // not transposed
+         // Matrix44 m_projectionMatrixInverse; // not transposed
+         // Matrix44 m_viewProjectionMatrix; // transposed
+         // Matrix44 m_viewProjectionMatrixInverse; //transposed
+         // G4::Vector3f m_position;
+         // G4::Vector3f m_frontVector;
+         // G4::Vector3f m_upVector;
+         // G4::Vector3f m_leftVector;
+         // float m_nearClipDistance;
+         // float m_farClipDistance;
+         // float m_FOV;
+         
          /*
          s << "PrevCamDirDotCamDir = " << dot;
          reshade::log::message(reshade::log::level::info, s.str().c_str());
@@ -207,6 +225,7 @@ struct GameDeviceDataWatchDogs final : public GameDeviceData
    com_ptr<ID3D11RenderTargetView> game_source_color_rtv;
    com_ptr<ID3D11ShaderResourceView> game_depth_srv;
    com_ptr<ID3D11DepthStencilView> game_depth_dsv;
+   com_ptr<ID3D11Texture2D> game_motion_vector;
    com_ptr<ID3D11ShaderResourceView> game_motion_vector_srv;
    com_ptr<ID3D11Buffer> game_viewport_cbv;
    
@@ -881,7 +900,6 @@ public:
                // ------------------------------------------------------------
                // Recompute matrices
                // ------------------------------------------------------------
-
                XMMATRIX viewProjection =
                   XMMatrixMultiply(jitteredProjection, view);
 
@@ -889,6 +907,16 @@ public:
                viewRot.r[0].m128_f32[3] = 0.f; // Clear X translation
                viewRot.r[1].m128_f32[3] = 0.f; // Clear Y translation
                viewRot.r[2].m128_f32[3] = 0.f; // Clear Z translation
+               
+               // this is exactly why it doesnt work.. matrix is too inaccurate
+#if 0
+               XMMATRIX newPreviousTranslation = XMMatrixTranslation(-game_device_data.camera_position_previous.x, -game_device_data.camera_position_previous.y, -game_device_data.camera_position_previous.z);
+               newPreviousTranslation = XMMatrixTranspose(newPreviousTranslation);
+               LogXMMatrix("PreviousTranslation", newPreviousTranslation);
+               XMMATRIX newPreviousVP = XMMatrixMultiply(viewRot, newPreviousTranslation);
+               newPreviousVP = XMMatrixMultiply(baseProjection, newPreviousVP);
+               LogXMMatrix("New PreviousViewProjectionMatrix", newPreviousVP);
+#endif
                
                LogXMMatrix("View Rotation Matrix", viewRot);
 
@@ -1101,6 +1129,7 @@ public:
                float height = static_cast<float>(current_rtv.texture.height);
                if ((width / height) != 1.0)
                {
+                  game_device_data.game_motion_vector = reinterpret_cast<ID3D11Texture2D*>(current_rtv_resource.handle);
                   if (width != game_device_data.render_res.x || height != game_device_data.render_res.y)
                   {
 
@@ -1429,6 +1458,8 @@ public:
                   srvs[0] = 0;
                   srvs[1] = 0;
                   native_device_context->CSSetShaderResources(0, 2, srvs);
+                  
+                  native_device_context->CopyResource(game_device_data.game_motion_vector.get(), game_device_data.motion_vector.get());
                }
                
                if(device_data.sr_type != SR::Type::None && !device_data.sr_suppressed)
