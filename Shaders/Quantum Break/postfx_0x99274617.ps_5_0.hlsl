@@ -43,7 +43,7 @@ void frag_main()
                   uint(cvt_f32_i32(float(uint(cvt_f32_i32(gl_FragCoord.y + float(g_vTonemapNoiseOffset.y)) & 511))))),
             0u));
 
-   float _111 = (CUSTOM_GRAIN_TYPE == 0.f) ? g_fTonemapNoiseIntensity : 0.f;
+   float _111 = (CUSTOM_GRAIN_TYPE == 0.f) ? g_fTonemapNoiseIntensity * CUSTOM_GRAIN_STRENGTH : 0.f;
 
    float _113 = (1.0f - _111) * 0.5f;
    float _117 = (_104.x * _111) + _113;

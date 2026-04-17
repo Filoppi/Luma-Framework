@@ -276,7 +276,7 @@ float3 ApplyColorGradingLUT(float3 color_input, Texture2D<float4> lut, SamplerSt
    float3 color_input_encoded = linear_to_sRGB_gamma(color_input);
    float3 color_output_encoded = Sample2DLUT(color_input_encoded, lut, lut_sampler);
 
-   if (LUT_SCALING > 0.f)
+   if (CUSTOM_LUT_SCALING > 0.f)
    {
       float3 lut_black_encoded = Sample2DLUT(0.f, lut, lut_sampler);
 
@@ -292,7 +292,7 @@ float3 ApplyColorGradingLUT(float3 color_input, Texture2D<float4> lut, SamplerSt
 
          float3 color_output_linear = gamma_sRGB_to_linear(color_output_encoded);
          color_output_linear *=
-             lerp(1.f, safeDivision(GetLuminance(unclamped_linear), GetLuminance(color_output_linear), 1), LUT_SCALING);
+             lerp(1.f, safeDivision(GetLuminance(unclamped_linear), GetLuminance(color_output_linear), 1), CUSTOM_LUT_SCALING);
 
          color_output_encoded = linear_to_sRGB_gamma(color_output_linear);
       }
@@ -315,7 +315,7 @@ float3 SRGBEncodeAndSample2DLUT(float3 input, Texture2D<float4> g_sBaseColorCorr
 
    r0.rgb = gamma_sRGB_to_linear(r0.rgb);
    r0.rgb /= scale;
-   r0.rgb = lerp(input, r0.rgb, LUT_STRENGTH);
+   r0.rgb = lerp(input, r0.rgb, CUSTOM_LUT_STRENGTH);
    r0.rgb = linear_to_sRGB_gamma(r0.rgb);
 
    return r0.rgb;

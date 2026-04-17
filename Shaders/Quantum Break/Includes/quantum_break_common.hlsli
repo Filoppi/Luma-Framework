@@ -3,14 +3,12 @@
 
 #define GCT_DEFAULT 3
 
+#include "./GameCBuffers.hlsl"
+
 #include "../../Includes/ColorGradingLUT.hlsl"
 #include "../../Includes/Common.hlsl"
 #include "./CBuffer_cb_update_1.hlsli"
-
-#define LUT_STRENGTH 1.f
-#define LUT_SCALING 1.f
-#define TONE_MAP_TYPE 1.f
-#define CUSTOM_GRAIN_TYPE 0.f
+#include "./colorgrade.hlsli"
 
 // f_{p}\left(x\right)=\frac{px}{\sqrt{xx+pp}}
 float Neutwo(float x, float peak)
@@ -47,6 +45,20 @@ float3 ApplyDisplayMapAndScale(float3 input, float2 texcoord)
    if (TONE_MAP_TYPE != 0.f)
    {
       output = gamma_sRGB_to_linear(input);
+
+      Config config;
+      config.exposure = 1.f;
+      config.highlights = CUSTOM_HIGHLIGHTS;
+      config.shadows = CUSTOM_SHADOWS;
+      config.contrast = CUSTOM_CONTRAST;
+      config.flare = 0.10f * pow(CUSTOM_FLARE, 10.f);
+      config.saturation = CUSTOM_SATURATION;
+      config.dechroma = CUSTOM_DECHROMA;
+      config.highlight_saturation = -1.f * (CUSTOM_HIGHLIGHT_SATURATION - 1.f);
+      config.mid_gray = 0.1;
+
+      output = ApplyUserColorGrading(output, config);
+
       output = BT709_To_BT2020(output);
       output = max(0, output);
 
