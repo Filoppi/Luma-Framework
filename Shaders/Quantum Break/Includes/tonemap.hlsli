@@ -72,9 +72,10 @@ float ReinhardExtendedDerivative(float x, float white_max = 1000.f / 203.f, floa
 // Cube root that works for negative values too
 float Cbrt(float v)
 {
-    float a = abs(v);
-    if (a == 0.0f) return 0.0f;
-    return sign(v) * pow(a, 1.0f / 3.0f);
+   float a = abs(v);
+   if (a == 0.0f)
+      return 0.0f;
+   return sign(v) * pow(a, 1.0f / 3.0f);
 }
 
 // Solve f'(x) = x for the ReinhardExtended luminance curve:
@@ -128,20 +129,20 @@ float ReinhardExtendedFindPivot(float peak, float white_max)
    return x;
 }
 
-#define APPLY_REINHARD_EXTENDED_PLUS_GENERATOR(T)                                                                      \
-   T ApplyReinhardExtendedPlus(T x, T base, float white_max, float peak = 1.f)                                         \
-   {                                                                                                                   \
-      float pivot_x = ReinhardExtendedFindPivot(peak, white_max);                                                      \
-                                                                                                                       \
-      float pivot_y = ReinhardExtended(pivot_x, white_max, peak);                                                      \
-                                                                                                                       \
-      float slope = ReinhardExtendedDerivative(pivot_x, white_max, peak);                                              \
-                                                                                                                       \
-      /* Line passing through (pivot_x, pivot_y) with matching slope */                                                \
-      T offset = pivot_y - slope * pivot_x;                                                                            \
-      T extended = slope * x + offset;                                                                                 \
-                                                                                                                       \
-      return (x >= pivot_x) ? extended : base;                                                                         \
+#define APPLY_REINHARD_EXTENDED_PLUS_GENERATOR(T)                              \
+   T ApplyReinhardExtendedPlus(T x, T base, float white_max, float peak = 1.f) \
+   {                                                                           \
+      float pivot_x = ReinhardExtendedFindPivot(peak, white_max);              \
+                                                                               \
+      float pivot_y = ReinhardExtended(pivot_x, white_max, peak);              \
+                                                                               \
+      float slope = ReinhardExtendedDerivative(pivot_x, white_max, peak);      \
+                                                                               \
+      /* Line passing through (pivot_x, pivot_y) with matching slope */        \
+      T offset = pivot_y - slope * pivot_x;                                    \
+      T extended = slope * x + offset;                                         \
+                                                                               \
+      return (x >= pivot_x) ? extended : base;                                 \
    }
 
 APPLY_REINHARD_EXTENDED_PLUS_GENERATOR(float)
@@ -170,10 +171,16 @@ float3 ApplyVanillaToneMapExtended(float3 color, float white_clip = 8.f)
 {
    float luma = GetLuminance(color);
    float base_luma = ReinhardExtended(luma, white_clip, 1.f, 0.f);
-   float extended_lum = ApplyReinhardExtendedPlus(luma, base_luma, white_clip, 1.f);
-   float scale = (luma > 0.0f) ? (extended_lum / luma) : 1.0f;
+   float sdr_scale = (luma > 0.0f) ? (base_luma / luma) : 1.0f;
+   float3 sdr_tonemapped = saturate(color * sdr_scale);
 
-   return color * scale;
+   float extended_lum = ApplyReinhardExtendedPlus(luma, base_luma, white_clip, 1.f);
+   float hdr_scale = (luma > 0.0f) ? (extended_lum / luma) : 1.0f;
+   float3 hdr_tonemapped = color * hdr_scale;
+#if 0
+   hdr_tonemapped = RestoreHueAndChrominance(hdr_tonemapped, sdr_tonemapped, 0.f, 0.25f); // needed to blow out blues
+#endif
+   return hdr_tonemapped;
 }
 
 float3 ApplyToneMap(float3 color, float white_clip = 8.f)
