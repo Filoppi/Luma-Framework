@@ -2,3 +2,6 @@ BasedOnStyle: Microsoft
 IndentWidth: 3
 SpaceBeforeParens: ControlStatements
 ColumnLimit: 0
+AlignConsecutiveMacros:
+  Enabled: true
+  AcrossEmptyLines: true
