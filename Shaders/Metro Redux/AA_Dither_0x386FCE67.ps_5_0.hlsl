@@ -3,8 +3,26 @@
 #define FXAA_QUALITY__PRESET 39
 #endif
 
+#include "../Includes/ColorGradingLUT.hlsl"
 #include "../Includes/Common.hlsl"
 #include "../Includes/FXAA.hlsl"
+
+
+// Workaround: Common.hlsl defines FLT_* and PI macros that collide with RenoDX math constants.
+#undef FLT_MIN
+#undef FLT_MAX
+#undef FLT_NAN
+#undef FLT_QNAN_POS
+#undef FLT_QNAN_NEG
+#undef FLT_SNAN_POS
+#undef FLT_SNAN_NEG
+#undef FLT_EPSILON
+#undef FLT10_MAX
+#undef FLT11_MAX
+#undef FLT16_MAX
+#undef PI
+
+#include "./RenoDX/renodx.hlsl"
 
 // Enables FXAA (Luma's improved implementation)
 #ifndef ENABLE_FXAA
@@ -80,6 +98,8 @@ void main(
   o0.xyzw = t_backbuffer.SampleLevel(s_clamp_bi_s, uv, 0).xyzw;
 #endif
 
+ //o0.xyz = gamma_sRGB_to_linear(o0.xyz);
+
 #if ENABLE_DITHER // Applies dither in gamma space
   float2 r0;
   r0.xy = v0.xy * rtdim.xy + timers.ww;
@@ -94,4 +114,37 @@ void main(
   o0.xyz += temporalDither;
   o0.xyz = pow(abs(o0.xyz), 2.2) * Sign_Fast(o0.xyz);
 #endif
+  float3 untonemapped_bt2020 = BT709_To_BT2020(o0.xyz);
+  untonemapped_bt2020 = gamma_sRGB_to_linear(untonemapped_bt2020);
+
+  float peak = LumaSettings.PeakWhiteNits / sRGB_WhiteLevelNits;
+  float diffuse_white = LumaSettings.GamePaperWhiteNits / sRGB_WhiteLevelNits;
+
+  peak = peak / diffuse_white;
+
+  // bool gamma_correction = true;
+  // if (gamma_correction) {
+  //     peak = gamma_to_linear(peak, 0, 2.0);
+  //     peak = linear_to_gamma(peak, 0, 2.2);
+  // }
+
+  float3 tonemapped_bt2020 = renodx::tonemap::neutwo::PerChannel(untonemapped_bt2020, peak);
+  float3 tonemapped_bt709 = BT2020_To_BT709(tonemapped_bt2020);
+
+  //tonemapped_bt709 = linear_to_sRGB_gamma(tonemapped_bt709);
+
+// #if UI_DRAW_TYPE == 2 // Scale by the inverse of the relative UI brightness so we can draw the UI at brightness 1x and then multiply it back to its intended range
+//   ColorGradingLUTTransferFunctionInOutCorrected(tonemapped_bt709.rgb, VANILLA_ENCODING_TYPE, GAMMA_CORRECTION_TYPE, true);
+//   tonemapped_bt709.rgb *= (LumaSettings.GamePaperWhiteNits / LumaSettings.UIPaperWhiteNits);
+//   ColorGradingLUTTransferFunctionInOutCorrected(tonemapped_bt709.rgb, GAMMA_CORRECTION_TYPE, VANILLA_ENCODING_TYPE, true);
+// #endif
+
+  // if (gamma_correction) {
+  // // Game originally encodes with 2.0, so recreate mismatch
+  // tonemapped_bt709 = linear_to_gamma(tonemapped_bt709, 0, 2.0);
+  // tonemapped_bt709 = gamma_to_linear(tonemapped_bt709, 0, 2.2);
+  // }
+  tonemapped_bt709 = linear_to_sRGB_gamma(tonemapped_bt709);
+  o0.xyz = tonemapped_bt709;
+
 }
