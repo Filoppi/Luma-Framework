@@ -12,10 +12,9 @@
 
 #define LUT_3D 1
 
-#include "./RenoDX/RenoDX.hlsl"
-//#include "./RenoDX/uncharted2extended.hlsli"
 #include "../Includes/Common.hlsl"
 #include "../Includes/Tonemap.hlsl"
+#include "../Includes/Reinhard.hlsl"
 
 #include "../Includes/ColorGradingLUT.hlsl"
 
@@ -42,24 +41,10 @@ float3 ExtendedUncharted2(float3 untonemapped) {
   return outputColor;
 }
 
-// float3 ExtendedUncharted2(float3 untonemapped) {
-
-//   const float A = 0.150000006f, B = 0.5f, C = 0.100000001f, D = 0.200000003f, E = 0.0199999996f, F = 0.300000012f;
-//   const float W = 1.0f;
-
-//   float coeffs[6] = { A, B, C, D, E, F };
-//   const float white_precompute = 1.f / renodx::tonemap::ApplyCurve(W, A, B, C, D, E, F);
-//   Uncharted2::Config::Uncharted2ExtendedConfig uc2_config = Uncharted2::Config::CreateUncharted2ExtendedConfig(coeffs, white_precompute);
-
-//   float3 outputColor = Uncharted2::ApplyExtended(untonemapped, uc2_config);
-
-//   return outputColor;
-// }
-
 float ComputeReinhardSmoothClampScale(float3 untonemapped, float rolloff_start = 0.375f, float output_max = 1.f, float white_clip = 100.f) {
-    float peak = renodx::math::Max(untonemapped);
-    float mapped_peak = renodx::tonemap::ReinhardPiecewiseExtended(peak, white_clip, output_max, rolloff_start);
-    float scale = renodx::math::DivideSafe(mapped_peak, peak, 1.f);
+    float peak = max(untonemapped.r, max(untonemapped.g, untonemapped.b));
+    float mapped_peak = Reinhard::ReinhardRange(peak, rolloff_start, white_clip, output_max).x;
+    float scale = safeDivision(mapped_peak, peak, 1);
 
     return scale;
 }
@@ -457,11 +442,8 @@ void main(
   r0.xyz /= scale;
 
   r0.w = GetLuminance(r0.xyz);
-  o0.w = renodx::color::gamma::Encode(r0.w);
+  o0.w = linear_to_gamma(r0.w).x;
 #endif
   o0.xyz = r0.xyz;
-  // o0.xyz = linear_to_sRGB_gamma(tonemapped_bt709);
-  //o0.xyz = gamma_sRGB_to_linear(o0.xyz);
-
   return;
 }

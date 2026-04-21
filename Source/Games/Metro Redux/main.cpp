@@ -30,22 +30,13 @@ class MetroRedux final : public Game
 public:
    void OnInit(bool async) override
    {
-      // You can add shader defines that will end up in the advanced settings for users to modify here.
-		// These will be defined in the shaders, so they can be used to do static branches in them.
-      // Ideally they should also be defined in the game's Settings.hlsl file.
-      std::vector<ShaderDefineData> game_shader_defines_data = {
-         {"TONEMAP_TYPE", /*default value*/ '1', true, false, /*tooltip*/ "0 - Vanilla SDR\n1 - Luma HDR (Vanilla+)", /*max value*/ 1},
-      };
-      shader_defines_data.append_range(game_shader_defines_data);
-      assert(shader_defines_data.size() < MAX_SHADER_DEFINES); // Make sure there's room for at least one extra custom define to add for development (this isn't really relevant outside of development)
 
-      // Define these according to the game's original technical details and the mod's implementation (see their declarations for more).
-      GetShaderDefineData(POST_PROCESS_SPACE_TYPE_HASH).SetDefaultValue('0'); // What space are the colors in? Was the swapchain linear (sRGB texture format)? Did we change post processing to store in linear space?
-      GetShaderDefineData(EARLY_DISPLAY_ENCODING_HASH).SetDefaultValue('1'); // Whether we do gamma correction and paper white scaling during post processing or we delay them until the final display composition pass
-      GetShaderDefineData(VANILLA_ENCODING_TYPE_HASH).SetDefaultValue('0'); // What SDR transfer curve was the game using? Most modern games used sRGB in SDR
-      GetShaderDefineData(GAMMA_CORRECTION_TYPE_HASH).SetDefaultValue('1'); // What SDR transfer curve to we want to emulate? This is relevant even if we work in linear space, as there can be a gamma mismatch on it
-      GetShaderDefineData(UI_DRAW_TYPE_HASH).SetDefaultValue('0'); // How does the UI draw in?
-      GetShaderDefineData(GAMUT_MAPPING_TYPE_HASH).SetDefaultValue('1');
+      GetShaderDefineData(POST_PROCESS_SPACE_TYPE_HASH).SetDefaultValue('0'); // Game is not linear all the way
+      GetShaderDefineData(EARLY_DISPLAY_ENCODING_HASH).SetDefaultValue('1'); 
+      GetShaderDefineData(VANILLA_ENCODING_TYPE_HASH).SetDefaultValue('0'); // Game uses a 2.0 encode normally
+      GetShaderDefineData(GAMMA_CORRECTION_TYPE_HASH).SetDefaultValue('1'); // Gamma correction looks correct. TODO: Experiment with different LUT sampling options instead.
+      GetShaderDefineData(UI_DRAW_TYPE_HASH).SetDefaultValue('0'); // TODO: Figure out what went wrong with encoding and then implement UI_DRAW_TYPE 2
+      GetShaderDefineData(GAMUT_MAPPING_TYPE_HASH).SetDefaultValue('1'); // Contains out of gamut colors, pushing into invalid territory
 
       // ### Update these (find the right values) ###
       // ### See the "GameCBuffers.hlsl" in the shader directory to expand settings ###
@@ -56,27 +47,6 @@ public:
    void OnPresent(ID3D11Device* native_device, DeviceData& device_data) override
    {
       device_data.has_drawn_main_post_processing = false;
-   }
-
-   void DrawImGuiSettings(DeviceData& device_data) override
-   {
-      (void)device_data;
-
-      ImGui::NewLine();
-
-      if (ImGui::TreeNode("Metro Runtime Sliders"))
-      {
-         ImGui::TextUnformatted("Bloom / Lens / Grading");
-         ImGui::SliderFloat("Bloom Strength", &slider_bloom_strength, 0.0f, 1.0f, "%.2f");
-         ImGui::SliderFloat("Lens Dirt Strength", &slider_lens_dirt_strength, 0.0f, 1.0f, "%.2f");
-         ImGui::SliderFloat("Color Grading Strength", &slider_color_grading_strength, 0.0f, 1.0f, "%.2f");
-
-         ImGui::Spacing();
-         ImGui::TextUnformatted("Filmic Curve");
-         ImGui::SliderFloat("Filmic Strength", &slider_filmic_strength, 0.0f, 1.0f, "%.2f");
-
-         ImGui::TreePop();
-      }
    }
 
    void PrintImGuiAbout() override
