@@ -60,11 +60,16 @@ void main(float4 v0: SV_Position0, out float4 o0: SV_Target0)
    r0.xyz = r0.yzw * r0.xxx;
    r0.xyz = max(float3(0, 0, 0), r0.xyz);
    r0.xyz = g_fTonemapKeyValue * r0.xyz;
+// tonemap
+#if 1
+   r0.rgb = ApplyToneMap(r0.xyz);
+#else
    r0.w = dot(r0.xyz, float3(0.270000011, 0.670000017, 0.0599999987));
    r1.x = r0.w * 0.015625 + 1;
    r0.w = 1 + r0.w;
    r0.w = r1.x / r0.w;
    r0.xyz = saturate(r0.xyz * r0.www);
+#endif
 #if 1
    r0.rgb = SRGBEncodeAndSample2DLUT(r0.rgb, g_sBaseColorCorrectionMap, g_sBaseColorCorrectionMap_s);
 #else
@@ -101,3 +106,4 @@ void main(float4 v0: SV_Position0, out float4 o0: SV_Target0)
    o0.w = 1;
    return;
 }
+
