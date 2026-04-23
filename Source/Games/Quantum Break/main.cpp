@@ -1,7 +1,228 @@
 #define GAME_QUANTUM_BREAK 1
 
+#include <algorithm>
+#include <cmath>
+#include <string>
+#include <vector>
+
 #include "../../../Shaders/Quantum Break/Includes/GameCBuffers.hlsl"
-#include "..\..\Core\core.hpp"
+#include "../../Core/core.hpp"
+
+namespace
+{
+   namespace Settings
+   {
+      enum class Kind : uint8_t
+      {
+         Float,
+         Integer
+      };
+
+      struct Descriptor
+      {
+         Kind kind = Kind::Float;
+         const char* label = "";
+         float CB::LumaGameSettings::* member = nullptr;
+         float default_value = 1.f;
+         float min_value = 0.f;
+         float max_value = 2.f;
+         const char* format = "%.2f";
+         const char* tooltip = nullptr;
+         std::vector<std::string> labels = {"Off", "On"};
+         bool (*is_enabled)(const CB::LumaGameSettings&) = nullptr;
+      };
+
+      const Descriptor k_descriptors[] = {
+         {
+            .kind = Kind::Float,
+            .label = "Highlights",
+            .member = &CB::LumaGameSettings::Highlights,
+         },
+         {
+            .kind = Kind::Float,
+            .label = "Shadows",
+            .member = &CB::LumaGameSettings::Shadows,
+         },
+         {
+            .kind = Kind::Float,
+            .label = "Contrast",
+            .member = &CB::LumaGameSettings::Contrast,
+         },
+         {
+            .kind = Kind::Float,
+            .label = "Saturation",
+            .member = &CB::LumaGameSettings::Saturation,
+         },
+         {
+            .kind = Kind::Float,
+            .label = "Highlight Saturation",
+            .member = &CB::LumaGameSettings::HighlightSaturation,
+         },
+         {
+            .kind = Kind::Float,
+            .label = "Dechroma",
+            .member = &CB::LumaGameSettings::Dechroma,
+            .default_value = 0.f,
+            .max_value = 1.f,
+            .tooltip = "Controls highlight desaturation due to overexposure.",
+         },
+         {
+            .kind = Kind::Float,
+            .label = "Flare",
+            .member = &CB::LumaGameSettings::Flare,
+            .default_value = 0.f,
+            .max_value = 1.f,
+            .tooltip = "Flare/Glare Compensation",
+         },
+         {
+            .kind = Kind::Float,
+            .label = "LUT Strength",
+            .member = &CB::LumaGameSettings::LUTStrength,
+            .max_value = 1.f,
+         },
+         {
+            .kind = Kind::Float,
+            .label = "LUT Scaling",
+            .member = &CB::LumaGameSettings::LUTScaling,
+            .max_value = 1.f,
+            .tooltip = "Scales the color grade LUT to full range when size is clamped.",
+         },
+         {
+            .kind = Kind::Integer,
+            .label = "Grain Type",
+            .member = &CB::LumaGameSettings::GrainType,
+            .labels = {"Vanilla", "Perceptual"},
+         },
+         {
+            .kind = Kind::Float,
+            .label = "Grain Strength",
+            .member = &CB::LumaGameSettings::GrainStrength,
+            .max_value = 1.f,
+         },
+      };
+
+      int IntegerSliderMin(const Descriptor& setting)
+      {
+         return setting.labels.empty()
+                   ? static_cast<int>(setting.min_value)
+                   : 0;
+      }
+
+      int IntegerSliderMax(const Descriptor& setting)
+      {
+         return setting.labels.empty()
+                   ? static_cast<int>(setting.max_value)
+                   : static_cast<int>(setting.labels.size() - 1);
+      }
+
+      void SaveSettingValue(reshade::api::effect_runtime* runtime, const Descriptor& setting, float value)
+      {
+         reshade::set_config_value(runtime, NAME, setting.label, value);
+      }
+
+      void Initialize()
+      {
+         for (const Descriptor& setting : k_descriptors)
+         {
+            default_luma_global_game_settings.*(setting.member) = setting.default_value;
+            cb_luma_global_settings.GameSettings.*(setting.member) = setting.default_value;
+         }
+      }
+
+      void Load(reshade::api::effect_runtime* runtime)
+      {
+         for (const Descriptor& setting : k_descriptors)
+         {
+            float& value = cb_luma_global_settings.GameSettings.*(setting.member);
+            reshade::get_config_value(runtime, NAME, setting.label, value);
+         }
+      }
+
+      void DrawIntegerSetting(const Descriptor& setting, float& value, reshade::api::effect_runtime* runtime)
+      {
+         const int min_value_i = IntegerSliderMin(setting);
+         const int max_value_i = IntegerSliderMax(setting);
+         int slider_value = std::clamp(static_cast<int>(std::lround(value)), min_value_i, max_value_i);
+
+         const char* slider_format = "%d";
+         if (!setting.labels.empty())
+         {
+            slider_format = setting.labels[static_cast<size_t>(slider_value - min_value_i)].c_str();
+         }
+
+         if (ImGui::SliderInt(setting.label, &slider_value, min_value_i, max_value_i, slider_format))
+         {
+            value = static_cast<float>(slider_value);
+            SaveSettingValue(runtime, setting, value);
+         }
+      }
+
+      void DrawFloatSetting(const Descriptor& setting, float& value, reshade::api::effect_runtime* runtime)
+      {
+         if (ImGui::SliderFloat(setting.label, &value, setting.min_value, setting.max_value, setting.format))
+         {
+            SaveSettingValue(runtime, setting, value);
+         }
+      }
+
+      void DrawOne(const Descriptor& setting, reshade::api::effect_runtime* runtime)
+      {
+         float& value = cb_luma_global_settings.GameSettings.*(setting.member);
+         const float default_value = default_luma_global_game_settings.*(setting.member);
+         const bool is_enabled = setting.is_enabled == nullptr || setting.is_enabled(cb_luma_global_settings.GameSettings);
+
+         if (!is_enabled)
+         {
+            ImGui::BeginDisabled();
+         }
+
+         if (setting.kind == Kind::Integer)
+         {
+            DrawIntegerSetting(setting, value, runtime);
+         }
+         else
+         {
+            DrawFloatSetting(setting, value, runtime);
+         }
+
+         if (setting.tooltip && ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
+         {
+            ImGui::SetTooltip("%s", setting.tooltip);
+         }
+
+         DrawResetButton(value, default_value, setting.label, runtime);
+
+         if (!is_enabled)
+         {
+            ImGui::EndDisabled();
+         }
+      }
+
+      void DrawAll(reshade::api::effect_runtime* runtime)
+      {
+         for (const Descriptor& setting : k_descriptors)
+         {
+            DrawOne(setting, runtime);
+         }
+      }
+   } // namespace Settings
+
+   namespace RuntimeConfig
+   {
+      void ConfigureSwapchainAndFormatUpgrades()
+      {
+         swapchain_format_upgrade_type = TextureFormatUpgradesType::AllowedEnabled;
+         swapchain_upgrade_type = SwapchainUpgradeType::scRGB;
+         texture_format_upgrades_type = TextureFormatUpgradesType::AllowedEnabled;
+
+         texture_upgrade_formats = {
+            reshade::api::format::r11g11b10_float,
+         };
+         texture_format_upgrades_2d_size_filters =
+            0 | static_cast<uint32_t>(TextureFormatUpgrades2DSizeFilters::SwapchainResolution) | static_cast<uint32_t>(TextureFormatUpgrades2DSizeFilters::SwapchainAspectRatio);
+      }
+   } // namespace RuntimeConfig
+} // namespace
 
 class QuantumBreakGame final : public Game
 {
@@ -10,41 +231,17 @@ public:
    {
       (void)async;
 
-      // ### Update these (find the right values) ###
-      // ### See the "GameCBuffers.hlsl" in the shader directory to expand settings ###
+      // Game constant buffer indices for Luma settings/data.
       luma_settings_cbuffer_index = 13;
       luma_data_cbuffer_index = 12;
 
-      default_luma_global_game_settings.Highlights = cb_luma_global_settings.GameSettings.Highlights = 1.f;
-      default_luma_global_game_settings.Shadows = cb_luma_global_settings.GameSettings.Shadows = 1.f;
-      default_luma_global_game_settings.Contrast = cb_luma_global_settings.GameSettings.Contrast = 1.f;
-      default_luma_global_game_settings.Saturation = cb_luma_global_settings.GameSettings.Saturation = 1.f;
-      default_luma_global_game_settings.HighlightSaturation = cb_luma_global_settings.GameSettings.HighlightSaturation = 1.f;
-      default_luma_global_game_settings.Dechroma = cb_luma_global_settings.GameSettings.Dechroma = 0.f;
-      default_luma_global_game_settings.Flare = cb_luma_global_settings.GameSettings.Flare = 0.f;
-      default_luma_global_game_settings.LUTStrength = cb_luma_global_settings.GameSettings.LUTStrength = 1.f;
-      default_luma_global_game_settings.LUTScaling = cb_luma_global_settings.GameSettings.LUTScaling = 1.f;
-      default_luma_global_game_settings.GrainType = cb_luma_global_settings.GameSettings.GrainType = 1.f;
-      default_luma_global_game_settings.GrainStrength = cb_luma_global_settings.GameSettings.GrainStrength = 1.f;
+      Settings::Initialize();
    }
 
    void LoadConfigs() override
    {
       reshade::api::effect_runtime* runtime = nullptr;
-
-      reshade::get_config_value(runtime, NAME, "Highlights", cb_luma_global_settings.GameSettings.Highlights);
-      reshade::get_config_value(runtime, NAME, "Shadows", cb_luma_global_settings.GameSettings.Shadows);
-      reshade::get_config_value(runtime, NAME, "Contrast", cb_luma_global_settings.GameSettings.Contrast);
-      reshade::get_config_value(runtime, NAME, "Saturation", cb_luma_global_settings.GameSettings.Saturation);
-      reshade::get_config_value(runtime, NAME, "HighlightSaturation", cb_luma_global_settings.GameSettings.HighlightSaturation);
-      reshade::get_config_value(runtime, NAME, "Dechroma", cb_luma_global_settings.GameSettings.Dechroma);
-      reshade::get_config_value(runtime, NAME, "Flare", cb_luma_global_settings.GameSettings.Flare);
-      reshade::get_config_value(runtime, NAME, "LUTStrength", cb_luma_global_settings.GameSettings.LUTStrength);
-      reshade::get_config_value(runtime, NAME, "LUTScaling", cb_luma_global_settings.GameSettings.LUTScaling);
-      reshade::get_config_value(runtime, NAME, "GrainType", cb_luma_global_settings.GameSettings.GrainType);
-      reshade::get_config_value(runtime, NAME, "GrainStrength", cb_luma_global_settings.GameSettings.GrainStrength);
-
-      cb_luma_global_settings.GameSettings.GrainType = cb_luma_global_settings.GameSettings.GrainType >= 0.5f ? 1.f : 0.f;
+      Settings::Load(runtime);
    }
 
    void DrawImGuiSettings(DeviceData& device_data) override
@@ -54,62 +251,7 @@ public:
 
       ImGui::NewLine();
 
-      auto DrawFloatSlider = [&](const char* label, const char* config_key, float& value, float default_value,
-                                 const char* tooltip = nullptr, float min_value = 0.f, float max_value = 2.f, const char* format = "%.2f")
-      {
-         if (ImGui::SliderFloat(label, &value, min_value, max_value, format))
-         {
-            reshade::set_config_value(runtime, NAME, config_key, value);
-         }
-         if (tooltip && ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
-         {
-            ImGui::SetTooltip("%s", tooltip);
-         }
-         DrawResetButton(value, default_value, config_key, runtime);
-      };
-
-      auto DrawBoolSlider = [&](const char* label, const char* config_key, float& value, float default_value,
-                                const char* tooltip = nullptr, const char* false_label = "Off", const char* true_label = "On")
-      {
-         int slider_value = value >= 0.5f ? 1 : 0;
-         if (ImGui::SliderInt(label, &slider_value, 0, 1, slider_value == 0 ? false_label : true_label))
-         {
-            value = static_cast<float>(slider_value);
-            reshade::set_config_value(runtime, NAME, config_key, value);
-         }
-         if (tooltip && ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
-         {
-            ImGui::SetTooltip("%s", tooltip);
-         }
-         DrawResetButton(value, default_value, config_key, runtime);
-      };
-
-      DrawFloatSlider("Highlights", "Highlights",
-                      cb_luma_global_settings.GameSettings.Highlights, default_luma_global_game_settings.Highlights);
-      DrawFloatSlider("Shadows", "Shadows",
-                      cb_luma_global_settings.GameSettings.Shadows, default_luma_global_game_settings.Shadows);
-      DrawFloatSlider("Contrast", "Contrast",
-                      cb_luma_global_settings.GameSettings.Contrast, default_luma_global_game_settings.Contrast);
-      DrawFloatSlider("Saturation", "Saturation",
-                      cb_luma_global_settings.GameSettings.Saturation, default_luma_global_game_settings.Saturation);
-      DrawFloatSlider("Highlight Saturation", "HighlightSaturation",
-                      cb_luma_global_settings.GameSettings.HighlightSaturation, default_luma_global_game_settings.HighlightSaturation);
-      DrawFloatSlider("Dechroma", "Dechroma",
-                      cb_luma_global_settings.GameSettings.Dechroma, default_luma_global_game_settings.Dechroma,
-                      "Controls highlight desaturation due to overexposure.", 0.f, 1.f);
-      DrawFloatSlider("Flare", "Flare",
-                      cb_luma_global_settings.GameSettings.Flare, default_luma_global_game_settings.Flare,
-                      "Flare/Glare Compensation", 0.f, 1.f);
-      DrawFloatSlider("LUT Strength", "LUTStrength",
-                      cb_luma_global_settings.GameSettings.LUTStrength, default_luma_global_game_settings.LUTStrength, nullptr, 0.f, 1.f);
-      DrawFloatSlider("LUT Scaling", "LUTScaling",
-                      cb_luma_global_settings.GameSettings.LUTScaling, default_luma_global_game_settings.LUTScaling,
-                      "Scales the color grade LUT to full range when size is clamped.", 0.f, 1.f);
-      DrawBoolSlider("Grain Type", "GrainType",
-                     cb_luma_global_settings.GameSettings.GrainType, default_luma_global_game_settings.GrainType,
-                     nullptr, "Vanilla", "Perceptual");
-      DrawFloatSlider("Grain Strength", "GrainStrength",
-                      cb_luma_global_settings.GameSettings.GrainStrength, default_luma_global_game_settings.GrainStrength, nullptr, 0.f, 1.f);
+      Settings::DrawAll(runtime);
    }
 
    void PrintImGuiAbout() override
@@ -167,15 +309,7 @@ BOOL APIENTRY DllMain(HMODULE hModule, DWORD ul_reason_for_call, LPVOID lpReserv
       Globals::SetGlobals(PROJECT_NAME, "Quantum Break Luma mod", "https://ko-fi.com/musaqh");
       Globals::VERSION = 1;
 
-      swapchain_format_upgrade_type = TextureFormatUpgradesType::AllowedEnabled;
-      swapchain_upgrade_type = SwapchainUpgradeType::scRGB;
-      texture_format_upgrades_type = TextureFormatUpgradesType::AllowedEnabled;
-      // ### Check which of these are needed and remove the rest ###
-      texture_upgrade_formats = {
-         reshade::api::format::r11g11b10_float,
-      };
-      // ### Check these if textures are not upgraded ###
-      texture_format_upgrades_2d_size_filters = 0 | static_cast<uint32_t>(TextureFormatUpgrades2DSizeFilters::SwapchainResolution) | static_cast<uint32_t>(TextureFormatUpgrades2DSizeFilters::SwapchainAspectRatio);
+      RuntimeConfig::ConfigureSwapchainAndFormatUpgrades();
 
       game = new QuantumBreakGame();
    }
