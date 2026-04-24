@@ -2,7 +2,7 @@
 
 #define ENABLE_NGX 1
 #define ENABLE_FIDELITY_SK 1
-#define ENABLE_POST_DRAW_CALLBACK 1
+#define ENABLE_POST_DRAW_DISPATCH_CALLBACK 1
 
 #include <algorithm>
 #include <cmath>
