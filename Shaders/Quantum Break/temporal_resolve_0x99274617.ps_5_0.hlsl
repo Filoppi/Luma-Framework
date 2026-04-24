@@ -58,11 +58,11 @@ int cvt_f32_i32(float v)
 
 void frag_main()
 {
+
    float4 _104 = g_sFilmGrain.Load(
        int3(uint2(uint(cvt_f32_i32(float(uint(cvt_f32_i32(gl_FragCoord.x + float(g_vTonemapNoiseOffset.x)) & 511)))),
                   uint(cvt_f32_i32(float(uint(cvt_f32_i32(gl_FragCoord.y + float(g_vTonemapNoiseOffset.y)) & 511))))),
             0u));
-
    float _111 = (CUSTOM_GRAIN_TYPE == 0.f) ? g_fTonemapNoiseIntensity * CUSTOM_GRAIN_STRENGTH : 0.f;
 
    float _113 = (1.0f - _111) * 0.5f;
@@ -72,13 +72,23 @@ void frag_main()
    float _124 = g_vInvScreenRes.x;
    float _125 = g_vInvScreenRes.y;
 
+   float2 scaled_uv = gl_FragCoord * g_vInvScreenRes;
    if (LumaSettings.SRType > 0)
    {
-      float2 sr_uv = gl_FragCoord * float2(_124, _125);
-      float4 sr_color = g_tColor.Sample(g_sLinearClamp, sr_uv);
-      float4 sr_depth = g_tClipDepth.Sample(g_sLinearClamp, sr_uv);
+      float4 sr_color = g_tColor.Sample(g_sLinearClamp, scaled_uv);
+      float4 sr_depth = g_tClipDepth.Sample(g_sLinearClamp, scaled_uv);
       gl_FragDepth = sr_depth.x;
       SV_Target = sr_color.rgb;
+      if (CUSTOM_GRAIN_TYPE == 0.f)
+      {
+         SV_Target = float3(
+             (sr_color.r < 0.5f) ? (1.0f - (((1.0f - sr_color.r) * 0.5f) / _117))
+                                 : (sr_color.r / mad(0.5f - _117, 2.0f, 1.0f)),
+             (sr_color.g < 0.5f) ? (1.0f - (((1.0f - sr_color.g) * 0.5f) / _118))
+                                 : (sr_color.g / mad(0.5f - _118, 2.0f, 1.0f)),
+             (sr_color.b < 0.5f) ? (1.0f - (((1.0f - sr_color.b) * 0.5f) / _119))
+                                 : (sr_color.b / mad(0.5f - _119, 2.0f, 1.0f)));
+      }
    }
    else
    {
@@ -109,7 +119,7 @@ void frag_main()
                                   : ((_195 * 0.25f) / mad(0.5f - _119, 2.0f, 1.0f));
    }
 
-   SV_Target.rgb = ApplyDisplayMapAndScale(SV_Target.rgb, gl_FragCoord * g_vInvScreenRes);
+   SV_Target.rgb = ApplyDisplayMapAndScale(SV_Target.rgb, scaled_uv, _104.z);
 }
 
 SPIRV_Cross_Output main(SPIRV_Cross_Input stage_input)

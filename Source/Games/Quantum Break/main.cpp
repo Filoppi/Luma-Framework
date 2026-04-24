@@ -1212,7 +1212,7 @@ public:
             updated_cbuffers = true;
          }
 
- #if ENABLE_SR
+#if ENABLE_SR
          if (sr_succeeded)
          {
             ID3D11ShaderResourceView* sr_output_srv = game_device_data.sr_output_color_srv.get();
@@ -1243,7 +1243,7 @@ public:
          updated_cbuffers = true;
       }
 
- #if ENABLE_SR
+#if ENABLE_SR
       if (sr_succeeded)
       {
          ID3D11ShaderResourceView* sr_output_srv = game_device_data.sr_output_color_srv.get();
@@ -1391,7 +1391,7 @@ public:
                   "\n\nThird Party:"
                   "\nReShade"
                   "\nImGui"
-                  "\nNeutwo and Film Grain (from RenoDX) - Copyright (c) 2026 Carlos Lopez Jr. Licensed under MIT."
+                  "\nNeutwo, LUT Scaling, and Film Grain (from RenoDX) - Copyright (c) 2026 Carlos Lopez Jr. Licensed under MIT."
                   "");
       static const std::string neutwo_license_link = std::string("RenoDX MIT License ") + std::string(ICON_FK_SEARCH);
       if (ImGui::Button(neutwo_license_link.c_str()))

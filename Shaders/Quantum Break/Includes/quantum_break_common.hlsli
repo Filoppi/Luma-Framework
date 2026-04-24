@@ -9,6 +9,7 @@
 #include "../../Includes/Common.hlsl"
 #include "./CBuffer_cb_update_1.hlsli"
 #include "./colorgrade.hlsli"
+#include "./filmgrain.hlsli"
 
 // f_{p}\left(x\right)=\frac{px}{\sqrt{xx+pp}}
 float Neutwo(float x, float peak)
@@ -39,7 +40,7 @@ float3 NeutwoPerChannel(float3 color, float3 peak)
    return float3(Neutwo(color.r, peak.r), Neutwo(color.g, peak.g), Neutwo(color.b, peak.b));
 }
 
-float3 ApplyDisplayMapAndScale(float3 input, float2 texcoord)
+float3 ApplyDisplayMapAndScale(float3 input, float2 texcoord, float random)
 {
    float3 output;
    if (TONE_MAP_TYPE != 0.f)
@@ -70,6 +71,17 @@ float3 ApplyDisplayMapAndScale(float3 input, float2 texcoord)
       float3 ch = NeutwoPerChannel(output, peak_ratio);
       output = ch;
 #endif
+
+      if (CUSTOM_GRAIN_STRENGTH > 0.f && CUSTOM_GRAIN_TYPE != 0.f)
+      {
+         output = ApplyFilmGrain(
+             output,
+             texcoord,
+             random,
+             CUSTOM_GRAIN_STRENGTH * 0.03f,
+             1.f,
+             false, BT2020_To_XYZ);
+      }
 
       output = BT2020_To_BT709(output);
       output = linear_to_sRGB_gamma(output);
