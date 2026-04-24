@@ -8780,6 +8780,10 @@ namespace
                      std::unique_lock device_write_lock(device_data.mutex);
                      device_data.temp_copy_source_texture = temp_copy_source_texture;
                   }
+                  else
+                  {
+                     native_device_context->CopyResource(temp_copy_source_texture.get(), source_resource_texture.get());
+                  }
                   proxy_source_resource_texture = temp_copy_source_texture;
                }
                com_ptr<ID3D11ShaderResourceView> source_resource_texture_view;
