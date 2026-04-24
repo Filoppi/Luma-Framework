@@ -1,3 +1,23 @@
+/*
+   Quantum Break history reprojection and clipping prepass.
+
+   Inputs:
+   - t0: geometry motion vectors
+   - t1: current-frame color used to build a local neighborhood envelope
+   - t2-t4: previous temporal history textures
+
+   Work performed:
+   - loads a 10x10 neighborhood of current color into groupshared memory
+   - computes a local min/max color envelope around each output pixel
+   - converts the envelope to xyY space for more stable luminance/chroma clipping
+   - reprojects each previous history texture using the motion vectors
+   - clamps each reprojected history sample to the current-frame envelope
+   - writes the three clamped reprojected histories to u0-u2
+
+   Important:
+   - this shader does not output the final anti-aliased image
+   - its UAV outputs are consumed later by the final temporal resolve pass
+*/
 #include "./quantum_break_common.hlsli"
 
 struct _31

@@ -180,7 +180,7 @@
   <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Development-Release|Win32'" Label="Vcpkg" />
   <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Development-Debug|x64'">
     <ClCompile>
-      <AdditionalIncludeDirectories>..\..\External\reshade;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+      <AdditionalIncludeDirectories>..\..\External\reshade;..\..\External\NGX;$(SolutionDir)\Source\External\FidelityFX;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
       <BasicRuntimeChecks>EnableFastChecks</BasicRuntimeChecks>
       <DebugInformationFormat>ProgramDatabase</DebugInformationFormat>
       <ExceptionHandling>Sync</ExceptionHandling>
@@ -212,10 +212,8 @@
       <ProxyFileName>%(Filename)_p.c</ProxyFileName>
     </Midl>
     <Link>
-      <AdditionalDependencies>
-      </AdditionalDependencies>
-      <AdditionalLibraryDirectories>
-      </AdditionalLibraryDirectories>
+      <AdditionalDependencies>nvsdk_ngx_d_dbg.lib;ffx_backend_dx11_x64d.lib;ffx_fsr3_x64d.lib;ffx_frameinterpolation_x64d.lib;ffx_fsr3upscaler_x64d.lib;ffx_opticalflow_x64d.lib;%(AdditionalDependencies)</AdditionalDependencies>
+      <AdditionalLibraryDirectories>..\..\External\NGX\libs;..\..\External\FidelityFX\libs;%(AdditionalLibraryDirectories)</AdditionalLibraryDirectories>
       <AdditionalOptions>%(AdditionalOptions) /machine:x64</AdditionalOptions>
       <GenerateDebugInformation>DebugFull</GenerateDebugInformation>
       <ImportLibrary>
@@ -228,7 +226,10 @@
       </LinkLibraryDependencies>
     </ProjectReference>
     <PostBuildEvent>
-      <Command>IF DEFINED LUMA_QUANTUM_BREAK_BIN_PATH ( xcopy /Y "$(TargetDir)*$(SolutionName)-$(ProjectName).addon" "%LUMA_QUANTUM_BREAK_BIN_PATH%" || exit /B 0 )</Command>
+      <Command>IF DEFINED LUMA_QUANTUM_BREAK_BIN_PATH (
+  xcopy /Y "$(TargetDir)*$(SolutionName)-$(ProjectName).addon" "%LUMA_QUANTUM_BREAK_BIN_PATH%" || exit /B 0
+  IF EXIST "..\..\External\NGX\bin\dev\nvngx_dlss.dll" ( xcopy /Y "..\..\External\NGX\bin\dev\nvngx_dlss.dll" "%LUMA_QUANTUM_BREAK_BIN_PATH%" || exit /B 0 )
+)</Command>
     </PostBuildEvent>
   </ItemDefinitionGroup>
   <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Development-Debug|Win32'">
@@ -281,12 +282,15 @@
       </LinkLibraryDependencies>
     </ProjectReference>
     <PostBuildEvent>
-      <Command>IF DEFINED LUMA_QUANTUM_BREAK_BIN_PATH ( xcopy /Y "$(TargetDir)*$(SolutionName)-$(ProjectName).addon" "%LUMA_QUANTUM_BREAK_BIN_PATH%" || exit /B 0 )</Command>
+      <Command>IF DEFINED LUMA_QUANTUM_BREAK_BIN_PATH (
+  xcopy /Y "$(TargetDir)*$(SolutionName)-$(ProjectName).addon" "%LUMA_QUANTUM_BREAK_BIN_PATH%" || exit /B 0
+  IF EXIST "..\..\External\NGX\bin\rel\nvngx_dlss.dll" ( xcopy /Y "..\..\External\NGX\bin\rel\nvngx_dlss.dll" "%LUMA_QUANTUM_BREAK_BIN_PATH%" || exit /B 0 )
+)</Command>
     </PostBuildEvent>
   </ItemDefinitionGroup>
   <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Publishing-Release|x64'">
     <ClCompile>
-      <AdditionalIncludeDirectories>..\..\External\reshade;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+      <AdditionalIncludeDirectories>..\..\External\reshade;..\..\External\NGX;$(SolutionDir)\Source\External\FidelityFX;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
       <ExceptionHandling>Sync</ExceptionHandling>
       <InlineFunctionExpansion>Default</InlineFunctionExpansion>
       <LanguageStandard>stdcpplatest</LanguageStandard>
@@ -316,10 +320,8 @@
       <ProxyFileName>%(Filename)_p.c</ProxyFileName>
     </Midl>
     <Link>
-      <AdditionalDependencies>
-      </AdditionalDependencies>
-      <AdditionalLibraryDirectories>
-      </AdditionalLibraryDirectories>
+      <AdditionalDependencies>nvsdk_ngx_d.lib;ffx_backend_dx11_x64.lib;ffx_fsr3_x64.lib;ffx_frameinterpolation_x64.lib;ffx_fsr3upscaler_x64.lib;ffx_opticalflow_x64.lib;%(AdditionalDependencies)</AdditionalDependencies>
+      <AdditionalLibraryDirectories>..\..\External\NGX\libs;..\..\External\FidelityFX\libs;%(AdditionalLibraryDirectories)</AdditionalLibraryDirectories>
       <AdditionalOptions>%(AdditionalOptions) /machine:x64</AdditionalOptions>
       <GenerateDebugInformation>false</GenerateDebugInformation>
       <ImportLibrary>
@@ -330,12 +332,15 @@
       </LinkLibraryDependencies>
     </ProjectReference>
     <PostBuildEvent>
-      <Command>IF DEFINED LUMA_QUANTUM_BREAK_BIN_PATH ( xcopy /Y "$(TargetDir)*$(SolutionName)-$(ProjectName).addon" "%LUMA_QUANTUM_BREAK_BIN_PATH%" || exit /B 0 )</Command>
+      <Command>IF DEFINED LUMA_QUANTUM_BREAK_BIN_PATH (
+  xcopy /Y "$(TargetDir)*$(SolutionName)-$(ProjectName).addon" "%LUMA_QUANTUM_BREAK_BIN_PATH%" || exit /B 0
+  IF EXIST "..\..\External\NGX\bin\rel\nvngx_dlss.dll" ( xcopy /Y "..\..\External\NGX\bin\rel\nvngx_dlss.dll" "%LUMA_QUANTUM_BREAK_BIN_PATH%" || exit /B 0 )
+)</Command>
     </PostBuildEvent>
   </ItemDefinitionGroup>
   <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Test-Release|x64'">
     <ClCompile>
-      <AdditionalIncludeDirectories>..\..\External\reshade;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+      <AdditionalIncludeDirectories>..\..\External\reshade;..\..\External\NGX;$(SolutionDir)\Source\External\FidelityFX;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
       <ExceptionHandling>Sync</ExceptionHandling>
       <InlineFunctionExpansion>Default</InlineFunctionExpansion>
       <LanguageStandard>stdcpplatest</LanguageStandard>
@@ -365,10 +370,8 @@
       <ProxyFileName>%(Filename)_p.c</ProxyFileName>
     </Midl>
     <Link>
-      <AdditionalDependencies>
-      </AdditionalDependencies>
-      <AdditionalLibraryDirectories>
-      </AdditionalLibraryDirectories>
+      <AdditionalDependencies>nvsdk_ngx_d.lib;ffx_backend_dx11_x64.lib;ffx_fsr3_x64.lib;ffx_frameinterpolation_x64.lib;ffx_fsr3upscaler_x64.lib;ffx_opticalflow_x64.lib;%(AdditionalDependencies)</AdditionalDependencies>
+      <AdditionalLibraryDirectories>..\..\External\NGX\libs;..\..\External\FidelityFX\libs;%(AdditionalLibraryDirectories)</AdditionalLibraryDirectories>
       <AdditionalOptions>%(AdditionalOptions) /machine:x64</AdditionalOptions>
       <GenerateDebugInformation>DebugFull</GenerateDebugInformation>
       <ImportLibrary>
@@ -379,12 +382,15 @@
       </LinkLibraryDependencies>
     </ProjectReference>
     <PostBuildEvent>
-      <Command>IF DEFINED LUMA_QUANTUM_BREAK_BIN_PATH ( xcopy /Y "$(TargetDir)*$(SolutionName)-$(ProjectName).addon" "%LUMA_QUANTUM_BREAK_BIN_PATH%" || exit /B 0 )</Command>
+      <Command>IF DEFINED LUMA_QUANTUM_BREAK_BIN_PATH (
+  xcopy /Y "$(TargetDir)*$(SolutionName)-$(ProjectName).addon" "%LUMA_QUANTUM_BREAK_BIN_PATH%" || exit /B 0
+  IF EXIST "..\..\External\NGX\bin\rel\nvngx_dlss.dll" ( xcopy /Y "..\..\External\NGX\bin\rel\nvngx_dlss.dll" "%LUMA_QUANTUM_BREAK_BIN_PATH%" || exit /B 0 )
+)</Command>
     </PostBuildEvent>
   </ItemDefinitionGroup>
   <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Development-Release|x64'">
     <ClCompile>
-      <AdditionalIncludeDirectories>..\..\External\reshade;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+      <AdditionalIncludeDirectories>..\..\External\reshade;..\..\External\NGX;$(SolutionDir)\Source\External\FidelityFX;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
       <ExceptionHandling>Sync</ExceptionHandling>
       <InlineFunctionExpansion>Default</InlineFunctionExpansion>
       <LanguageStandard>stdcpplatest</LanguageStandard>
@@ -414,10 +420,8 @@
       <ProxyFileName>%(Filename)_p.c</ProxyFileName>
     </Midl>
     <Link>
-      <AdditionalDependencies>
-      </AdditionalDependencies>
-      <AdditionalLibraryDirectories>
-      </AdditionalLibraryDirectories>
+      <AdditionalDependencies>nvsdk_ngx_d.lib;ffx_backend_dx11_x64.lib;ffx_fsr3_x64.lib;ffx_frameinterpolation_x64.lib;ffx_fsr3upscaler_x64.lib;ffx_opticalflow_x64.lib;%(AdditionalDependencies)</AdditionalDependencies>
+      <AdditionalLibraryDirectories>..\..\External\NGX\libs;..\..\External\FidelityFX\libs;%(AdditionalLibraryDirectories)</AdditionalLibraryDirectories>
       <AdditionalOptions>%(AdditionalOptions) /machine:x64</AdditionalOptions>
       <GenerateDebugInformation>DebugFull</GenerateDebugInformation>
       <ImportLibrary>
