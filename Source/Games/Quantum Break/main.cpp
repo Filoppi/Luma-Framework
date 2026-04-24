@@ -13,44 +13,29 @@
 #include "../../../Shaders/Quantum Break/Includes/GameCBuffers.hlsl"
 #include "../../Core/core.hpp"
 
+// Quantum Break's SR hook sits inside the temporal resolve path:
+// history reprojection provides motion vectors, temporal resolve provides color/depth/cbuffer inputs,
+// and two fullscreen conversion passes let DLSS run on linear color while the game remains gamma-space.
 namespace
 {
+   // Pass hashes used to identify the two parts of QB's temporal pipeline we need to observe/replace.
    ShaderHashesList shader_hashes_history_reprojection;
    ShaderHashesList shader_hashes_temporal_resolve;
 
-   constexpr float sr_vertical_fov_fallback = 1.04719758f; // 60 degrees
-   constexpr uint32_t cb_update_1_screen_res_offset = 0u * 16u;
-   constexpr uint32_t cb_update_1_inv_screen_res_offset = 0u * 16u + sizeof(float) * 2u;
-   constexpr uint32_t cb_update_1_output_res_offset = 1u * 16u;
-   constexpr uint32_t cb_update_1_inv_output_res_offset = 1u * 16u + sizeof(float) * 2u;
+   constexpr float sr_vertical_fov_fallback = 0.775934f; // ~44.46 degrees
+   // Byte offsets into QB's cb_update_1 cbuffer for the SR inputs that are not available from textures.
    constexpr uint32_t cb_update_1_inv_near_offset = 47u * 16u;
-   constexpr uint32_t cb_update_1_simulation_time_offset = 47u * 16u + sizeof(float);
-   constexpr uint32_t cb_update_1_simulation_time_delta_offset = 47u * 16u + sizeof(float) * 2u;
-   constexpr uint32_t cb_update_1_simulation_time_step_offset = 47u * 16u + sizeof(float) * 3u;
-   constexpr uint32_t cb_update_1_temporal_frame_offset = 48u * 16u;
-   constexpr uint32_t cb_update_1_current_frame_offset = 48u * 16u + sizeof(uint32_t);
-   constexpr uint32_t cb_update_1_half_res_jitter_offset = 96u * 16u;
    constexpr uint32_t cb_update_1_view_to_clip_offset = 10u * 16u;
-   constexpr uint32_t cb_update_1_viewport_res_offset = 118u * 16u + sizeof(float) * 2u;
-   constexpr uint32_t cb_update_1_inv_viewport_res_offset = 119u * 16u;
-   constexpr uint32_t cb_update_1_viewport_offset_offset = 119u * 16u + sizeof(float) * 2u;
-   constexpr uint32_t cb_update_1_shadow_map_res_offset = 120u * 16u;
-   constexpr uint32_t cb_update_1_shadow_map_vsm_res_offset = 120u * 16u + sizeof(float) * 2u;
    constexpr uint32_t cb_update_1_tess_view_to_clip_11_offset = 112u * 16u + 12u;
    constexpr uint32_t cb_update_1_jitter_offset = 121u * 16u;
-   constexpr uint32_t cb_update_1_snap_offset = 121u * 16u + sizeof(int32_t) * 2u;
-   constexpr uint32_t cb_update_1_screen_to_view_offset = 123u * 16u;
-   constexpr uint32_t cb_update_1_clip_to_previous_clip_offset = 26u * 16u;
-   constexpr uint32_t cb_update_1_view_to_previous_screen_offset = 124u * 16u;
-   constexpr uint32_t cb_update_1_min_size = cb_update_1_view_to_previous_screen_offset + sizeof(float) * 16u;
-   constexpr uint32_t ssaa_clip_to_previous_clip_offset = 0u * 16u;
+   constexpr uint32_t cb_update_1_min_size = cb_update_1_jitter_offset + sizeof(float) * 2u;
+   // The temporal resolve samples current color with g_vSSAAJitterOffset[0].
    constexpr uint32_t ssaa_jitter_offset = 12u * 16u;
-   constexpr uint32_t ssaa_source_res_offset = 15u * 16u + sizeof(float) * 2u;
-   constexpr uint32_t ssaa_inv_source_res_offset = 16u * 16u;
-   constexpr uint32_t ssaa_min_size = ssaa_inv_source_res_offset + sizeof(float) * 2u;
+   constexpr uint32_t ssaa_min_size = ssaa_jitter_offset + sizeof(float) * 2u;
 
    float ComputeVerticalFovFromProjectionScale(float projection_scale)
    {
+      // Projection matrix scale is 1 / tan(fov / 2). Invalid values fall back to the previous FOV.
       if (!std::isfinite(projection_scale))
       {
          return 0.f;
@@ -73,6 +58,7 @@ namespace
 
    bool UpdatePreviousTextureDesc(const D3D11_TEXTURE2D_DESC& current_desc, D3D11_TEXTURE2D_DESC& previous_desc, bool& has_previous_desc)
    {
+      // DLSS history must reset when any SR input/output texture shape changes.
       const bool changed = has_previous_desc && HasTextureShapeChanged(current_desc, previous_desc);
       previous_desc = current_desc;
       has_previous_desc = true;
@@ -93,55 +79,9 @@ namespace
       y = ReadCBufferValue<float>(base, offset + sizeof(float));
    }
 
-   void ReadCBufferInt2(const uint8_t* base, uint32_t offset, int32_t& x, int32_t& y)
-   {
-      x = ReadCBufferValue<int32_t>(base, offset);
-      y = ReadCBufferValue<int32_t>(base, offset + sizeof(int32_t));
-   }
-
-   void ReadCBufferFloatArray(const uint8_t* base, uint32_t offset, float* values, uint32_t count)
-   {
-      std::memcpy(values, base + offset, sizeof(float) * count);
-   }
-
-   bool IsFinitePositiveFloat(float value)
-   {
-      return std::isfinite(value) && value > 0.f;
-   }
-
-   float ResolveDimensionFromRawAndInverse(float raw_value, float inverse_value, float previous_value)
-   {
-      if (IsFinitePositiveFloat(raw_value))
-      {
-         return raw_value;
-      }
-      if (IsFinitePositiveFloat(inverse_value))
-      {
-         return 1.f / inverse_value;
-      }
-      return previous_value;
-   }
-
-   float ResolveInverseDimensionFromRawAndInverse(float raw_value, float inverse_value, float previous_value)
-   {
-      if (IsFinitePositiveFloat(inverse_value))
-      {
-         return inverse_value;
-      }
-      if (IsFinitePositiveFloat(raw_value))
-      {
-         return 1.f / raw_value;
-      }
-      return previous_value;
-   }
-
-   float RoundDimensionValue(float value)
-   {
-      return IsFinitePositiveFloat(value) ? std::round(value) : value;
-   }
-
    namespace Settings
    {
+      // Slider descriptors keep defaults, config keys, UI labels, and cbuffer members in one table.
       enum class Kind : uint8_t
       {
          Float,
@@ -233,56 +173,28 @@ namespace
 
       namespace SuperResolution
       {
-         constexpr const char* config_key_fsr_sharpness = "SR FSR Sharpness";
-         constexpr const char* config_key_mv_scale = "SR MV Scale";
-         constexpr const char* config_key_jitter_scale = "SR Jitter Scale";
-
-         float fsr_sharpness = 0.f;
-         float mv_scale = 1.f;
-         float jitter_scale = 1.f;
-
-         constexpr float fsr_sharpness_default = 0.f;
-         constexpr float mv_scale_default = 1.f;
-         constexpr float jitter_scale_default = 1.f;
+         constexpr float fsr_sharpness = 0.f;
+         constexpr float mv_scale = 1.f;
+         constexpr float jitter_scale = 1.f;
 
          void Initialize()
          {
-            fsr_sharpness = fsr_sharpness_default;
-            mv_scale = mv_scale_default;
-            jitter_scale = jitter_scale_default;
          }
 
          void Load(reshade::api::effect_runtime* runtime)
          {
-            reshade::get_config_value(runtime, NAME, config_key_fsr_sharpness, fsr_sharpness);
-            reshade::get_config_value(runtime, NAME, config_key_mv_scale, mv_scale);
-            reshade::get_config_value(runtime, NAME, config_key_jitter_scale, jitter_scale);
+            (void)runtime;
          }
 
          void Draw(DeviceData& device_data, reshade::api::effect_runtime* runtime)
          {
+            (void)runtime;
+
+#if DEVELOPMENT || TEST
+#if ENABLE_SR
             ImGui::NewLine();
             ImGui::Text("Super Resolution");
 
-            if (ImGui::SliderFloat("FSR Sharpness", &fsr_sharpness, 0.f, 1.f, "%.2f"))
-            {
-               reshade::set_config_value(runtime, NAME, config_key_fsr_sharpness, fsr_sharpness);
-            }
-            DrawResetButton(fsr_sharpness, fsr_sharpness_default, config_key_fsr_sharpness, runtime);
-
-            if (ImGui::SliderFloat("SR MV Scale", &mv_scale, -4.f, 4.f, "%.2f"))
-            {
-               reshade::set_config_value(runtime, NAME, config_key_mv_scale, mv_scale);
-            }
-            DrawResetButton(mv_scale, mv_scale_default, config_key_mv_scale, runtime);
-
-            if (ImGui::SliderFloat("SR Jitter Scale", &jitter_scale, -4.f, 4.f, "%.2f"))
-            {
-               reshade::set_config_value(runtime, NAME, config_key_jitter_scale, jitter_scale);
-            }
-            DrawResetButton(jitter_scale, jitter_scale_default, config_key_jitter_scale, runtime);
-
-#if ENABLE_SR
             if (ImGui::Button("Reset SR History"))
             {
                device_data.force_reset_sr = true;
@@ -290,6 +202,9 @@ namespace
 #else
             (void)device_data;
             ImGui::TextDisabled("Super Resolution is disabled in this build.");
+#endif
+#else
+            (void)device_data;
 #endif
          }
       } // namespace SuperResolution
@@ -405,6 +320,7 @@ namespace
 
       void SetRenderData(uint32_t render_width, uint32_t render_height, uint32_t output_width, uint32_t output_height, float jitter_x, float jitter_y, DeviceData& device_data)
       {
+         // Shaders need both SR input and final output sizes so the temporal resolve can sample the correct buffer.
          const float render_width_f = static_cast<float>(render_width);
          const float render_height_f = static_cast<float>(render_height);
          const float output_width_f = static_cast<float>(output_width);
@@ -444,59 +360,29 @@ namespace
 struct GameDeviceDataQuantumBreak final : public GameDeviceData
 {
 #if ENABLE_SR
+   // Resources captured or created around the temporal resolve pass.
    com_ptr<ID3D11Resource> sr_motion_vectors;
    com_ptr<ID3D11Buffer> cb_update_1_readback;
    com_ptr<ID3D11Buffer> ssaa_readback;
+   // Conversion scratch textures: game gamma color -> DLSS linear input -> game gamma resolve input.
+   com_ptr<ID3D11Texture2D> sr_linear_input_color;
+   com_ptr<ID3D11ShaderResourceView> sr_linear_input_color_srv;
+   com_ptr<ID3D11RenderTargetView> sr_linear_input_color_rtv;
+   com_ptr<ID3D11Texture2D> sr_gamma_output_color;
+   com_ptr<ID3D11ShaderResourceView> sr_gamma_output_color_srv;
+   com_ptr<ID3D11RenderTargetView> sr_gamma_output_color_rtv;
    com_ptr<ID3D11ShaderResourceView> sr_output_color_srv;
 
-   float sr_screen_res_x = 0.f;
-   float sr_screen_res_y = 0.f;
-   float sr_inv_screen_res_x = 0.f;
-   float sr_inv_screen_res_y = 0.f;
-   float sr_output_res_x = 0.f;
-   float sr_output_res_y = 0.f;
-   float sr_inv_output_res_x = 0.f;
-   float sr_inv_output_res_y = 0.f;
+   // Last captured frame constants that feed SR.
    float sr_jitter_x = 0.f;
    float sr_jitter_y = 0.f;
    float sr_cb_jitter_x = 0.f;
    float sr_cb_jitter_y = 0.f;
-   float sr_half_res_jitter_x = 0.f;
-   float sr_half_res_jitter_y = 0.f;
-   float sr_viewport_res_x = 0.f;
-   float sr_viewport_res_y = 0.f;
-   float sr_inv_viewport_res_x = 0.f;
-   float sr_inv_viewport_res_y = 0.f;
-   float sr_viewport_offset_x = 0.f;
-   float sr_viewport_offset_y = 0.f;
-   float sr_shadow_map_res_x = 0.f;
-   float sr_shadow_map_res_y = 0.f;
-   float sr_shadow_map_vsm_res_x = 0.f;
-   float sr_shadow_map_vsm_res_y = 0.f;
-   float sr_projection_scale_x = 0.f;
-   float sr_projection_scale_y = 0.f;
-   float sr_inv_near = 0.f;
    float sr_vertical_fov = sr_vertical_fov_fallback;
    float sr_near_plane = 0.1f;
    float sr_far_plane = 1000.f;
-   float sr_simulation_time = 0.f;
-   float sr_simulation_time_delta = 0.f;
-   float sr_simulation_time_step = 0.f;
-   float sr_taa_inv_source_width = 0.f;
-   float sr_taa_inv_source_height = 0.f;
-   int32_t sr_snap_offset_x = 0;
-   int32_t sr_snap_offset_y = 0;
-   uint32_t sr_taa_source_width = 0u;
-   uint32_t sr_taa_source_height = 0u;
-   uint32_t sr_temporal_frame = 0u;
-   uint32_t sr_current_frame = 0u;
-   float sr_screen_to_view[4] = {};
-   float sr_clip_to_previous_clip[16] = {};
-   float sr_view_to_previous_screen[16] = {};
-   float sr_ssaa_jitter_offsets[4][2] = {};
-   float sr_ssaa_clip_to_previous_clip[3][16] = {};
 
-   bool has_cb_update_1_data = false;
+   // Per-resource history used to decide when DLSS history must reset.
    bool has_ssaa_data = false;
    bool output_changed = false;
    bool has_previous_source_desc = false;
@@ -507,8 +393,11 @@ struct GameDeviceDataQuantumBreak final : public GameDeviceData
    D3D11_TEXTURE2D_DESC previous_motion_vectors_desc = {};
    uint32_t previous_render_width = 0u;
    uint32_t previous_render_height = 0u;
+   uint32_t previous_output_width = 0u;
+   uint32_t previous_output_height = 0u;
 #endif
 
+   // Frame markers are latched on present so pause/menu frames can be distinguished from scene frames.
    bool had_scene_temporal_resolve_last_frame = false;
    uint32_t ui_only_frame_hold_counter = 0u;
    bool debug_prev_saw_history_reprojection_pass = false;
@@ -530,9 +419,10 @@ class QuantumBreakGame final : public Game
       return *static_cast<const GameDeviceDataQuantumBreak*>(device_data.game);
    }
 
-#if ENABLE_SR
+#if ENABLE_SR && (DEVELOPMENT || TEST)
    static void DrawSuperResolutionDebug(DeviceData& device_data)
    {
+      // Runtime SR status only; detailed cbuffer dumps are intentionally kept out of the user-facing UI.
       auto& game_device_data = GetGameDeviceData(device_data);
 
       auto begin_table = [](const char* id)
@@ -545,7 +435,7 @@ class QuantumBreakGame final : public Game
 
          const float field_column_width = (std::max)(
             420.f,
-            ImGui::CalcTextSize("Active Jitter Scale Multiplier:").x + ImGui::GetStyle().CellPadding.x * 2.f + 48.f);
+            ImGui::CalcTextSize("Had Scene Temporal Resolve Last Frame:").x + ImGui::GetStyle().CellPadding.x * 2.f + 48.f);
          ImGui::TableSetupColumn("Field", ImGuiTableColumnFlags_WidthFixed, field_column_width);
          ImGui::TableSetupColumn("Value", ImGuiTableColumnFlags_WidthStretch);
          return true;
@@ -571,136 +461,43 @@ class QuantumBreakGame final : public Game
          ImGui::Text("%u", value);
       };
 
-      auto table_row_int2 = [&](const char* label, int32_t x, int32_t y)
-      {
-         table_row_label(label);
-         ImGui::Text("%d %d", x, y);
-      };
-
       auto table_row_float = [&](const char* label, float value)
       {
          table_row_label(label);
          ImGui::Text("%.6f", value);
       };
 
-      auto table_row_vec2 = [&](const char* label, float x, float y)
-      {
-         table_row_label(label);
-         ImGui::Text("%.6f %.6f", x, y);
-      };
-
-      auto table_row_vec2_precise = [&](const char* label, float x, float y)
-      {
-         table_row_label(label);
-         ImGui::Text("%.9f %.9f", x, y);
-      };
-
-      auto table_row_resolution2 = [&](const char* label, float x, float y)
-      {
-         table_row_label(label);
-         ImGui::Text("%u %u", static_cast<uint32_t>(std::lround((std::max)(0.f, x))), static_cast<uint32_t>(std::lround((std::max)(0.f, y))));
-      };
-
-      auto draw_float4 = [](const char* label, const float* values)
-      {
-         ImGui::Text("%s: %.6f %.6f %.6f %.6f", label, values[0], values[1], values[2], values[3]);
-      };
-
-      auto draw_float4x4_registers = [&](const char* label, const float* values)
-      {
-         if (ImGui::TreeNode(label))
-         {
-            for (int i = 0; i < 4; ++i)
-            {
-               const float* row = values + (i * 4);
-               ImGui::Text("[%d] %.6f %.6f %.6f %.6f", i, row[0], row[1], row[2], row[3]);
-            }
-            ImGui::TreePop();
-         }
-      };
-
       ImGui::NewLine();
-      ImGui::Text("Super Resolution Debug");
-      if (begin_table("QB_SR_Debug_Overview"))
+      if (ImGui::CollapsingHeader("Super Resolution Debug"))
       {
-         table_row_bool("History Reprojection Pass Seen:", game_device_data.debug_prev_saw_history_reprojection_pass);
-         table_row_bool("Temporal Resolve Pass Seen:", game_device_data.debug_prev_saw_temporal_resolve_pass);
-         table_row_bool("Motion Vectors Captured:", game_device_data.debug_prev_had_motion_vectors);
-         table_row_bool("Had Scene Temporal Resolve Last Frame:", game_device_data.had_scene_temporal_resolve_last_frame);
-         table_row_uint("UI-Only Hold Frames:", game_device_data.ui_only_frame_hold_counter);
-         ImGui::EndTable();
+         if (begin_table("QB_SR_Debug_Overview"))
+         {
+            table_row_bool("History Reprojection Pass Seen:", game_device_data.debug_prev_saw_history_reprojection_pass);
+            table_row_bool("Temporal Resolve Pass Seen:", game_device_data.debug_prev_saw_temporal_resolve_pass);
+            table_row_bool("Motion Vectors Captured:", game_device_data.debug_prev_had_motion_vectors);
+            table_row_bool("Had Scene Temporal Resolve Last Frame:", game_device_data.had_scene_temporal_resolve_last_frame);
+            table_row_uint("UI-Only Hold Frames:", game_device_data.ui_only_frame_hold_counter);
+            ImGui::EndTable();
+         }
       }
 
-      ImGui::Separator();
-      ImGui::TextUnformatted("cb_update_1");
-      if (begin_table("QB_SR_Debug_CBUpdate1"))
+      if (ImGui::CollapsingHeader("Active SR Inputs"))
       {
-         table_row_bool("Captured:", game_device_data.has_cb_update_1_data);
-         table_row_resolution2("g_vScreenRes (c0):", game_device_data.sr_screen_res_x, game_device_data.sr_screen_res_y);
-         table_row_vec2_precise("g_vInvScreenRes (c0.z):", game_device_data.sr_inv_screen_res_x, game_device_data.sr_inv_screen_res_y);
-         table_row_resolution2("g_vOutputRes (c1):", game_device_data.sr_output_res_x, game_device_data.sr_output_res_y);
-         table_row_vec2_precise("g_vInvOutputRes (c1.z):", game_device_data.sr_inv_output_res_x, game_device_data.sr_inv_output_res_y);
-         table_row_resolution2("g_vViewportRes (c118.z):", game_device_data.sr_viewport_res_x, game_device_data.sr_viewport_res_y);
-         table_row_vec2_precise("g_vInvViewportRes (c119):", game_device_data.sr_inv_viewport_res_x, game_device_data.sr_inv_viewport_res_y);
-         table_row_vec2("g_vViewportOffset (c119.z):", game_device_data.sr_viewport_offset_x, game_device_data.sr_viewport_offset_y);
-         table_row_vec2("g_vJitterOffset (c121):", game_device_data.sr_cb_jitter_x, game_device_data.sr_cb_jitter_y);
-         table_row_vec2("g_vHalfResolutionJitter (c96):", game_device_data.sr_half_res_jitter_x, game_device_data.sr_half_res_jitter_y);
-         table_row_int2("g_vSnapOffset (c121.z):", game_device_data.sr_snap_offset_x, game_device_data.sr_snap_offset_y);
-         table_row_uint("g_uTemporalFrame (c48):", game_device_data.sr_temporal_frame);
-         table_row_uint("g_uCurrentFrame (c48.y):", game_device_data.sr_current_frame);
-         table_row_float("g_fSimulationTime (c47.y):", game_device_data.sr_simulation_time);
-         table_row_float("g_fSimulationTimeDelta (c47.z):", game_device_data.sr_simulation_time_delta);
-         table_row_float("g_fSimulationTimeStep (c47.w):", game_device_data.sr_simulation_time_step);
-         table_row_float("g_fInvNear (c47):", game_device_data.sr_inv_near);
-         table_row_float("Near Plane (derived):", game_device_data.sr_near_plane);
-         table_row_vec2("g_mViewToClip proj XY:", game_device_data.sr_projection_scale_x, game_device_data.sr_projection_scale_y);
-         table_row_float("Vertical FOV (derived):", game_device_data.sr_vertical_fov);
-         ImGui::EndTable();
-      }
-      draw_float4("g_vScreenToView (c123)", game_device_data.sr_screen_to_view);
-
-      ImGui::Separator();
-      ImGui::TextUnformatted("temporal_resolve (ssaa cbuffer)");
-      if (begin_table("QB_SR_Debug_SSAA"))
-      {
-         table_row_bool("Captured:", game_device_data.has_ssaa_data);
-         table_row_vec2("g_vSSAAJitterOffset[0] (c12):", game_device_data.sr_ssaa_jitter_offsets[0][0], game_device_data.sr_ssaa_jitter_offsets[0][1]);
-         table_row_vec2("g_vSSAAJitterOffset[1] (c13):", game_device_data.sr_ssaa_jitter_offsets[1][0], game_device_data.sr_ssaa_jitter_offsets[1][1]);
-         table_row_vec2("g_vSSAAJitterOffset[2] (c14):", game_device_data.sr_ssaa_jitter_offsets[2][0], game_device_data.sr_ssaa_jitter_offsets[2][1]);
-         table_row_vec2("g_vSSAAJitterOffset[3] (c15):", game_device_data.sr_ssaa_jitter_offsets[3][0], game_device_data.sr_ssaa_jitter_offsets[3][1]);
-         table_row_uint("g_vTAASourceRes.x (c15.z):", game_device_data.sr_taa_source_width);
-         table_row_uint("g_vTAASourceRes.y (c15.w):", game_device_data.sr_taa_source_height);
-         table_row_vec2_precise("g_vInvTAASourceRes (c16):", game_device_data.sr_taa_inv_source_width, game_device_data.sr_taa_inv_source_height);
-         ImGui::EndTable();
-      }
-
-      const bool using_ssaa_jitter = game_device_data.has_ssaa_data;
-      const float active_jitter_x = using_ssaa_jitter ? game_device_data.sr_jitter_x : game_device_data.sr_cb_jitter_x;
-      const float active_jitter_y = using_ssaa_jitter ? game_device_data.sr_jitter_y : game_device_data.sr_cb_jitter_y;
-      ImGui::Separator();
-      ImGui::TextUnformatted("Active SR Inputs");
-      if (begin_table("QB_SR_Debug_Active"))
-      {
-         table_row_label("Active Jitter Source:");
-         ImGui::TextUnformatted(using_ssaa_jitter ? "ssaa" : "cb_update_1");
-         table_row_vec2("Active Jitter:", active_jitter_x, active_jitter_y);
-         table_row_uint("Last SR Render Width:", game_device_data.previous_render_width);
-         table_row_uint("Last SR Render Height:", game_device_data.previous_render_height);
-         table_row_float("Active MV Scale Multiplier:", Settings::SuperResolution::mv_scale);
-         table_row_float("Active Jitter Scale Multiplier:", Settings::SuperResolution::jitter_scale);
-         ImGui::EndTable();
-      }
-
-      if (ImGui::CollapsingHeader("Temporal Matrices"))
-      {
-         draw_float4x4_registers("g_mClipToPreviousClip", game_device_data.sr_clip_to_previous_clip);
-         draw_float4x4_registers("g_mViewToPreviousScreen", game_device_data.sr_view_to_previous_screen);
-         draw_float4x4_registers("g_mSSAAClipToPreviousClip[0]", &game_device_data.sr_ssaa_clip_to_previous_clip[0][0]);
-         draw_float4x4_registers("g_mSSAAClipToPreviousClip[1]", &game_device_data.sr_ssaa_clip_to_previous_clip[1][0]);
-         draw_float4x4_registers("g_mSSAAClipToPreviousClip[2]", &game_device_data.sr_ssaa_clip_to_previous_clip[2][0]);
+         if (begin_table("QB_SR_Debug_Active"))
+         {
+            table_row_uint("Last SR Render Width:", game_device_data.previous_render_width);
+            table_row_uint("Last SR Render Height:", game_device_data.previous_render_height);
+            table_row_uint("Last SR Output Width:", game_device_data.previous_output_width);
+            table_row_uint("Last SR Output Height:", game_device_data.previous_output_height);
+            table_row_float("Active MV Scale Multiplier:", Settings::SuperResolution::mv_scale);
+            table_row_float("Active Jitter Scale Multiplier:", Settings::SuperResolution::jitter_scale);
+            ImGui::EndTable();
+         }
       }
    }
+#endif
 
+#if ENABLE_SR
    static bool MapPixelShaderConstantBufferForReadback(
       ID3D11Device* native_device,
       ID3D11DeviceContext* native_device_context,
@@ -709,6 +506,7 @@ class QuantumBreakGame final : public Game
       com_ptr<ID3D11Buffer>& readback_buffer,
       D3D11_MAPPED_SUBRESOURCE& mapped)
    {
+      // Constant buffers are GPU-only, so copy them into a staging buffer before CPU-side parsing.
       com_ptr<ID3D11Buffer> constant_buffer;
       native_device_context->PSGetConstantBuffers(slot, 1, &constant_buffer);
       if (!constant_buffer.get())
@@ -756,7 +554,7 @@ class QuantumBreakGame final : public Game
 
    static bool CaptureCBUpdate1Data(ID3D11Device* native_device, ID3D11DeviceContext* native_device_context, GameDeviceDataQuantumBreak& game_device_data)
    {
-      game_device_data.has_cb_update_1_data = false;
+      // cb_update_1 supplies fallback jitter, projection scale, and near plane for SR.
       game_device_data.sr_cb_jitter_x = 0.f;
       game_device_data.sr_cb_jitter_y = 0.f;
       D3D11_MAPPED_SUBRESOURCE mapped = {};
@@ -766,60 +564,11 @@ class QuantumBreakGame final : public Game
       }
 
       const auto* base = static_cast<const uint8_t*>(mapped.pData);
-      float raw_screen_res_x = 0.f;
-      float raw_screen_res_y = 0.f;
-      float raw_inv_screen_res_x = 0.f;
-      float raw_inv_screen_res_y = 0.f;
-      float raw_output_res_x = 0.f;
-      float raw_output_res_y = 0.f;
-      float raw_inv_output_res_x = 0.f;
-      float raw_inv_output_res_y = 0.f;
-      float raw_viewport_res_x = 0.f;
-      float raw_viewport_res_y = 0.f;
-      float raw_inv_viewport_res_x = 0.f;
-      float raw_inv_viewport_res_y = 0.f;
-
-      ReadCBufferFloat2(base, cb_update_1_screen_res_offset, raw_screen_res_x, raw_screen_res_y);
-      ReadCBufferFloat2(base, cb_update_1_inv_screen_res_offset, raw_inv_screen_res_x, raw_inv_screen_res_y);
-      ReadCBufferFloat2(base, cb_update_1_output_res_offset, raw_output_res_x, raw_output_res_y);
-      ReadCBufferFloat2(base, cb_update_1_inv_output_res_offset, raw_inv_output_res_x, raw_inv_output_res_y);
-      ReadCBufferFloat2(base, cb_update_1_half_res_jitter_offset, game_device_data.sr_half_res_jitter_x, game_device_data.sr_half_res_jitter_y);
-      ReadCBufferFloat2(base, cb_update_1_viewport_res_offset, raw_viewport_res_x, raw_viewport_res_y);
-      ReadCBufferFloat2(base, cb_update_1_inv_viewport_res_offset, raw_inv_viewport_res_x, raw_inv_viewport_res_y);
-      ReadCBufferFloat2(base, cb_update_1_viewport_offset_offset, game_device_data.sr_viewport_offset_x, game_device_data.sr_viewport_offset_y);
       ReadCBufferFloat2(base, cb_update_1_jitter_offset, game_device_data.sr_cb_jitter_x, game_device_data.sr_cb_jitter_y);
-      ReadCBufferInt2(base, cb_update_1_snap_offset, game_device_data.sr_snap_offset_x, game_device_data.sr_snap_offset_y);
-      const float raw_inv_near = ReadCBufferValue<float>(base, cb_update_1_inv_near_offset);
-      game_device_data.sr_simulation_time = ReadCBufferValue<float>(base, cb_update_1_simulation_time_offset);
-      game_device_data.sr_simulation_time_delta = ReadCBufferValue<float>(base, cb_update_1_simulation_time_delta_offset);
-      game_device_data.sr_simulation_time_step = ReadCBufferValue<float>(base, cb_update_1_simulation_time_step_offset);
-      game_device_data.sr_temporal_frame = ReadCBufferValue<uint32_t>(base, cb_update_1_temporal_frame_offset);
-      game_device_data.sr_current_frame = ReadCBufferValue<uint32_t>(base, cb_update_1_current_frame_offset);
-      game_device_data.sr_projection_scale_x = ReadCBufferValue<float>(base, cb_update_1_view_to_clip_offset);
-      game_device_data.sr_projection_scale_y = ReadCBufferValue<float>(base, cb_update_1_view_to_clip_offset + sizeof(float) * 5u);
-      ReadCBufferFloatArray(base, cb_update_1_screen_to_view_offset, game_device_data.sr_screen_to_view, 4u);
-      ReadCBufferFloatArray(base, cb_update_1_clip_to_previous_clip_offset, game_device_data.sr_clip_to_previous_clip, 16u);
-      ReadCBufferFloatArray(base, cb_update_1_view_to_previous_screen_offset, game_device_data.sr_view_to_previous_screen, 16u);
-
-      game_device_data.sr_inv_screen_res_x = ResolveInverseDimensionFromRawAndInverse(raw_screen_res_x, raw_inv_screen_res_x, game_device_data.sr_inv_screen_res_x);
-      game_device_data.sr_inv_screen_res_y = ResolveInverseDimensionFromRawAndInverse(raw_screen_res_y, raw_inv_screen_res_y, game_device_data.sr_inv_screen_res_y);
-      game_device_data.sr_screen_res_x = RoundDimensionValue(ResolveDimensionFromRawAndInverse(raw_screen_res_x, raw_inv_screen_res_x, game_device_data.sr_screen_res_x));
-      game_device_data.sr_screen_res_y = RoundDimensionValue(ResolveDimensionFromRawAndInverse(raw_screen_res_y, raw_inv_screen_res_y, game_device_data.sr_screen_res_y));
-      game_device_data.sr_inv_output_res_x = ResolveInverseDimensionFromRawAndInverse(raw_output_res_x, raw_inv_output_res_x, game_device_data.sr_inv_output_res_x);
-      game_device_data.sr_inv_output_res_y = ResolveInverseDimensionFromRawAndInverse(raw_output_res_y, raw_inv_output_res_y, game_device_data.sr_inv_output_res_y);
-      game_device_data.sr_output_res_x = RoundDimensionValue(ResolveDimensionFromRawAndInverse(raw_output_res_x, raw_inv_output_res_x, game_device_data.sr_output_res_x));
-      game_device_data.sr_output_res_y = RoundDimensionValue(ResolveDimensionFromRawAndInverse(raw_output_res_y, raw_inv_output_res_y, game_device_data.sr_output_res_y));
-      game_device_data.sr_inv_viewport_res_x = ResolveInverseDimensionFromRawAndInverse(raw_viewport_res_x, raw_inv_viewport_res_x, game_device_data.sr_inv_viewport_res_x);
-      game_device_data.sr_inv_viewport_res_y = ResolveInverseDimensionFromRawAndInverse(raw_viewport_res_y, raw_inv_viewport_res_y, game_device_data.sr_inv_viewport_res_y);
-      game_device_data.sr_viewport_res_x = RoundDimensionValue(ResolveDimensionFromRawAndInverse(raw_viewport_res_x, raw_inv_viewport_res_x, game_device_data.sr_viewport_res_x));
-      game_device_data.sr_viewport_res_y = RoundDimensionValue(ResolveDimensionFromRawAndInverse(raw_viewport_res_y, raw_inv_viewport_res_y, game_device_data.sr_viewport_res_y));
-      if (IsFinitePositiveFloat(raw_inv_near))
-      {
-         game_device_data.sr_inv_near = raw_inv_near;
-      }
-
+      const float inv_near = ReadCBufferValue<float>(base, cb_update_1_inv_near_offset);
+      const float projection_scale_x = ReadCBufferValue<float>(base, cb_update_1_view_to_clip_offset);
+      const float projection_scale_y = ReadCBufferValue<float>(base, cb_update_1_view_to_clip_offset + sizeof(float) * 5u);
       const float tess_view_to_clip_11 = ReadCBufferValue<float>(base, cb_update_1_tess_view_to_clip_11_offset);
-      const float inv_near = game_device_data.sr_inv_near;
       if (std::isfinite(inv_near) && inv_near > 0.f)
       {
          game_device_data.sr_near_plane = 1.f / inv_near;
@@ -828,21 +577,19 @@ class QuantumBreakGame final : public Game
       game_device_data.sr_cb_jitter_x = std::isfinite(game_device_data.sr_cb_jitter_x) ? game_device_data.sr_cb_jitter_x : 0.f;
       game_device_data.sr_cb_jitter_y = std::isfinite(game_device_data.sr_cb_jitter_y) ? game_device_data.sr_cb_jitter_y : 0.f;
 
-      float vertical_fov = ComputeVerticalFovFromProjectionScale(tess_view_to_clip_11);
+      float vertical_fov = ComputeVerticalFovFromProjectionScale(projection_scale_y);
       if (vertical_fov <= 0.f)
       {
-         vertical_fov = ComputeVerticalFovFromProjectionScale(game_device_data.sr_projection_scale_y);
+         vertical_fov = ComputeVerticalFovFromProjectionScale(projection_scale_x);
       }
       if (vertical_fov <= 0.f)
       {
-         vertical_fov = ComputeVerticalFovFromProjectionScale(game_device_data.sr_projection_scale_x);
+         vertical_fov = ComputeVerticalFovFromProjectionScale(tess_view_to_clip_11);
       }
       if (vertical_fov > 0.f)
       {
          game_device_data.sr_vertical_fov = vertical_fov;
       }
-
-      game_device_data.has_cb_update_1_data = true;
 
       native_device_context->Unmap(game_device_data.cb_update_1_readback.get(), 0);
       return true;
@@ -850,11 +597,10 @@ class QuantumBreakGame final : public Game
 
    static bool CaptureSSAAData(ID3D11Device* native_device, ID3D11DeviceContext* native_device_context, GameDeviceDataQuantumBreak& game_device_data)
    {
+      // The temporal resolve samples current color with g_vSSAAJitterOffset[0], so keep this as the jitter source.
       game_device_data.has_ssaa_data = false;
       game_device_data.sr_jitter_x = 0.f;
       game_device_data.sr_jitter_y = 0.f;
-      game_device_data.sr_taa_source_width = 0u;
-      game_device_data.sr_taa_source_height = 0u;
 
       D3D11_MAPPED_SUBRESOURCE mapped = {};
       if (!MapPixelShaderConstantBufferForReadback(native_device, native_device_context, 1, ssaa_min_size, game_device_data.ssaa_readback, mapped))
@@ -863,27 +609,9 @@ class QuantumBreakGame final : public Game
       }
 
       const auto* base = static_cast<const uint8_t*>(mapped.pData);
-      ReadCBufferFloatArray(base, ssaa_clip_to_previous_clip_offset, &game_device_data.sr_ssaa_clip_to_previous_clip[0][0], 48u);
-      for (uint32_t i = 0u; i < 4u; ++i)
-      {
-         ReadCBufferFloat2(base, ssaa_jitter_offset + i * 16u, game_device_data.sr_ssaa_jitter_offsets[i][0], game_device_data.sr_ssaa_jitter_offsets[i][1]);
-      }
-      game_device_data.sr_jitter_x = std::isfinite(game_device_data.sr_ssaa_jitter_offsets[0][0]) ? game_device_data.sr_ssaa_jitter_offsets[0][0] : 0.f;
-      game_device_data.sr_jitter_y = std::isfinite(game_device_data.sr_ssaa_jitter_offsets[0][1]) ? game_device_data.sr_ssaa_jitter_offsets[0][1] : 0.f;
-
-      float source_res_x = 0.f;
-      float source_res_y = 0.f;
-      ReadCBufferFloat2(base, ssaa_source_res_offset, source_res_x, source_res_y);
-      ReadCBufferFloat2(base, ssaa_inv_source_res_offset, game_device_data.sr_taa_inv_source_width, game_device_data.sr_taa_inv_source_height);
-
-      if (std::isfinite(source_res_x) && source_res_x > 0.f)
-      {
-         game_device_data.sr_taa_source_width = static_cast<uint32_t>(std::lround(source_res_x));
-      }
-      if (std::isfinite(source_res_y) && source_res_y > 0.f)
-      {
-         game_device_data.sr_taa_source_height = static_cast<uint32_t>(std::lround(source_res_y));
-      }
+      ReadCBufferFloat2(base, ssaa_jitter_offset, game_device_data.sr_jitter_x, game_device_data.sr_jitter_y);
+      game_device_data.sr_jitter_x = std::isfinite(game_device_data.sr_jitter_x) ? game_device_data.sr_jitter_x : 0.f;
+      game_device_data.sr_jitter_y = std::isfinite(game_device_data.sr_jitter_y) ? game_device_data.sr_jitter_y : 0.f;
 
       game_device_data.has_ssaa_data = true;
 
@@ -893,6 +621,7 @@ class QuantumBreakGame final : public Game
 
    static bool SetupSROutput(ID3D11Device* native_device, DeviceData& device_data, GameDeviceDataQuantumBreak& game_device_data, const D3D11_TEXTURE2D_DESC& output_desc)
    {
+      // DLSS writes linear color here; a later fullscreen pass encodes it back to QB's gamma-space resolve input.
       game_device_data.output_changed = false;
       bool recreated_output_texture = false;
 
@@ -940,6 +669,124 @@ class QuantumBreakGame final : public Game
 
       return true;
    }
+
+   static DXGI_FORMAT ResolveSRColorViewFormat(DXGI_FORMAT format)
+   {
+      // Conversion passes need RTV/SRV-compatible typed color formats, not typeless or sRGB view formats.
+      switch (format)
+      {
+      case DXGI_FORMAT_R32G32B32A32_TYPELESS:
+         return DXGI_FORMAT_R32G32B32A32_FLOAT;
+      case DXGI_FORMAT_R16G16B16A16_TYPELESS:
+         return DXGI_FORMAT_R16G16B16A16_FLOAT;
+      case DXGI_FORMAT_R10G10B10A2_TYPELESS:
+         return DXGI_FORMAT_R10G10B10A2_UNORM;
+      case DXGI_FORMAT_R8G8B8A8_TYPELESS:
+      case DXGI_FORMAT_R8G8B8A8_UNORM_SRGB:
+         return DXGI_FORMAT_R8G8B8A8_UNORM;
+      case DXGI_FORMAT_B8G8R8A8_TYPELESS:
+      case DXGI_FORMAT_B8G8R8A8_UNORM_SRGB:
+         return DXGI_FORMAT_B8G8R8A8_UNORM;
+      case DXGI_FORMAT_B8G8R8X8_TYPELESS:
+      case DXGI_FORMAT_B8G8R8X8_UNORM_SRGB:
+         return DXGI_FORMAT_B8G8R8X8_UNORM;
+      default:
+         return format;
+      }
+   }
+
+   static bool SetupSRConversionTexture(ID3D11Device* native_device, D3D11_TEXTURE2D_DESC desc, com_ptr<ID3D11Texture2D>& texture, com_ptr<ID3D11ShaderResourceView>& srv, com_ptr<ID3D11RenderTargetView>& rtv)
+   {
+      // Scratch textures are simple single-mip render targets used only by the pre/post SR conversion passes.
+      desc.Format = ResolveSRColorViewFormat(desc.Format);
+      if (desc.Width == 0u || desc.Height == 0u || desc.Format == DXGI_FORMAT_UNKNOWN)
+      {
+         return false;
+      }
+
+      desc.BindFlags = D3D11_BIND_SHADER_RESOURCE | D3D11_BIND_RENDER_TARGET;
+      desc.CPUAccessFlags = 0;
+      desc.Usage = D3D11_USAGE_DEFAULT;
+      desc.MiscFlags = 0;
+      desc.MipLevels = 1u;
+      desc.ArraySize = 1u;
+      desc.SampleDesc.Count = 1u;
+      desc.SampleDesc.Quality = 0u;
+
+      bool recreate_texture = !texture.get();
+      if (!recreate_texture)
+      {
+         D3D11_TEXTURE2D_DESC previous_desc = {};
+         texture->GetDesc(&previous_desc);
+         recreate_texture = HasTextureShapeChanged(desc, previous_desc);
+      }
+
+      if (recreate_texture)
+      {
+         texture = nullptr;
+         srv = nullptr;
+         rtv = nullptr;
+
+         HRESULT hr = native_device->CreateTexture2D(&desc, nullptr, &texture);
+         if (FAILED(hr) || !texture.get())
+         {
+            return false;
+         }
+      }
+
+      if (!srv.get())
+      {
+         HRESULT hr = native_device->CreateShaderResourceView(texture.get(), nullptr, &srv);
+         if (FAILED(hr) || !srv.get())
+         {
+            return false;
+         }
+      }
+
+      if (!rtv.get())
+      {
+         HRESULT hr = native_device->CreateRenderTargetView(texture.get(), nullptr, &rtv);
+         if (FAILED(hr) || !rtv.get())
+         {
+            return false;
+         }
+      }
+
+      return true;
+   }
+
+   static bool DrawSRConversionPass(ID3D11DeviceContext* native_device_context, DeviceData& device_data, uint32_t pixel_shader_hash, ID3D11ShaderResourceView* source_srv, ID3D11RenderTargetView* target_rtv, uint32_t width, uint32_t height)
+   {
+      // Shared fullscreen draw for gamma->linear and linear->gamma SR color conversion.
+      const auto vs_it = device_data.native_vertex_shaders.find(CompileTimeStringHash("Copy VS"));
+      const auto ps_it = device_data.native_pixel_shaders.find(pixel_shader_hash);
+      if (vs_it == device_data.native_vertex_shaders.end() || !vs_it->second.get() ||
+          ps_it == device_data.native_pixel_shaders.end() || !ps_it->second.get() ||
+          !source_srv || !target_rtv || width == 0u || height == 0u)
+      {
+         return false;
+      }
+
+      native_device_context->OMSetRenderTargets(0, nullptr, nullptr);
+      DrawCustomPixelShader(
+         native_device_context,
+         device_data.default_depth_stencil_state.get(),
+         device_data.default_blend_state.get(),
+         nullptr,
+         vs_it->second.get(),
+         ps_it->second.get(),
+         source_srv,
+         target_rtv,
+         width,
+         height,
+         false);
+
+      ID3D11ShaderResourceView* null_srv = nullptr;
+      native_device_context->PSSetShaderResources(0, 1, &null_srv);
+      ID3D11RenderTargetView* null_rtv = nullptr;
+      native_device_context->OMSetRenderTargets(1, &null_rtv, nullptr);
+      return true;
+   }
 #endif
 
 public:
@@ -947,11 +794,15 @@ public:
    {
       (void)async;
 
+      // QB custom shaders reserve these slots for Luma settings/data during the temporal resolve replacement.
       luma_settings_cbuffer_index = 13;
       luma_data_cbuffer_index = 12;
 
 #if ENABLE_SR
       sr_game_tooltip = "Super Resolution engages during the temporal resolve pass.\n";
+      // Native fullscreen passes bridge QB's gamma-space post stack with DLSS' preferred linear input.
+      native_shaders_definitions.emplace(CompileTimeStringHash("QB Pre SR Decode"), ShaderDefinition{"Luma_QB_PreSRDecode", reshade::api::pipeline_subobject_type::pixel_shader});
+      native_shaders_definitions.emplace(CompileTimeStringHash("QB Post SR Encode"), ShaderDefinition{"Luma_QB_PostSREncode", reshade::api::pipeline_subobject_type::pixel_shader});
 #endif
 
       Settings::Initialize();
@@ -975,6 +826,7 @@ public:
 
       if (original_shader_hashes.Contains(shader_hashes_history_reprojection))
       {
+         // The history reprojection pass has the motion-vector resource bound as CS SRV 0.
          game_device_data.saw_history_reprojection_pass = true;
          device_data.taa_detected = true;
 
@@ -996,6 +848,7 @@ public:
          return DrawOrDispatchOverrideType::None;
       }
 
+      // Temporal resolve is the SR insertion point: it sees color, depth, post-stack constants, and final output.
       game_device_data.saw_temporal_resolve_pass = true;
       device_data.has_drawn_main_post_processing = true;
 
@@ -1018,6 +871,7 @@ public:
             return false;
          }
 
+         // UI/menu-only resolves can hit the same shader without the scene color/depth/RTV bindings SR needs.
          native_device_context->PSGetShaderResources(0, ARRAYSIZE(ps_shader_resources), reinterpret_cast<ID3D11ShaderResourceView**>(ps_shader_resources));
          native_device_context->OMGetRenderTargets(D3D11_SIMULTANEOUS_RENDER_TARGET_COUNT, &render_target_views[0], &depth_stencil_view);
          return ps_shader_resources[0].get() && ps_shader_resources[2].get() && render_target_views[0].get();
@@ -1039,6 +893,7 @@ public:
             com_ptr<ID3D11Resource> depth_resource;
             ps_shader_resources[0]->GetResource(&depth_resource);
 
+            // The temporal resolve RTV is the final SR output target size.
             com_ptr<ID3D11Resource> output_resource;
             render_target_views[0]->GetResource(&output_resource);
 
@@ -1054,10 +909,12 @@ public:
 
             if (SUCCEEDED(source_hr) && SUCCEEDED(output_hr) && SUCCEEDED(depth_hr) && SUCCEEDED(motion_vectors_hr) && source_color_texture.get() && output_texture.get() && depth_texture.get() && motion_vectors_texture.get())
             {
+               // Descs drive DLSS settings, conversion texture allocation, and history reset decisions.
                D3D11_TEXTURE2D_DESC source_desc = {};
                D3D11_TEXTURE2D_DESC depth_desc = {};
                D3D11_TEXTURE2D_DESC motion_vectors_desc = {};
                D3D11_TEXTURE2D_DESC output_desc = {};
+               // Source/depth/MV descs bound the DLSS input resolution; output desc drives the upscaled target.
                source_color_texture->GetDesc(&source_desc);
                depth_texture->GetDesc(&depth_desc);
                motion_vectors_texture->GetDesc(&motion_vectors_desc);
@@ -1068,27 +925,18 @@ public:
                   auto* sr_instance_data = device_data.GetSRInstanceData();
                   if (sr_instance_data)
                   {
+                     // Use the smallest SR input texture so color, depth, and motion vectors cover the full render area.
                      const uint32_t max_input_width = (std::min)(source_desc.Width, (std::min)(depth_desc.Width, motion_vectors_desc.Width));
                      const uint32_t max_input_height = (std::min)(source_desc.Height, (std::min)(depth_desc.Height, motion_vectors_desc.Height));
-                     uint32_t render_width = source_desc.Width;
-                     uint32_t render_height = source_desc.Height;
-                     if (game_device_data.sr_taa_source_width > 0u && game_device_data.sr_taa_source_height > 0u && game_device_data.sr_taa_source_width <= max_input_width && game_device_data.sr_taa_source_height <= max_input_height)
-                     {
-                        render_width = game_device_data.sr_taa_source_width;
-                        render_height = game_device_data.sr_taa_source_height;
-                     }
-                     else if (max_input_width > 0u && max_input_height > 0u)
-                     {
-                        render_width = max_input_width;
-                        render_height = max_input_height;
-                     }
+                     const uint32_t render_width = max_input_width;
+                     const uint32_t render_height = max_input_height;
 
                      const uint32_t output_width = output_desc.Width;
                      const uint32_t output_height = output_desc.Height;
                      const float jitter_x = game_device_data.has_ssaa_data ? game_device_data.sr_jitter_x : game_device_data.sr_cb_jitter_x;
                      const float jitter_y = game_device_data.has_ssaa_data ? game_device_data.sr_jitter_y : game_device_data.sr_cb_jitter_y;
 
-                     if (render_width == 0u || render_height == 0u)
+                     if (render_width == 0u || render_height == 0u || output_width == 0u || output_height == 0u)
                      {
                         device_data.force_reset_sr = true;
                         return DrawOrDispatchOverrideType::None;
@@ -1102,33 +950,48 @@ public:
                      settings_data.render_width = render_width;
                      settings_data.render_height = render_height;
                      settings_data.dynamic_resolution = false;
-                     settings_data.hdr = false;
-                     settings_data.auto_exposure = true;
+                     // The pre-SR decode pass makes the color input linear; exposure is already baked by QB.
+                     settings_data.hdr = true;
+                     settings_data.auto_exposure = false;
                      settings_data.inverted_depth = false;
-                     settings_data.mvs_jittered = true;
+                     settings_data.mvs_jittered = false;
                      settings_data.mvs_x_scale = static_cast<float>(render_width) * Settings::SuperResolution::mv_scale;
                      settings_data.mvs_y_scale = static_cast<float>(render_height) * Settings::SuperResolution::mv_scale;
                      settings_data.render_preset = dlss_render_preset;
 
-                     const bool settings_updated = sr_implementations[device_data.sr_type]->UpdateSettings(sr_instance_data, native_device_context, settings_data);
+                     D3D11_SHADER_RESOURCE_VIEW_DESC source_srv_desc = {};
+                     ps_shader_resources[2]->GetDesc(&source_srv_desc);
+
+                     D3D11_TEXTURE2D_DESC sr_linear_input_desc = source_desc;
+                     sr_linear_input_desc.Format = source_srv_desc.Format != DXGI_FORMAT_UNKNOWN ? source_srv_desc.Format : source_desc.Format;
+
+                     D3D11_TEXTURE2D_DESC sr_gamma_output_desc = output_desc;
+                     const bool conversion_resources_ready =
+                        SetupSRConversionTexture(native_device, sr_linear_input_desc, game_device_data.sr_linear_input_color, game_device_data.sr_linear_input_color_srv, game_device_data.sr_linear_input_color_rtv) &&
+                        SetupSRConversionTexture(native_device, sr_gamma_output_desc, game_device_data.sr_gamma_output_color, game_device_data.sr_gamma_output_color_srv, game_device_data.sr_gamma_output_color_rtv);
+
+                     const bool settings_updated = conversion_resources_ready && sr_implementations[device_data.sr_type]->UpdateSettings(sr_instance_data, native_device_context, settings_data);
                      if (settings_updated)
                      {
+                        // Reset DLSS history when any physical resource or logical render size changes.
                         const bool source_changed = UpdatePreviousTextureDesc(source_desc, game_device_data.previous_source_desc, game_device_data.has_previous_source_desc);
                         const bool depth_changed = UpdatePreviousTextureDesc(depth_desc, game_device_data.previous_depth_desc, game_device_data.has_previous_depth_desc);
                         const bool motion_vectors_changed = UpdatePreviousTextureDesc(motion_vectors_desc, game_device_data.previous_motion_vectors_desc, game_device_data.has_previous_motion_vectors_desc);
                         const bool render_size_changed = game_device_data.previous_render_width != 0u && game_device_data.previous_render_height != 0u && (game_device_data.previous_render_width != render_width || game_device_data.previous_render_height != render_height);
                         game_device_data.previous_render_width = render_width;
                         game_device_data.previous_render_height = render_height;
+                        game_device_data.previous_output_width = output_width;
+                        game_device_data.previous_output_height = output_height;
 
                         const bool reset_sr = device_data.force_reset_sr || game_device_data.output_changed || source_changed || depth_changed || motion_vectors_changed || render_size_changed;
                         device_data.force_reset_sr = false;
 
                         SR::SuperResolutionImpl::DrawData draw_data = {};
-                        draw_data.source_color = source_color_resource.get();
+                        draw_data.source_color = game_device_data.sr_linear_input_color.get();
                         draw_data.output_color = device_data.sr_output_color.get();
                         draw_data.motion_vectors = game_device_data.sr_motion_vectors.get();
                         draw_data.depth_buffer = depth_resource.get();
-                        draw_data.pre_exposure = 0.f;
+                        draw_data.pre_exposure = 1.f;
                         draw_data.jitter_x = jitter_x * Settings::SuperResolution::jitter_scale;
                         draw_data.jitter_y = jitter_y * Settings::SuperResolution::jitter_scale;
                         draw_data.vert_fov = (std::isfinite(game_device_data.sr_vertical_fov) && game_device_data.sr_vertical_fov > 0.f)
@@ -1146,7 +1009,17 @@ public:
                         draw_state_stack.Cache(native_device_context, device_data.uav_max_count);
                         compute_state_stack.Cache(native_device_context, device_data.uav_max_count);
 
-                        sr_succeeded = sr_implementations[device_data.sr_type]->Draw(sr_instance_data, native_device_context, draw_data);
+                        // Feed DLSS linear color, then encode its linear result back to QB's gamma-space resolve input.
+                        const bool pre_sr_encoded = DrawSRConversionPass(
+                           native_device_context,
+                           device_data,
+                           CompileTimeStringHash("QB Pre SR Decode"),
+                           ps_shader_resources[2].get(),
+                           game_device_data.sr_linear_input_color_rtv.get(),
+                           source_desc.Width,
+                           source_desc.Height);
+
+                        sr_succeeded = pre_sr_encoded && sr_implementations[device_data.sr_type]->Draw(sr_instance_data, native_device_context, draw_data);
 
                         {
                            ID3D11ShaderResourceView* null_srvs[D3D11_COMMONSHADER_INPUT_RESOURCE_SLOT_COUNT] = {};
@@ -1156,6 +1029,18 @@ public:
                            native_device_context->CSSetUnorderedAccessViews(0, D3D11_1_UAV_SLOT_COUNT, null_uavs, nullptr);
                            ID3D11RenderTargetView* null_rtvs[D3D11_SIMULTANEOUS_RENDER_TARGET_COUNT] = {};
                            native_device_context->OMSetRenderTargets(D3D11_SIMULTANEOUS_RENDER_TARGET_COUNT, null_rtvs, nullptr);
+                        }
+
+                        if (sr_succeeded)
+                        {
+                           sr_succeeded = DrawSRConversionPass(
+                              native_device_context,
+                              device_data,
+                              CompileTimeStringHash("QB Post SR Encode"),
+                              game_device_data.sr_output_color_srv.get(),
+                              game_device_data.sr_gamma_output_color_rtv.get(),
+                              output_width,
+                              output_height);
                         }
 
                         draw_state_stack.Restore(native_device_context);
@@ -1197,6 +1082,7 @@ public:
 
       if (original_draw_dispatch_func && *original_draw_dispatch_func)
       {
+         // Post-draw callback path lets us bind the SR result and then execute QB's original resolve draw once.
          com_ptr<ID3D11ShaderResourceView> original_ps_srv_2;
          native_device_context->PSGetShaderResources(2, 1, &original_ps_srv_2);
 
@@ -1215,7 +1101,7 @@ public:
 #if ENABLE_SR
          if (sr_succeeded)
          {
-            ID3D11ShaderResourceView* sr_output_srv = game_device_data.sr_output_color_srv.get();
+            ID3D11ShaderResourceView* sr_output_srv = game_device_data.sr_gamma_output_color_srv.get();
             native_device_context->PSSetShaderResources(2, 1, &sr_output_srv);
          }
 #endif
@@ -1246,7 +1132,7 @@ public:
 #if ENABLE_SR
       if (sr_succeeded)
       {
-         ID3D11ShaderResourceView* sr_output_srv = game_device_data.sr_output_color_srv.get();
+         ID3D11ShaderResourceView* sr_output_srv = game_device_data.sr_gamma_output_color_srv.get();
          native_device_context->PSSetShaderResources(2, 1, &sr_output_srv);
       }
 #endif
@@ -1257,12 +1143,19 @@ public:
    void CleanExtraSRResources(DeviceData& device_data) override
    {
 #if ENABLE_SR
+      // Drop all transient SR resources so the next valid scene frame rebuilds them and resets DLSS history.
       auto& game_device_data = GetGameDeviceData(device_data);
 
       device_data.force_reset_sr = true;
       device_data.has_drawn_sr = false;
 
       game_device_data.sr_motion_vectors = nullptr;
+      game_device_data.sr_linear_input_color = nullptr;
+      game_device_data.sr_linear_input_color_srv = nullptr;
+      game_device_data.sr_linear_input_color_rtv = nullptr;
+      game_device_data.sr_gamma_output_color = nullptr;
+      game_device_data.sr_gamma_output_color_srv = nullptr;
+      game_device_data.sr_gamma_output_color_rtv = nullptr;
       game_device_data.sr_output_color_srv = nullptr;
       game_device_data.output_changed = false;
 
@@ -1274,6 +1167,8 @@ public:
       game_device_data.previous_motion_vectors_desc = {};
       game_device_data.previous_render_width = 0u;
       game_device_data.previous_render_height = 0u;
+      game_device_data.previous_output_width = 0u;
+      game_device_data.previous_output_height = 0u;
 #else
       (void)device_data;
 #endif
@@ -1281,6 +1176,7 @@ public:
 
    bool IsGamePaused(const DeviceData& device_data) const override
    {
+      // If scene temporal resolve stops briefly after being active, treat it as pause/menu rather than gameplay.
       const auto& game_device_data = GetGameDeviceData(device_data);
       return !game_device_data.saw_temporal_resolve_pass && (game_device_data.had_scene_temporal_resolve_last_frame || game_device_data.ui_only_frame_hold_counter > 0u);
    }
@@ -1291,6 +1187,7 @@ public:
       auto& game_device_data = GetGameDeviceData(device_data);
 
 #if ENABLE_SR
+      // If SR was requested but no scene resolve produced SR output, force a history reset for the next scene frame.
       if (device_data.sr_type != SR::Type::None && !device_data.has_drawn_sr)
       {
          device_data.force_reset_sr = true;
@@ -1310,6 +1207,7 @@ public:
       device_data.has_drawn_main_post_processing = false;
 
       const uint32_t back_buffer_count = (std::max)(2u, static_cast<uint32_t>(device_data.back_buffers.size()));
+      // Hold the paused state across the swapchain queue so UI-only frames do not look like gameplay frames.
       if (game_device_data.saw_temporal_resolve_pass)
       {
          game_device_data.had_scene_temporal_resolve_last_frame = true;
@@ -1349,9 +1247,12 @@ public:
 
       ImGui::NewLine();
 
+      // Keep user-facing grading/effects controls above the SR tuning/debug block.
       Settings::DrawAll(runtime);
       Settings::SuperResolution::Draw(device_data, runtime);
+#if ENABLE_SR && (DEVELOPMENT || TEST)
       DrawSuperResolutionDebug(device_data);
+#endif
    }
 
    void PrintImGuiAbout() override
@@ -1405,6 +1306,7 @@ BOOL APIENTRY DllMain(HMODULE hModule, DWORD ul_reason_for_call, LPVOID lpReserv
 {
    if (ul_reason_for_call == DLL_PROCESS_ATTACH)
    {
+      // Register QB before CoreMain initializes hooks, shader hashes, and runtime-wide format upgrades.
       Globals::SetGlobals(PROJECT_NAME, "Quantum Break Luma mod", "https://ko-fi.com/musaqh");
       Globals::VERSION = 1;
 

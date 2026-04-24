@@ -78,7 +78,7 @@ float3 ApplyDisplayMapAndScale(float3 input, float2 texcoord, float random)
              output,
              texcoord,
              random,
-             CUSTOM_GRAIN_STRENGTH * 0.03f,
+             CUSTOM_GRAIN_STRENGTH * 0.015f,
              1.f,
              false, BT2020_To_XYZ);
       }
