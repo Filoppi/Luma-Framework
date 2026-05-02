@@ -1016,13 +1016,23 @@ namespace
          {
             continue;
          }
-         const bool is_cso_or_meta = entry_path.extension().compare(".cso") == 0 || entry_path.extension().compare(".meta") == 0;
-         if (!entry_path.has_extension() || !entry_path.has_stem() || !is_cso_or_meta)
+         const bool is_cso = entry_path.extension().compare(".cso") == 0;
+         const bool is_meta = entry_path.extension().compare(".meta") == 0;
+         if (!entry_path.has_extension() || !entry_path.has_stem() || !(is_cso || is_meta))
          {
             continue;
          }
 
          const auto filename_no_extension_string = entry_path.stem().string();
+         
+         if (is_cso)
+         {
+            // If this is named CSO with exclamation mark, it's user pre-built which needs to be skipped
+            if (filename_no_extension_string.find("!") != std::string::npos)
+            {
+               continue;
+            }
+         }
 
 #if 1 // Optionally leave any "raw" cso that was likely copied from the dumped shaders folder (these were not compiled from a custom hlsl shader by the same hash)
          if (filename_no_extension_string.length() >= (HASH_CHARACTERS_LENGTH + 2) && filename_no_extension_string[0] == '0' && filename_no_extension_string[1] == 'x') // Matches "strlen("0x12345678")"
@@ -1528,7 +1538,14 @@ namespace
          {
             // As long as cso starts from "0x12345678", it's good, they don't need the shader type specified
             size_t hash_pos = filename_no_extension_string.find("0x");
-            if (hash_pos != 0) continue; // TODO: what is this condition even for? Is it because when we find an hlsl we'd automatically load its matching cso anyway?
+            if (hash_pos != 0)
+            {
+               // If this is named CSO without exclamation mark, it's not user pre-built which needs to be skipped
+               if (filename_no_extension_string.find("!") == std::string::npos)
+               {
+                  continue;
+               }
+            }
             if (hash_pos == std::string::npos) continue; // Silently skip if the cso has no hash, we'd do nothing with it
             if (hash_pos + 2 /*0x*/ + HASH_CHARACTERS_LENGTH > filename_no_extension_string.size())
             {
