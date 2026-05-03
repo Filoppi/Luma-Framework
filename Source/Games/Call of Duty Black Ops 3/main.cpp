@@ -2166,10 +2166,14 @@ BOOL APIENTRY DllMain(HMODULE hModule, DWORD ul_reason_for_call, LPVOID lpReserv
 // #if DEVELOPMENT // If you want to track any shader names over time, you can hardcode them here by hash (they can be a useful reference in the pipeline)
 //       forced_shader_names.emplace(std::stoul("FD2925B4", nullptr, 16), "Tracked Shader Name");
 // #endif
-//
-// #if !DEVELOPMENT // Put shaders that a previous version of the mod used but has ever since been deleted here, so that users updating the mod from an older version won't accidentally load them
-//       old_shader_file_names.emplace("Bloom_0xDC9373A8.ps_5_0.hlsl");CallOfDutyBlackOps3GameDeviceData
-// #endif
+
+#if !DEVELOPMENT // Put shaders that a previous version of the mod used but has ever since been deleted here
+      old_shader_file_names.emplace("!tonemapper_mainmenu_0x1744B1D4.ps_5_0.hlsl");
+      old_shader_file_names.emplace("!tonemapper_game_0x59F328E3.ps_5_0.hlsl");
+      old_shader_file_names.emplace("!final_mainmenu_0x224A8BF5.ps_5_0.hlsl");
+      old_shader_file_names.emplace("!final_game_0x3D461B1A.ps_5_0.hlsl");
+      old_shader_file_names.emplace("bloom_0x57CF6767.ps_5_0.hlsl");
+#endif
       
       game = new CallOfDutyBlackOps3();
    }
