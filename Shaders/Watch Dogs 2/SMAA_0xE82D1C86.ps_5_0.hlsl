@@ -1,4 +1,4 @@
-// ---- Created with 3Dmigoto v1.3.16 on Thu Dec 04 00:59:58 2025
+#include "../Includes/Common.hlsl"
 
 cbuffer PostFxSMAA : register(b0)
 {
@@ -53,7 +53,17 @@ void main(
   r1.xy = r1.xy ? float2(1,1) : 0;
   r0.xy = cmp(r0.yz >= r0.xx);
   r0.xy = r0.xy ? float2(1,1) : 0;
-  o0.xy = r1.xy * r0.xy;
+  o0.xy = float2(0,0);//r1.xy * r0.xy;
+  
+  if (LumaSettings.SRType != 0)
+  {
+	o0.xy = float2(0,0);//r1.xy * r0.xy;
+  }
+  else
+  {
+    o0.xy = r1.xy * r0.xy;
+  }
+  
   o0.zw = float2(0,0);
   return;
 }

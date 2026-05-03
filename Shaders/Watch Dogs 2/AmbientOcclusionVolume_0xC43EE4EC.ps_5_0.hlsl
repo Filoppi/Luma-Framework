@@ -1,3 +1,5 @@
+// ---- Created with 3Dmigoto v1.3.16 on Thu Apr 16 12:01:34 2026
+
 cbuffer Viewport : register(b0)
 {
   float4 CameraNearPlaneSize : packoffset(c0);
@@ -72,54 +74,75 @@ cbuffer Viewport : register(b0)
   uint2 SelectedPixel : packoffset(c185.z);
 }
 
-cbuffer FireUiPrimitive : register(b1)
-{
-  float4 ColorAdd : packoffset(c0);
-  float4 ColorMultiplier : packoffset(c1);
-  float4 DiffuseSampler0Size : packoffset(c2);
-  float4 DistanceFieldFloatArray[3] : packoffset(c3);
-  float4x4 Transform : packoffset(c6);
-  float4 UVOffsets[9] : packoffset(c10);
-  float4x4 UVTransform : packoffset(c19);
-  float4 VideoTextureUnpack[8] : packoffset(c23);
-  float3 GammaBrightnessContrastParams : packoffset(c31);
-  float DesaturationFactor : packoffset(c31.w);
-  float2 SystemTime_GlitchFactor : packoffset(c32);
-}
+SamplerState AmbientOcclusionVolume__AmbientOcclusionTexure__SampObj___s : register(s0);
+Texture2DMS<float> Viewport__DepthVPSamplerMS : register(t0);
+Texture2DMS<float4> Viewport__GBufferNormalTextureMS : register(t1);
+Texture2D<float4> AmbientOcclusionVolume__AmbientOcclusionTexure__TexObj__ : register(t2);
 
-SamplerState Video_s : register(s0);
-Texture2D<float4> FireUiPrimitive__DiffuseSampler0__TexObj__ : register(t0);
+
+// 3Dmigoto declarations
+#define cmp -
+
 
 void main(
   linear centroid float4 v0 : TEXCOORD0,
-  linear centroid float2 v1 : TEXCOORD1,
-  float4 v2 : SV_Position0,
+  linear centroid float4 v1 : TEXCOORD1,
+  linear centroid float4 v2 : TEXCOORD2,
+  linear centroid float4 v3 : TEXCOORD3,
+  linear centroid float4 v4 : TEXCOORD4,
+  linear centroid float2 v5 : TEXCOORD5,
+  float4 v6 : SV_Position0,
+  uint v7 : SV_SampleIndex0,
   out float4 o0 : SV_Target0)
 {
-  float4 r0,r1;
-  r0.xy = frac(v1.xy);
-  r1.xy = r0.xy * VideoTextureUnpack[2].xy + VideoTextureUnpack[2].zw;
-  r1.zw = r0.xy * VideoTextureUnpack[3].xy + VideoTextureUnpack[3].zw;
-  r0.xy = r0.xy * VideoTextureUnpack[0].xy + VideoTextureUnpack[0].zw;
-  r0.xy = max(VideoTextureUnpack[4].xy, r0.xy);
-  r0.xy = min(VideoTextureUnpack[5].xy, r0.xy);
-  r0.x = FireUiPrimitive__DiffuseSampler0__TexObj__.Sample(Video_s, r0.xy).w;
-  r1.xyzw = max(VideoTextureUnpack[6].xyzw, r1.xyzw);
-  r1.xyzw = min(VideoTextureUnpack[7].xyzw, r1.xyzw);
-  r0.y = FireUiPrimitive__DiffuseSampler0__TexObj__.Sample(Video_s, r1.zw).w;
-  r0.z = FireUiPrimitive__DiffuseSampler0__TexObj__.Sample(Video_s, r1.xy).w;
-  r1.xyz = float3(0,-0.391448975,2.01782227) * r0.yyy; // TODO: fix wrong video color space and wrong luminance formula
-  r0.yzw = r0.z * float3(1.59579468,-0.813476563,0) + r1.xyz;
-  r0.xyz = r0.x * float3(1.16412354,1.16412354,1.16412354) + r0.yzw;
-  r0.xyz = float3(-0.87065506,0.529705048,-1.08166885) + r0.xyz;
-  //r0.xyz = max(float3(0,0,0), r0.xyz); // Luma: disabled
-  r1.xyz = v0.xyz * r0.xyz;
-  r0.w = dot(r1.xyz, float3(0.298999995,0.587000012,0.114));
-  r0.xyz = v0.xyz * r0.xyz + -r0.w;
-  r0.xyz = DesaturationFactor * r0.xyz + r0.w;
-  r0.xyz = ExposureScale * r0.xyz;
-  //r0.xyz = clamp(r0.xyz, 0.0, 64512.0); // Luma: disabled
-  r0.xyz = pow(abs(r0.xyz), GammaBrightnessContrastParams.x) * sign(r0.xyz); // Luma: fixed negative values support
-  o0.xyz = r0.xyz * GammaBrightnessContrastParams.y + GammaBrightnessContrastParams.z;
-  o0.w = v0.w;
+  float4 r0,r1,r2;
+  uint4 bitmask, uiDest;
+  float4 fDest;
+
+  r0.xy = (int2)v6.xy;
+  r0.zw = float2(0,0);
+  r1.xyz = Viewport__GBufferNormalTextureMS.Load(r0.xy, v7.x).xyz;
+  r0.x = Viewport__DepthVPSamplerMS.Load(r0.xy, v7.x).x;
+  r2.x = dot(r1.xyz, ViewMatrix._m00_m10_m20);
+  r2.y = dot(r1.xyz, ViewMatrix._m01_m11_m21);
+  r2.z = dot(r1.xyz, ViewMatrix._m02_m12_m22);
+  r0.z = dot(r2.xyz, r2.xyz);
+  r0.z = rsqrt(r0.z);
+  r1.xyz = r2.xyz * r0.zzz;
+  r0.y = 1;
+  r0.z = dot(r0.xy, InvProjectionMatrix._m22_m32);
+  r0.x = dot(r0.xy, InvProjectionMatrix._m23_m33);
+  r0.x = -r0.z / r0.x;
+  r0.yzw = v4.xyz / v4.zzz;
+  r2.x = v0.w;
+  r2.y = v1.w;
+  r2.z = v2.w;
+  r0.xyz = r0.yzw * -r0.xxx + -r2.xyz;
+  r0.w = dot(r0.xyz, r0.xyz);
+  r0.w = rsqrt(r0.w);
+  r2.xyz = r0.xyz * r0.www;
+  r0.w = dot(r1.xyz, r2.xyz);
+  r0.w = saturate(0.5 + r0.w);
+  r0.w = -r0.w * v5.y + 1;
+  r1.x = dot(r0.xyz, v0.xyz);
+  r1.y = dot(r0.xyz, v1.xyz);
+  r0.z = dot(r0.xyz, v2.xyz);
+  r0.z = abs(r0.z);
+  r1.zw = abs(r1.xy) * abs(r1.xy);
+  r2.xy = r1.xy * float2(0.5,0.5) + float2(0.5,0.5);
+  r0.xy = r1.zw * r1.zw;
+  r0.xyz = min(float3(1,1,1), r0.xyz);
+  r0.xyz = float3(1,1,1) + -r0.xyz;
+  r0.x = r0.x * r0.y;
+  r0.x = r0.x * r0.z;
+  r2.z = 1 + -r2.y;
+  r1.xyz = AmbientOcclusionVolume__AmbientOcclusionTexure__TexObj__.Sample(AmbientOcclusionVolume__AmbientOcclusionTexure__SampObj___s, r2.xz).xyz;
+  r0.y = dot(r1.xyz, v3.xyz);
+  r0.x = r0.y * r0.x;
+  r0.x = r0.x * r0.w;
+  r0.x = v4.w * r0.x;
+  r0.x = saturate(min(v3.w, r0.x));
+  r0.x = v5.x + -r0.x;
+  o0.xyzw = saturate(float4(1,1,1,1) + r0.xxxx);
+  return;
 }

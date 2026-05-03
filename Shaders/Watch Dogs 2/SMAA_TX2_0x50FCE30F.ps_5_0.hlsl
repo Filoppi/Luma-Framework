@@ -1,3 +1,5 @@
+#include "../Includes/Common.hlsl"
+
 cbuffer PostFxSMAA : register(b0)
 {
   float4x4 CameraSpaceToPreviousProjectedSpace : packoffset(c0);
@@ -105,6 +107,13 @@ void main(
   r0.x = max(TemporalParameters.y, r0.x);
   r0.x = r1.x ? 1 : r0.x;
   r0.xyz = r0.x * r1.yzw + r2.yzw;
-  o0.xyz = sqrt(r0.xyz);
+  if (LumaSettings.SRType != 0)
+  {
+	o0.xyz = PostFxSMAA__ColorTexture__TexObj__.SampleLevel(ColorPointClamp_s, v0.xy, 0).xyz;//sqrt(r0.xyz);
+  }
+  else
+  {
+    o0.xyz = sqrt(r0.xyz);
+  }
   o0.w = 1;
 }
