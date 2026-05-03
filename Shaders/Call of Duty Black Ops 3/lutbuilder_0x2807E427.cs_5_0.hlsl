@@ -133,14 +133,6 @@ Texture1D<float4> IniParams : register(t120);
 Texture2D<float4> StereoParams : register(t125);
 RWTexture3D<float4> lut3D : register(u0); // dcl_uav_typed_texture3d (float,float,float,float) u0
 
-
-
-float3 RestoreChrominance1(float3 targetColor, float sourceChrominance, float targetChrominance, uint colorSpace = CS_DEFAULT)
-{
-	float chrominanceRatio = safeDivision(sourceChrominance, targetChrominance, 1);
-	return SetChrominance(targetColor, chrominanceRatio);
-}
-
 [numthreads(4,4,4)] //dcl_thread_group 4, 4, 4
 void main(uint3 vThreadID : SV_DispatchThreadID)
 {
@@ -159,11 +151,11 @@ void main(uint3 vThreadID : SV_DispatchThreadID)
   r0.xy = (int2)r0.xy + (int2)vThreadID.xy;             //iadd r0.xy, r0.xyxx, vThreadID.xyxx
   r2.zw = float2(0,0);                                  //mov r2.zw, l(0,0,0,0)
   r2.xyz = postEffect0.Load(r2.xyz).xyz;                //ld_indexable(texture2d)(float,float,float,float) r2.xyz, r2.xyzw, t0.xyzw
-  r2.xyz = postFxControlF.yyy * r2.xyz; //scaling
+  r2.xyz = postFxControlF.yyy * r2.xyz;
 
   r0.zw = float2(0,0);
   r0.xyz = postEffect0.Load(r0.xyz).xyz;
-  r0.xyz = r0.xyz * postFxControlF.xxx + r2.xyz; //scaling and apply
+  r0.xyz = r0.xyz * postFxControlF.xxx + r2.xyz;
 
   r1.xz = vThreadID.zz;
   r1.xyzw = (uint4)r1.xyzw << int4(5,5,5,5);
@@ -171,11 +163,11 @@ void main(uint3 vThreadID : SV_DispatchThreadID)
   r1.xy = (int2)r1.zw + (int2)vThreadID.xy;
   r2.zw = float2(0,0);
   r2.xyz = postEffect0.Load(r2.xyz).xyz;
-  r0.xyz = r2.xyz * postFxControlF.zzz + r0.xyz; //scaling and apply
+  r0.xyz = r2.xyz * postFxControlF.zzz + r0.xyz;
 
   r1.zw = float2(0,0);
   r1.xyz = postEffect0.Load(r1.xyz).xyz;
-  r0.xyz = r1.xyz * postFxControlF.www + r0.xyz; //scaling and apply
+  r0.xyz = r1.xyz * postFxControlF.www + r0.xyz;
 
   /// COLOR GRADE (but gets applied later) ///
   r0.w = dot(r0.xyz, postFxConst15.xyz);
@@ -189,9 +181,7 @@ void main(uint3 vThreadID : SV_DispatchThreadID)
   r0.w = 1 / r0.w;
   r1.xyz = r1.xzw * r0.www;
 
-#if CUSTOM_LUTBUILDER_NEUTRAL > 0
-  r0.xyz = LUTNeutralize(vThreadID.xyz, r0.xyz, 32u, GS.LUTBuilderNeutral);
-#endif
+  r0.xyz = LUTNeutralize(vThreadID.xyz, r0.xyz, 32u);
 
   /// DECODE Rec709 ///
   // {
@@ -208,11 +198,11 @@ void main(uint3 vThreadID : SV_DispatchThreadID)
   // }
   r2.xyz = DecodeRec709(r0.xyz);
 
-  // float3 colorRaw = r2.xyz;
-
   // lut3D[uint3(vThreadID.xyz)] = float4(r2.xyz, 1);
   // return;
-  
+
+  float3 colorBefore0 = r2.xyz;
+
   /// COLOR GRADE ///
   r0.w = dot(r2.xyz, postFxConst18.xyz);
   r3.x = postFxConst18.w + r0.w;
@@ -355,13 +345,21 @@ void main(uint3 vThreadID : SV_DispatchThreadID)
   // lut3D[uint3(vThreadID.xyz)] = float4(r0.xyz, 1);
   // return;
 
-  r0.w = dot(r0.xyz, postFxControl0.xyz);
-  r0.w = postFxControl0.w + r0.w;
-  r1.x/* w */ = saturate(r0.w/* w */);
-  r0.w = dot(r0.xyz, postFxControl1.xyz); //Start of WEIRD SWIZZLE?
-  r0.x = dot(r0.xyz, postFxControl2.xyz);
-  r1.z = saturate(postFxControl2.w + r0.x);
-  r1.y = saturate(postFxControl1.w + r0.w);
+  r0.xyz = lerp(colorBefore0, r0.xyz, GS.LUTBuilderGradeSMH); //user settings
+
+  //luma based tint
+  float3 colorBefore2 = r0.xyz;
+  #if 1
+    r0.w = dot(r0.xyz, postFxControl0.xyz);
+    r1.x = saturate(postFxControl0.w + r0.w);
+    r0.w = dot(r0.xyz, postFxControl1.xyz); //Start of WEIRD SWIZZLE?
+    r0.x = dot(r0.xyz, postFxControl2.xyz);
+    r1.z = saturate(postFxControl2.w + r0.x);
+    r1.y = saturate(postFxControl1.w + r0.w);
+  #else
+    r1.xyz = r0.xyz;
+  #endif
+  r1.xyz = lerp(colorBefore2, r1.xyz, GS.LUTBuilderGradeTint); //user settings
 
   /// COLOR GRADE DONE ///
   // lut3D[uint3(vThreadID.xyz)] = float4(r1.xyz, 1);
@@ -378,6 +376,8 @@ void main(uint3 vThreadID : SV_DispatchThreadID)
   //   r0.xyzw = r2.xyzw ? r1.xyzw : r0.xyzw;
   // }
   r0.xyz = EncodeRec709(r1.xyz);
+
+  float3 colorBefore1 = r0.xyz;
 
   /// SATURATION (very rare) ///
   r1.x = dot(r0.xyz/* wyz */, float3(0.212599993,0.715200007,0.0722000003)); //WEIRD SWIZZLE!
@@ -398,6 +398,8 @@ void main(uint3 vThreadID : SV_DispatchThreadID)
   r1.xyz/* w */ = r3.xyz/* w */ + -r0.xyz/* .wyzw */; //WEIRD SWIZZLE!
   r0.xyz/* w */ = postFxControl7.w * r1.xyz/* w */ + r0.xyz/* w */; //desat final
 
+  r0.xyz = lerp(colorBefore1, r0.xyz, GS.LUTBuilderGradeSat); //user settings
+
   /// DECODE Rec709 ///
 
   // {
@@ -414,7 +416,7 @@ void main(uint3 vThreadID : SV_DispatchThreadID)
   // }
 
 
-#if CUSTOM_LUTBUILDER_DECODE == 0
+#if CUSTOM_LUTBUILDER_SATBOOST == 0 || CUSTOM_SDR > 0
   r0.xyz = BT709_To_BT2020(DecodeRec709(r0.xyz));
 #else
   float3 color709 = r0.xyz;
@@ -423,17 +425,39 @@ void main(uint3 vThreadID : SV_DispatchThreadID)
   color709 = DecodeRec709(color709);
   color2020 = DecodeRec709(color2020);
 
-  color709 = BT709_To_BT2020(color709);
+  color709 = UCSTo(color709, CS_BT709);
+  color2020 = UCSTo(color2020, CS_BT2020);
+  r0.xyz = RestoreHueAndChrominanceUcs(color709, color2020, 0, GS.LUTBuilderExpansionChrominance, 1);
+  r0.x = lerp(color709.x, color2020.x, GS.LUTBuilderExpansionLuminance);
+  // r0.xyz = color709;
 
-  r0.xyz = RestoreHueAndChrominance(color2020, color709, 1, GS.LUTBuilderExpansionChrominanceCorrect, 0, FLT_MAX, GS.LUTBuilderExpansionLuminanceCorrect, CS_BT2020);
+  // r0.xyz = CorrectPerChannelTonemapHiglightsDesaturationBo3(r0.xyz, 1.0, 1 - GS.LUTBuilderHighlightSat, GS.LUTBuilderHighlightSatHighlightsOnly, CS_BT2020);
+  {
+    float sourceChrominance = length(r0.yz);
+    float3 color = UCSFrom(r0.xyz, CS_BT2020);
+
+    float maxBrightness = max3(color); 
+    float midBrightness = GetMidValue(color);
+	  float minBrightness = min3(color);
+	  float brightnessRatio = saturate(maxBrightness / 1.0f);
+
+    brightnessRatio = lerp(brightnessRatio, sqrt(brightnessRatio), sqrt(saturate(InverseLerp(minBrightness, maxBrightness, midBrightness))));
+    brightnessRatio = pow(brightnessRatio, GS.LUTBuilderHighlightSatHighlightsOnly); //skewed towards highlights only
+
+    float chrominancePow = lerp(1.0, 1.0 / (1 - GS.LUTBuilderHighlightSat), brightnessRatio);
+    
+    float targetChrominance = sourceChrominance > 1.0 ? pow(sourceChrominance, chrominancePow) : (1.0 - pow(1.0 - sourceChrominance, chrominancePow));
+    float chrominanceRatio = safeDivision(targetChrominance, sourceChrominance, 1);
+
+    r0.yz *= chrominanceRatio;
+  }
+
+  r0.xyz = UCSFrom(r0.xyz, CS_BT2020);
 #endif
 
-#if CUSTOM_LUTBUILDER_HIGHLIGHTSAT > 0
-  r0.xyz = CorrectPerChannelTonemapHiglightsDesaturationBo3(r0.xyz, 1.0, 1 - GS.LUTBuilderHighlightSat, GS.LUTBuilderHighlightSatHighlightsOnly, CS_BT2020);
-#endif 
 
-  // r0.xyzw = float4(32768,32768,32768,32768) * r0.xyzw; //eww
-  // r0.xyz = max(0, r0.xyz);
+  // r0.xyzw = float4(32768,32768,32768,32768) * r0.xyzw; //packing, eww
+  r0.xyz = max(0, r0.xyz); //clamp
 
   lut3D[uint3(vThreadID.xyz)].xyzw = float4(r0.xyz, 1); //store_uav_typed u0.xyzw, vThreadID.xyzz, r0.xyzw
   return;

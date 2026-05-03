@@ -20,96 +20,109 @@ void main(
   uint4 bitmask, uiDest;
   float4 fDest;
 
-  r0.xyz = codeTexture0.Sample(biLinearClamp_s, v0.xy, int2(0, 0)).xyz; S(r0);
-  r1.x = dot(r0.xyz, float3(0.212599993,0.715200007,0.0722000003));
+  // instr 0: sample_aoffimmi(2,0,0)
+  r0.xyz = codeTexture0.Sample(biLinearClamp_s, v0.xy, int2(2, 0)).xyz; S(r0);
+  r1.x = dot(r0.xyz, float3(0.212599993,0.715200007,0.0722000003)); //luma weighted
   r1.x = 1 + r1.x;
-  r1.x = (int)-r1.x + 0x7ef311c2;
+  r1.x = asfloat(0x7ef311c2 - asint(r1.x)); // iadd: fast rcp bit trick on float bits
   r0.w = 1;
   r0.xyzw = r1.xxxx * r0.xyzw;
 
+  // instr 6: sample (no offset, center)
   r1.xyz = codeTexture0.Sample(biLinearClamp_s, v0.xy).xyz; S(r1);
   r2.x = dot(r1.xyz, float3(0.212599993,0.715200007,0.0722000003));
   r2.x = 1 + r2.x;
-  r2.x = (int)-r2.x + 0x7ef311c2;
+  r2.x = asfloat(0x7ef311c2 - asint(r2.x));
   r1.w = 1;
   r0.xyzw = r2.xxxx * r1.xyzw + r0.xyzw;
 
-  r1.xyz = codeTexture0.Sample(biLinearClamp_s, v0.xy, int2(0, 0)).xyz; S(r1);
+  // instr 12: sample_aoffimmi(-2,0,0)
+  r1.xyz = codeTexture0.Sample(biLinearClamp_s, v0.xy, int2(-2, 0)).xyz; S(r1);
   r2.x = dot(r1.xyz, float3(0.212599993,0.715200007,0.0722000003));
   r2.x = 1 + r2.x;
-  r2.x = (int)-r2.x + 0x7ef311c2;
+  r2.x = asfloat(0x7ef311c2 - asint(r2.x));
   r1.w = 1;
   r0.xyzw = r2.xxxx * r1.xyzw + r0.xyzw;
 
-  r1.xyz = codeTexture0.Sample(biLinearClamp_s, v0.xy, int2(0, 0)).xyz; S(r1);
+  // instr 18: sample_aoffimmi(0,2,0)
+  r1.xyz = codeTexture0.Sample(biLinearClamp_s, v0.xy, int2(0, 2)).xyz; S(r1);
   r2.x = dot(r1.xyz, float3(0.212599993,0.715200007,0.0722000003));
   r2.x = 1 + r2.x;
-  r2.x = (int)-r2.x + 0x7ef311c2;
+  r2.x = asfloat(0x7ef311c2 - asint(r2.x));
   r1.w = 1;
   r0.xyzw = r2.xxxx * r1.xyzw + r0.xyzw;
 
-  r1.xyz = codeTexture0.Sample(biLinearClamp_s, v0.xy, int2(0, 0)).xyz; S(r1);
+  // instr 24: sample_aoffimmi(0,-2,0)
+  r1.xyz = codeTexture0.Sample(biLinearClamp_s, v0.xy, int2(0, -2)).xyz; S(r1);
   r2.x = dot(r1.xyz, float3(0.212599993,0.715200007,0.0722000003));
   r2.x = 1 + r2.x;
-  r2.x = (int)-r2.x + 0x7ef311c2;
+  r2.x = asfloat(0x7ef311c2 - asint(r2.x));
   r1.w = 1;
   r0.xyzw = r2.xxxx * r1.xyzw + r0.xyzw;
   r0.xyzw = float4(0.0714285746,0.0714285746,0.0714285746,0.0714285746) * r0.xyzw;
 
-  r1.xyz = codeTexture0.Sample(biLinearClamp_s, v0.xy, int2(0, 0)).xyz; S(r1);
+  // instr 31: sample_aoffimmi(-2,-2,0)
+  r1.xyz = codeTexture0.Sample(biLinearClamp_s, v0.xy, int2(-2, -2)).xyz; S(r1);
   r2.x = dot(r1.xyz, float3(0.212599993,0.715200007,0.0722000003));
   r2.x = 1 + r2.x;
-  r2.x = (int)-r2.x + 0x7ef311c2;
+  r2.x = asfloat(0x7ef311c2 - asint(r2.x));
   r1.w = 1;
   r1.xyzw = r2.xxxx * r1.xyzw;
 
-  r2.xyz = codeTexture0.Sample(biLinearClamp_s, v0.xy, int2(0, 0)).xyz; S(r2);
+  // instr 37: sample_aoffimmi(2,-2,0)
+  r2.xyz = codeTexture0.Sample(biLinearClamp_s, v0.xy, int2(2, -2)).xyz; S(r2);
   r3.x = dot(r2.xyz, float3(0.212599993,0.715200007,0.0722000003));
   r3.x = 1 + r3.x;
-  r3.x = (int)-r3.x + 0x7ef311c2;
+  r3.x = asfloat(0x7ef311c2 - asint(r3.x));
   r2.w = 1;
   r1.xyzw = r3.xxxx * r2.xyzw + r1.xyzw;
 
-  r2.xyz = codeTexture0.Sample(biLinearClamp_s, v0.xy, int2(0, 0)).xyz; S(r2);
+  // instr 43: sample_aoffimmi(-2,2,0)
+  r2.xyz = codeTexture0.Sample(biLinearClamp_s, v0.xy, int2(-2, 2)).xyz; S(r2);
   r3.x = dot(r2.xyz, float3(0.212599993,0.715200007,0.0722000003));
   r3.x = 1 + r3.x;
-  r3.x = (int)-r3.x + 0x7ef311c2;
+  r3.x = asfloat(0x7ef311c2 - asint(r3.x));
   r2.w = 1;
   r1.xyzw = r3.xxxx * r2.xyzw + r1.xyzw;
 
-  r2.xyz = codeTexture0.Sample(biLinearClamp_s, v0.xy, int2(0, 0)).xyz; S(r2);
+  // instr 49: sample_aoffimmi(2,2,0)
+  r2.xyz = codeTexture0.Sample(biLinearClamp_s, v0.xy, int2(2, 2)).xyz; S(r2);
   r3.x = dot(r2.xyz, float3(0.212599993,0.715200007,0.0722000003));
   r3.x = 1 + r3.x;
-  r3.x = (int)-r3.x + 0x7ef311c2;
+  r3.x = asfloat(0x7ef311c2 - asint(r3.x));
   r2.w = 1;
   r1.xyzw = r3.xxxx * r2.xyzw + r1.xyzw;
   r0.xyzw = r1.xyzw * float4(0.0357142873,0.0357142873,0.0357142873,0.0357142873) + r0.xyzw;
 
-  r1.xyz = codeTexture0.Sample(biLinearClamp_s, v0.xy, int2(0, 0)).xyz; S(r1);
+  // instr 56: sample_aoffimmi(-1,-1,0)
+  r1.xyz = codeTexture0.Sample(biLinearClamp_s, v0.xy, int2(-1, -1)).xyz; S(r1);
   r2.x = dot(r1.xyz, float3(0.212599993,0.715200007,0.0722000003));
   r2.x = 1 + r2.x;
-  r2.x = (int)-r2.x + 0x7ef311c2;
+  r2.x = asfloat(0x7ef311c2 - asint(r2.x));
   r1.w = 1;
   r1.xyzw = r2.xxxx * r1.xyzw;
 
-  r2.xyz = codeTexture0.Sample(biLinearClamp_s, v0.xy, int2(0, 0)).xyz; S(r2);
+  // instr 62: sample_aoffimmi(1,-1,0)
+  r2.xyz = codeTexture0.Sample(biLinearClamp_s, v0.xy, int2(1, -1)).xyz; S(r2);
   r3.x = dot(r2.xyz, float3(0.212599993,0.715200007,0.0722000003));
   r3.x = 1 + r3.x;
-  r3.x = (int)-r3.x + 0x7ef311c2;
+  r3.x = asfloat(0x7ef311c2 - asint(r3.x));
   r2.w = 1;
   r1.xyzw = r3.xxxx * r2.xyzw + r1.xyzw;
 
-  r2.xyz = codeTexture0.Sample(biLinearClamp_s, v0.xy, int2(0, 0)).xyz; S(r2);
+  // instr 68: sample_aoffimmi(-1,1,0)
+  r2.xyz = codeTexture0.Sample(biLinearClamp_s, v0.xy, int2(-1, 1)).xyz; S(r2);
   r3.x = dot(r2.xyz, float3(0.212599993,0.715200007,0.0722000003));
   r3.x = 1 + r3.x;
-  r3.x = (int)-r3.x + 0x7ef311c2;
+  r3.x = asfloat(0x7ef311c2 - asint(r3.x));
   r2.w = 1;
   r1.xyzw = r3.xxxx * r2.xyzw + r1.xyzw;
 
-  r2.xyz = codeTexture0.Sample(biLinearClamp_s, v0.xy, int2(0, 0)).xyz; S(r2);
+  // instr 74: sample_aoffimmi(1,1,0)
+  r2.xyz = codeTexture0.Sample(biLinearClamp_s, v0.xy, int2(1, 1)).xyz; S(r2);
   r3.x = dot(r2.xyz, float3(0.212599993,0.715200007,0.0722000003));
   r3.x = 1 + r3.x;
-  r3.x = (int)-r3.x + 0x7ef311c2;
+  r3.x = asfloat(0x7ef311c2 - asint(r3.x));
   r2.w = 1;
   r1.xyzw = r3.xxxx * r2.xyzw + r1.xyzw;
   
@@ -118,3 +131,4 @@ void main(
   o0.xyz = r0.xyz * r0.www; 
   return;
 }
+

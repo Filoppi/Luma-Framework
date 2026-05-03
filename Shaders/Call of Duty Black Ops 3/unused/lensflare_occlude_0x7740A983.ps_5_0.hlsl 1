@@ -1,6 +1,6 @@
-// ---- Created with 3Dmigoto v1.3.16 on Thu Nov 27 11:19:02 2025
+// ---- Created with 3Dmigoto v1.3.16 on Tue Mar 24 14:16:44 2026
 
-/* cbuffer PostFxCBuffer : register(b8)
+cbuffer PostFxCBuffer : register(b8)
 {
   float4 postFxControl0 : packoffset(c0);
   float4 postFxControl1 : packoffset(c1);
@@ -122,52 +122,42 @@
   float4 postfxViewProjMatrix2 : packoffset(c124);
   float4 postfxViewProjMatrix3 : packoffset(c125);
 }
- */
-SamplerState bilinearClamp_s : register(s0);
-// SamplerState pointWrap_s : register(s2);
-Texture2D<float4> codeTexture0 : register(t0);
-// Texture2D<float4> tNoise : register(t1);
-// Texture2D<float4> tDither : register(t2);
+
+Texture2D<float> codeTexture0 : register(t0);
+Texture2D<float4> floatZSampler : register(t6);
+RWStructuredBuffer<uint> lensFlarePixelCount : register(u6);
+RWStructuredBuffer<uint> lensFlareTotalAlpha : register(u7);
 
 
 // 3Dmigoto declarations
 #define cmp -
 #include "./common1.hlsl"
 
+
 void main(
   float4 v0 : SV_POSITION0,
-  float2 v1 : TEXCOORD0,
+  float4 v1 : COLOR0,
   out float4 o0 : SV_TARGET0)
 {
-  float4 r0,r1,r2;
+  float4 r0,r1;
   uint4 bitmask, uiDest;
   float4 fDest;
 
-  o0.xyz = FinalShader_Resolve(codeTexture0, bilinearClamp_s, v1.xy);
-
-  // r0.xyz = codeTexture0.Sample(bilinearClamp_s, v1.xy).xyz;
-  // r0.xy = v1.xy * postFxControl0.xy + postFxControl0.zw;
-  // r0.x = tNoise.Sample(pointWrap_s, r0.xy).x;
-  // r0.x = postFxControl1.x * r0.x;
-  // r0.yz = float2(0.0250000004,0.0250000004) * v0.xy;
-  // r0.yzw = tDither.Sample(pointWrap_s, r0.yz).xyz;
-  // r0.xyz = r0.xxx * r0.yzw;
-  // r1.xyz = codeTexture0.Sample(bilinearClamp_s, v1.xy).xyz;
-  // r1.xyz = r1.xyz * float3(3.05175781e-005,3.05175781e-005,3.05175781e-005) + r0.xyz;
-  // r1.xz = r0.zx * r1.yy + r1.xz;
-
-  #if CUSTOM_SDR > 0
-    r1.xyz = o0.xyz;
-    r0.xyz = log2(r1.xyz);
-    r0.xyz = postFxControl2.yyy * r0.xyz;
-    r0.xyz = exp2(r0.xyz);
-    r0.xyz = r0.xyz * postFxControl2.zzz + postFxControl2.www;
-    r2.xyz = cmp(postFxControl1.www >= r1.xyz);
-    r1.xyz = postFxControl2.xxx * r1.xyz;
-    r0.xyz = r2.xyz ? r1.xyz : r0.xyz;
-    o0.xyz = postFxControl1.yyy + r0.xyz;
-  #endif
-
-  o0.w = 1;
+  r0.xy = (uint2)v0.xy;
+  r0.zw = float2(0,0);
+  r1.x = floatZSampler.Load(int3(r0.xyw)).x;
+  r1.x = cmp(r1.x < v0.z);
+  if (r1.x != 0) {
+    r1.xy = (uint2)postFxConst00.yx;
+    r1.w = (uint)r1.x;
+    r0.x = codeTexture0.Load(int3(r0.xyz)).x;
+    r0.x = (r1.x != 0) ? r1.w : r0.x;
+    r0.x = 485 * r0.x;
+    r0.x = (uint)r0.x;
+    uint originalValue;
+    InterlockedAdd(lensFlareTotalAlpha[(uint)r1.y], (uint)r0.x, originalValue);
+    InterlockedAdd(lensFlarePixelCount[(uint)r1.y], 1, originalValue);
+  }
+  o0.xyzw = v1.xyzw;
   return;
 }

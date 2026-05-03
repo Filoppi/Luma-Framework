@@ -10,10 +10,12 @@ namespace CB
     struct LumaGameSettings
     {
         float GammaInfluence;
-        float PreExposure;
         float Exposure;
         float TonemapperRolloffStart;
+        float TonemapperMaxExpected;
+
         float Bloom;
+        float LensFlare;
         float SlideLensDirt;
         float ADSSights;
         float XrayOutline;
@@ -21,14 +23,27 @@ namespace CB
         float VolumetricFog;
         float RCAS;
         float SDRTonemapFloorRaiseScale;
-        float LUT;
-        float LUTBuilderExpansionChrominanceCorrect;
-        float LUTBuilderExpansionLuminanceCorrect;
+        
+        float LUTBuilderExpansionChrominance;
+        float LUTBuilderExpansionLuminance;
         float LUTBuilderHighlightSat;
         float LUTBuilderHighlightSatHighlightsOnly;
-        float LUTBuilderNeutral;
-        float PCCStrength;
-        float PCCHighlightsOnly;
+
+        float LUTBuilderNeutralChrominance;
+        float LUTBuilderNeutralHue;
+        float LUTBuilderNeutralLuma;
+     //    float LUTBuilderNeutralLumaHPStart;
+
+        float LUTBuilderGradeSMH;
+        float LUTBuilderGradeTint;
+        float LUTBuilderGradeSat;
+
+        float PCCLookback;
+        float PCCChrominanceBoost;
+        float PCCHue;
+        float PCCChrominance;
+        // float PCCGuaranteed;
+
         float CGContrast;
         float CGContrastMidGray;
         float CGSaturation;
@@ -36,6 +51,7 @@ namespace CB
         float CGHighlightsMidGray;
         float CGShadowsStrength;
         float CGShadowsMidGray;
+        
         float MovPeakRatio;
         float MovShoulderPow;
    };

@@ -1,6 +1,6 @@
-// ---- Created with 3Dmigoto v1.3.16 on Thu Nov 27 11:19:04 2025
+// ---- Created with 3Dmigoto v1.3.16 on Thu Nov 27 11:19:02 2025
 
-/* cbuffer PostFxCBuffer : register(b8)
+cbuffer PostFxCBuffer : register(b8)
 {
   float4 postFxControl0 : packoffset(c0);
   float4 postFxControl1 : packoffset(c1);
@@ -121,10 +121,13 @@
   float4 postfxViewProjMatrix1 : packoffset(c123);
   float4 postfxViewProjMatrix2 : packoffset(c124);
   float4 postfxViewProjMatrix3 : packoffset(c125);
-} */
+}
 
 SamplerState bilinearClamp_s : register(s0);
+// SamplerState pointWrap_s : register(s2);
 Texture2D<float4> codeTexture0 : register(t0);
+// Texture2D<float4> tNoise : register(t1);
+// Texture2D<float4> tDither : register(t2);
 
 
 // 3Dmigoto declarations
@@ -143,16 +146,25 @@ void main(
   o0.xyz = FinalShader_Resolve(codeTexture0, bilinearClamp_s, v1.xy);
 
   // r0.xyz = codeTexture0.Sample(bilinearClamp_s, v1.xy).xyz;
-  // r0.xyz = float3(3.05175781e-005,3.05175781e-005,3.05175781e-005) * r0.xyz;
+  // r0.xy = v1.xy * postFxControl0.xy + postFxControl0.zw;
+  // r0.x = tNoise.Sample(pointWrap_s, r0.xy).x;
+  // r0.x = postFxControl1.x * r0.x;
+  // r0.yz = float2(0.0250000004,0.0250000004) * v0.xy;
+  // r0.yzw = tDither.Sample(pointWrap_s, r0.yz).xyz;
+  // r0.xyz = r0.xxx * r0.yzw;
+  // r1.xyz = codeTexture0.Sample(bilinearClamp_s, v1.xy).xyz;
+  // r1.xyz = r1.xyz * float3(3.05175781e-005,3.05175781e-005,3.05175781e-005) + r0.xyz;
+  // r1.xz = r0.zx * r1.yy + r1.xz;
+
   #if CUSTOM_SDR > 0
-    r0.xyz = o0.xyz;
-    r1.xyz = log2(r0.xyz);
-    r1.xyz = postFxControl2.yyy * r1.xyz;
-    r1.xyz = exp2(r1.xyz);
-    r1.xyz = r1.xyz * postFxControl2.zzz + postFxControl2.www;
-    r2.xyz = cmp(postFxControl1.www >= r0.xyz);
-    r0.xyz = postFxControl2.xxx * r0.xyz;
-    r0.xyz = r2.xyz ? r0.xyz : r1.xyz;
+    r1.xyz = o0.xyz;
+    r0.xyz = log2(r1.xyz);
+    r0.xyz = postFxControl2.yyy * r0.xyz;
+    r0.xyz = exp2(r0.xyz);
+    r0.xyz = r0.xyz * postFxControl2.zzz + postFxControl2.www;
+    r2.xyz = cmp(postFxControl1.www >= r1.xyz);
+    r1.xyz = postFxControl2.xxx * r1.xyz;
+    r0.xyz = r2.xyz ? r1.xyz : r0.xyz;
     o0.xyz = postFxControl1.yyy + r0.xyz;
   #endif
 

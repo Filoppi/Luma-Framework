@@ -41,22 +41,18 @@ float3 RenoDX_ColorGrade(
 ) {
   float l = GetLuminance(x, colorspace);
   float lOrig = l;
+  if (l <= 0) return 0; //0 is redundant
 
-  // Contrast
+  //Luminance Grading
   l = RenoDX_Contrast(l, contrast, contrast_mid);
-
-  // Highlights
   l = RenoDX_Highlights(l, highlights, highlights_mid);
-
-  // Shadows
   l = RenoDX_Shadows(l, shadows, shadows_mid);
+  x *= l / lOrig;
 
-  x *= safeDivision(l, lOrig, 0);
-
-  // Saturation
+  //Saturation
   if (saturation != 1.f) x = Saturation(x, saturation, colorspace);
 
-  // clamp cs
+  //Clamp
   if (clampCs) x = max(0, x);
 
   return x;

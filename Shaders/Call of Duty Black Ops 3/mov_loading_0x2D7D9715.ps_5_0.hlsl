@@ -40,7 +40,7 @@ void main(
   //sat
   o0.xyz = saturate(o0.xyz);
 
-  #if CUSTOM_UPSCALE_MOV > 0 && CUSTOM_SDR == 0
+  #if CUSTOM_SDR == 0
     //decode
     o0.xyz = gamma_sRGB_to_linear(o0.xyz); //must be, right?
 
@@ -48,7 +48,9 @@ void main(
     o0.xyz = GammaCorrection_Linear(o0.xyz);
 
     //autohdr
-    o0.xyz = PumboAutoHDR(o0.xyz, LumaSettings.PeakWhiteNits, LumaSettings.GamePaperWhiteNits, GS.MovShoulderPow);
+    #if CUSTOM_UPSCALE_MOV > 0
+      o0.xyz = PumboAutoHDR(o0.xyz, LumaSettings.PeakWhiteNits, LumaSettings.GamePaperWhiteNits, GS.MovShoulderPow);
+    #endif
     o0.xyz *= HDR_INTSCALING * GS.MovPeakRatio;
 
     //IntermediateEncode

@@ -22,9 +22,18 @@ void main(
   uint4 bitmask, uiDest;
   float4 fDest;
 
+  o1.x = 0;
+
+  // if (DVS1 != 0) {
+  //   o0.xyz = codeTexture4.Sample(bilinearClamp_s, v0.xy).xyz; o1 = 1; return; //debug
+  // }
+
   r0.xyz = codeTexture2.Sample(bilinearClamp_s, v0.xy).xyz;
 
-  r0.xyz *= v1.xxx * GS.PreExposure; float3 colorU = r0.xyz;
+  r0.xyz *= v1.xxx; float3 colorU = r0.xyz;
+
+  // Bloom_Comp_HDR(r0.xyz, colorU, codeTexture0, bilinearClamp_s, v0.xy);
+  // LensFlare_Comp_HDR(r0.xyz, colorU, codeTexture4, bilinearClamp_s, v0.xy);
 
   // r0.xyz += float3(0.00872999988,0.00872999988,0.00872999988);
   // r0.xyz = log2(r0.xyz);
@@ -35,39 +44,42 @@ void main(
   // r1.xyz = r1.xyz * r0.xyz + float3(0.87808305,0.87808305,0.87808305);
   // r0.xyz = saturate(r1.xyz * r0.xyz + float3(-0.0669102818,-0.0669102818,-0.0669102818));
   TonemapVanilla(r0.xyz, colorU);
-  
+
   // r1.xyz = codeTexture0.Sample(bilinearClamp_s, v0.xy).xyz; float3 bloomColor = r1.xyz;
   // r1.xyz = saturate(float3(0.00390625233,0.00390625233,0.00390625233) * r1.xyz);
   // r2.xyz = r1.xyz + r0.xyz;
   // r0.xyz = -r0.xyz * r1.xyz + r2.xyz;
   Bloom_Comp(r0.xyz, colorU, codeTexture0, bilinearClamp_s, v0.xy);
 
-  r1.xyz = codeTexture4.Sample(bilinearClamp_s, v0.xy).xyz * 3.05175781e-005;
-  r0.xyz = saturate(r1.xyz + r0.xyz);
-  colorU += r1.xyz;
+  // r1.xyz = codeTexture4.Sample(bilinearClamp_s, v0.xy).xyz * 3.05175781e-005;
+  // r0.xyz = saturate(r1.xyz + r0.xyz);
+  LensFlare_Comp(r0.xyz, colorU, codeTexture4, bilinearClamp_s, v0.xy);
 
   // r0.xyz = r0.xyz * float3(0.96875,0.96875,0.96875) + float3(0.015625,0.015625,0.015625);
   // r0.xyz = codeTexture1.Sample(bilinearClamp_s, r0.xyz).xyz;
   LUT(colorU, r0.xyz, codeTexture1, bilinearClamp_s);
 
+  // luma for AA HDR
+  #if CUSTOM_SDR == 0 && CUSTOM_SR == 0
+    o1.x = TonemapGetLumaForAA(r0.xyz);
+  #endif
+
   // o0.xyz = r0.xyz;
   TonemapShader_Out(o0.xyz, r0.xyz, colorU);
 
-  // luma for AA
-  #if CUSTOM_SR > 1
-    //skip if SR
-    o1.x = 0;
-    return;
-  #endif
+  //luma for AA SDR
+  #if CUSTOM_SDR > 0 && CUSTOM_SR == 0
+    r0.x = dot(r0.xyz, float3(6.48803689e-006,2.18261721e-005,2.20336915e-006));
 
-  r0.x = dot(r0.xyz, float3(6.48803689e-006,2.18261721e-005,2.20336915e-006));
-  r0.y = log2(r0.x);
-  r0.y = 0.333333343 * r0.y;
-  r0.y = exp2(r0.y);
-  r0.z = cmp(0.00885645207 < r0.x);
-  r0.x = r0.x * 7.7870369 + 0.137931034;
-  r0.x = r0.z ? r0.y : r0.x;
-  o1.x = r0.x * 1.15999997 + -0.159999996;
+    r0.y = log2(r0.x);
+    r0.y = 0.333333343 * r0.y;
+    r0.y = exp2(r0.y);
+    r0.z = cmp(0.00885645207 < r0.x);
+    r0.x = r0.x * 7.7870369 + 0.137931034;
+    r0.x = r0.z ? r0.y : r0.x;
+
+    o1.x = r0.x * 1.15999997 + -0.159999996;
+  #endif
 
   return;
 }
