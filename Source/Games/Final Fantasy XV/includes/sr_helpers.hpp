@@ -2,6 +2,7 @@
 // =============================================================================
 #include <cfloat>
 #include <d3d11.h>
+#include "log.hpp"
 
 // Extract the exposure texture from the autoexposure pass
 // FFXV autoexposure uses slot 0 for the exposure texture

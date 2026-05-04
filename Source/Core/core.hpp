@@ -8849,6 +8849,13 @@ namespace
             any_replaced |= FindOrCreateIndirectUpgradedResource(cmd_list->get_device(), source.handle, dest.handle, dest.handle, device_data, texture_format_upgrades_type == TextureFormatUpgradesType::AllowedEnabled && enable_chain_indirect_texture_format_upgrades >= ChainTextureFormatUpgradesType::DirectDependencies, reshade::api::resource_usage::copy_dest, lock_device_read, false);
          }
 
+         {
+            ID3D11Device* native_device = (ID3D11Device*)(cmd_list->get_device()->get_native());
+            DeviceData& device_data = *cmd_list->get_device()->get_private_data<DeviceData>();
+            if (game->OverrideCopyResource(native_device, device_data, dest.handle, source.handle))
+               return true;
+         }
+
          if (any_replaced)
          {
             uint4 size1, size2;
@@ -8888,6 +8895,13 @@ namespace
             any_replaced |= FindOrCreateIndirectUpgradedResource(cmd_list->get_device(), source.handle, source.handle, source.handle, device_data, false, reshade::api::resource_usage::copy_source, lock_device_read);
             any_replaced |= FindOrCreateIndirectUpgradedResource(cmd_list->get_device(), source.handle, dest.handle, dest.handle, device_data, texture_format_upgrades_type == TextureFormatUpgradesType::AllowedEnabled && enable_chain_indirect_texture_format_upgrades >= ChainTextureFormatUpgradesType::DirectDependencies, reshade::api::resource_usage::copy_dest, lock_device_read, false);
             // TODO: upgrade the "cmd_list_data.ps_srvs_state" state if any resources are upgraded here, they could also be bound as SRV/UAV already.
+         }
+
+         {
+            ID3D11Device* native_device = (ID3D11Device*)(cmd_list->get_device()->get_native());
+            DeviceData& device_data = *cmd_list->get_device()->get_private_data<DeviceData>();
+            if (game->OverrideCopyTextureRegion(native_device, device_data, dest.handle, dest_subresource, reinterpret_cast<const D3D11_BOX*>(dest_box), source.handle, source_subresource, reinterpret_cast<const D3D11_BOX*>(source_box)))
+               return true;
          }
 
          if (any_replaced)

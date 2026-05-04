@@ -48,6 +48,9 @@ public:
       device_data.game = nullptr;
    }
 
+   virtual bool OverrideCopyResource(ID3D11Device* native_device, DeviceData& device_data, uint64_t& dst_resource, uint64_t& src_resource) { return false; }
+   virtual bool OverrideCopyTextureRegion(ID3D11Device* native_device, DeviceData& device_data, uint64_t& dst_resource, uint32_t dst_subresource, const D3D11_BOX* dst_box, uint64_t& src_resource, uint32_t src_subresource, const D3D11_BOX* src_box) { return false; }
+
    // Optionally returns a modified shader.
    // Requires "ENABLE_ORIGINAL_SHADERS_MEMORY_EDITS" to be enabled.
    // "shader_hash" is 32bit, will be set to -1 if it's not specified.
