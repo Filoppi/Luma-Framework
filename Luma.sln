@@ -29,6 +29,8 @@ Project("{8BC9CEB8-8B4A-11D0-8D11-00A0C91BC942}") = "Thief (2014)", "Source\Game
 EndProject
 Project("{8BC9CEB8-8B4A-11D0-8D11-00A0C91BC942}") = "Watch Dogs 2", "Source\Games\Watch Dogs 2\Watch Dogs 2.vcxproj", "{D7A1B6B7-9CD7-46D2-9C42-E913F85966D4}"
 EndProject
+Project("{8BC9CEB8-8B4A-11D0-8D11-00A0C91BC942}") = "Blue Reflection Second Light", "Source\Games\Blue Reflection Second Light\Blue Reflection Second Light.vcxproj", "{23A5A14B-C2CA-4474-BC00-39C22C0CF778}"
+EndProject
 Project("{8BC9CEB8-8B4A-11D0-8D11-00A0C91BC942}") = "L.A. Noire", "Source\Games\L.A. Noire\L.A. Noire.vcxproj", "{70AE6118-3F1D-463D-8D73-3C1528E4B838}"
 EndProject
 Project("{8BC9CEB8-8B4A-11D0-8D11-00A0C91BC942}") = "Lego City Undercover", "Source\Games\Lego City Undercover\Lego City Undercover.vcxproj", "{0C26082F-5EBC-4A4F-B700-056009698224}"
@@ -267,6 +269,18 @@ Global
 		{D7A1B6B7-9CD7-46D2-9C42-E913F85966D4}.Test-Release|Win32.ActiveCfg = Test-Release|x64
 		{D7A1B6B7-9CD7-46D2-9C42-E913F85966D4}.Test-Release|x64.ActiveCfg = Test-Release|x64
 		{D7A1B6B7-9CD7-46D2-9C42-E913F85966D4}.Test-Release|x64.Build.0 = Test-Release|x64
+		{23A5A14B-C2CA-4474-BC00-39C22C0CF778}.Development-Debug|Win32.ActiveCfg = Development-Debug|x64
+		{23A5A14B-C2CA-4474-BC00-39C22C0CF778}.Development-Debug|x64.ActiveCfg = Development-Debug|x64
+		{23A5A14B-C2CA-4474-BC00-39C22C0CF778}.Development-Debug|x64.Build.0 = Development-Debug|x64
+		{23A5A14B-C2CA-4474-BC00-39C22C0CF778}.Development-Release|Win32.ActiveCfg = Development-Release|x64
+		{23A5A14B-C2CA-4474-BC00-39C22C0CF778}.Development-Release|x64.ActiveCfg = Development-Release|x64
+		{23A5A14B-C2CA-4474-BC00-39C22C0CF778}.Development-Release|x64.Build.0 = Development-Release|x64
+		{23A5A14B-C2CA-4474-BC00-39C22C0CF778}.Publishing-Release|Win32.ActiveCfg = Publishing-Release|x64
+		{23A5A14B-C2CA-4474-BC00-39C22C0CF778}.Publishing-Release|x64.ActiveCfg = Publishing-Release|x64
+		{23A5A14B-C2CA-4474-BC00-39C22C0CF778}.Publishing-Release|x64.Build.0 = Publishing-Release|x64
+		{23A5A14B-C2CA-4474-BC00-39C22C0CF778}.Test-Release|Win32.ActiveCfg = Test-Release|x64
+		{23A5A14B-C2CA-4474-BC00-39C22C0CF778}.Test-Release|x64.ActiveCfg = Test-Release|x64
+		{23A5A14B-C2CA-4474-BC00-39C22C0CF778}.Test-Release|x64.Build.0 = Test-Release|x64
 		{70AE6118-3F1D-463D-8D73-3C1528E4B838}.Development-Debug|Win32.ActiveCfg = Development-Debug|Win32
 		{70AE6118-3F1D-463D-8D73-3C1528E4B838}.Development-Debug|Win32.Build.0 = Development-Debug|Win32
 		{70AE6118-3F1D-463D-8D73-3C1528E4B838}.Development-Debug|x64.ActiveCfg = Development-Debug|Win32
@@ -739,6 +753,7 @@ Global
 		{32621FBE-EECA-480C-B110-57D73246398A} = {02EA681E-C7D8-13C7-8484-4AC65E1B71E8}
 		{91886F0A-E405-4386-9BBA-BF011C50922F} = {02EA681E-C7D8-13C7-8484-4AC65E1B71E8}
 		{D7A1B6B7-9CD7-46D2-9C42-E913F85966D4} = {02EA681E-C7D8-13C7-8484-4AC65E1B71E8}
+        {23A5A14B-C2CA-4474-BC00-39C22C0CF778} = {02EA681E-C7D8-13C7-8484-4AC65E1B71E8}
 		{70AE6118-3F1D-463D-8D73-3C1528E4B838} = {02EA681E-C7D8-13C7-8484-4AC65E1B71E8}
 		{0C26082F-5EBC-4A4F-B700-056009698224} = {02EA681E-C7D8-13C7-8484-4AC65E1B71E8}
 		{6D7FE62D-347F-4331-AD21-82672EA4E434} = {02EA681E-C7D8-13C7-8484-4AC65E1B71E8}
