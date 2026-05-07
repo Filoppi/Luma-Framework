@@ -8,7 +8,6 @@ Relevant files:
 
 - `Source/Games/Quantum Break/main.cpp`
 - `Shaders/Quantum Break/Luma_QB_PreSRDecode.hlsl`
-- `Shaders/Quantum Break/Luma_QB_PostSREncode.hlsl`
 - `Shaders/Quantum Break/temporal_resolve_0x99274617.ps_5_0.hlsl`
 - `Shaders/Quantum Break/unused/history_reprojection_clamp_0xE8337D48.cs_5_0.hlsl`
 - `Shaders/Quantum Break/Includes/CBuffer_cb_update_1.hlsli`
@@ -92,9 +91,7 @@ QB gamma source color
 -> linear SR input texture
 -> DLSS/FSR
 -> linear SR output texture
--> Luma_QB_PostSREncode.hlsl
--> QB gamma SR color
--> original temporal resolve shader
+-> original temporal resolve shader (encodes to gamma in SR branch)
 ```
 
 Pre-SR decode:
@@ -104,14 +101,11 @@ Pre-SR decode:
 - Operation: `gamma_sRGB_to_linear(..., GCT_POSITIVE)`.
 - Output: `game_device_data.sr_linear_input_color`.
 
-Post-SR encode:
+Post-SR encode is now in `temporal_resolve_0x99274617.ps_5_0.hlsl` when `LumaSettings.SRType > 0`:
 
-- Shader: `Luma_QB_PostSREncode.hlsl`
-- Input: `device_data.sr_output_color`.
-- Operation: `linear_to_sRGB_gamma(..., GCT_POSITIVE)`.
-- Output: `game_device_data.sr_gamma_output_color`.
-
-The original temporal resolve draw receives `sr_gamma_output_color_srv` in `PS SRV slot 2`, so the shader contract remains gamma-space.
+- Input: `device_data.sr_output_color` (bound as `PS SRV slot 2`).
+- Operation: `linear_to_sRGB_gamma(..., GCT_POSITIVE)` in the SR branch.
+- Output: gamma-space color that continues through the normal resolve/display-map path.
 
 ## Current SR Settings
 

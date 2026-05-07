@@ -15,7 +15,7 @@
 
 // Quantum Break's SR hook sits inside the temporal resolve path:
 // history reprojection provides motion vectors, temporal resolve provides color/depth/cbuffer inputs,
-// and two fullscreen conversion passes let DLSS run on linear color while the game remains gamma-space.
+// and a fullscreen pre-decode pass lets DLSS run on linear color while the game remains gamma-space.
 namespace
 {
    // Pass hashes used to identify the two parts of QB's temporal pipeline we need to observe/replace.
@@ -364,13 +364,10 @@ struct GameDeviceDataQuantumBreak final : public GameDeviceData
    com_ptr<ID3D11Resource> sr_motion_vectors;
    com_ptr<ID3D11Buffer> cb_update_1_readback;
    com_ptr<ID3D11Buffer> ssaa_readback;
-   // Conversion scratch textures: game gamma color -> DLSS linear input -> game gamma resolve input.
+   // Conversion scratch texture: game gamma color -> DLSS linear input.
    com_ptr<ID3D11Texture2D> sr_linear_input_color;
    com_ptr<ID3D11ShaderResourceView> sr_linear_input_color_srv;
    com_ptr<ID3D11RenderTargetView> sr_linear_input_color_rtv;
-   com_ptr<ID3D11Texture2D> sr_gamma_output_color;
-   com_ptr<ID3D11ShaderResourceView> sr_gamma_output_color_srv;
-   com_ptr<ID3D11RenderTargetView> sr_gamma_output_color_rtv;
    com_ptr<ID3D11ShaderResourceView> sr_output_color_srv;
 
    // Last captured frame constants that feed SR.
@@ -621,7 +618,7 @@ class QuantumBreakGame final : public Game
 
    static bool SetupSROutput(ID3D11Device* native_device, DeviceData& device_data, GameDeviceDataQuantumBreak& game_device_data, const D3D11_TEXTURE2D_DESC& output_desc)
    {
-      // DLSS writes linear color here; a later fullscreen pass encodes it back to QB's gamma-space resolve input.
+      // DLSS writes linear color here; temporal_resolve encodes to gamma when SRType > 0.
       game_device_data.output_changed = false;
       bool recreated_output_texture = false;
 
@@ -697,7 +694,7 @@ class QuantumBreakGame final : public Game
 
    static bool SetupSRConversionTexture(ID3D11Device* native_device, D3D11_TEXTURE2D_DESC desc, com_ptr<ID3D11Texture2D>& texture, com_ptr<ID3D11ShaderResourceView>& srv, com_ptr<ID3D11RenderTargetView>& rtv)
    {
-      // Scratch textures are simple single-mip render targets used only by the pre/post SR conversion passes.
+      // Scratch textures are simple single-mip render targets used by SR conversion passes.
       desc.Format = ResolveSRColorViewFormat(desc.Format);
       if (desc.Width == 0u || desc.Height == 0u || desc.Format == DXGI_FORMAT_UNKNOWN)
       {
@@ -800,9 +797,8 @@ public:
 
 #if ENABLE_SR
       sr_game_tooltip = "Super Resolution engages during the temporal resolve pass.\n";
-      // Native fullscreen passes bridge QB's gamma-space post stack with DLSS' preferred linear input.
+      // Native fullscreen pass bridges QB's gamma-space post stack with DLSS' preferred linear input.
       native_shaders_definitions.emplace(CompileTimeStringHash("QB Pre SR Decode"), ShaderDefinition{"Luma_QB_PreSRDecode", reshade::api::pipeline_subobject_type::pixel_shader});
-      native_shaders_definitions.emplace(CompileTimeStringHash("QB Post SR Encode"), ShaderDefinition{"Luma_QB_PostSREncode", reshade::api::pipeline_subobject_type::pixel_shader});
 #endif
 
       Settings::Initialize();
@@ -965,10 +961,8 @@ public:
                      D3D11_TEXTURE2D_DESC sr_linear_input_desc = source_desc;
                      sr_linear_input_desc.Format = source_srv_desc.Format != DXGI_FORMAT_UNKNOWN ? source_srv_desc.Format : source_desc.Format;
 
-                     D3D11_TEXTURE2D_DESC sr_gamma_output_desc = output_desc;
                      const bool conversion_resources_ready =
-                        SetupSRConversionTexture(native_device, sr_linear_input_desc, game_device_data.sr_linear_input_color, game_device_data.sr_linear_input_color_srv, game_device_data.sr_linear_input_color_rtv) &&
-                        SetupSRConversionTexture(native_device, sr_gamma_output_desc, game_device_data.sr_gamma_output_color, game_device_data.sr_gamma_output_color_srv, game_device_data.sr_gamma_output_color_rtv);
+                        SetupSRConversionTexture(native_device, sr_linear_input_desc, game_device_data.sr_linear_input_color, game_device_data.sr_linear_input_color_srv, game_device_data.sr_linear_input_color_rtv);
 
                      const bool settings_updated = conversion_resources_ready && sr_implementations[device_data.sr_type]->UpdateSettings(sr_instance_data, native_device_context, settings_data);
                      if (settings_updated)
@@ -1009,7 +1003,7 @@ public:
                         draw_state_stack.Cache(native_device_context, device_data.uav_max_count);
                         compute_state_stack.Cache(native_device_context, device_data.uav_max_count);
 
-                        // Feed DLSS linear color, then encode its linear result back to QB's gamma-space resolve input.
+                        // Feed DLSS linear color; temporal_resolve encodes SR output back to gamma-space.
                         const bool pre_sr_encoded = DrawSRConversionPass(
                            native_device_context,
                            device_data,
@@ -1029,18 +1023,6 @@ public:
                            native_device_context->CSSetUnorderedAccessViews(0, D3D11_1_UAV_SLOT_COUNT, null_uavs, nullptr);
                            ID3D11RenderTargetView* null_rtvs[D3D11_SIMULTANEOUS_RENDER_TARGET_COUNT] = {};
                            native_device_context->OMSetRenderTargets(D3D11_SIMULTANEOUS_RENDER_TARGET_COUNT, null_rtvs, nullptr);
-                        }
-
-                        if (sr_succeeded)
-                        {
-                           sr_succeeded = DrawSRConversionPass(
-                              native_device_context,
-                              device_data,
-                              CompileTimeStringHash("QB Post SR Encode"),
-                              game_device_data.sr_output_color_srv.get(),
-                              game_device_data.sr_gamma_output_color_rtv.get(),
-                              output_width,
-                              output_height);
                         }
 
                         draw_state_stack.Restore(native_device_context);
@@ -1101,7 +1083,7 @@ public:
 #if ENABLE_SR
          if (sr_succeeded)
          {
-            ID3D11ShaderResourceView* sr_output_srv = game_device_data.sr_gamma_output_color_srv.get();
+            ID3D11ShaderResourceView* sr_output_srv = game_device_data.sr_output_color_srv.get();
             native_device_context->PSSetShaderResources(2, 1, &sr_output_srv);
          }
 #endif
@@ -1132,7 +1114,7 @@ public:
 #if ENABLE_SR
       if (sr_succeeded)
       {
-         ID3D11ShaderResourceView* sr_output_srv = game_device_data.sr_gamma_output_color_srv.get();
+         ID3D11ShaderResourceView* sr_output_srv = game_device_data.sr_output_color_srv.get();
          native_device_context->PSSetShaderResources(2, 1, &sr_output_srv);
       }
 #endif
@@ -1153,9 +1135,6 @@ public:
       game_device_data.sr_linear_input_color = nullptr;
       game_device_data.sr_linear_input_color_srv = nullptr;
       game_device_data.sr_linear_input_color_rtv = nullptr;
-      game_device_data.sr_gamma_output_color = nullptr;
-      game_device_data.sr_gamma_output_color_srv = nullptr;
-      game_device_data.sr_gamma_output_color_rtv = nullptr;
       game_device_data.sr_output_color_srv = nullptr;
       game_device_data.output_changed = false;
 
