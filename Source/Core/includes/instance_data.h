@@ -16,6 +16,8 @@
 #include <utility>
 #include <vector>
 
+#include "managed_resources.h"
+
 // Forward declarations
 struct GameDeviceData;
 
@@ -90,7 +92,7 @@ struct TraceDrawCallData
       AppendCommandList,
       ResetCommmandList,
       FlushCommandList,
-		Custom, // Custom draw call for custom passes we added/replaced
+        Custom, // Custom draw call for custom passes we added/replaced
    };
 
    TraceDrawCallType type = TraceDrawCallType::Shader;
@@ -583,6 +585,8 @@ struct __declspec(uuid("cfebf6d4-d184-4e1a-ac14-09d088e560ca")) DeviceData
          buffers.push_back(luma_ui_data.get());
       return buffers;
    }
+
+   ManagedResources managed_resources;
 };
 
 struct __declspec(uuid("c5805458-2c02-4ebf-b139-38b85118d971")) SwapchainData
@@ -595,5 +599,5 @@ struct __declspec(uuid("c5805458-2c02-4ebf-b139-38b85118d971")) SwapchainData
    std::vector<com_ptr<ID3D11RenderTargetView>> display_composition_rtvs;
 
    // Whether the original SDR (vanilla) swapchain was linear space (e.g. sRGB formats)
-	bool vanilla_was_linear_space = false;
+    bool vanilla_was_linear_space = false;
 };

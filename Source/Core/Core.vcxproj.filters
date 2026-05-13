@@ -105,5 +105,11 @@
     <ClInclude Include="includes\overlay_log.h">
       <Filter>Includes</Filter>
     </ClInclude>
+    <ClInclude Include="includes\callbacks.h">
+      <Filter>Includes</Filter>
+    </ClInclude>
+    <ClInclude Include="includes\managed_resources.h">
+      <Filter>Includes</Filter>
+    </ClInclude>
   </ItemGroup>
 </Project>

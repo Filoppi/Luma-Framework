@@ -3,6 +3,11 @@
 #include "../texture_data/SMAA_AreaTex.h"
 #include "../texture_data/SMAA_SearchTex.h"
 
+#include "../includes/callbacks.h"
+#include "../includes/math.h"
+
+using Math::operator"" _h;
+
 enum class DrawStateStackType
 {
    // Same as "FullGraphics" but skips some states that are usually not changed by our code.
@@ -1319,16 +1324,10 @@ void SanitizeNaNs(ID3D11Device* device, ID3D11DeviceContext* device_context, ID3
    }
 }
 
-struct DrawSMAAData
+void DrawSMAA(ID3D11Device* device, ID3D11DeviceContext* device_context, DeviceData& device_data, ID3D11RenderTargetView* rtv, ID3D11ShaderResourceView* srv_color_tex, ID3D11ShaderResourceView* srv_color_tex_gamma, ID3D11ShaderResourceView* srv_predication_tex = nullptr)
 {
-   ComPtr<ID3D11ShaderResourceView> srv_area_tex;
-   ComPtr<ID3D11ShaderResourceView> srv_search_tex;
-   ComPtr<ID3D11DepthStencilState> ds_disable_depth_replace_stencil;
-   ComPtr<ID3D11DepthStencilState> ds_disable_depth_use_stencil;
-};
+   auto& managed_resources = device_data.managed_resources;
 
-void DrawSMAA(ID3D11Device* device, ID3D11DeviceContext* device_context, const DeviceData& device_data, DrawSMAAData& data, ID3D11RenderTargetView* rtv, ID3D11ShaderResourceView* srv_color_tex, ID3D11ShaderResourceView* srv_color_tex_gamma, ID3D11ShaderResourceView* srv_predication_tex = nullptr)
-{  
    // Backup IA.
    D3D11_PRIMITIVE_TOPOLOGY primitive_topology_original;
    device_context->IAGetPrimitiveTopology(&primitive_topology_original);
@@ -1388,38 +1387,41 @@ void DrawSMAA(ID3D11Device* device, ID3D11DeviceContext* device_context, const D
    viewport.Height = tex_desc.Height;
 
    // Create DS.
-   [[unlikely]] if (!data.ds_disable_depth_replace_stencil)
+   [[unlikely]] if (!managed_resources.depth_stencils["smaa_disable_depth_replace_stencil"_h])
    {
       CD3D11_DEPTH_STENCIL_DESC ds_desc(D3D11_DEFAULT);
       ds_desc.DepthEnable = FALSE;
       ds_desc.StencilEnable = TRUE;
       ds_desc.FrontFace.StencilPassOp = D3D11_STENCIL_OP_REPLACE;
-      ensure(device->CreateDepthStencilState(&ds_desc, data.ds_disable_depth_replace_stencil.put()), >= 0);
+      ensure(device->CreateDepthStencilState(&ds_desc, managed_resources.depth_stencils["smaa_disable_depth_replace_stencil"_h].put()), >= 0);
    }
 
    // Create DSV.
-   tex_desc.Format = DXGI_FORMAT_D24_UNORM_S8_UINT;
-   tex_desc.BindFlags = D3D11_BIND_DEPTH_STENCIL;
-   ensure(device->CreateTexture2D(&tex_desc, nullptr, tex.put()), >= 0);
-   ComPtr<ID3D11DepthStencilView> dsv;
-   ensure(device->CreateDepthStencilView(tex.get(), nullptr, dsv.put()), >= 0);
+   [[unlikely]] if (!managed_resources.depth_stencil_views["smaa_dsv"_h])
+   {
+      tex_desc.Format = DXGI_FORMAT_D24_UNORM_S8_UINT;
+      tex_desc.BindFlags = D3D11_BIND_DEPTH_STENCIL;
+      ensure(device->CreateTexture2D(&tex_desc, nullptr, tex.put()), >= 0);
+      ensure(device->CreateDepthStencilView(tex.get(), nullptr, managed_resources.depth_stencil_views["smaa_dsv"_h].put()), >= 0);
+   }
 
    // Create RT and views.
-   tex_desc.Format = DXGI_FORMAT_R8G8_UNORM;
-   tex_desc.BindFlags = D3D11_BIND_SHADER_RESOURCE | D3D11_BIND_RENDER_TARGET;
-   ensure(device->CreateTexture2D(&tex_desc, nullptr, tex.put()), >= 0);
-   ComPtr<ID3D11RenderTargetView> rtv_edge_detection;
-   ensure(device->CreateRenderTargetView(tex.get(), nullptr, rtv_edge_detection.put()), >= 0);
-   ComPtr<ID3D11ShaderResourceView> srv_edge_detection;
-   ensure(device->CreateShaderResourceView(tex.get(), nullptr, srv_edge_detection.put()), >= 0);
+   [[unlikely]] if (!managed_resources.render_target_views["smaa_edge_detection"_h])
+   {
+      tex_desc.Format = DXGI_FORMAT_R8G8_UNORM;
+      tex_desc.BindFlags = D3D11_BIND_SHADER_RESOURCE | D3D11_BIND_RENDER_TARGET;
+      ensure(device->CreateTexture2D(&tex_desc, nullptr, tex.put()), >= 0);
+      ensure(device->CreateRenderTargetView(tex.get(), nullptr, managed_resources.render_target_views["smaa_edge_detection"_h].put()), >= 0);
+      ensure(device->CreateShaderResourceView(tex.get(), nullptr, managed_resources.shader_resource_views["smaa_edge_detection"_h].put()), >= 0);
+   }
 
    // Bindings.
    device_context->OMSetBlendState(nullptr, nullptr, UINT_MAX);
-   device_context->OMSetDepthStencilState(data.ds_disable_depth_replace_stencil.get(), 1);
-   device_context->OMSetRenderTargets(1, &rtv_edge_detection, dsv.get());
+   device_context->OMSetDepthStencilState(managed_resources.depth_stencils["smaa_disable_depth_replace_stencil"_h].get(), 1);
+   device_context->OMSetRenderTargets(1, &managed_resources.render_target_views["smaa_edge_detection"_h], managed_resources.depth_stencil_views["smaa_dsv"_h].get());
    device_context->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
-   device_context->VSSetShader(device_data.native_vertex_shaders.at(Math::CompileTimeStringHash("SMAA Edge Detection VS")).get(), nullptr, 0);
-   device_context->PSSetShader(device_data.native_pixel_shaders.at(Math::CompileTimeStringHash("SMAA Edge Detection PS")).get(), nullptr, 0);
+   device_context->VSSetShader(device_data.native_vertex_shaders.at("SMAA Edge Detection VS"_h).get(), nullptr, 0);
+   device_context->PSSetShader(device_data.native_pixel_shaders.at("SMAA Edge Detection PS"_h).get(), nullptr, 0);
    const std::array ps_samplers = { device_data.sampler_state_linear.get(), device_data.sampler_state_point.get() };
    device_context->PSSetSamplers(0, ps_samplers.size(), ps_samplers.data());
    const std::array ps_srvs_edge_detection = { srv_color_tex_gamma, srv_predication_tex };
@@ -1428,8 +1430,8 @@ void DrawSMAA(ID3D11Device* device, ID3D11DeviceContext* device_context, const D
    device_context->RSSetState(nullptr);
 
    static constexpr FLOAT clear_color[4] = {};
-   device_context->ClearRenderTargetView(rtv_edge_detection.get(), clear_color);
-   device_context->ClearDepthStencilView(dsv.get(), D3D10_CLEAR_STENCIL, 1.0f, 0);
+   device_context->ClearRenderTargetView(managed_resources.render_target_views["smaa_edge_detection"_h].get(), clear_color);
+   device_context->ClearDepthStencilView(managed_resources.depth_stencil_views["smaa_dsv"_h].get(), D3D11_CLEAR_STENCIL, 1.0f, 0);
    device_context->Draw(3, 0);
 
    //
@@ -1438,7 +1440,7 @@ void DrawSMAA(ID3D11Device* device, ID3D11DeviceContext* device_context, const D
    //
 
    // Create area texture.
-   [[unlikely]] if (!data.srv_area_tex)
+   [[unlikely]] if (!managed_resources.shader_resource_views["smaa_area_tex"_h])
    {
       D3D11_TEXTURE2D_DESC tex_desc = {};
       tex_desc.Width = AREATEX_WIDTH;
@@ -1453,11 +1455,11 @@ void DrawSMAA(ID3D11Device* device, ID3D11DeviceContext* device_context, const D
       subresource_data.pSysMem = areaTexBytes;
       subresource_data.SysMemPitch = AREATEX_PITCH;
       ensure(device->CreateTexture2D(&tex_desc, &subresource_data, tex.put()), >= 0);
-      ensure(device->CreateShaderResourceView(tex.get(), nullptr, data.srv_area_tex.put()), >= 0);
+      ensure(device->CreateShaderResourceView(tex.get(), nullptr, managed_resources.shader_resource_views["smaa_area_tex"_h].put()), >= 0);
    }
 
    // Create search texture.
-   [[unlikely]] if (!data.srv_search_tex)
+   [[unlikely]] if (!managed_resources.shader_resource_views["smaa_search_tex"_h])
    {
       D3D11_TEXTURE2D_DESC tex_desc = {};
       tex_desc.Width = SEARCHTEX_WIDTH;
@@ -1472,36 +1474,37 @@ void DrawSMAA(ID3D11Device* device, ID3D11DeviceContext* device_context, const D
       subresource_data.pSysMem = searchTexBytes;
       subresource_data.SysMemPitch = SEARCHTEX_PITCH;
       ensure(device->CreateTexture2D(&tex_desc, &subresource_data, tex.put()), >= 0);
-      ensure(device->CreateShaderResourceView(tex.get(), nullptr, data.srv_search_tex.put()), >= 0);
+      ensure(device->CreateShaderResourceView(tex.get(), nullptr, managed_resources.shader_resource_views["smaa_search_tex"_h].put()), >= 0);
    }
 
    // Create DS.
-   [[unlikely]] if (!data.ds_disable_depth_use_stencil)
+   [[unlikely]] if (!managed_resources.depth_stencils["smaa_disable_depth_use_stencil"_h])
    {
       CD3D11_DEPTH_STENCIL_DESC ds_desc(D3D11_DEFAULT);
       ds_desc.DepthEnable = FALSE;
       ds_desc.StencilEnable = TRUE;
       ds_desc.FrontFace.StencilFunc = D3D11_COMPARISON_EQUAL;
-      ensure(device->CreateDepthStencilState(&ds_desc, data.ds_disable_depth_use_stencil.put()), >= 0);
+      ensure(device->CreateDepthStencilState(&ds_desc, managed_resources.depth_stencils["smaa_disable_depth_use_stencil"_h].put()), >= 0);
    }
 
    // Create RT and views.
-   tex_desc.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
-   ensure(device->CreateTexture2D(&tex_desc, nullptr, tex.put()), >= 0);
-   ComPtr<ID3D11RenderTargetView> rtv_blending_weight_calculation;
-   ensure(device->CreateRenderTargetView(tex.get(), nullptr, rtv_blending_weight_calculation.put()), >= 0);
-   ComPtr<ID3D11ShaderResourceView> srv_blending_weight_calculation;
-   ensure(device->CreateShaderResourceView(tex.get(), nullptr, srv_blending_weight_calculation.put()), >= 0);
+   [[unlikely]] if (!managed_resources.render_target_views["smaa_blending_weight_calculation"_h])
+   {
+      tex_desc.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
+      ensure(device->CreateTexture2D(&tex_desc, nullptr, tex.put()), >= 0);
+      ensure(device->CreateRenderTargetView(tex.get(), nullptr, managed_resources.render_target_views["smaa_blending_weight_calculation"_h].put()), >= 0);
+      ensure(device->CreateShaderResourceView(tex.get(), nullptr, managed_resources.shader_resource_views["smaa_blending_weight_calculation"_h].put()), >= 0); 
+   }
 
    // Bindings.
-   device_context->OMSetDepthStencilState(data.ds_disable_depth_use_stencil.get(), 1);
-   device_context->OMSetRenderTargets(1, &rtv_blending_weight_calculation, dsv.get());
-   device_context->VSSetShader(device_data.native_vertex_shaders.at(Math::CompileTimeStringHash("SMAA Blending Weight Calculation VS")).get(), nullptr, 0);
-   device_context->PSSetShader(device_data.native_pixel_shaders.at(Math::CompileTimeStringHash("SMAA Blending Weight Calculation PS")).get(), nullptr, 0);
-   const std::array ps_srvs_blending_weight_calculation = { srv_edge_detection.get(), data.srv_area_tex.get(), data.srv_search_tex.get() };
+   device_context->OMSetDepthStencilState(managed_resources.depth_stencils["smaa_disable_depth_use_stencil"_h].get(), 1);
+   device_context->OMSetRenderTargets(1, &managed_resources.render_target_views["smaa_blending_weight_calculation"_h], managed_resources.depth_stencil_views["smaa_dsv"_h].get());
+   device_context->VSSetShader(device_data.native_vertex_shaders.at("SMAA Blending Weight Calculation VS"_h).get(), nullptr, 0);
+   device_context->PSSetShader(device_data.native_pixel_shaders.at("SMAA Blending Weight Calculation PS"_h).get(), nullptr, 0);
+   const std::array ps_srvs_blending_weight_calculation = { managed_resources.shader_resource_views["smaa_edge_detection"_h].get(), managed_resources.shader_resource_views["smaa_area_tex"_h].get(), managed_resources.shader_resource_views["smaa_search_tex"_h].get() };
    device_context->PSSetShaderResources(0, ps_srvs_blending_weight_calculation.size(), ps_srvs_blending_weight_calculation.data());
 
-   device_context->ClearRenderTargetView(rtv_blending_weight_calculation.get(), clear_color);
+   device_context->ClearRenderTargetView(managed_resources.render_target_views["smaa_blending_weight_calculation"_h].get(), clear_color);
    device_context->Draw(3, 0);
 
    //
@@ -1511,14 +1514,28 @@ void DrawSMAA(ID3D11Device* device, ID3D11DeviceContext* device_context, const D
 
    // Bindings.
    device_context->OMSetRenderTargets(1, &rtv, nullptr);
-   device_context->VSSetShader(device_data.native_vertex_shaders.at(Math::CompileTimeStringHash("SMAA Neighborhood Blending VS")).get(), nullptr, 0);
-   device_context->PSSetShader(device_data.native_pixel_shaders.at(Math::CompileTimeStringHash("SMAA Neighborhood Blending PS")).get(), nullptr, 0);
-   const std::array ps_srvs_neighborhood_blending = { srv_color_tex, srv_blending_weight_calculation.get() };
+   device_context->VSSetShader(device_data.native_vertex_shaders.at("SMAA Neighborhood Blending VS"_h).get(), nullptr, 0);
+   device_context->PSSetShader(device_data.native_pixel_shaders.at("SMAA Neighborhood Blending PS"_h).get(), nullptr, 0);
+   const std::array ps_srvs_neighborhood_blending = { srv_color_tex, managed_resources.shader_resource_views["smaa_blending_weight_calculation"_h].get() };
    device_context->PSSetShaderResources(0, ps_srvs_neighborhood_blending.size(), ps_srvs_neighborhood_blending.data());
 
    device_context->Draw(3, 0);
 
    //
+
+   // Reset resolution dependent resources on init swapchain.
+   // Some are intentionaly left out, we will recreate them here (in the DrawSMAA function).
+   [[unlikely]] if (!LumaCallbacks::on_init_swapchain["luma_smaa"_h])
+   {
+      auto on_init_swapchain = [&]()
+      {
+         managed_resources.depth_stencil_views["smaa_dsv"_h].reset();
+         managed_resources.render_target_views["smaa_edge_detection"_h].reset();
+         managed_resources.render_target_views["smaa_blending_weight_calculation"_h].reset();
+      };
+
+      LumaCallbacks::on_init_swapchain["luma_smaa"_h] = on_init_swapchain;
+   }
 
    // Restore.
    device_context->OMSetBlendState(blend_original.get(), blend_factor_original, sample_mask_original);

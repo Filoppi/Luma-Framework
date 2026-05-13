@@ -2959,6 +2959,12 @@ namespace
          // TODO: put code to track all recently created resources and late upgraded them if the size/aspect ratio now matches the swapchain (some games resize the swapchain after resources, so in that case we should handle indirect upgrades like this)
       }
 
+      // Execute all Luma callbacks.
+      for (const auto& callback : LumaCallbacks::on_init_swapchain)
+      {
+          callback.second();
+      }
+
       game->OnInitSwapchain(swapchain);
    }
 

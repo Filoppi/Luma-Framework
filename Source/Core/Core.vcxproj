@@ -608,6 +608,7 @@
   <ItemGroup>
     <ClInclude Include="dlss\DLSS.h" />
     <ClInclude Include="fsr\FSR.h" />
+    <ClInclude Include="includes\callbacks.h" />
     <ClInclude Include="includes\cbuffers.h" />
     <ClInclude Include="includes\com_ptr.h" />
     <ClInclude Include="includes\debug.h" />
@@ -615,6 +616,7 @@
     <ClInclude Include="includes\globals.h" />
     <ClInclude Include="includes\hash.h" />
     <ClInclude Include="includes\instance_data.h" />
+    <ClInclude Include="includes\managed_resources.h" />
     <ClInclude Include="includes\overlay_log.h" />
     <ClInclude Include="includes\math.h" />
     <ClInclude Include="includes\matrix.h" />

@@ -182,6 +182,13 @@ namespace Math
       return hash;
    }
 
+   // User-defined literal for CompileTimeStringHash.
+   // Usage: `"some_string"_h`, this is equivalent to `CompileTimeStringHash("some_string")`.
+   consteval uint32_t operator"" _h(const char* str, size_t len)
+   {
+	  return CompileTimeStringHash(str);
+   }
+
    uint32_t FindNextUniqueNumberInRange(uint32_t value, uint32_t min_value, uint32_t max_value, std::unordered_set<uint32_t> excluded_values)
    {
       assert(value >= min_value && value <= max_value);
