@@ -12,6 +12,9 @@
 // Signal user that callback was executed?
 struct LumaCallbacks final
 {
-    // Executed after swapchaiin resize and after swapchain creation.
+    // Executed after swapchain resize and after swapchain creation.
     static inline std::unordered_map<uint32_t, std::function<void()>> on_init_swapchain;
+
+    // Executed before device is destroyed.
+    static inline std::unordered_map<uint32_t, std::function<void()>> on_destroy_device;
 };

@@ -2570,6 +2570,12 @@ namespace
       }
 #endif // ENABLE_SR
 
+      // Execute all Luma callbacks.
+      for (const auto& callback : LumaCallbacks::on_destroy_device)
+      {
+          callback.second();
+      }
+
       device->destroy_private_data<DeviceData>();
    }
 

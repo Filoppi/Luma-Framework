@@ -1525,17 +1525,14 @@ void DrawSMAA(ID3D11Device* device, ID3D11DeviceContext* device_context, DeviceD
 
    // Reset resolution dependent resources on init swapchain.
    // Some are intentionaly left out, we will recreate them here (in the DrawSMAA function).
-   [[unlikely]] if (!LumaCallbacks::on_init_swapchain["luma_smaa"_h])
+   auto on_init_swapchain = [&]()
    {
-      auto on_init_swapchain = [&]()
-      {
-         managed_resources.depth_stencil_views["smaa_dsv"_h].reset();
-         managed_resources.render_target_views["smaa_edge_detection"_h].reset();
-         managed_resources.render_target_views["smaa_blending_weight_calculation"_h].reset();
-      };
+      managed_resources.depth_stencil_views["smaa_dsv"_h].reset();
+      managed_resources.render_target_views["smaa_edge_detection"_h].reset();
+      managed_resources.render_target_views["smaa_blending_weight_calculation"_h].reset();
+   };
 
-      LumaCallbacks::on_init_swapchain["luma_smaa"_h] = on_init_swapchain;
-   }
+   LumaCallbacks::on_init_swapchain.try_emplace("luma_smaa"_h, on_init_swapchain);
 
    // Restore.
    device_context->OMSetBlendState(blend_original.get(), blend_factor_original, sample_mask_original);
@@ -1608,15 +1605,35 @@ struct alignas(16) CBLumaBloomData
    float sigma;
 };
 
-struct DrawLumaBloomData
+void DrawBloom(ID3D11Device* device, ID3D11DeviceContext* device_context, DeviceData& device_data, ID3D11ShaderResourceView* srv_scene, int nmips, const float* sigmas, ID3D11ShaderResourceView** srv_bloom)
 {
-   ComPtr<ID3D11Buffer> cb;
-   ComPtr<ID3D11BlendState> blend;
-};
+   auto& managed_resources = device_data.managed_resources;
 
-void DrawBloom(ID3D11Device* device, ID3D11DeviceContext* device_context, const DeviceData& device_data, DrawLumaBloomData& draw_luma_bloom_data, ID3D11ShaderResourceView* srv_scene, int nmips, const float* sigmas, ID3D11ShaderResourceView** srv_bloom)
-{
-    // Backup IA.
+   // TODO: Reorganize this better.
+   static std::vector<ID3D11RenderTargetView*> rtv_mips_x(nmips);
+   static std::vector<ID3D11ShaderResourceView*> srv_mips_x(nmips);
+   static std::vector<ID3D11RenderTargetView*> rtv_mips_y(nmips);
+   static std::vector<ID3D11ShaderResourceView*> srv_mips_y(nmips);
+
+#if DEVELOPMENT
+   static int last_nmips = nmips;
+   if (nmips != last_nmips)
+   {
+      ResetCOMArray(rtv_mips_x);
+      ResetCOMArray(srv_mips_x);
+      ResetCOMArray(rtv_mips_y);
+      ResetCOMArray(srv_mips_y);
+
+      rtv_mips_x.resize(nmips);
+      srv_mips_x.resize(nmips);
+      rtv_mips_y.resize(nmips);
+      srv_mips_y.resize(nmips);
+
+      last_nmips = nmips;
+   }
+#endif
+
+   // Backup IA.
    D3D11_PRIMITIVE_TOPOLOGY primitive_topology_original;
    device_context->IAGetPrimitiveTopology(&primitive_topology_original);
 
@@ -1655,9 +1672,6 @@ void DrawBloom(ID3D11Device* device, ID3D11DeviceContext* device_context, const 
    ComPtr<ID3D11DepthStencilView> dsv_original;
    device_context->OMGetRenderTargets(rtvs_original.size(), rtvs_original.data(), dsv_original.put());
 
-   // Create MIPs and views.
-   //
-
    // Get the scene resource and texture description from the SRV.
    ComPtr<ID3D11Resource> resource;
    srv_scene->GetResource(resource.put());
@@ -1669,82 +1683,73 @@ void DrawBloom(ID3D11Device* device, ID3D11DeviceContext* device_context, const 
    const auto scene_width = tex_desc.Width;
    const auto scene_height = tex_desc.Height;
 
-   // Create Y MIPs and views.
-   ////
-
-   tex_desc.Width /= 2;
-   tex_desc.Height /= 2;
-   tex_desc.MipLevels = nmips;
-   tex_desc.Format = DXGI_FORMAT_R16G16B16A16_FLOAT;
-   tex_desc.BindFlags = D3D11_BIND_SHADER_RESOURCE | D3D11_BIND_RENDER_TARGET;
-   ensure(device->CreateTexture2D(&tex_desc, nullptr, tex.put()), >= 0);
-
-   const UINT y_mip0_width = tex_desc.Width;
-   const UINT y_mip0_height = tex_desc.Height;
-
-   std::vector<ID3D11RenderTargetView*> rtv_mips_y(nmips);
-   std::vector<ID3D11ShaderResourceView*> srv_mips_y(nmips);
-
-   D3D11_RENDER_TARGET_VIEW_DESC rtv_desc = {};
-   rtv_desc.Format = tex_desc.Format;
-   rtv_desc.ViewDimension = D3D11_RTV_DIMENSION_TEXTURE2D;
-
-   D3D11_SHADER_RESOURCE_VIEW_DESC srv_desc = {};
-   srv_desc.Format = tex_desc.Format;
-   srv_desc.ViewDimension = D3D11_SRV_DIMENSION_TEXTURE2D;
-   srv_desc.Texture2D.MipLevels = 1;
-
-   for (int i = 0; i < nmips; ++i)
-   {
-       rtv_desc.Texture2D.MipSlice = i;
-       ensure(device->CreateRenderTargetView(tex.get(), &rtv_desc, &rtv_mips_y[i]), >= 0);
-       srv_desc.Texture2D.MostDetailedMip = i;
-       ensure(device->CreateShaderResourceView(tex.get(), &srv_desc, &srv_mips_y[i]), >= 0);
-   }
-
-   ////
-
-   // Create X MIPs and views.
-   ////
-
-   std::vector<ID3D11RenderTargetView*> rtv_mips_x(nmips);
-   std::vector<ID3D11ShaderResourceView*> srv_mips_x(nmips);
-
-   // Create X MIP0 and views.
-   tex_desc.Width = scene_width / 2;
-   tex_desc.Height = scene_height;
-   tex_desc.MipLevels = 1;
-   ensure(device->CreateTexture2D(&tex_desc, nullptr, tex.put()), >= 0);
-   ensure(device->CreateRenderTargetView(tex.get(), nullptr, &rtv_mips_x[0]), >= 0);
-   ensure(device->CreateShaderResourceView(tex.get(), nullptr, &srv_mips_x[0]), >= 0);
-
-   const UINT x_mip0_width = tex_desc.Width;
+   const UINT x_mip0_width = tex_desc.Width / 2;
    const UINT x_mip0_height = tex_desc.Height;
 
-   // Create rest of X MIPs and views.
-   for (UINT i = 1; i < nmips; ++i) {
-      tex_desc.Width = max(1u, x_mip0_width >> i);
-      tex_desc.Height = max(1u, x_mip0_height >> i);
+   const UINT y_mip0_width = tex_desc.Width / 2;
+   const UINT y_mip0_height = tex_desc.Height / 2;
+
+   // Create Y MIPs and views.
+   [[unlikely]] if (!rtv_mips_y[0])
+   {
+      tex_desc.Width = y_mip0_width;
+      tex_desc.Height = y_mip0_height;
+      tex_desc.MipLevels = nmips;
+      tex_desc.Format = DXGI_FORMAT_R16G16B16A16_FLOAT;
+      tex_desc.BindFlags = D3D11_BIND_SHADER_RESOURCE | D3D11_BIND_RENDER_TARGET;
       ensure(device->CreateTexture2D(&tex_desc, nullptr, tex.put()), >= 0);
-      ensure(device->CreateRenderTargetView(tex.get(), nullptr, &rtv_mips_x[i]), >= 0);
-      ensure(device->CreateShaderResourceView(tex.get(), nullptr, &srv_mips_x[i]), >= 0);
+
+      D3D11_RENDER_TARGET_VIEW_DESC rtv_desc = {};
+      rtv_desc.Format = tex_desc.Format;
+      rtv_desc.ViewDimension = D3D11_RTV_DIMENSION_TEXTURE2D;
+
+      D3D11_SHADER_RESOURCE_VIEW_DESC srv_desc = {};
+      srv_desc.Format = tex_desc.Format;
+      srv_desc.ViewDimension = D3D11_SRV_DIMENSION_TEXTURE2D;
+      srv_desc.Texture2D.MipLevels = 1;
+
+      for (int i = 0; i < nmips; ++i)
+      {
+          rtv_desc.Texture2D.MipSlice = i;
+          ensure(device->CreateRenderTargetView(tex.get(), &rtv_desc, &rtv_mips_y[i]), >= 0);
+          srv_desc.Texture2D.MostDetailedMip = i;
+          ensure(device->CreateShaderResourceView(tex.get(), &srv_desc, &srv_mips_y[i]), >= 0);
+      }
    }
 
-   ////
+   // Create X MIPs and views.
+   [[unlikely]] if (!rtv_mips_x[0])
+   {
+      // Create X MIP0 and views.
+      tex_desc.Width = x_mip0_width;
+      tex_desc.Height = x_mip0_height;
+      tex_desc.MipLevels = 1;
+      ensure(device->CreateTexture2D(&tex_desc, nullptr, tex.put()), >= 0);
+      ensure(device->CreateRenderTargetView(tex.get(), nullptr, &rtv_mips_x[0]), >= 0);
+      ensure(device->CreateShaderResourceView(tex.get(), nullptr, &srv_mips_x[0]), >= 0);
 
-   //
+      // Create rest of X MIPs and views.
+      for (UINT i = 1; i < nmips; ++i)
+      {
+         tex_desc.Width = max(1u, x_mip0_width >> i);
+         tex_desc.Height = max(1u, x_mip0_height >> i);
+         ensure(device->CreateTexture2D(&tex_desc, nullptr, tex.put()), >= 0);
+         ensure(device->CreateRenderTargetView(tex.get(), nullptr, &rtv_mips_x[i]), >= 0);
+         ensure(device->CreateShaderResourceView(tex.get(), nullptr, &srv_mips_x[i]), >= 0);
+      }
+   }
 
    // Create bloom CB.
    //
 
-   if (!draw_luma_bloom_data.cb)
+   [[unlikely]] if (!managed_resources.buffers["luma_bloom_cb"_h])
    {
       D3D11_BUFFER_DESC buffer_desc = {};
       buffer_desc.ByteWidth = sizeof(CBLumaBloomData);
       buffer_desc.Usage = D3D11_USAGE_DYNAMIC;
       buffer_desc.BindFlags = D3D11_BIND_CONSTANT_BUFFER;
       buffer_desc.CPUAccessFlags = D3D11_CPU_ACCESS_WRITE;
-      ensure(device->CreateBuffer(&buffer_desc, nullptr, draw_luma_bloom_data.cb.put()), >= 0);
+      ensure(device->CreateBuffer(&buffer_desc, nullptr, managed_resources.buffers["luma_bloom_cb"_h].put()), >= 0);
    }
 
    CBLumaBloomData cb_data;
@@ -1752,9 +1757,9 @@ void DrawBloom(ID3D11Device* device, ID3D11DeviceContext* device_context, const 
    auto update_constant_buffer = [&]()
    {
       D3D11_MAPPED_SUBRESOURCE mapped_subresource;
-      ensure(device_context->Map(draw_luma_bloom_data.cb.get(), 0, D3D11_MAP_WRITE_DISCARD, 0, &mapped_subresource), >= 0);
+      ensure(device_context->Map(managed_resources.buffers["luma_bloom_cb"_h].get(), 0, D3D11_MAP_WRITE_DISCARD, 0, &mapped_subresource), >= 0);
       std::memcpy(mapped_subresource.pData, &cb_data, sizeof(CBLumaBloomData));
-      device_context->Unmap(draw_luma_bloom_data.cb.get(), 0);
+      device_context->Unmap(managed_resources.buffers["luma_bloom_cb"_h].get(), 0);
    };
 
    //
@@ -1778,7 +1783,7 @@ void DrawBloom(ID3D11Device* device, ID3D11DeviceContext* device_context, const 
    device_context->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
    device_context->VSSetShader(device_data.native_vertex_shaders.at(Math::CompileTimeStringHash("Bloom VS")).get(), nullptr, 0);
    device_context->PSSetShader(device_data.native_pixel_shaders.at(Math::CompileTimeStringHash("Bloom Downsample PS")).get(), nullptr, 0);
-   device_context->PSSetConstantBuffers(11, 1, &draw_luma_bloom_data.cb);
+   device_context->PSSetConstantBuffers(11, 1, &managed_resources.buffers["luma_bloom_cb"_h]);
    const std::array ps_samplers = { device_data.sampler_state_linear.get() };
    device_context->PSSetSamplers(0, ps_samplers.size(), ps_samplers.data());
    device_context->PSSetShaderResources(0, 1, &srv_scene);
@@ -1800,7 +1805,7 @@ void DrawBloom(ID3D11Device* device, ID3D11DeviceContext* device_context, const 
 
    // Bindings.
    device_context->OMSetRenderTargets(1, &rtv_mips_y[0], nullptr);
-   device_context->PSSetShader(device_data.native_pixel_shaders.at(Math::CompileTimeStringHash("Bloom Prefilter PS")).get(), nullptr, 0);
+   device_context->PSSetShader(device_data.native_pixel_shaders.at("Bloom Prefilter PS"_h).get(), nullptr, 0);
    device_context->PSSetShaderResources(0, 1, &srv_mips_x[0]);
    device_context->RSSetViewports(1, &viewports_y[0]);
 
@@ -1812,10 +1817,11 @@ void DrawBloom(ID3D11Device* device, ID3D11DeviceContext* device_context, const 
    // Downsample passes
    //
 
-   device_context->PSSetShader(device_data.native_pixel_shaders.at(Math::CompileTimeStringHash("Bloom Downsample PS")).get(), nullptr, 0);
+   device_context->PSSetShader(device_data.native_pixel_shaders.at("Bloom Downsample PS"_h).get(), nullptr, 0);
 
    // Render downsample passes.
-   for (UINT i = 1; i < nmips; ++i) {
+   for (UINT i = 1; i < nmips; ++i)
+   {
       viewport_x.Width = max(1u, x_mip0_width >> i);
       viewport_x.Height = max(1u, x_mip0_height >> i);
 
@@ -1857,15 +1863,15 @@ void DrawBloom(ID3D11Device* device, ID3D11DeviceContext* device_context, const 
    // Upsample passes
    //
 
-   device_context->PSSetShader(device_data.native_pixel_shaders.at(Math::CompileTimeStringHash("Bloom Upsample PS")).get(), nullptr, 0);
+   device_context->PSSetShader(device_data.native_pixel_shaders.at("Bloom Upsample PS"_h).get(), nullptr, 0);
    
-   if (!draw_luma_bloom_data.blend)
+   [[unlikely]] if (!managed_resources.blends["luma_bloom_blend"_h])
    {
       CD3D11_BLEND_DESC blend_desc(D3D11_DEFAULT);
       blend_desc.RenderTarget[0].BlendEnable = TRUE;
       blend_desc.RenderTarget[0].SrcBlend = D3D11_BLEND_BLEND_FACTOR;
       blend_desc.RenderTarget[0].DestBlend = D3D11_BLEND_BLEND_FACTOR;
-      ensure(device->CreateBlendState(&blend_desc, draw_luma_bloom_data.blend.put()), >= 0);
+      ensure(device->CreateBlendState(&blend_desc, managed_resources.blends["luma_bloom_blend"_h].put()), >= 0);
    }
    
    for (int i = nmips - 1; i > 0; --i)
@@ -1882,7 +1888,7 @@ void DrawBloom(ID3D11Device* device, ID3D11DeviceContext* device_context, const 
        device_context->OMSetRenderTargets(1, &rtv_mips_y[i - 1], nullptr);
        device_context->PSSetShaderResources(0, 1, &srv_mips_y[i]);
        device_context->RSSetViewports(1, &viewports_y[i - 1]);
-       device_context->OMSetBlendState(draw_luma_bloom_data.blend.get(), blend_factor, UINT_MAX);
+       device_context->OMSetBlendState(managed_resources.blends["luma_bloom_blend"_h].get(), blend_factor, UINT_MAX);
 
        device_context->Draw(3, 0);
    }
@@ -1906,10 +1912,16 @@ void DrawBloom(ID3D11Device* device, ID3D11DeviceContext* device_context, const 
    device_context->RSSetState(rasterizer_original.get());
 
    // Release com arrays.
-   auto release_com_array = [](auto& array){ for (auto* p : array) if (p) p->Release(); };
-   release_com_array(rtvs_original);
-   release_com_array(rtv_mips_x);
-   release_com_array(srv_mips_x);
-   release_com_array(rtv_mips_y);
-   release_com_array(srv_mips_y);
+   ResetCOMArray(rtvs_original);
+
+   auto reset_mips = [&]()
+   {
+       ResetCOMArray(rtv_mips_x);
+       ResetCOMArray(srv_mips_x);
+       ResetCOMArray(rtv_mips_y);
+       ResetCOMArray(srv_mips_y);
+   };
+
+   LumaCallbacks::on_destroy_device.try_emplace("luma_bloom"_h, reset_mips);
+   LumaCallbacks::on_init_swapchain.try_emplace("luma_bloom"_h, reset_mips);
 }

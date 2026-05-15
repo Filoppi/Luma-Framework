@@ -152,7 +152,6 @@ struct GameDeviceDataBioshockSeries final : public GameDeviceData
    com_ptr<ID3D11ShaderResourceView> scene_texture_srv;
 
    ComPtr<ID3D11ShaderResourceView> srv_depth;
-   DrawLumaBloomData draw_luma_bloom_data;
    ComPtr<ID3D11Buffer> cb_bloom;
 };
 
@@ -838,7 +837,7 @@ public:
             native_device_context->PSSetConstantBuffers(0, 1, &game_device_data.cb_bloom);
 
             ComPtr<ID3D11ShaderResourceView> srv_bloom;
-            DrawBloom(native_device, native_device_context, device_data, game_device_data.draw_luma_bloom_data, srv_original.get(), g_bloom_nmips, g_bloom_sigmas.data(), srv_bloom.put());
+            DrawBloom(native_device, native_device_context, device_data, srv_original.get(), g_bloom_nmips, g_bloom_sigmas.data(), srv_bloom.put());
 
             native_device_context->PSSetConstantBuffers(0, 1, &cb_original);
 

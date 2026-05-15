@@ -31,3 +31,16 @@ struct ManagedResources
     std::unordered_map<uint32_t, ComPtr<ID3D11GeometryShader>> geometry_shaders;
     std::unordered_map<uint32_t, ComPtr<ID3D11HullShader>> hull_shaders;
 };
+
+// TODO: Move this somewhere else.
+inline void ResetCOMArray(auto& array)
+{
+    for (auto*& ptr : array)
+    {
+        if (ptr)
+        {
+            ptr->Release();
+            ptr = nullptr;
+        }
+    }
+}
