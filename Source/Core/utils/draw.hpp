@@ -1553,8 +1553,10 @@ void DrawSMAA(ID3D11Device* device, ID3D11DeviceContext* device_context, DeviceD
    release_com_array(ps_srvs_original);
 }
 
-void DrawKarisAverage(ID3D11Device* device, ID3D11DeviceContext* device_context, const DeviceData& device_data, ID3D11ShaderResourceView* srv_source, ID3D11ShaderResourceView** srv_out)
+void DrawKarisAverage(ID3D11Device* device, ID3D11DeviceContext* device_context, DeviceData& device_data, ID3D11ShaderResourceView* srv_source, ID3D11ShaderResourceView** srv_out)
 {
+   auto& managed_resources = device_data.managed_resources;
+
    // Backup CS.
    ComPtr<ID3D11ComputeShader> cs_original;
    device_context->CSGetShader(cs_original.put(), nullptr, nullptr);
@@ -1572,29 +1574,42 @@ void DrawKarisAverage(ID3D11Device* device, ID3D11DeviceContext* device_context,
    tex->GetDesc(&tex_desc);
 
    // Create RT and views.
-   tex_desc.MipLevels = 1;
-   tex_desc.ArraySize = 1;
-   tex_desc.Format = DXGI_FORMAT_R16G16B16A16_FLOAT;
-   tex_desc.SampleDesc.Count = 1;
-   tex_desc.BindFlags = D3D11_BIND_SHADER_RESOURCE | D3D11_BIND_UNORDERED_ACCESS;
-   ensure(device->CreateTexture2D(&tex_desc, nullptr, tex.put()), >= 0);
-   ComPtr<ID3D11UnorderedAccessView> uav;
-   ensure(device->CreateUnorderedAccessView(tex.get(), nullptr, uav.put()), >= 0);
+   if (!managed_resources.unordered_access_views["luma_karis_average"_h])
+   {
+      tex_desc.MipLevels = 1;
+      tex_desc.ArraySize = 1;
+      tex_desc.Format = DXGI_FORMAT_R16G16B16A16_FLOAT;
+      tex_desc.SampleDesc.Count = 1;
+      tex_desc.BindFlags = D3D11_BIND_SHADER_RESOURCE | D3D11_BIND_UNORDERED_ACCESS;
+      ensure(device->CreateTexture2D(&tex_desc, nullptr, tex.put()), >= 0);
+      ensure(device->CreateUnorderedAccessView(tex.get(), nullptr, managed_resources.unordered_access_views["luma_karis_average"_h].put()), >= 0);
+      ensure(device->CreateShaderResourceView(tex.get(), nullptr, managed_resources.shader_resource_views["luma_karis_average"_h].put()), >= 0);
+   }
 
    // Bindings.
-   device_context->CSSetUnorderedAccessViews(0, 1, &uav, nullptr);
-   device_context->CSSetShader(device_data.native_compute_shaders.at(Math::CompileTimeStringHash("Karis Average CS")).get(), nullptr, 0);
+   device_context->CSSetUnorderedAccessViews(0, 1, &managed_resources.unordered_access_views["luma_karis_average"_h], nullptr);
+   device_context->CSSetShader(device_data.native_compute_shaders.at("Karis Average CS"_h).get(), nullptr, 0);
    device_context->CSSetShaderResources(0, 1, &srv_source);
 
    device_context->Dispatch((tex_desc.Width + 8 - 1) / 8, (tex_desc.Height + 8 - 1) / 8, 1);
 
    // Karis averaged out.
-   ensure(device->CreateShaderResourceView(tex.get(), nullptr, srv_out), >= 0);
+   *srv_out = managed_resources.shader_resource_views["luma_karis_average"_h].get();
+   (*srv_out)->AddRef();
 
    // Restore.
    device_context->CSSetUnorderedAccessViews(0, 1, &uav_original, nullptr);
    device_context->CSSetShader(cs_original.get(), nullptr, 0);
    device_context->CSSetShaderResources(0, 1, &srv_original);
+
+   // Reset resolution dependent resources on init swapchain.
+   // Some are intentioanlly left out, we will recreate/reset them here.
+   auto on_init_swapchain = [&]()
+   {
+      managed_resources.unordered_access_views["luma_karis_average"_h].reset();
+   };
+
+   LumaCallbacks::on_init_swapchain.try_emplace("luma_karis_average"_h, on_init_swapchain);
 }
 
 struct alignas(16) CBLumaBloomData

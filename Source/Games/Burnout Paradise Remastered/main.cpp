@@ -66,7 +66,6 @@ struct GameDeviceDataBurnoutParadise final : public GameDeviceData
    ComPtr<ID3D11Buffer> motion_blur_ps_cb_copy;
    ComPtr<ID3D11Buffer> motion_blur_vs_cb_copy;
 
-   DrawLumaBloomData draw_luma_bloom_data;
    ComPtr<ID3D11ShaderResourceView> srv_luma_bloom;
    ComPtr<ID3D11ShaderResourceView> srv_xegtao;
 };
@@ -578,7 +577,7 @@ public:
             ComPtr<ID3D11ShaderResourceView> srv_karis_averaged_scene;
             DrawKarisAverage(native_device, native_device_context, device_data, srv_linear_scene.get(), srv_karis_averaged_scene.put());
 
-            DrawBloom(native_device, native_device_context, device_data, game_device_data.draw_luma_bloom_data, srv_karis_averaged_scene.get(), g_bloom_nmips, g_bloom_sigmas.data(), game_device_data.srv_luma_bloom.put());
+            DrawBloom(native_device, native_device_context, device_data, srv_karis_averaged_scene.get(), g_bloom_nmips, g_bloom_sigmas.data(), game_device_data.srv_luma_bloom.put());
 
             // Delinearize bloom pass
             //
