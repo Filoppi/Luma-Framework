@@ -58,18 +58,6 @@ namespace
 	    std::memcpy(mapped_subresource.pData, data, size);
 	    ctx->Unmap(cb, 0);
     }
-
-    void release_com_array(auto& array)
-    {
-	    for (auto*& ptr : array)
-        {
-		    if (ptr)
-            {
-			    ptr->Release();
-			    ptr = nullptr;
-		    }
-	    }
-    }
 }
 
 struct GameDeviceDataFallout4 final : GameDeviceData
@@ -154,7 +142,7 @@ public:
     {
         auto& game_device_data = GetGameDeviceData(device_data);
 
-        release_com_array(game_device_data.uav_xe_gtao_prefilter_depths16x16);
+        ResetCOMArray(game_device_data.uav_xe_gtao_prefilter_depths16x16);
         Game::OnDestroyDeviceData(device_data);
     }
 
@@ -482,7 +470,7 @@ public:
                 // Copy DLSS output to the original TAA's current frame and the backbuffer.
                 native_device_context->CopyResource(resource_output.get(), game_device_data.tex_dlss_output.get());
 
-                release_com_array(rtvs);
+                ResetCOMArray(rtvs);
 
                 return DrawOrDispatchOverrideType::Replaced;
             }

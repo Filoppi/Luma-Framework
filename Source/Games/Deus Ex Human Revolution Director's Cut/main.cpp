@@ -222,8 +222,6 @@ struct GameDeviceDataDeusExHumanRevolutionDC final : public GameDeviceData
 
    ComPtr<ID3D11Buffer> cb_ssao_scene_buffer;
 
-   DrawSMAAData draw_smaa_data;
-
    struct BlendDescCompare
    {
       bool operator()(const D3D11_BLEND_DESC& a, const D3D11_BLEND_DESC& b) const
@@ -647,7 +645,7 @@ public:
 
                   //
 
-                  DrawSMAA(native_device, native_device_context, device_data, game_device_data.draw_smaa_data, game_device_data.swapchain_rtv.get(), srv_linearize.get(), srv_scene.get(), game_device_data.depth_buffer_srv.get());
+                  DrawSMAA(native_device, native_device_context, device_data, game_device_data.swapchain_rtv.get(), srv_linearize.get(), srv_scene.get(), game_device_data.depth_buffer_srv.get());
 
                   return DrawOrDispatchOverrideType::Replaced;
                }
