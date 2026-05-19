@@ -19,6 +19,7 @@ namespace Shader
             reshade::log::message(reshade::log::level::debug, s.str().c_str());
          }
 #endif
+         if (subobject.data == nullptr) continue;
          switch (subobject.type)
          {
          case reshade::api::pipeline_subobject_type::vertex_shader:
@@ -44,7 +45,7 @@ namespace Shader
             memcpy(new_subobjects[i].data, subobject.data, sizeof(reshade::api::shader_desc));
             auto* old_desc = static_cast<reshade::api::shader_desc*>(subobject.data);
             auto* new_desc = static_cast<reshade::api::shader_desc*>(new_subobjects[i].data);
-            if (old_desc->code_size != 0u)
+            if (old_desc->code_size != 0u && old_desc->code != nullptr)
             {
                void* code_copy = malloc(old_desc->code_size);
                memcpy(code_copy, old_desc->code, old_desc->code_size);
@@ -67,7 +68,7 @@ namespace Shader
          }
 #if defined(DX12) && DX12
          case reshade::api::pipeline_subobject_type::input_layout:
-         new_subobjects[i].data = malloc(sizeof(reshade::api::input_element) * subobject.count);
+         new_subobjects[i].data = calloc(subobject.count, sizeof(reshade::api::input_element));
          memcpy(new_subobjects[i].data, subobject.data, sizeof(reshade::api::input_element) * subobject.count);
          for (uint32_t j = 0; j < subobject.count; j++)
          {
@@ -77,28 +78,28 @@ namespace Shader
          }
          break;
          case reshade::api::pipeline_subobject_type::stream_output_state:
-         new_subobjects[i].data = malloc(sizeof(reshade::api::stream_output_desc) * subobject.count);
+         new_subobjects[i].data = calloc(subobject.count, sizeof(reshade::api::stream_output_desc));
          memcpy(new_subobjects[i].data, subobject.data, sizeof(reshade::api::stream_output_desc) * subobject.count);
          break;
          case reshade::api::pipeline_subobject_type::blend_state:
-         new_subobjects[i].data = malloc(sizeof(reshade::api::blend_desc) * subobject.count);
+         new_subobjects[i].data = calloc(subobject.count, sizeof(reshade::api::blend_desc));
          memcpy(new_subobjects[i].data, subobject.data, sizeof(reshade::api::blend_desc) * subobject.count);
          break;
          case reshade::api::pipeline_subobject_type::rasterizer_state:
-         new_subobjects[i].data = malloc(sizeof(reshade::api::rasterizer_desc) * subobject.count);
+         new_subobjects[i].data = calloc(subobject.count, sizeof(reshade::api::rasterizer_desc));
          memcpy(new_subobjects[i].data, subobject.data, sizeof(reshade::api::rasterizer_desc) * subobject.count);
          break;
          case reshade::api::pipeline_subobject_type::depth_stencil_state:
-         new_subobjects[i].data = malloc(sizeof(reshade::api::depth_stencil_desc) * subobject.count);
+         new_subobjects[i].data = calloc(subobject.count, sizeof(reshade::api::depth_stencil_desc));
          memcpy(new_subobjects[i].data, subobject.data, sizeof(reshade::api::depth_stencil_desc) * subobject.count);
          break;
          case reshade::api::pipeline_subobject_type::primitive_topology:
-         new_subobjects[i].data = malloc(sizeof(reshade::api::primitive_topology) * subobject.count);
+         new_subobjects[i].data = calloc(subobject.count, sizeof(reshade::api::primitive_topology));
          memcpy(new_subobjects[i].data, subobject.data, sizeof(reshade::api::primitive_topology) * subobject.count);
          break;
          case reshade::api::pipeline_subobject_type::depth_stencil_format:
          case reshade::api::pipeline_subobject_type::render_target_formats:
-         new_subobjects[i].data = malloc(sizeof(reshade::api::format) * subobject.count);
+         new_subobjects[i].data = calloc(subobject.count, sizeof(reshade::api::format));
          memcpy(new_subobjects[i].data, subobject.data, sizeof(reshade::api::format) * subobject.count);
          break;
          case reshade::api::pipeline_subobject_type::sample_mask:
@@ -108,20 +109,20 @@ namespace Shader
          case reshade::api::pipeline_subobject_type::max_payload_size:
          case reshade::api::pipeline_subobject_type::max_attribute_size:
          case reshade::api::pipeline_subobject_type::max_recursion_depth:
-         new_subobjects[i].data = malloc(sizeof(uint32_t) * subobject.count);
+         new_subobjects[i].data = calloc(subobject.count, sizeof(uint32_t));
          memcpy(new_subobjects[i].data, subobject.data, sizeof(uint32_t) * subobject.count);
          break;
          case reshade::api::pipeline_subobject_type::dynamic_pipeline_states:
-         new_subobjects[i].data = malloc(sizeof(reshade::api::dynamic_state) * subobject.count);
+         new_subobjects[i].data = calloc(subobject.count, sizeof(reshade::api::dynamic_state));
          memcpy(new_subobjects[i].data, subobject.data, sizeof(reshade::api::dynamic_state) * subobject.count);
          break;
          case reshade::api::pipeline_subobject_type::libraries:
          case reshade::api::pipeline_subobject_type::shader_groups:
-         new_subobjects[i].data = malloc(sizeof(reshade::api::shader_group) * subobject.count);
+         new_subobjects[i].data = calloc(subobject.count, sizeof(reshade::api::shader_group));
          memcpy(new_subobjects[i].data, subobject.data, sizeof(reshade::api::shader_group) * subobject.count);
          break;
          case reshade::api::pipeline_subobject_type::flags:
-         new_subobjects[i].data = malloc(sizeof(reshade::api::pipeline_flags) * subobject.count);
+         new_subobjects[i].data = calloc(subobject.count, sizeof(reshade::api::pipeline_flags));
          memcpy(new_subobjects[i].data, subobject.data, sizeof(reshade::api::pipeline_flags) * subobject.count);
          break;
 #endif
