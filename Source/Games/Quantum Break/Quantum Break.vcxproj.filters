@@ -3,5 +3,7 @@
   <ItemGroup>
     <ClCompile Include="main.cpp" />
     <ClCompile Include="..\..\Core\unity_build.cpp" />
+    <ClInclude Include="shared.h" />
+    <ClInclude Include="Upscaling.hpp" />
   </ItemGroup>
 </Project>

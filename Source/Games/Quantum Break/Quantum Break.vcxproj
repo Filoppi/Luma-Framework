@@ -307,6 +307,8 @@
   <ItemGroup>
     <ClCompile Include="..\..\Core\unity_build.cpp" />
     <ClCompile Include="main.cpp" />
+    <ClInclude Include="shared.h" />
+    <ClInclude Include="Upscaling.hpp" />
   </ItemGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
   <ImportGroup Label="ExtensionTargets">
