@@ -208,6 +208,80 @@ namespace
 
    namespace RuntimeConfig
    {
+      void ApplyUltrawidePatches()
+      {
+         HMODULE module_handle = GetModuleHandle(nullptr);
+         if (!module_handle)
+         {
+            assert(false);
+            return;
+         }
+
+         auto* dos_header = reinterpret_cast<PIMAGE_DOS_HEADER>(module_handle);
+         if (dos_header->e_magic != IMAGE_DOS_SIGNATURE)
+         {
+            assert(false);
+            return;
+         }
+
+         auto* nt_headers = reinterpret_cast<PIMAGE_NT_HEADERS>(reinterpret_cast<std::byte*>(module_handle) + dos_header->e_lfanew);
+         if (nt_headers->Signature != IMAGE_NT_SIGNATURE)
+         {
+            assert(false);
+            return;
+         }
+
+         std::byte* base = reinterpret_cast<std::byte*>(module_handle);
+         const std::size_t section_size = nt_headers->OptionalHeader.SizeOfImage;
+
+         // Ultrawide patch: QB hardcodes its borderless/fullscreen resolution list and clamps aspect ratio.
+         // Replace the highest built-in ultrawide option with the current primary monitor resolution.
+         const int hardcoded_res_width = 3440;
+         const int hardcoded_res_height = 1440;
+         const char hardcoded_res_str[] = "3440 x 1440";
+
+         std::vector<std::byte*> hardcoded_res_width_addresses = System::ScanMemoryForPattern(base, section_size, reinterpret_cast<const std::byte*>(&hardcoded_res_width), sizeof(hardcoded_res_width));
+         assert(!hardcoded_res_width_addresses.empty());
+         for (std::byte* hardcoded_res_width_address : hardcoded_res_width_addresses)
+         {
+            // Scan the next three 32-bit values to find the matching height. There is usually one 32-bit gap.
+            std::vector<std::byte*> hardcoded_res_height_addresses = System::ScanMemoryForPattern(hardcoded_res_width_address, sizeof(hardcoded_res_height) * 3u, reinterpret_cast<const std::byte*>(&hardcoded_res_height), sizeof(hardcoded_res_height));
+            if (!hardcoded_res_height_addresses.empty())
+            {
+               const int screen_width = GetSystemMetrics(SM_CXSCREEN);
+               const int screen_height = GetSystemMetrics(SM_CYSCREEN);
+
+               System::PatchMemory(hardcoded_res_width_address, &screen_width, sizeof(screen_width), System::PatchMemoryType::Code);
+               System::PatchMemory(hardcoded_res_height_addresses[0], &screen_height, sizeof(screen_height), System::PatchMemoryType::Code);
+
+               // Patch the menu label as well. QB stores these resolution strings in 16-byte slots.
+               const std::vector<std::byte> hardcoded_res_str_pattern(reinterpret_cast<const std::byte*>(hardcoded_res_str), reinterpret_cast<const std::byte*>(hardcoded_res_str) + std::strlen(hardcoded_res_str) + 1u);
+               std::vector<std::byte*> hardcoded_res_str_addresses = System::ScanMemoryForPattern(base, section_size, hardcoded_res_str_pattern, true);
+               if (!hardcoded_res_str_addresses.empty())
+               {
+                  char screen_res_str[0x10] = {};
+                  const int written = std::snprintf(screen_res_str, sizeof(screen_res_str), "%i x %i", screen_width, screen_height);
+                  if (written > 0 && written < static_cast<int>(sizeof(screen_res_str)))
+                  {
+                     System::PatchMemory(hardcoded_res_str_addresses[0], screen_res_str, sizeof(screen_res_str), System::PatchMemoryType::Data);
+                  }
+               }
+
+               break;
+            }
+         }
+
+         // Patch the aspect ratio limit from 21:9-ish to 48:9.
+         const std::vector<uint8_t> pattern_aspect_ratio_limit = {0x26, 0xB4, 0x17, 0x40}; // 2.37037038803101 (2560x1080)
+         std::vector<std::byte*> aspect_ratio_limit_addresses = System::ScanMemoryForPattern(base, section_size, pattern_aspect_ratio_limit);
+         assert(aspect_ratio_limit_addresses.size() == 1); // Only one of these in the Steam build as of early 2026.
+         if (aspect_ratio_limit_addresses.size() == 1)
+         {
+            const float new_aspect_ratio_limit = 48.f / 9.f;
+            System::PatchMemory(aspect_ratio_limit_addresses[0], &new_aspect_ratio_limit, sizeof(new_aspect_ratio_limit), System::PatchMemoryType::Data);
+         }
+      }
+
       void ConfigureSwapchainAndFormatUpgrades()
       {
          swapchain_format_upgrade_type = TextureFormatUpgradesType::AllowedEnabled;
@@ -252,6 +326,8 @@ public:
    void OnInit(bool async) override
    {
       (void)async;
+
+      RuntimeConfig::ApplyUltrawidePatches();
 
       // QB custom shaders reserve these slots for Luma settings/data during the temporal resolve replacement.
       luma_settings_cbuffer_index = 13;

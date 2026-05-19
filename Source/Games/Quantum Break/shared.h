@@ -7,8 +7,11 @@
 #define ENABLE_POST_DRAW_DISPATCH_CALLBACK 1
 
 #include <algorithm>
+#include <cassert>
 #include <cmath>
+#include <cstddef>
 #include <cstdint>
+#include <cstdio>
 #include <cstring>
 #include <string>
 #include <vector>
