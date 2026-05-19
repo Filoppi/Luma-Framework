@@ -169,7 +169,7 @@ void main(
   r0.xyzw = g_fAmbientSkyIntensity * r0.xyzw;
 
 #if 1 // Luma: make sky brighter, it was overly dim
-  float normalizationPoint = 0.001; // Found empyrically
+  float normalizationPoint = 0.001; // Found empirically
   float fakeHDRIntensity = 0.15;
   r0.xyz = FakeHDR(r0.xyz * 1, normalizationPoint, fakeHDRIntensity) / 1;
 #endif
