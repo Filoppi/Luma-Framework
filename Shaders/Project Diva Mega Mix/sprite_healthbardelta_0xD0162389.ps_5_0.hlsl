@@ -47,8 +47,8 @@ void main(
   o0.xyzw = r0.xyzw;
 
 #if CUSTOM_HUDBRIGHTNESS > 0
-  if (TonemapInfo::GetDrawnFinal(GS.TonemapInfo) && 
-  TonemapInfo::GetDrawnHPBarDelta(GS.TonemapInfo) /* This is set just before. */) 
+  if (TonemapInfo::GetDrawnFinal(GS.TonemapInfo)  
+      && TonemapInfo::GetDrawnHPBarDelta(GS.TonemapInfo)) //OnDraw sets true as right before drawing this.
     o0.xyz *= GS.HUDBrightnessHealthBarDelta;
 #endif
   return;

@@ -32,6 +32,8 @@ Texture2D<float4> g_scene_depth_texture : register(t10);
 #define TONEMAP_COMPLEX
 #include "./common1.hlsl"
 
+
+
 void main(
   float4 v0 : SV_POSITION0,
   float4 v1 : TEXCOORD0,
@@ -47,12 +49,18 @@ void main(
   float3 colorUntonemapped, colorTonemapped;
   float colorUntonemappedMask;
 
-  //color + bloom (sample)
+  //color
   r0.xyzw = g_textures_0_.Sample(g_samplers_0__s, v1.xy).xyzw;
+  #if CUSTOM_TESTBGSPRITES == 1
+    r0 = 0;
+  #endif
   colorUntonemappedMask = r0.w;
 
   //depth based bloom composite
   r1.xyz = g_textures_1_.Sample(g_samplers_1__s, v1.zw).xyz * GS.BloomStrength;
+  #if CUSTOM_TESTBGSPRITES == 1
+    r1.xyz = 0;
+  #endif
 
   r1.w = g_scene_depth_texture.Sample(g_scene_depth_sampler_s, v1.xy).x;
   r1.w = cmp(0 < r1.w);
@@ -83,6 +91,9 @@ void main(
 
   //sprites (complex)
   r1.xyz = g_textures_6_.Sample(g_samplers_6__s, v1.xy).xyz; 
+  #if CUSTOM_TESTBGSPRITES == 2
+    r1.xyz = 0;
+  #endif
   r1.xyz = saturate(r1.xyz);
   
   r2.xyz = float3(0.959999979,0.959999979,0.959999979) * r1.xyz;
@@ -116,7 +127,8 @@ void main(
   // r0.xyz = r2.xwy * r1.xxx + r0.xyz;
   Tonemap_SaveSprites(r2.xwy, r1.x, r0.xyz, colorUntonemapped);
   
-  colorUntonemapped = gamma_to_linear(colorUntonemapped, GCT_POSITIVE, 2.2);
+  //colorUntonemapped = gamma_to_linear(colorUntonemapped, GCT_POSITIVE, 2.2);
+  colorUntonemapped = gamma_sRGB_to_linear(colorUntonemapped, GCT_POSITIVE);
 
   //tonemap
 //   r0.y = dot(r0.xyz, float3(0.300000012,0.589999974,0.109999999));
@@ -147,5 +159,6 @@ void main(
   o0.xyz = r1.xxx ? r1.yzw : r0.xyz;
   o0.w = r0.w;
 
+  Tonemap_Out(o0);
   return;
 }

@@ -29,6 +29,8 @@ Texture2D<float4> g_textures_7_ : register(t7); //4x4
 #define TONEMAP_COMPLEX
 #include "./common1.hlsl"
 
+
+
 //Color + Bloom + Tonemap + Fade
 //Default Future Tone
 void main(
@@ -42,6 +44,10 @@ void main(
   float4 v4 : TEXCOORD3,
   out float4 o0 : SV_Target0)
 {
+  #if CUSTOM_TESTBGSPRITES == 1
+    o0 = 0; return;
+  #endif
+
   float4 r0,r1,r2,r3,r4;
   uint4 bitmask, uiDest;
   float4 fDest;
@@ -55,7 +61,7 @@ void main(
   r1.xyz = r1.xyz + r0.xyz; //add bloom
   r0.xyz = r1.www ? r1.xyz : r0.xyz; //dont draw if not surpasses threshold
 
-  // HDR color grading?
+  //lensflare0
   r1.x = cmp(0 < g_texcoord_transforms[0].w);
   if (r1.x != 0) {
     r1.xyz = g_textures_4_.Sample(g_samplers_4__s, v2.xy).xyz;
@@ -63,6 +69,7 @@ void main(
     r0.xyz = r1.xyz * g_texcoord_transforms[0].www + r0.xyz;
   }
 
+  //lensflare1
   r1.x = cmp(0 < g_texcoord_transforms[2].w);
   if (r1.x != 0) {
     r1.xyz = g_textures_5_.Sample(g_samplers_5__s, v2.zw).xyz;
@@ -70,7 +77,7 @@ void main(
     r0.xyz = r1.xyz * g_texcoord_transforms[2].www + r0.xyz;
   }
 
-  r1.x = cmp(0 < v4.z);
+  //still dont know
   if (r1.x != 0) {
     r1.xyz = g_textures_7_.Sample(g_samplers_7__s, v4.xy).xyz;
     r0.xyz = r1.xyz + r0.xyz;
@@ -78,6 +85,7 @@ void main(
 
   float3 colorUntonemapped = r0.xyz;
   colorUntonemapped = gamma_to_linear(colorUntonemapped, GCT_POSITIVE, 2.2);
+  // colorUntonemapped = gamma_sRGB_to_linear(colorUntonemapped, GCT_POSITIVE);
   
   //tonemapper
   {
@@ -91,22 +99,29 @@ void main(
     // r0.xz = r0.yy * r0.xz + r1.yy;
     // r0.y = dot(r1.xyz, float3(-0.508475006,1,-0.186441004));
     // r0.xyz = r0.xyz * g_tone_scale.xyz + g_tone_offset.xyz; //this barely changes from 0, idk cases.
-    // r0.xyz = /* saturate */(r0.xyz);
+    // r0.xyz = saturate(r0.xyz); //perchannel blowout
 
     Tonemap_ResolveComplexWithExposure(r0.xyz, colorUntonemapped, v3);
   }
 
-  //tonemapped
-  r0.xyz = Tonemap_Do(colorUntonemapped, r0.xyz, v1.xy, g_textures_0_);
+  // tonemapped
+  r0.xyz = Tonemap_Do(colorUntonemapped, r0.xyz, v1.xy, g_textures_0_/* , g_tone_offset */);
 
-  //fade
+  //fade //TODO: add [branch]?
   {
+    //type: lerp
     r1.x = cmp(0 < g_fade_color.w);
     r1.yzw = g_fade_color.xyz + -r0.xyz;
     r1.yzw = g_fade_color.www * r1.yzw + r0.xyz;
+
+    //type: multiply tint
     r2.xy = cmp(g_tone_scale.ww == float2(0,2));
     r3.xyz = g_fade_color.xyz + r0.xyz;
+
+    //type: additive tint
     r4.xyz = g_fade_color.xyz * r0.xyz;
+
+    //select
     r2.yzw = r2.yyy ? r3.xyz : r4.xyz;
     r1.yzw = r2.xxx ? r1.yzw : r2.yzw;
     r0.xyz = r1.xxx ? r1.yzw : r0.xyz;
@@ -114,6 +129,7 @@ void main(
 
   //out
   o0 = r0;
+  Tonemap_Out(o0);
   return;
 }
 

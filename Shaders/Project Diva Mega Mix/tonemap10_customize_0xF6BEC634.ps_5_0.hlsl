@@ -25,7 +25,11 @@ Texture2D<float4> g_textures_7_ : register(t7);
 
 // 3Dmigoto declarations
 #define cmp -
+#define TONEMAP_TOON
+#define TONEMAP_CUSTOMIZE
 #include "./common1.hlsl"
+
+
 
 void main(
   float4 v0 : SV_POSITION0,
@@ -39,13 +43,22 @@ void main(
   uint4 bitmask, uiDest;
   float4 fDest;
 
+  //color
   r0.xyzw = g_textures_0_.Sample(g_samplers_0__s, v1.xy).xyzw;
+  #if CUSTOM_TESTBGSPRITES == 1
+    r0 = 0;
+  #endif
 
+  //bloom
   r1.xyz = g_textures_1_.Sample(g_samplers_1__s, v1.zw).xyz * GS.BloomStrength;
+  #if CUSTOM_TESTBGSPRITES == 1
+    r1.xyz = 0;
+  #endif
   r1.w = cmp(0 < v3.z);
   r1.xyz = r1.xyz + r0.xyz;
   r0.xyz = r1.www ? r1.xyz : r0.xyz;
 
+  //something
   r1.x = cmp(0 < g_texcoord_transforms[0].w);
   if (r1.x != 0) {
     r1.xyz = g_textures_4_.Sample(g_samplers_4__s, v2.xy).xyz;
@@ -64,7 +77,12 @@ void main(
     r0.xyz = r1.xyz + r0.xyz;
   }
 
+  //sprites
   r1.xyz = g_textures_6_.Sample(g_samplers_6__s, v1.xy).xyz; //sprites
+  #if CUSTOM_TESTBGSPRITES == 2
+    r1.xyz = 0;
+  #endif
+  r1.xyz = saturate(r1.xyz);
   r1.xyz = float3(0.959999979,0.959999979,0.959999979) * r1.xyz;
   r1.w = 0.479999989 * v3.x;
   r0.xyz = r1.www * r0.xyz;
@@ -73,16 +91,19 @@ void main(
   r0.xyz = Tonemap_SaveSprites_UpgradeSpritesOnly(r1.xyz) * r1.www + r0.xyz;
   r0.xyz = /* saturate */(r0.xyz * g_tone_scale.xyz + g_tone_offset.xyz);
 
+  //Tonemap
   float3 colorUntonemapped = r0.xyz;
-  colorUntonemapped = gamma_to_linear(colorUntonemapped, GCT_POSITIVE, 2.2);
+  //colorUntonemapped = gamma_to_linear(colorUntonemapped, GCT_POSITIVE, 2.2);
+  colorUntonemapped = gamma_sRGB_to_linear(colorUntonemapped, GCT_POSITIVE);
 
-  #if CUSTOM_UPSCALE_TOON == 2
-    const bool isIVT = false; //ignore customization screen
+  #if CUSTOM_UPSCALE_TOON == 3
+    const bool isIVT = false;
   #else 
     const bool isIVT = true;
   #endif
   r0.xyz = Tonemap_Do(colorUntonemapped, r0.xyz, v1.xy, g_textures_0_, isIVT);
 
+  //fade + out
   r1.x = cmp(0 < g_fade_color.w);
   r1.yzw = g_fade_color.xyz + -r0.xyz;
   r1.yzw = g_fade_color.www * r1.yzw + r0.xyz;
@@ -93,5 +114,7 @@ void main(
   r1.yzw = r2.xxx ? r1.yzw : r2.yzw;
   o0.xyz = r1.xxx ? r1.yzw : r0.xyz;
   o0.w = r0.w;
+  
+  Tonemap_Out(o0);
   return;
 }

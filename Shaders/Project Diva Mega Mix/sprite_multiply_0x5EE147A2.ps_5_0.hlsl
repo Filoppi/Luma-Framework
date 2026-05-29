@@ -20,25 +20,20 @@ float Check() { //TODO upgrade to out float multiplier if needed
   if (
     // hit response 1
     (
-    (w == 1024.f && h == 1024.f) && 
-      // CheckBlack(g_texture.SampleLevel(g_sampler_s, float2(0, 0), 0).xyz) &&
-      CheckBlack(g_texture.SampleLevel(g_sampler_s, float2(190 / 1024.f, 290 / 1024.f), 0).xyz) &&
-     !CheckBlack(g_texture.SampleLevel(g_sampler_s, float2(195 / 1024.f, 318 / 1024.f), 0).xyz) &&
-      CheckWhite(g_texture.SampleLevel(g_sampler_s, float2(215 / 1024.f, 788 / 1024.f), 0).xyz) &&
-      CheckBlack(g_texture.SampleLevel(g_sampler_s, float2(206 / 1024.f, 922 / 1024.f), 0).xyz)
+      (w == 1024.f && h == 1024.f)
+      && CheckCustom(g_texture.Load(int3(191, 311, 0)), float4(0.19216f, 0.21961f, 0.35294f, 1.00000f), 0.00001f)
+      && CheckCustom(g_texture.Load(int3(191, 312, 0)), float4(0.51765f, 0.82745f, 1.00000f, 1.00000f), 0.00001f)
     )
-    ||
+  ) return GS.HUDBrightnessNoteResponse;
+
+  if (
     // hit response 2
     (
-    (w == 2048.f && h == 1024.f) && 
-      // CheckBlack(g_texture.SampleLevel(g_sampler_s, float2(0, 0), 0).xyz) &&
-      CheckBlack(g_texture.SampleLevel(g_sampler_s, float2(112 / 2048.f, 168 / 1024.f), 0).xyz) &&
-     !CheckBlack(g_texture.SampleLevel(g_sampler_s, float2(107 / 2048.f, 193 / 1024.f), 0).xyz) &&
-      CheckBlack(g_texture.SampleLevel(g_sampler_s, float2(103 / 2048.f, 217 / 1024.f), 0).xyz) &&
-      CheckBlack(g_texture.SampleLevel(g_sampler_s, float2(129 / 2048.f, 366 / 1024.f), 0).xyz) &&
-     !CheckBlack(g_texture.SampleLevel(g_sampler_s, float2(105 / 2048.f, 372 / 1024.f), 0).xyz)
+      (w == 2048.f && h == 1024.f)
+      && CheckCustom(g_texture.Load(int3(1865, 738, 0)), float4(0.32157f, 1.0000f, 1.0000f, 0.92157f), 0.00001f)
+      && CheckCustom(g_texture.Load(int3(1865, 739, 0)), float4(0.61176f, 0.8902f, 1.0000f, 0.99608f), 0.00001f)
     )
-  ) return HUDBrightness(GS.HUDBrightnessNoteResponse);
+  ) return GS.HUDBrightnessNoteResponse;
 
   return 1;
 }

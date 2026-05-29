@@ -25,7 +25,10 @@ Texture2D<float4> g_textures_7_ : register(t7);
 
 // 3Dmigoto declarations
 #define cmp -
+#define TONEMAP_TOON
 #include "./common1.hlsl"
+
+
 
 void main(
   float4 v0 : SV_POSITION0,
@@ -44,9 +47,15 @@ void main(
 
   //color + bloom
   r0.xyzw = g_textures_0_.Sample(g_samplers_0__s, v1.xy).xyzw;
+  #if CUSTOM_TESTBGSPRITES == 1
+    r0 = 0;
+  #endif
   colorUntonemappedMask = r0.w;
 
-  r1.xyz = g_textures_1_.Sample(g_samplers_1__s, v1.zw).xyz;
+  r1.xyz = g_textures_1_.Sample(g_samplers_1__s, v1.zw).xyz * GS.BloomStrength;
+  #if CUSTOM_TESTBGSPRITES == 1
+    r1.xyz = 0;
+  #endif
   r1.w = cmp(0 < v3.z);
   r1.xyz = r1.xyz + r0.xyz;
   r0.xyz = r1.www ? r1.xyz : r0.xyz;
@@ -74,6 +83,9 @@ void main(
 
   //sprites
   r1.xyz = g_textures_6_.Sample(g_samplers_6__s, v1.xy).xyz;
+  #if CUSTOM_TESTBGSPRITES == 2
+    r1.xyz = 0;
+  #endif
   r1.xyz = saturate(r1.xyz);
   
   r1.xyz = float3(0.959999979,0.959999979,0.959999979) * r1.xyz;
@@ -85,7 +97,8 @@ void main(
   r0.xyz = r1.xyz * r1.www + r0.xyz;
 
   colorUntonemapped = r0.xyz; //TODO: verify... somehow
-  colorUntonemapped = gamma_to_linear(colorUntonemapped, GCT_POSITIVE, 2.2);
+  //colorUntonemapped = gamma_to_linear(colorUntonemapped, GCT_POSITIVE, 2.2);
+  colorUntonemapped = gamma_sRGB_to_linear(colorUntonemapped, GCT_POSITIVE);
 
   //tonemap
   r0.xyz = /* saturate */(r0.xyz * g_tone_scale.xyz + g_tone_offset.xyz);
@@ -104,5 +117,6 @@ void main(
   o0.xyz = r1.xxx ? r1.yzw : r0.xyz;
   o0.w = r0.w;
 
+  Tonemap_Out(o0);
   return;
 }

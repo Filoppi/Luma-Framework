@@ -1,4 +1,4 @@
-// #include "../Includes/Color.hlsl"
+#include "../Includes/Color.hlsl"
 
 //from RenoDX clshortfuse
 float RenoDX_Contrast(float x, float contrast, float mid_gray = 0.18f) {
@@ -41,54 +41,19 @@ float3 RenoDX_ColorGrade(
 ) {
   float l = GetLuminance(x, colorspace);
   float lOrig = l;
+  if (l <= 0) return 0; //0 is redundant and div 0
 
-  // Contrast
+  //Luminance Grading
   l = RenoDX_Contrast(l, contrast, contrast_mid);
-
-  // Highlights
   l = RenoDX_Highlights(l, highlights, highlights_mid);
-
-  // Shadows
   l = RenoDX_Shadows(l, shadows, shadows_mid);
+  x *= l / lOrig;
 
-  x *= safeDivision(l, lOrig, 0);
-
-  // Saturation
+  //Saturation
   if (saturation != 1.f) x = Saturation(x, saturation, colorspace);
 
-  // clamp cs
+  //Clamp
   if (clampCs) x = max(0, x);
 
   return x;
-}
-
-/*
-  x = RenoDX_ColorGrade(
-    x, 
-    GS.CGContrast, GS.CGContrastMidGray, 
-    GS.CGHighlightsStrength, GS.CGHighlightsMidGray, 
-    GS.CGShadowsStrength, GS.CGShadowsMidGray, 
-    GS.CGSaturation, 
-    CS_BT2020
-  );
-*/
-
-float3 CorrectPerChannelTonemapHiglightsDesaturationFixed(float3 color, float peakBrightness, float desaturationExponent = 2.0, uint colorSpace = CS_DEFAULT)
-{    
-  float sourceChrominance = GetChrominance(color);
-
-  float maxBrightness = max3(color); 
-  float midBrightness = GetMidValue(color);
-	float minBrightness = min3(color);
-	float brightnessRatio = saturate(maxBrightness / peakBrightness);
-
-  brightnessRatio = lerp(brightnessRatio, sqrt(brightnessRatio), safeSqrt(InverseLerp(minBrightness, maxBrightness, midBrightness)));
-  brightnessRatio *= brightnessRatio; // skewed towards highlights only
-
-  float chrominancePow = lerp(1.0, 1.0 / desaturationExponent, brightnessRatio);
-  
-  float targetChrominance = sourceChrominance > 1.0 ? pow(sourceChrominance, chrominancePow) : (1.0 - pow(1.0 - sourceChrominance, chrominancePow));
-  float chrominanceRatio = safeDivision(targetChrominance, sourceChrominance, 1);
-
-  return RestoreLuminance(SetChrominance(color, chrominanceRatio), color, true, colorSpace);
 }

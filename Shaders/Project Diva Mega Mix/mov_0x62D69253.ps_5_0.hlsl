@@ -35,7 +35,7 @@ void main(
 
   r1.xyz = saturate(r1.xyz);
 
-#if CUSTOM_UPSCALE_MOV > 0
+#if CUSTOM_UPSCALE_MOV > 0 && CYSTOM_TESTSDR == 0 && CUSTOM_SDR == 0
   if (TonemapInfo::GetDrawnFinal(GS.TonemapInfo)) {
     r1.xyz = gamma_to_linear(r1.xyz, GCT_NONE, 2.2);
     r1.xyz = PumboAutoHDR(r1.xyz, LumaSettings.PeakWhiteNits, LumaSettings.GamePaperWhiteNits, GS.UpscaleMovPumboPow);
@@ -46,6 +46,9 @@ void main(
   r0.xyz = v1.xyz * r1.xyz;
 
   r0.w = 1;
+
   o0 = r0;
+  o0.w = saturate(o0.w);
+  o0.xyz = max(o0.xyz, 0);
   return;
 }

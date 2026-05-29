@@ -21,7 +21,10 @@ Texture2D<float4> g_scene_depth_texture : register(t10);
 
 // 3Dmigoto declarations
 #define cmp -
+#define TONEMAP_TOON
 #include "./common1.hlsl"
+
+
 
 //Color + Bloom + Sprites (Depth based select) + Tonemap (Simple) + Fade
 //Catch the Wave: to not bloom bg
@@ -43,10 +46,16 @@ void main(
   r0.w = g_scene_depth_texture.Sample(g_scene_depth_sampler_s, v1.xy).x; //depth
   r0.w = cmp(0 >= r0.w);
 
-  r0.xyz = g_textures_6_.Sample(g_samplers_6__s, v1.xy).xyz; //sprites (eww, it's shifted because )
+  r0.xyz = g_textures_6_.Sample(g_samplers_6__s, v1.xy).xyz; //sprites (eww, it's shifted)
+  #if CUSTOM_TESTBGSPRITES == 2
+    r0.xyz = 0;
+  #endif
   r0.xyz = saturate(r0.xyz); //fix
 
   r1.xyzw = g_textures_0_.Sample(g_samplers_0__s, v1.xy).xyzw; //color
+  #if CUSTOM_TESTBGSPRITES == 1
+    r1 = 0;
+  #endif
 
   r2.x = min(1, r1.w);
   r2.y = 1 + -r2.x;
@@ -62,6 +71,9 @@ void main(
   r0.xyz = r0.www ? r0.xyz : r1.xyz;
 
   r1.xyz = g_textures_1_.Sample(g_samplers_1__s, v1.zw).xyz * GS.BloomStrength; //bloom
+  #if CUSTOM_TESTBGSPRITES == 1
+    r1.xyz = 0;
+  #endif
 
   r1.xyz = r1.xyz * r2.zzz + r0.xyz;
 
@@ -71,7 +83,8 @@ void main(
   r0.xyz = r0.www ? r1.xyz : r0.xyz; //bloom or not
   
   colorUntonemapped = r0.xyz; //TODO: verify... somehow
-  colorUntonemapped = gamma_to_linear(colorUntonemapped, GCT_POSITIVE, 2.2);
+  //colorUntonemapped = gamma_to_linear(colorUntonemapped, GCT_POSITIVE, 2.2);
+  colorUntonemapped = gamma_sRGB_to_linear(colorUntonemapped, GCT_POSITIVE);
 
   //tonemap
   r0.xyz = /* saturate */(r0.xyz * g_tone_scale.xyz + g_tone_offset.xyz); //clamp with color grade
@@ -88,5 +101,7 @@ void main(
   r1.xyz = r4.xxx ? r1.xyz : r2.xyz;
   r0.w = cmp(0 < g_fade_color.w);
   o0.xyz = r0.www ? r1.xyz : r0.xyz;
+  
+  Tonemap_Out(o0);
   return;
 }

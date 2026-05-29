@@ -1,0 +1,504 @@
+// ---- Created with 3Dmigoto v1.3.16 on Tue Sep 02 15:46:09 2025
+
+// Auto-exposure aggregate shader (ae0).
+// Runs as a full-screen pass over a 32x1 history render target.
+// Every pixel in the target receives the same computed exposure value (the
+// position of the pixel is not used). The 32-slot history is a ring buffer —
+// a separate pass selects which slot to write each frame using viewport/scissor.
+//
+// Inputs:
+//   g_textures[0] (t0) — downsampled scene-luminance buffer; .w = (log-)luminance
+//   g_textures[1] (t1) — spot-meter luminance buffer; .w = (log-)luminance
+//
+// The shader produces a single float exposure value, broadcast to all 4 output
+// channels, representing the weighted combination of:
+//   - A wide (global) meter:  center-weighted 4x4 sample grid from t0
+//   - Four spot meter zones:  each a weighted average of 8 samples from t1,
+//                             with CPU-supplied UV positions and per-sample weights
+
+cbuffer ExposureMeasure : register(b1)
+{
+  // Blend weights for the four spot meter zones (x=zoneA, y=zoneB, z=zoneC, w=zoneD).
+  // The global wide meter has an implicit fixed weight of 1.0.
+  float4 g_spot_weight : packoffset(c0);
+
+  // 32 entries; each float4 packs:
+  //   .xy = UV coordinate in the spot-meter texture (t1)
+  //   .w  = sample weight for the weighted average
+  // Entries 0-7   → spot zone A
+  // Entries 8-15  → spot zone B
+  // Entries 16-23 → spot zone C
+  // Entries 24-31 → spot zone D
+  float4 g_spot_coefficients[32] : packoffset(c1);
+}
+
+SamplerState g_sampler_s : register(s0);
+Texture2D<float4> g_textures_0_ : register(t0); // Wide-area luminance buffer
+Texture2D<float4> g_textures_1_ : register(t1); // Spot-meter luminance buffer
+
+#define cmp -
+
+void main(
+  float4 v0 : SV_POSITION0,
+  out float4 o0 : SV_Target0)
+{
+  float4 r0,r1;
+  uint4 bitmask, uiDest;
+  float4 fDest;
+
+  // -----------------------------------------------------------------------
+  // STAGE 1: Wide (global) area meter — center-weighted 4x4 grid from t0
+  //
+  // Samples t0 at the centers of a 4x4 uniform grid (UV spacing = 0.25).
+  // The .w channel carries pre-computed (log-)luminance.
+  // Weights form a centre-biased kernel (heavier weight toward the image centre):
+  //
+  //   UV-X →   0.125   0.375   0.625   0.875
+  //   -------+-------+-------+-------+-------
+  //   0.125  |  0.8  |  1.0  |  1.0  |  0.8
+  //   0.375  |  1.0  |  1.2  |  1.2  |  1.0
+  //   0.625  |  1.0  |  1.2  |  1.2  |  1.0
+  //   0.875  |  0.8  |  1.0  |  1.0  |  0.8
+  //
+  // Total weight sum = 4*0.8 + 8*1.0 + 4*1.2 = 16.0.
+  // The running sum is normalised at blend-time by multiplying with 0.0625 (=1/16).
+  // r0.x accumulates the un-normalised weighted sum.
+  // -----------------------------------------------------------------------
+
+  // Row Y=0.125 (top row): corner samples get weight 0.8, middle samples weight 1.0
+  r0.x = g_textures_0_.SampleLevel(g_sampler_s, float2(0.125,0.125), 0).w;
+  r0.y = g_textures_0_.SampleLevel(g_sampler_s, float2(0.375,0.125), 0).w;
+  r0.x = r0.x * 0.800000012 + r0.y;           // sum = s(0.125,0.125)*0.8 + s(0.375,0.125)*1.0
+  r0.y = g_textures_0_.SampleLevel(g_sampler_s, float2(0.625,0.125), 0).w;
+  r0.x = r0.x + r0.y;                          // + s(0.625,0.125)*1.0
+  r0.y = g_textures_0_.SampleLevel(g_sampler_s, float2(0.875,0.125), 0).w;
+  r0.x = r0.y * 0.800000012 + r0.x;           // + s(0.875,0.125)*0.8
+
+  // Row Y=0.375: edge samples weight 1.0, inner samples weight 1.2
+  r0.y = g_textures_0_.SampleLevel(g_sampler_s, float2(0.125,0.375), 0).w;
+  r0.x = r0.x + r0.y;                          // + s(0.125,0.375)*1.0
+  r0.y = g_textures_0_.SampleLevel(g_sampler_s, float2(0.375,0.375), 0).w;
+  r0.x = r0.y * 1.20000005 + r0.x;            // + s(0.375,0.375)*1.2  (inner)
+  r0.y = g_textures_0_.SampleLevel(g_sampler_s, float2(0.625,0.375), 0).w;
+  r0.x = r0.y * 1.20000005 + r0.x;            // + s(0.625,0.375)*1.2  (inner)
+  r0.y = g_textures_0_.SampleLevel(g_sampler_s, float2(0.875,0.375), 0).w;
+  r0.x = r0.x + r0.y;                          // + s(0.875,0.375)*1.0
+
+  // Row Y=0.625: same pattern as Y=0.375
+  r0.y = g_textures_0_.SampleLevel(g_sampler_s, float2(0.125,0.625), 0).w;
+  r0.x = r0.x + r0.y;                          // + s(0.125,0.625)*1.0
+  r0.y = g_textures_0_.SampleLevel(g_sampler_s, float2(0.375,0.625), 0).w;
+  r0.x = r0.y * 1.20000005 + r0.x;            // + s(0.375,0.625)*1.2  (inner)
+  r0.y = g_textures_0_.SampleLevel(g_sampler_s, float2(0.625,0.625), 0).w;
+  r0.x = r0.y * 1.20000005 + r0.x;            // + s(0.625,0.625)*1.2  (inner)
+  r0.y = g_textures_0_.SampleLevel(g_sampler_s, float2(0.875,0.625), 0).w;
+  r0.x = r0.x + r0.y;                          // + s(0.875,0.625)*1.0
+
+  // Row Y=0.875 (bottom row): same pattern as top row
+  r0.y = g_textures_0_.SampleLevel(g_sampler_s, float2(0.125,0.875), 0).w;
+  r0.x = r0.y * 0.800000012 + r0.x;           // + s(0.125,0.875)*0.8
+  r0.y = g_textures_0_.SampleLevel(g_sampler_s, float2(0.375,0.875), 0).w;
+  r0.x = r0.x + r0.y;                          // + s(0.375,0.875)*1.0
+  r0.y = g_textures_0_.SampleLevel(g_sampler_s, float2(0.625,0.875), 0).w;
+  r0.x = r0.x + r0.y;                          // + s(0.625,0.875)*1.0
+  r0.y = g_textures_0_.SampleLevel(g_sampler_s, float2(0.875,0.875), 0).w;
+  r0.x = r0.y * 0.800000012 + r0.x;           // + s(0.875,0.875)*0.8
+  // r0.x = un-normalised wide-area weighted sum (sum of 16 weights = 16.0)
+  // Normalised at blend time: r0.x * 0.0625 = r0.x / 16
+
+  // -----------------------------------------------------------------------
+  // STAGE 2: Spot meter — four zones, each 8 CPU-defined weighted samples from t1
+  //
+  // Each zone computes a normalised weighted average:
+  //   zone = sum_i( sample[i].w * g_spot_coefficients[i].w )
+  //          / ( (sum_i( g_spot_coefficients[i].w ) + 1e-9) * 1.1 )
+  //
+  // The epsilon (1e-9) prevents divide-by-zero when all weights are zero.
+  // The 1.1 multiplier deflates the result by ~9% — a conservative headroom
+  // bias that slightly darkens the spot reading relative to the true average.
+  //
+  // The initial weight accumulator is seeded with the sum of the first two
+  // sample weights; subsequent samples add one weight at a time.
+  // -----------------------------------------------------------------------
+
+  // --- Spot zone A: g_spot_coefficients[0..7] ---
+  // r0.y = running weighted luminance sum
+  // r0.z = running total weight
+  r0.y = g_textures_1_.SampleLevel(g_sampler_s, g_spot_coefficients[0].xy, 0).w;
+  r0.z = g_spot_coefficients[1].w + g_spot_coefficients[0].w; // total_w = w[0]+w[1]
+  r0.w = g_textures_1_.SampleLevel(g_sampler_s, g_spot_coefficients[1].xy, 0).w;
+  r0.w = g_spot_coefficients[1].w * r0.w;
+  r0.y = r0.y * g_spot_coefficients[0].w + r0.w; // weighted_sum = s[0]*w[0] + s[1]*w[1]
+  r0.z = g_spot_coefficients[2].w + r0.z;
+  r0.w = g_textures_1_.SampleLevel(g_sampler_s, g_spot_coefficients[2].xy, 0).w;
+  r0.y = r0.w * g_spot_coefficients[2].w + r0.y;
+  r0.z = g_spot_coefficients[3].w + r0.z;
+  r0.w = g_textures_1_.SampleLevel(g_sampler_s, g_spot_coefficients[3].xy, 0).w;
+  r0.y = r0.w * g_spot_coefficients[3].w + r0.y;
+  r0.z = g_spot_coefficients[4].w + r0.z;
+  r0.w = g_textures_1_.SampleLevel(g_sampler_s, g_spot_coefficients[4].xy, 0).w;
+  r0.y = r0.w * g_spot_coefficients[4].w + r0.y;
+  r0.z = g_spot_coefficients[5].w + r0.z;
+  r0.w = g_textures_1_.SampleLevel(g_sampler_s, g_spot_coefficients[5].xy, 0).w;
+  r0.y = r0.w * g_spot_coefficients[5].w + r0.y;
+  r0.z = g_spot_coefficients[6].w + r0.z;
+  r0.w = g_textures_1_.SampleLevel(g_sampler_s, g_spot_coefficients[6].xy, 0).w;
+  r0.y = r0.w * g_spot_coefficients[6].w + r0.y;
+  r0.z = g_spot_coefficients[7].w + r0.z;
+  r0.w = g_textures_1_.SampleLevel(g_sampler_s, g_spot_coefficients[7].xy, 0).w;
+  r0.y = r0.w * g_spot_coefficients[7].w + r0.y;
+  // Normalise zone A: divide by (total_w + epsilon) * 1.1
+  r0.z = 9.99999972e-010 + r0.z; // epsilon guard against zero-weight divide
+  r0.z = 1.10000002 * r0.z;      // 10% headroom bias on denominator
+  r0.z = 1 / r0.z;
+  r0.y = r0.y * r0.z;            // r0.y = zone A normalised luminance
+
+  // --- Spot zone B: g_spot_coefficients[8..15] ---
+  // r0.z = running weighted luminance sum
+  // r0.w = running total weight
+  r0.z = g_textures_1_.SampleLevel(g_sampler_s, g_spot_coefficients[8].xy, 0).w;
+  r0.w = g_spot_coefficients[9].w + g_spot_coefficients[8].w;
+  r1.x = g_textures_1_.SampleLevel(g_sampler_s, g_spot_coefficients[9].xy, 0).w;
+  r1.x = g_spot_coefficients[9].w * r1.x;
+  r0.z = r0.z * g_spot_coefficients[8].w + r1.x;
+  r0.w = g_spot_coefficients[10].w + r0.w;
+  r1.x = g_textures_1_.SampleLevel(g_sampler_s, g_spot_coefficients[10].xy, 0).w;
+  r0.z = r1.x * g_spot_coefficients[10].w + r0.z;
+  r0.w = g_spot_coefficients[11].w + r0.w;
+  r1.x = g_textures_1_.SampleLevel(g_sampler_s, g_spot_coefficients[11].xy, 0).w;
+  r0.z = r1.x * g_spot_coefficients[11].w + r0.z;
+  r0.w = g_spot_coefficients[12].w + r0.w;
+  r1.x = g_textures_1_.SampleLevel(g_sampler_s, g_spot_coefficients[12].xy, 0).w;
+  r0.z = r1.x * g_spot_coefficients[12].w + r0.z;
+  r0.w = g_spot_coefficients[13].w + r0.w;
+  r1.x = g_textures_1_.SampleLevel(g_sampler_s, g_spot_coefficients[13].xy, 0).w;
+  r0.z = r1.x * g_spot_coefficients[13].w + r0.z;
+  r0.w = g_spot_coefficients[14].w + r0.w;
+  r1.x = g_textures_1_.SampleLevel(g_sampler_s, g_spot_coefficients[14].xy, 0).w;
+  r0.z = r1.x * g_spot_coefficients[14].w + r0.z;
+  r0.w = g_spot_coefficients[15].w + r0.w;
+  r1.x = g_textures_1_.SampleLevel(g_sampler_s, g_spot_coefficients[15].xy, 0).w;
+  r0.z = r1.x * g_spot_coefficients[15].w + r0.z;
+  // Normalise zone B
+  r0.w = 9.99999972e-010 + r0.w;
+  r0.w = 1.10000002 * r0.w;
+  r0.w = 1 / r0.w;
+  r0.z = r0.z * r0.w;            // r0.z = zone B normalised luminance
+
+  // --- Spot zone C: g_spot_coefficients[16..23] ---
+  // r0.w = running weighted luminance sum
+  // r1.x = running total weight
+  r0.w = g_textures_1_.SampleLevel(g_sampler_s, g_spot_coefficients[16].xy, 0).w;
+  r1.x = g_spot_coefficients[17].w + g_spot_coefficients[16].w;
+  r1.y = g_textures_1_.SampleLevel(g_sampler_s, g_spot_coefficients[17].xy, 0).w;
+  r1.y = g_spot_coefficients[17].w * r1.y;
+  r0.w = r0.w * g_spot_coefficients[16].w + r1.y;
+  r1.x = g_spot_coefficients[18].w + r1.x;
+  r1.y = g_textures_1_.SampleLevel(g_sampler_s, g_spot_coefficients[18].xy, 0).w;
+  r0.w = r1.y * g_spot_coefficients[18].w + r0.w;
+  r1.x = g_spot_coefficients[19].w + r1.x;
+  r1.y = g_textures_1_.SampleLevel(g_sampler_s, g_spot_coefficients[19].xy, 0).w;
+  r0.w = r1.y * g_spot_coefficients[19].w + r0.w;
+  r1.x = g_spot_coefficients[20].w + r1.x;
+  r1.y = g_textures_1_.SampleLevel(g_sampler_s, g_spot_coefficients[20].xy, 0).w;
+  r0.w = r1.y * g_spot_coefficients[20].w + r0.w;
+  r1.x = g_spot_coefficients[21].w + r1.x;
+  r1.y = g_textures_1_.SampleLevel(g_sampler_s, g_spot_coefficients[21].xy, 0).w;
+  r0.w = r1.y * g_spot_coefficients[21].w + r0.w;
+  r1.x = g_spot_coefficients[22].w + r1.x;
+  r1.y = g_textures_1_.SampleLevel(g_sampler_s, g_spot_coefficients[22].xy, 0).w;
+  r0.w = r1.y * g_spot_coefficients[22].w + r0.w;
+  r1.x = g_spot_coefficients[23].w + r1.x;
+  r1.y = g_textures_1_.SampleLevel(g_sampler_s, g_spot_coefficients[23].xy, 0).w;
+  r0.w = r1.y * g_spot_coefficients[23].w + r0.w;
+  // Normalise zone C
+  r1.x = 9.99999972e-010 + r1.x;
+  r1.x = 1.10000002 * r1.x;
+  r1.x = 1 / r1.x;
+  r0.w = r1.x * r0.w;            // r0.w = zone C normalised luminance
+
+  // --- Spot zone D: g_spot_coefficients[24..31] ---
+  // r1.x = running weighted luminance sum
+  // r1.y = running total weight
+  r1.x = g_textures_1_.SampleLevel(g_sampler_s, g_spot_coefficients[24].xy, 0).w;
+  r1.y = g_spot_coefficients[25].w + g_spot_coefficients[24].w;
+  r1.z = g_textures_1_.SampleLevel(g_sampler_s, g_spot_coefficients[25].xy, 0).w;
+  r1.z = g_spot_coefficients[25].w * r1.z;
+  r1.x = r1.x * g_spot_coefficients[24].w + r1.z;
+  r1.y = g_spot_coefficients[26].w + r1.y;
+  r1.z = g_textures_1_.SampleLevel(g_sampler_s, g_spot_coefficients[26].xy, 0).w;
+  r1.x = r1.z * g_spot_coefficients[26].w + r1.x;
+  r1.y = g_spot_coefficients[27].w + r1.y;
+  r1.z = g_textures_1_.SampleLevel(g_sampler_s, g_spot_coefficients[27].xy, 0).w;
+  r1.x = r1.z * g_spot_coefficients[27].w + r1.x;
+  r1.y = g_spot_coefficients[28].w + r1.y;
+  r1.z = g_textures_1_.SampleLevel(g_sampler_s, g_spot_coefficients[28].xy, 0).w;
+  r1.x = r1.z * g_spot_coefficients[28].w + r1.x;
+  r1.y = g_spot_coefficients[29].w + r1.y;
+  r1.z = g_textures_1_.SampleLevel(g_sampler_s, g_spot_coefficients[29].xy, 0).w;
+  r1.x = r1.z * g_spot_coefficients[29].w + r1.x;
+  r1.y = g_spot_coefficients[30].w + r1.y;
+  r1.z = g_textures_1_.SampleLevel(g_sampler_s, g_spot_coefficients[30].xy, 0).w;
+  r1.x = r1.z * g_spot_coefficients[30].w + r1.x;
+  r1.y = g_spot_coefficients[31].w + r1.y;
+  r1.z = g_textures_1_.SampleLevel(g_sampler_s, g_spot_coefficients[31].xy, 0).w;
+  r1.x = r1.z * g_spot_coefficients[31].w + r1.x;
+  // Normalise zone D
+  r1.y = 9.99999972e-010 + r1.y;
+  r1.y = 1.10000002 * r1.y;
+  r1.y = 1 / r1.y;
+  r1.x = r1.x * r1.y;            // r1.x = zone D normalised luminance
+
+  // -----------------------------------------------------------------------
+  // STAGE 3: Final weighted blend of all meters
+  //
+  // The global wide meter has an implicit weight of 1.0 in both numerator
+  // and denominator.  The four spot zones use CPU-supplied weights from
+  // g_spot_weight.xyzw, allowing the game to tune how strongly each spot
+  // region influences the final exposure value.
+  //
+  // output = ( wide * 1.0
+  //           + zoneA * g_spot_weight.x
+  //           + zoneB * g_spot_weight.y
+  //           + zoneC * g_spot_weight.z
+  //           + zoneD * g_spot_weight.w )
+  //         / ( 1.0
+  //           + g_spot_weight.x
+  //           + g_spot_weight.y
+  //           + g_spot_weight.z
+  //           + g_spot_weight.w )
+  // -----------------------------------------------------------------------
+
+  r0.y = g_spot_weight.x * r0.y;            // zoneA contribution (weighted)
+  r0.x = r0.x * 0.0625 + r0.y;             // wide (normalised: sum/16) + zoneA
+  r0.y = g_spot_weight.y + g_spot_weight.x; // denominator: w.x + w.y
+  r0.x = r0.z * g_spot_weight.y + r0.x;    // + zoneB contribution
+  r0.y = g_spot_weight.z + r0.y;            // denominator: + w.z
+  r0.x = r0.w * g_spot_weight.z + r0.x;    // + zoneC contribution
+  r0.y = g_spot_weight.w + r0.y;            // denominator: + w.w
+  r0.x = r1.x * g_spot_weight.w + r0.x;    // + zoneD contribution
+  r0.y = 1 + r0.y;                          // denominator: + 1.0 (wide's implicit weight)
+  r0.y = 1 / r0.y;                          // 1 / total_weight_sum
+  r0.xyzw = r0.xxxx * r0.yyyy;             // broadcast final exposure scalar to all 4 channels
+
+  // NaN guard: discard this pixel if the result is not-a-number.
+  // NOTE: 'cmp(r0.w != r0.w)' is a 3Dmigoto artifact for the assembly 'ne r1.x, r0.w, r0.w'.
+  // The correct HLSL idiom is: if (isnan(r0.w)) discard;
+  // At this point r0.w == r0.x (all channels equal), so this guards against
+  // a NaN exposure value corrupting the history buffer.
+  // r1.x = cmp(r0.w != r0.w);
+  // if (r1.x != 0) discard;
+  if (isnan(r0.w)) discard;
+
+  o0.xyzw = r0.xyzw; // Write same exposure value to all 4 channels of the history texel
+  return;
+}
+
+
+/*
+
+//
+// Generated by Microsoft (R) HLSL Shader Compiler 10.1
+//
+//
+// Buffer Definitions: 
+//
+// cbuffer ExposureMeasure
+// {
+//
+//   float4 g_spot_weight;              // Offset:    0 Size:    16
+//   float4 g_spot_coefficients[32];    // Offset:   16 Size:   512
+//
+// }
+//
+//
+// Resource Bindings:
+//
+// Name                                 Type  Format         Dim      HLSL Bind  Count
+// ------------------------------ ---------- ------- ----------- -------------- ------
+// g_sampler                         sampler      NA          NA             s0      1 
+// g_textures[0]                     texture  float4          2d             t0      1 
+// g_textures[1]                     texture  float4          2d             t1      1 
+// ExposureMeasure                   cbuffer      NA          NA            cb1      1 
+//
+//
+//
+// Input signature:
+//
+// Name                 Index   Mask Register SysValue  Format   Used
+// -------------------- ----- ------ -------- -------- ------- ------
+// SV_POSITION              0   xyzw        0      POS   float       
+//
+//
+// Output signature:
+//
+// Name                 Index   Mask Register SysValue  Format   Used
+// -------------------- ----- ------ -------- -------- ------- ------
+// SV_Target                0   xyzw        0   TARGET   float   xyzw
+//
+      0x00000000: ps_5_0
+      0x00000008: dcl_globalFlags refactoringAllowed
+      0x0000000C: dcl_constantbuffer CB1[33], immediateIndexed
+      0x0000001C: dcl_sampler s0, mode_default
+      0x00000028: dcl_resource_texture2d (float,float,float,float) t0
+      0x00000038: dcl_resource_texture2d (float,float,float,float) t1
+      0x00000048: dcl_output o0.xyzw
+      0x00000054: dcl_temps 2
+   0  0x0000005C: sample_l_indexable(texture2d)(float,float,float,float) r0.x, l(0.125000, 0.125000, 0.000000, 0.000000), t0.wxyz, s0, l(0.000000)
+   1  0x0000009C: sample_l_indexable(texture2d)(float,float,float,float) r0.y, l(0.375000, 0.125000, 0.000000, 0.000000), t0.xwyz, s0, l(0.000000)
+   2  0x000000DC: mad r0.x, r0.x, l(0.800000), r0.y
+   3  0x00000100: sample_l_indexable(texture2d)(float,float,float,float) r0.y, l(0.625000, 0.125000, 0.000000, 0.000000), t0.xwyz, s0, l(0.000000)
+   4  0x00000140: add r0.x, r0.y, r0.x
+   5  0x0000015C: sample_l_indexable(texture2d)(float,float,float,float) r0.y, l(0.875000, 0.125000, 0.000000, 0.000000), t0.xwyz, s0, l(0.000000)
+   6  0x0000019C: mad r0.x, r0.y, l(0.800000), r0.x
+   7  0x000001C0: sample_l_indexable(texture2d)(float,float,float,float) r0.y, l(0.125000, 0.375000, 0.000000, 0.000000), t0.xwyz, s0, l(0.000000)
+   8  0x00000200: add r0.x, r0.y, r0.x
+   9  0x0000021C: sample_l_indexable(texture2d)(float,float,float,float) r0.y, l(0.375000, 0.375000, 0.000000, 0.000000), t0.xwyz, s0, l(0.000000)
+  10  0x0000025C: mad r0.x, r0.y, l(1.200000), r0.x
+  11  0x00000280: sample_l_indexable(texture2d)(float,float,float,float) r0.y, l(0.625000, 0.375000, 0.000000, 0.000000), t0.xwyz, s0, l(0.000000)
+  12  0x000002C0: mad r0.x, r0.y, l(1.200000), r0.x
+  13  0x000002E4: sample_l_indexable(texture2d)(float,float,float,float) r0.y, l(0.875000, 0.375000, 0.000000, 0.000000), t0.xwyz, s0, l(0.000000)
+  14  0x00000324: add r0.x, r0.y, r0.x
+  15  0x00000340: sample_l_indexable(texture2d)(float,float,float,float) r0.y, l(0.125000, 0.625000, 0.000000, 0.000000), t0.xwyz, s0, l(0.000000)
+  16  0x00000380: add r0.x, r0.y, r0.x
+  17  0x0000039C: sample_l_indexable(texture2d)(float,float,float,float) r0.y, l(0.375000, 0.625000, 0.000000, 0.000000), t0.xwyz, s0, l(0.000000)
+  18  0x000003DC: mad r0.x, r0.y, l(1.200000), r0.x
+  19  0x00000400: sample_l_indexable(texture2d)(float,float,float,float) r0.y, l(0.625000, 0.625000, 0.000000, 0.000000), t0.xwyz, s0, l(0.000000)
+  20  0x00000440: mad r0.x, r0.y, l(1.200000), r0.x
+  21  0x00000464: sample_l_indexable(texture2d)(float,float,float,float) r0.y, l(0.875000, 0.625000, 0.000000, 0.000000), t0.xwyz, s0, l(0.000000)
+  22  0x000004A4: add r0.x, r0.y, r0.x
+  23  0x000004C0: sample_l_indexable(texture2d)(float,float,float,float) r0.y, l(0.125000, 0.875000, 0.000000, 0.000000), t0.xwyz, s0, l(0.000000)
+  24  0x00000500: mad r0.x, r0.y, l(0.800000), r0.x
+  25  0x00000524: sample_l_indexable(texture2d)(float,float,float,float) r0.y, l(0.375000, 0.875000, 0.000000, 0.000000), t0.xwyz, s0, l(0.000000)
+  26  0x00000564: add r0.x, r0.y, r0.x
+  27  0x00000580: sample_l_indexable(texture2d)(float,float,float,float) r0.y, l(0.625000, 0.875000, 0.000000, 0.000000), t0.xwyz, s0, l(0.000000)
+  28  0x000005C0: add r0.x, r0.y, r0.x
+  29  0x000005DC: sample_l_indexable(texture2d)(float,float,float,float) r0.y, l(0.875000, 0.875000, 0.000000, 0.000000), t0.xwyz, s0, l(0.000000)
+  30  0x0000061C: mad r0.x, r0.y, l(0.800000), r0.x
+  31  0x00000640: sample_l_indexable(texture2d)(float,float,float,float) r0.y, cb1[1].xyxx, t1.xwyz, s0, l(0.000000)
+  32  0x00000678: add r0.z, cb1[1].w, cb1[2].w
+  33  0x0000069C: sample_l_indexable(texture2d)(float,float,float,float) r0.w, cb1[2].xyxx, t1.xyzw, s0, l(0.000000)
+  34  0x000006D4: mul r0.w, r0.w, cb1[2].w
+  35  0x000006F4: mad r0.y, r0.y, cb1[1].w, r0.w
+  36  0x0000071C: add r0.z, r0.z, cb1[3].w
+  37  0x0000073C: sample_l_indexable(texture2d)(float,float,float,float) r0.w, cb1[3].xyxx, t1.xyzw, s0, l(0.000000)
+  38  0x00000774: mad r0.y, r0.w, cb1[3].w, r0.y
+  39  0x0000079C: add r0.z, r0.z, cb1[4].w
+  40  0x000007BC: sample_l_indexable(texture2d)(float,float,float,float) r0.w, cb1[4].xyxx, t1.xyzw, s0, l(0.000000)
+  41  0x000007F4: mad r0.y, r0.w, cb1[4].w, r0.y
+  42  0x0000081C: add r0.z, r0.z, cb1[5].w
+  43  0x0000083C: sample_l_indexable(texture2d)(float,float,float,float) r0.w, cb1[5].xyxx, t1.xyzw, s0, l(0.000000)
+  44  0x00000874: mad r0.y, r0.w, cb1[5].w, r0.y
+  45  0x0000089C: add r0.z, r0.z, cb1[6].w
+  46  0x000008BC: sample_l_indexable(texture2d)(float,float,float,float) r0.w, cb1[6].xyxx, t1.xyzw, s0, l(0.000000)
+  47  0x000008F4: mad r0.y, r0.w, cb1[6].w, r0.y
+  48  0x0000091C: add r0.z, r0.z, cb1[7].w
+  49  0x0000093C: sample_l_indexable(texture2d)(float,float,float,float) r0.w, cb1[7].xyxx, t1.xyzw, s0, l(0.000000)
+  50  0x00000974: mad r0.y, r0.w, cb1[7].w, r0.y
+  51  0x0000099C: add r0.z, r0.z, cb1[8].w
+  52  0x000009BC: sample_l_indexable(texture2d)(float,float,float,float) r0.w, cb1[8].xyxx, t1.xyzw, s0, l(0.000000)
+  53  0x000009F4: mad r0.y, r0.w, cb1[8].w, r0.y
+  54  0x00000A1C: add r0.z, r0.z, l(0.000000)
+  55  0x00000A38: mul r0.z, r0.z, l(1.100000)
+  56  0x00000A54: div r0.z, l(1.000000, 1.000000, 1.000000, 1.000000), r0.z
+  57  0x00000A7C: mul r0.y, r0.z, r0.y
+  58  0x00000A98: sample_l_indexable(texture2d)(float,float,float,float) r0.z, cb1[9].xyxx, t1.xywz, s0, l(0.000000)
+  59  0x00000AD0: add r0.w, cb1[9].w, cb1[10].w
+  60  0x00000AF4: sample_l_indexable(texture2d)(float,float,float,float) r1.x, cb1[10].xyxx, t1.wxyz, s0, l(0.000000)
+  61  0x00000B2C: mul r1.x, r1.x, cb1[10].w
+  62  0x00000B4C: mad r0.z, r0.z, cb1[9].w, r1.x
+  63  0x00000B74: add r0.w, r0.w, cb1[11].w
+  64  0x00000B94: sample_l_indexable(texture2d)(float,float,float,float) r1.x, cb1[11].xyxx, t1.wxyz, s0, l(0.000000)
+  65  0x00000BCC: mad r0.z, r1.x, cb1[11].w, r0.z
+  66  0x00000BF4: add r0.w, r0.w, cb1[12].w
+  67  0x00000C14: sample_l_indexable(texture2d)(float,float,float,float) r1.x, cb1[12].xyxx, t1.wxyz, s0, l(0.000000)
+  68  0x00000C4C: mad r0.z, r1.x, cb1[12].w, r0.z
+  69  0x00000C74: add r0.w, r0.w, cb1[13].w
+  70  0x00000C94: sample_l_indexable(texture2d)(float,float,float,float) r1.x, cb1[13].xyxx, t1.wxyz, s0, l(0.000000)
+  71  0x00000CCC: mad r0.z, r1.x, cb1[13].w, r0.z
+  72  0x00000CF4: add r0.w, r0.w, cb1[14].w
+  73  0x00000D14: sample_l_indexable(texture2d)(float,float,float,float) r1.x, cb1[14].xyxx, t1.wxyz, s0, l(0.000000)
+  74  0x00000D4C: mad r0.z, r1.x, cb1[14].w, r0.z
+  75  0x00000D74: add r0.w, r0.w, cb1[15].w
+  76  0x00000D94: sample_l_indexable(texture2d)(float,float,float,float) r1.x, cb1[15].xyxx, t1.wxyz, s0, l(0.000000)
+  77  0x00000DCC: mad r0.z, r1.x, cb1[15].w, r0.z
+  78  0x00000DF4: add r0.w, r0.w, cb1[16].w
+  79  0x00000E14: sample_l_indexable(texture2d)(float,float,float,float) r1.x, cb1[16].xyxx, t1.wxyz, s0, l(0.000000)
+  80  0x00000E4C: mad r0.z, r1.x, cb1[16].w, r0.z
+  81  0x00000E74: add r0.w, r0.w, l(0.000000)
+  82  0x00000E90: mul r0.w, r0.w, l(1.100000)
+  83  0x00000EAC: div r0.w, l(1.000000, 1.000000, 1.000000, 1.000000), r0.w
+  84  0x00000ED4: mul r0.z, r0.w, r0.z
+  85  0x00000EF0: sample_l_indexable(texture2d)(float,float,float,float) r0.w, cb1[17].xyxx, t1.xyzw, s0, l(0.000000)
+  86  0x00000F28: add r1.x, cb1[17].w, cb1[18].w
+  87  0x00000F4C: sample_l_indexable(texture2d)(float,float,float,float) r1.y, cb1[18].xyxx, t1.xwyz, s0, l(0.000000)
+  88  0x00000F84: mul r1.y, r1.y, cb1[18].w
+  89  0x00000FA4: mad r0.w, r0.w, cb1[17].w, r1.y
+  90  0x00000FCC: add r1.x, r1.x, cb1[19].w
+  91  0x00000FEC: sample_l_indexable(texture2d)(float,float,float,float) r1.y, cb1[19].xyxx, t1.xwyz, s0, l(0.000000)
+  92  0x00001024: mad r0.w, r1.y, cb1[19].w, r0.w
+  93  0x0000104C: add r1.x, r1.x, cb1[20].w
+  94  0x0000106C: sample_l_indexable(texture2d)(float,float,float,float) r1.y, cb1[20].xyxx, t1.xwyz, s0, l(0.000000)
+  95  0x000010A4: mad r0.w, r1.y, cb1[20].w, r0.w
+  96  0x000010CC: add r1.x, r1.x, cb1[21].w
+  97  0x000010EC: sample_l_indexable(texture2d)(float,float,float,float) r1.y, cb1[21].xyxx, t1.xwyz, s0, l(0.000000)
+  98  0x00001124: mad r0.w, r1.y, cb1[21].w, r0.w
+  99  0x0000114C: add r1.x, r1.x, cb1[22].w
+ 100  0x0000116C: sample_l_indexable(texture2d)(float,float,float,float) r1.y, cb1[22].xyxx, t1.xwyz, s0, l(0.000000)
+ 101  0x000011A4: mad r0.w, r1.y, cb1[22].w, r0.w
+ 102  0x000011CC: add r1.x, r1.x, cb1[23].w
+ 103  0x000011EC: sample_l_indexable(texture2d)(float,float,float,float) r1.y, cb1[23].xyxx, t1.xwyz, s0, l(0.000000)
+ 104  0x00001224: mad r0.w, r1.y, cb1[23].w, r0.w
+ 105  0x0000124C: add r1.x, r1.x, cb1[24].w
+ 106  0x0000126C: sample_l_indexable(texture2d)(float,float,float,float) r1.y, cb1[24].xyxx, t1.xwyz, s0, l(0.000000)
+ 107  0x000012A4: mad r0.w, r1.y, cb1[24].w, r0.w
+ 108  0x000012CC: add r1.x, r1.x, l(0.000000)
+ 109  0x000012E8: mul r1.x, r1.x, l(1.100000)
+ 110  0x00001304: div r1.x, l(1.000000, 1.000000, 1.000000, 1.000000), r1.x
+ 111  0x0000132C: mul r0.w, r0.w, r1.x
+ 112  0x00001348: sample_l_indexable(texture2d)(float,float,float,float) r1.x, cb1[25].xyxx, t1.wxyz, s0, l(0.000000)
+ 113  0x00001380: add r1.y, cb1[25].w, cb1[26].w
+ 114  0x000013A4: sample_l_indexable(texture2d)(float,float,float,float) r1.z, cb1[26].xyxx, t1.xywz, s0, l(0.000000)
+ 115  0x000013DC: mul r1.z, r1.z, cb1[26].w
+ 116  0x000013FC: mad r1.x, r1.x, cb1[25].w, r1.z
+ 117  0x00001424: add r1.y, r1.y, cb1[27].w
+ 118  0x00001444: sample_l_indexable(texture2d)(float,float,float,float) r1.z, cb1[27].xyxx, t1.xywz, s0, l(0.000000)
+ 119  0x0000147C: mad r1.x, r1.z, cb1[27].w, r1.x
+ 120  0x000014A4: add r1.y, r1.y, cb1[28].w
+ 121  0x000014C4: sample_l_indexable(texture2d)(float,float,float,float) r1.z, cb1[28].xyxx, t1.xywz, s0, l(0.000000)
+ 122  0x000014FC: mad r1.x, r1.z, cb1[28].w, r1.x
+ 123  0x00001524: add r1.y, r1.y, cb1[29].w
+ 124  0x00001544: sample_l_indexable(texture2d)(float,float,float,float) r1.z, cb1[29].xyxx, t1.xywz, s0, l(0.000000)
+ 125  0x0000157C: mad r1.x, r1.z, cb1[29].w, r1.x
+ 126  0x000015A4: add r1.y, r1.y, cb1[30].w
+ 127  0x000015C4: sample_l_indexable(texture2d)(float,float,float,float) r1.z, cb1[30].xyxx, t1.xywz, s0, l(0.000000)
+ 128  0x000015FC: mad r1.x, r1.z, cb1[30].w, r1.x
+ 129  0x00001624: add r1.y, r1.y, cb1[31].w
+ 130  0x00001644: sample_l_indexable(texture2d)(float,float,float,float) r1.z, cb1[31].xyxx, t1.xywz, s0, l(0.000000)
+ 131  0x0000167C: mad r1.x, r1.z, cb1[31].w, r1.x
+ 132  0x000016A4: add r1.y, r1.y, cb1[32].w
+ 133  0x000016C4: sample_l_indexable(texture2d)(float,float,float,float) r1.z, cb1[32].xyxx, t1.xywz, s0, l(0.000000)
+ 134  0x000016FC: mad r1.x, r1.z, cb1[32].w, r1.x
+ 135  0x00001724: add r1.y, r1.y, l(0.000000)
+ 136  0x00001740: mul r1.y, r1.y, l(1.100000)
+ 137  0x0000175C: div r1.y, l(1.000000, 1.000000, 1.000000, 1.000000), r1.y
+ 138  0x00001784: mul r1.x, r1.y, r1.x
+ 139  0x000017A0: mul r0.y, r0.y, cb1[0].x
+ 140  0x000017C0: mad r0.x, r0.x, l(0.062500), r0.y
+ 141  0x000017E4: add r0.y, cb1[0].x, cb1[0].y
+ 142  0x00001808: mad r0.x, r0.z, cb1[0].y, r0.x
+ 143  0x00001830: add r0.y, r0.y, cb1[0].z
+ 144  0x00001850: mad r0.x, r0.w, cb1[0].z, r0.x
+ 145  0x00001878: add r0.y, r0.y, cb1[0].w
+ 146  0x00001898: mad r0.x, r1.x, cb1[0].w, r0.x
+ 147  0x000018C0: add r0.y, r0.y, l(1.000000)
+ 148  0x000018DC: div r0.y, l(1.000000, 1.000000, 1.000000, 1.000000), r0.y
+ 149  0x00001904: mul r0.xyzw, r0.yyyy, r0.xxxx
+ 150  0x00001920: ne r1.x, r0.w, r0.w
+ 151  0x0000193C: discard_nz r1.x
+ 152  0x00001948: mov o0.xyzw, r0.xyzw
+ 153  0x0000195C: ret 
+// Approximately 154 instruction slots used
+
+
+*/

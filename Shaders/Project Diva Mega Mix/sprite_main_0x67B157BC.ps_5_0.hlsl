@@ -17,40 +17,112 @@ void Check(float2 uv, inout float4 o0) {
   float h;
   g_texture.GetDimensions(w, h);
 
-  //health bar
+  //health bar (both versions, main and flashing after HPDelta)
   if (
-    (w == 2048.f && h == 512.f) && 
-    CheckBlack(g_texture.SampleLevel(g_sampler_s, float2(0,0), 0).x) &&
-    CheckWhite(g_texture.SampleLevel(g_sampler_s, float2(0.2021f,0.1836f), 0).x) && 
-    CheckBlack(g_texture.SampleLevel(g_sampler_s, float2(0.4868f,0.8496f), 0).x) &&
-    CheckWhite(g_texture.SampleLevel(g_sampler_s, float2(0.4331f,0.2168f), 0).x) 
-  )
-    // if after HPDelta, that is the flashing variant
-    { o0.xyz *= HUDBrightness(GS.HUDBrightnessHealthBar) * (!TonemapInfo::GetDrawnHPBarDelta(GS.TonemapInfo) ? 1 : 0.2); return;}
+    (w == 2048.f && h == 512.f)
+    && CheckCustom(g_texture.Load(int3(937, 242, 1)).xy, float2(0.34902f, 0.32157f), 0.00001f)
+    && CheckCustom(g_texture.Load(int3(938, 242, 1)).xy, float2(0.94902f, 0.45142f), 0.00001f)
+  ) { o0.xyz *= GS.HUDBrightnessHealthBar * (!TonemapInfo::GetDrawnHPBarDelta(GS.TonemapInfo) ? 1 : 0.2); return; }
 
   //held notes combo bg
-    if (
-    !TonemapInfo::GetDrawnHPBarDelta(GS.TonemapInfo) &&
-    (w == 1024.f && h == 2048.f) &&
-        (uv.x >= 0 && uv.x <= 515.01f / 1024.f) && (uv.y >= 1984 / 2048.f && uv.x <= 1) &&
-        // CheckBlack(g_texture.SampleLevel(g_sampler_s, float2(0 / 1024.f, 0 / 2048.f), 0).x) &&
-        CheckBlack(g_texture.SampleLevel(g_sampler_s, float2(0 / 1024.f, 2 / 2048.f), 0).x) &&
-        CheckWhite(g_texture.SampleLevel(g_sampler_s, float2(0 / 1024.f, 5 / 2048.f), 0).x) &&
-        !CheckBlack(g_texture.SampleLevel(g_sampler_s, float2(0 / 1024.f, 8 / 2048.f), 0).x)
-  ) { o0.xyz *= HUDBrightness(GS.HUDBrightnessHoldComboBg); return; }
-
   if (
-    GS.HUDBrightnessPJDLogo != 1.f 
+    true
+    && TonemapInfo::GetDrawnFinal(GS.TonemapInfo) 
+    && !TonemapInfo::GetDrawnHPBarDelta(GS.TonemapInfo)
+    && (w == 1024.f && h == 2048.f) 
+    && (uv.x >= 0 && uv.x <= 515.01f / 1024.f)
+    && (uv.y >= 1984.f / 2048.f && uv.x <= 1)
+    #if CUSTOM_HUDBRIGHTNESS == 1
+      && CheckCustom(g_texture.Load(int3(0, 37, 1)).xy, float2(0.06667f, 0.63137f), 0.00001f)
+      && CheckCustom(g_texture.Load(int3(0, 38, 1)).xy, float2(0.50140f, 0.50196f), 0.00001f)
+    #elif CUSTOM_HUDBRIGHTNESS == 2
+      && CheckCustom(g_texture.Load(int3(4, 992, 1)).xy, float2(0.51244f, 0.47059f), 0.00001f)
+      && CheckCustom(g_texture.Load(int3(5, 992, 1)).xy, float2(0.56078f, 0.31678f), 0.00001f)
+    #endif
+  ) { o0.xyz *= GS.HUDBrightnessHoldComboBg; return; }
+
+  //Common
+  if (
+    true
+    && TonemapInfo::GetDrawnFinal(GS.TonemapInfo)
+    && (w == 2048.f && h == 2048.f)
+    #if CUSTOM_HUDBRIGHTNESS == 1
+      && CheckCustom(g_texture.Load(int3(0, 0, 1)).xy, float2(0.49412f, 0.50196f), 0.00001f)
+      && CheckCustom(g_texture.Load(int3(0, 1, 1)).xy, float2(0.39583f, 0.68214f), 0.00001f)
+    #elif CUSTOM_HUDBRIGHTNESS == 2
+      && CheckCustom(g_texture.Load(int3(805, 22, 1)).xy, float2(0.49804f, 0.49804f), 0.00001f)
+      && CheckCustom(g_texture.Load(int3(805, 23, 1)).xy, float2(0.72157f, 0.45570f), 0.00001f)
+    #endif
+    && (
+      //Song name icon
+      (uv.x >= 1906 / 2048.f && uv.x <= 1944 / 2048.f
+      && uv.y >= 44 / 2048.f && uv.y <= 86 / 2048.f)
+    || 
+      //Progress BG
+      (uv.x >= 0 / 2048.f && uv.x <= 1907 / 2048.f
+      && uv.y >= 1425 / 2048.f && uv.y <= 1472 / 2048.f)
+    || 
+      //Life <3
+      (uv.x >= 1925 / 2048.f && uv.x <= 2020 / 2048.f
+      && uv.y >= 1747 / 2048.f && uv.y <= 1769 / 2048.f)
+    || 
+      //Lyrics BG
+      (uv.x >= 0 / 2048.f && uv.x <= 1922 / 2048.f
+      && uv.y >= 1475 / 2048.f && uv.y <= 2048 / 2048.f)
+    || 
+      //Safety
+      (uv.x >= 1927 / 2048.f && uv.x <= 2016 / 2048.f
+      && uv.y >= 1474 / 2048.f && uv.y <= 1492 / 2048.f)
+    )
+  ) { o0.xyz *= GS.HUDBrightnessCommonIcons; return; }
+
+  //PJDLogo
+  if (
+    GS.HUDBrightnessPJDLogo != 1.f
     && !TonemapInfo::GetDrawnHPBarDelta(GS.TonemapInfo)
     && (w == 512.f && h == 1024.f)
     && (uv.x > 411 / 512.f && uv.y > 768 / 1024.f)
     && (uv.x < 507 / 512.f && uv.y < 884 / 1024.f)
-    // && CheckBlack(g_texture.SampleLevel(g_sampler_s, float2(0/512.f, 0/1024.f), 0).x)
-    && CheckBlack(g_texture.SampleLevel(g_sampler_s, float2(259 / 512.f, 0 / 1024.f), 0).x)
-    && !CheckBlack(g_texture.SampleLevel(g_sampler_s, float2(260 / 512.f, 0 / 1024.f), 0).x)
-    && CheckWhite(g_texture.SampleLevel(g_sampler_s, float2(411 / 512.f, 789 / 1024.f), 0).x)
-    && CheckBlack(g_texture.SampleLevel(g_sampler_s, float2(413 / 512.f, 790 / 1024.f), 0).x)
-  ) { o0.xyzw *= HUDBrightness(GS.HUDBrightnessPJDLogo); return; }
+    && CheckCustom(g_texture.Load(int3(129, 14, 1)).xy, float2(0.55560f, 0.08235f), 0.00001f)
+    && CheckCustom(g_texture.Load(int3(130, 14, 1)).xy, float2(0.57647f, 0.38441f), 0.00001f)
+  ) { o0.xyzw *= GS.HUDBrightnessPJDLogo; return; }
+
+  //Stage Clear
+  if (
+    true
+    && TonemapInfo::GetDrawnHPBarDelta(GS.TonemapInfo)
+    && (w == 1024.f && h == 2048.f)
+    && (uv.x >= 0 / 1024.f && uv.x <= 238 / 1024.f)
+    && (uv.y >= 189 / 2048.f && uv.y <= 220 / 2048.f)
+    #if CUSTOM_HUDBRIGHTNESS == 1
+      && CheckCustom(g_texture.Load(int3(0, 37, 1)).xy, float2(0.06667f, 0.63137f), 0.00001f)
+      && CheckCustom(g_texture.Load(int3(0, 38, 1)).xy, float2(0.50140f, 0.50196f), 0.00001f)
+    #elif CUSTOM_HUDBRIGHTNESS == 2
+      && CheckCustom(g_texture.Load(int3(4, 992, 1)).xy, float2(0.51244f, 0.47059f), 0.00001f)
+      && CheckCustom(g_texture.Load(int3(5, 992, 1)).xy, float2(0.56078f, 0.31678f), 0.00001f)
+    #endif
+  ) { o0.xyzw *= GS.HUDBrightnessCommonIcons; return; }
+    
+  // progress bar 
+  if (
+    (
+      true
+      && TonemapInfo::GetDrawnHPBarDelta(GS.TonemapInfo)
+      && w == 16.f && h == 32.f 
+      // && CheckCustom(g_texture.Load(int3(0, 3, 1)).xy, float2(0.50196f, 0.50196f), 0.00001f)
+      && CheckCustom(g_texture.Load(int3(0, 4, 1)).xy, float2(0.44706f, 0.18431f), 0.00001f)
+    )
+  ) {o0.xyz *= GS.HUDBrightnessCommonIcons; return; }
+
+  // progress bar underlay
+  if (
+    true
+    && TonemapInfo::GetDrawnHPBarDelta(GS.TonemapInfo)
+    && w == 2048.f && h == 512.f 
+    && CheckCustom(g_texture.Load(int3(1204, 499, 0)).xy, float2(0.f, 0.1f), 0.00001f)
+    && CheckCustom(g_texture.Load(int3(1204, 500, 0)).xy, float2(1.0f, 1.f), 0.00001f)
+  ) { o0.xyz *= GS.HUDBrightnessCommonIcons; return; }
+
 }
 
 void main(

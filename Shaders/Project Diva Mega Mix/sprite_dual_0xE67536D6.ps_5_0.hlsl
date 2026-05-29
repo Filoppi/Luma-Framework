@@ -16,7 +16,7 @@ Texture2D<float4> g_overlay_dest_texture : register(t2);
 #define cmp -
 #include "./common1.hlsl"
 
-float Check() { //TODO upgrade to out float multiplier if needed
+float Check() {
   //ignore bg sprites
   if (!TonemapInfo::GetDrawnFinal(GS.TonemapInfo) || !TonemapInfo::GetDrawnHPBarDelta(GS.TonemapInfo)) return 1;
 
@@ -26,16 +26,13 @@ float Check() { //TODO upgrade to out float multiplier if needed
   g_textures_0_.GetDimensions(w, h);
 
   if (
-      // progress bar 
-      (
-      (w == 2048.f && h == 64.f) && 
-      // CheckBlack(g_textures_0_.SampleLevel(g_sampler_s, float2(0, 0), 0).x) &&
-       !CheckBlack(g_textures_0_.SampleLevel(g_sampler_s, float2(0, 0.2f), 0).x) &&
-       CheckBlack(g_textures_0_.SampleLevel(g_sampler_s, float2(0, 0.1f), 0).x) &&
-       !CheckBlack(g_textures_0_.SampleLevel(g_sampler_s, float2(0.87f, 0.2f), 0).x) &&
-       CheckBlack(g_textures_0_.SampleLevel(g_sampler_s, float2(0.89f, 0.2f), 0).x) 
+    // progress bar 
+    (
+      w == 2048.f && h == 64.f 
+      && CheckCustom(g_textures_0_.Load(int3(0,  9, 0), 0).xyz, 0.f, 0.f)
+      && CheckCustom(g_textures_0_.Load(int3(0, 10, 0), 0).xyz, 1.f, 0.f)
     )
-  ) return HUDBrightness(GS.HUDBrightnessProgressBar);
+  ) return GS.HUDBrightnessProgressBar;
 
   return 1;
 }

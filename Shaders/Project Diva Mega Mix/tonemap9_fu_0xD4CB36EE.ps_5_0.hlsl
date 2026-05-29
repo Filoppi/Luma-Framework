@@ -23,7 +23,10 @@ Texture2D<float4> g_textures_7_ : register(t7);
 
 // 3Dmigoto declarations
 #define cmp -
+#define TONEMAP_TOON
 #include "./common1.hlsl"
+
+
 
 //Color + Bloom + Tonemap (Simple) + Fade
 void main(
@@ -34,6 +37,10 @@ void main(
   float4 v4 : TEXCOORD3,
   out float4 o0 : SV_Target0)
 {
+  #if CUSTOM_TESTBGSPRITES == 1
+    o0 = 0; return;
+  #endif
+
   float4 r0,r1,r2,r3,r4;
   uint4 bitmask, uiDest;
   float4 fDest;
@@ -76,7 +83,8 @@ void main(
   // r0.xyz = min(float3(0.959999979,0.959999979,0.959999979), r0.xyz);
 
   colorUntonemapped = r0.xyz;
-  colorUntonemapped = gamma_to_linear(colorUntonemapped, GCT_POSITIVE, 2.2);
+  //colorUntonemapped = gamma_to_linear(colorUntonemapped, GCT_POSITIVE, 2.2);
+  colorUntonemapped = gamma_sRGB_to_linear(colorUntonemapped, GCT_POSITIVE);
 
   r0.xyz = /* saturate */(r0.xyz * g_tone_scale.xyz + g_tone_offset.xyz);
 
@@ -94,5 +102,6 @@ void main(
   o0.xyz = r1.xxx ? r1.yzw : r0.xyz;
   o0.w = r0.w;
 
+  Tonemap_Out(o0);
   return;
 }

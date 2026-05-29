@@ -28,6 +28,8 @@ Texture2D<float4> g_scene_depth_texture : register(t10);
 #define TONEMAP_COMPLEX
 #include "./common1.hlsl"
 
+
+
 void main(
   float4 v0 : SV_POSITION0,
   float4 v1 : TEXCOORD0,
@@ -45,12 +47,21 @@ void main(
 
   //color, bloom (sample)
   r0.xyzw = g_textures_0_.Sample(g_samplers_0__s, v1.xy).xyzw; //color
+  #if CUSTOM_TESTBGSPRITES == 1
+    r0 = 0;
+  #endif
   colorUntonemappedMask = r0.w;
   
   r1.xyz = g_textures_1_.Sample(g_samplers_1__s, v1.zw).xyz * GS.BloomStrength; //bloom
+  #if CUSTOM_TESTBGSPRITES == 1
+    r1.xyz = 0;
+  #endif
 
   //sprites (complex)
   r2.xyz = g_textures_6_.Sample(g_samplers_6__s, v1.xy).xyz; //sprites
+  #if CUSTOM_TESTBGSPRITES == 2
+    r2.xyz = 0;
+  #endif
   r2.xyz = saturate(r2.xyz);
 
   r3.xyz = float3(0.959999979,0.959999979,0.959999979) * r2.xyz;
@@ -108,7 +119,8 @@ void main(
   r0.xyz = r1.www ? r1.xyz : r0.xyz;
 
   colorUntonemapped = r0.xyz;
-  colorUntonemapped = gamma_to_linear(colorUntonemapped, GCT_POSITIVE, 2.2);
+  //colorUntonemapped = gamma_to_linear(colorUntonemapped, GCT_POSITIVE, 2.2);
+  colorUntonemapped = gamma_sRGB_to_linear(colorUntonemapped, GCT_POSITIVE);
   
   //tonemap
   // r1.xyz = min(float3(0.959999979,0.959999979,0.959999979), r1.xyz); //if this is here, r1.xyz is still HDR before
@@ -139,5 +151,6 @@ void main(
   o0.xyz = r1.xxx ? r1.yzw : r0.xyz;
   o0.w = r0.w;
 
+  Tonemap_Out(o0);
   return;
 }

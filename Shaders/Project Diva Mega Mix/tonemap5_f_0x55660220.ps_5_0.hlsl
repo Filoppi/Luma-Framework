@@ -17,7 +17,10 @@ Texture2D<float4> g_textures_1_ : register(t1); //bloom
 
 // 3Dmigoto declarations
 #define cmp -
+#define TONEMAP_TOON
 #include "./common1.hlsl"
+
+
 
 //Color + Bloom + Tonemap (Simple) + Fade
 //Piano Girl: toon scenes
@@ -31,6 +34,10 @@ void main(
   float4 v4 : TEXCOORD3,
   out float4 o0 : SV_Target0)
 {
+  #if CUSTOM_TESTBGSPRITES == 1
+    o0 = 0; return;
+  #endif
+
   float4 r0,r1,r2,r3,r4;
   uint4 bitmask, uiDest;
   float4 fDest;
@@ -55,11 +62,12 @@ void main(
   r0.xyz = r0.www ? r0.xyz : r1.xyz;
 
   colorUntonemapped = r0.xyz;
-  colorUntonemapped = gamma_to_linear(colorUntonemapped, GCT_POSITIVE, 2.2);
+  //colorUntonemapped = gamma_to_linear(colorUntonemapped, GCT_POSITIVE, 2.2);
+  colorUntonemapped = gamma_sRGB_to_linear(colorUntonemapped, GCT_POSITIVE);
 
   //tonemapper (simple)
   r0.xyz = /* saturate */(r0.xyz * g_tone_scale.xyz + g_tone_offset.xyz); //clamp with color grade
-  
+
   r0.xyz = Tonemap_Do(colorUntonemapped, r0.xyz, v1.xy, g_textures_0_, true);
 
   //fade
@@ -75,6 +83,6 @@ void main(
     o0.xyz = r0.www ? r1.xyz : r0.xyz; //out xyz
   }
 
-
+  Tonemap_Out(o0);
   return;
 }

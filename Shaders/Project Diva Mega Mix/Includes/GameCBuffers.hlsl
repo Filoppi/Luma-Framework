@@ -48,21 +48,42 @@ namespace CB
    {
       int TonemapInfo;
       
-      float TonemapperRolloffStart;
-      
-      float Exposure;
+      // float TonemapperRolloffStart;
+      float TonemapperPeakCached;
+      float TonemapperMaxExpectedCached;
       float BloomStrength;
+      float AAMultiplier;
+      float PerChannelLuminanceReductionEmulateStrength;
+
+      float GammaCorrection22PaperWhite;
+      float GammaPerceptualChrominanceCorrect;
+
+      float UITransparency;
+
+      // float SDRTonemapToeStrength;
+      // float SDRTonemapToeLowPass;
       
-      float LUT;
-      float LUTBlowoutReduction;
-      float LUTBlowoutReductionLookBack;
+      // float LUTNeutralize;
+      // float LUTBlowoutReduction;
+      // float LUTBlowoutReductionLookBack;
+      float LUTScalingAndMakeUp;
+      float LUTGaussianBlurStep;
+      float LUTGaussianBlurBias;
+
+      // float PCBlowoutHue;
+      // float PCBlowoutChrom;
+      // float PCBlowoutStart;
+      // float PCBlowoutEnd;
+      // float PCBlowoutLumaClip;
+      float PCBlowoutLumaEnd;
+      float PCBlowoutPerChannelClip;
+      float PCBlowoutPerChannelEnd;
+      float PCBlowoutPerChannel2ndStartRatio;
+      float PCBlowoutPerChannel2ndEnd;
       
-      float PCBlowoutStrength;
-      float PCBlowoutStart;
-      float PCBlowoutEnd;
-      
-      float FakeBT2020ChromaCorrect;
-      float FakeBT2020LumaCorrect;
+      // float FakeBT2020Gamma;
+      float FakeBT2020Chroma;
+      float FakeBT2020Luma;
       
       float UpscaleMovPumboPow; 
       float UpscaleBGSpritesMax; 
@@ -73,6 +94,7 @@ namespace CB
       float HUDBrightnessHealthBar; 
       float HUDBrightnessHealthBarDelta; 
       float HUDBrightnessProgressBar; 
+      float HUDBrightnessCommonIcons; 
       float HUDBrightnessNoteResponse;
       float HUDBrightnessHoldComboBg; 
       float HUDBrightnessPJDLogo; 
@@ -84,6 +106,8 @@ namespace CB
       float CGHighlightsMidGray;
       float CGShadowsStrength;
       float CGShadowsMidGray;
+
+      float ProgressBarRatio;
    };
    
    struct LumaGameData
