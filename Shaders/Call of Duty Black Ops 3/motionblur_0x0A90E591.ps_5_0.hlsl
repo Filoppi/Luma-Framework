@@ -225,7 +225,7 @@ void main(
 
   //if motion
   if (r1.y != 0) { 
-    const float scale = GS.MotionBlur;
+    const float scale = GS_MotionBlur;
 
     //prep motion
     r1.y = 255 * r1.w;

@@ -1,6 +1,7 @@
 // ---- Created with 3Dmigoto v1.3.16 on Fri Aug 01 11:48:18 2025
 
-#include "./Includes/Common.hlsl"
+// #include "./Includes/Common.hlsl"
+#include "./common1.hlsl"
 
 Texture2D<float4> t6 : register(t6);
 
@@ -22,7 +23,7 @@ void main(
   float2 v2 : TEXCOORD0,
   out float4 o0 : SV_TARGET0)
 {
-  // if (!GS.IsHud) discard;
+  // if (!GS_IsHud) discard;
 
   float4 r0,r1,r2,r3,r4,r5;
   uint4 bitmask, uiDest;
@@ -40,7 +41,13 @@ void main(
     r2.x = 0.333333343 * r2.x;
     r2.xy = r2.xx * r0.xy;
     r2.xy = r0.zw * cb3[6].zw + r2.xy;
-    r2.xyz = t6.Sample(s1_s, r2.xy).xyz;
+    r2.xyz = t6.Sample(s1_s, r2.xy).xyz; //this is supposed to be linear color scaled unorm 32768 before SMAA
+
+    #if CUSTOM_SDR == 0 && CUSTOM_SR > 0
+      r2.xyz = Trade_Out_NoCS(r2.xyz) * 32768.f * 2.f;
+      // r2.xyz = max(r2.xyz, 0); //clamp BT709
+    #endif
+
     r1.xyz = r2.xyz + r1.xyz;
     r1.w = (int)r1.w + 1;
   }

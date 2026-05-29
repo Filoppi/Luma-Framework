@@ -274,7 +274,7 @@ void main(
   r1.z = dot(r4.zwyx, vB);
 
   r0.xyz = r1.xyz / r0.z;
-  r0.xyz = relHDRExposure.y * GS.VolumetricFog * r0.xyz;
+  r0.xyz = relHDRExposure.y * GS_VolumetricFog * r0.xyz;
 
   //force 0 if too small
   r1.xyz = cmp(r0.xyz >= 6.10351563e-005);

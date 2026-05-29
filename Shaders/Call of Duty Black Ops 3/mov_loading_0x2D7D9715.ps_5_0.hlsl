@@ -45,13 +45,13 @@ void main(
     o0.xyz = gamma_sRGB_to_linear(o0.xyz); //must be, right?
 
     //Gamma Correction
-    o0.xyz = GammaCorrection_Linear(o0.xyz);
+    o0.xyz = GammaCorrection_Linear(o0.xyz, CS_BT709);
 
     //autohdr
     #if CUSTOM_UPSCALE_MOV > 0
-      o0.xyz = PumboAutoHDR(o0.xyz, LumaSettings.PeakWhiteNits, LumaSettings.GamePaperWhiteNits, GS.MovShoulderPow);
+      o0.xyz = PumboAutoHDR(o0.xyz, LumaSettinGS_PeakWhiteNits, LumaSettinGS_GamePaperWhiteNits, GS_MovShoulderPow);
     #endif
-    o0.xyz *= HDR_INTSCALING * GS.MovPeakRatio;
+    o0.xyz *= HDR_INTSCALING * GS_MovPeakRatio;
 
     //IntermediateEncode
     o0.xyz = GammaCorrection_IntermediateEncode(o0.xyz);

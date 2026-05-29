@@ -30,20 +30,168 @@ float getRCASLuma(float3 rgb)
 #endif
 }
 
-float3 RCAS_BO3(float3 color, Texture2D<float4> texColor, SamplerState sampler1, float2 uv , float sharpness, float paperWhite)
+float3 RCAS_BO3(float3 color, Texture2D<float4> texColor, SamplerState sampler1, float2 uv, float sharpness, float paperWhite, const bool isTradeOut = true)
 {
     // if (sharpness == 0.0f) return color;
-    
+
     // RCAS is always "pixel based" (the next 4 pixels)
     //    b
     //  d e f
     //    h
     // We check for "maxPixelCoord" and "minPixelCoord" to support dynamic resolution scaling. We assume "pixelCoord" is already within the limits.
-    float3 e = color / paperWhite;
-    float3 b = Trade_Out_NoCS(texColor.Sample(sampler1, uv, int2( 0,-1)).rgb) / paperWhite;
-    float3 d = Trade_Out_NoCS(texColor.Sample(sampler1, uv, int2(-1, 0)).rgb) / paperWhite;
-    float3 f = Trade_Out_NoCS(texColor.Sample(sampler1, uv, int2( 1, 0)).rgb) / paperWhite;
-    float3 h = Trade_Out_NoCS(texColor.Sample(sampler1, uv, int2( 0, 1)).rgb) / paperWhite;
+    // float3 e = Trade_Out_NoCS(color) / paperWhite;
+    // float3 b = Trade_Out_NoCS(texColor.Sample(sampler1, uv, int2( 0,-1)).rgb) / paperWhite;
+    // float3 d = Trade_Out_NoCS(texColor.Sample(sampler1, uv, int2(-1, 0)).rgb) / paperWhite;
+    // float3 f = Trade_Out_NoCS(texColor.Sample(sampler1, uv, int2( 1, 0)).rgb) / paperWhite;
+    // float3 h = Trade_Out_NoCS(texColor.Sample(sampler1, uv, int2( 0, 1)).rgb) / paperWhite;
+    float3 e = color;
+    float3 b = texColor.Sample(sampler1, uv, int2( 0,-1)).rgb;
+    float3 d = texColor.Sample(sampler1, uv, int2(-1, 0)).rgb;
+    float3 f = texColor.Sample(sampler1, uv, int2( 1, 0)).rgb;
+    float3 h = texColor.Sample(sampler1, uv, int2( 0, 1)).rgb;
+
+    if (isTradeOut) {
+        e = Trade_Out_NoCS(e);
+        b = Trade_Out_NoCS(b);
+        d = Trade_Out_NoCS(d);
+        f = Trade_Out_NoCS(f);
+        h = Trade_Out_NoCS(h);
+    }
+
+    e /= paperWhite;
+    b /= paperWhite;
+    d /= paperWhite;
+    f /= paperWhite;
+    h /= paperWhite;
+
+#if RCAS_DENOISE >= 1
+    // Get lumas times 2. Should use luma weights that are twice as large as normal.
+    float bL = getRCASLuma(b);
+    float dL = getRCASLuma(d);
+    float eL = getRCASLuma(e);
+    float fL = getRCASLuma(f);
+    float hL = getRCASLuma(h);
+
+    // denoise
+    float nz = (bL + dL + fL + hL) * 0.25 - eL;
+    float range = max(max(max(bL, dL), max(hL, fL)), eL) - min(min(min(bL, dL), min(eL, fL)), hL);
+    nz = saturate(abs(nz) * rcp(range));
+    nz = -0.5 * nz + 1.0;
+#endif
+
+    static const float samplesNum = 4.0; // There's 4 (5) colors to be mixed
+    // Immediate constants for peak range.
+    static const float2 peakC = float2(1.0, -samplesNum);
+
+#if RCAS_LUMINANCE_BASED
+    // These should all be >= 0, but tiny values below zero shouldn't hurt anyway, still, we clip them below as they'd be clipped by the screen anyway
+    float bLum = GetLuminance(b);
+    float dLum = GetLuminance(d);
+    float eLum = GetLuminance(e);
+    float fLum = GetLuminance(f);
+    float hLum = GetLuminance(h);
+
+    float minLum = max(min(min(bLum, dLum), min(fLum, hLum)), 0.0);
+    float maxLum = max(max(bLum, dLum), max(fLum, hLum));
+
+    float hitMin = minLum * rcp(samplesNum * maxLum);
+    float hitMax = (peakC.x - maxLum) * rcp(samplesNum * minLum + peakC.y);
+
+    float localLobe = max(-hitMin, hitMax);
+#else // !RCAS_LUMINANCE_BASED
+    // Min and max of ring.
+    float3 minRGB = min(min(b, d), min(f, h));
+    float3 maxRGB = max(max(b, d), max(f, h));
+
+#if 0 // It seems like it's ok if these values aren't in the 0-1 range, the code below will still work as expected, and avoid clipping HDR (or anyway ignoring values beyond SDR) //TODOFT3: Lilium claims the code below can break for negative rgb (scRGB) values, investigate and fix it
+    minRGB = saturate(minRGB);
+    maxRGB = saturate(maxRGB);
+#endif
+
+    // Limiters, these need to use high precision reciprocal operations.
+    // Decided to use standard rcp for now in hopes of optimizing it.
+    // It's fine if either of these can go below zero!
+    float3 hitMin = minRGB * rcp(samplesNum * maxRGB);
+    float3 hitMax = (peakC.xxx - maxRGB) * rcp(samplesNum * minRGB + peakC.yyy);
+
+    float3 lobeRGB = max(-hitMin, hitMax);
+#if 0 // An attempt to make this code, which branches by r g b channel, color space agnostic. Without this, the result heavily depends by where the rgb coordinates are in the CIE color graph, and by how luminous they are. Unfortunately this drastically reduces the sharpening intensity, even if it makes it look even more natural.
+    float localLobe = max(lobeRGB.r * Rec709_Luminance.r * 3.0, max(lobeRGB.g * Rec709_Luminance.g * 3.0, lobeRGB.b * Rec709_Luminance.b * 3.0));
+#else
+    float localLobe = max(lobeRGB.r, max(lobeRGB.g, lobeRGB.b));
+#endif
+#endif // RCAS_LUMINANCE_BASED
+
+    float lobe = max(-RCAS_LIMIT, min(localLobe, 0.0)) * sharpness;
+
+#if RCAS_DENOISE >= 1
+    // denoise
+    lobe *= nz;
+#endif
+
+    // Resolve, which needs medium precision rcp approximation to avoid visible tonality changes.
+    float rcpL = rcp(samplesNum * lobe + 1.0);
+    
+#if RCAS_LUMINANCE_BASED
+    float outputLum = ((bLum + dLum + hLum + fLum) * lobe + eLum) * rcpL;
+    // Questionable choice: in case the source center pixel had luminance zero (even if the rgb ratio wasn't flat), elevate it to grey and match the target luminance, or we'd have a division by zero.
+    // The alternative would be to keep "e" intact, but that then wouldn't have applied any sharpening.
+    float3 output = eLum != 0 ? (e * (outputLum / eLum)) : outputLum;
+#else // !RCAS_LUMINANCE_BASED
+    float3 output = ((b + d + f + h) * lobe + e) * rcpL;
+#endif // RCAS_LUMINANCE_BASED
+
+#if 0 // Debug
+    if (dynamicSharpening)
+    {
+        if (originalSharpness < sharpness)
+            output.r *= 1 + (12.0 * (sharpness - originalSharpness));
+        else
+            output.g *= 1 + (12.0 * (originalSharpness - sharpness));
+    }
+#endif
+
+    output *= paperWhite;
+
+    return output;
+}
+
+float3 RCAS_BO3(float3 color, Texture2D<float4> texColor, float2 uv , float sharpness, float paperWhite, const bool isTradeOut = true)
+{
+    // if (sharpness == 0.0f) return color;
+
+    // RCAS is always "pixel based" (the next 4 pixels)
+    //    b
+    //  d e f
+    //    h
+    // We check for "maxPixelCoord" and "minPixelCoord" to support dynamic resolution scaling. We assume "pixelCoord" is already within the limits.
+    // float3 e = Trade_Out_NoCS(color) / paperWhite;
+    // float3 b = Trade_Out_NoCS(texColor.Sample(sampler1, uv, int2( 0,-1)).rgb) / paperWhite;
+    // float3 d = Trade_Out_NoCS(texColor.Sample(sampler1, uv, int2(-1, 0)).rgb) / paperWhite;
+    // float3 f = Trade_Out_NoCS(texColor.Sample(sampler1, uv, int2( 1, 0)).rgb) / paperWhite;
+    // float3 h = Trade_Out_NoCS(texColor.Sample(sampler1, uv, int2( 0, 1)).rgb) / paperWhite;
+    float3 e = color;
+    if (isTradeOut) e = Trade_Out_NoCS(e);
+    e /= paperWhite;
+
+    //uv to pixel coordinates
+    uint2 coord = uv * LumaSettings.SwapchainSize.xy;
+
+    float3 b = texColor.Load(int3(coord, 0) + int3(0, -1, 0)).rgb;
+    if (isTradeOut) b = Trade_Out_NoCS(b);
+    b /= paperWhite;
+
+    float3 d = texColor.Load(int3(coord, 0) + int3(-1, 0, 0)).rgb;
+    if (isTradeOut) d = Trade_Out_NoCS(d);
+    d /= paperWhite;
+
+    float3 f = texColor.Load(int3(coord, 0) + int3(1, 0, 0)).rgb;
+    if (isTradeOut) f = Trade_Out_NoCS(f);
+    f /= paperWhite;
+
+    float3 h = texColor.Load(int3(coord, 0) + int3(0, 1, 0)).rgb;
+    if (isTradeOut) h = Trade_Out_NoCS(h);
+    h /= paperWhite;
 
 #if RCAS_DENOISE >= 1
     // Get lumas times 2. Should use luma weights that are twice as large as normal.

@@ -232,7 +232,6 @@ void main(
   float4 fDest;
 
 #if CUSTOM_SR == 0
-  // purposefully break this
   LET_THIS_BREAK;
 #endif
 

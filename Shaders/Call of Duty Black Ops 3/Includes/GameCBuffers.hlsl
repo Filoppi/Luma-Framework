@@ -2,17 +2,27 @@
 #define LUMA_GAME_CB_STRUCTS
 
 #ifdef __cplusplus
-#include "../../../Source/Core/includes/shader_types.h"
+#if CUSTOM_LUMA == 1
+   #include "../../../Source/Core/includes/shader_types.h"
+#else
+   #include "../../shader_types.h"
+#endif
 #endif
 
 namespace CB
 {
+#if CUSTOM_LUMA == 1
     struct LumaGameSettings
     {
         float GammaInfluence;
+        float GammaPerceptualChrominanceCorrect;
         float Exposure;
         float TonemapperRolloffStart;
         float TonemapperMaxExpected;
+        
+        float PerChannelLuminanceReductionEmulateStrength;
+        float PerChannelLuminanceReductionEmulatePeak;
+        float PerChannelLuminanceReductionEmulateMakeup;
 
         float Bloom;
         float LensFlare;
@@ -22,8 +32,8 @@ namespace CB
         float MotionBlur;
         float VolumetricFog;
         float RCAS;
-        float SDRTonemapFloorRaiseScale;
-        
+        float IsDLAA;
+
         float LUTBuilderExpansionChrominance;
         float LUTBuilderExpansionLuminance;
         float LUTBuilderHighlightSat;
@@ -32,18 +42,18 @@ namespace CB
         float LUTBuilderNeutralChrominance;
         float LUTBuilderNeutralHue;
         float LUTBuilderNeutralLuma;
-     //    float LUTBuilderNeutralLumaHPStart;
 
         float LUTBuilderGradeSMH;
         float LUTBuilderGradeTint;
         float LUTBuilderGradeSat;
-
-        float PCCLookback;
-        float PCCChrominanceBoost;
+        
         float PCCHue;
         float PCCChrominance;
-        // float PCCGuaranteed;
+        float PCCPeak;
 
+        float BlackFloorSDRTonemap;
+        float BlackFloorLUT;
+        
         float CGContrast;
         float CGContrastMidGray;
         float CGSaturation;
@@ -54,8 +64,147 @@ namespace CB
         
         float MovPeakRatio;
         float MovShoulderPow;
-   };
-   
+    };
+    #define GS_GammaInfluence LumaSettings.GameSettings.GammaInfluence
+    #define GS_GammaPerceptualChrominanceCorrect LumaSettings.GameSettings.GammaPerceptualChrominanceCorrect
+    #define GS_Exposure LumaSettings.GameSettings.Exposure
+    #define GS_TonemapperRolloffStart LumaSettings.GameSettings.TonemapperRolloffStart
+    #define GS_TonemapperMaxExpected LumaSettings.GameSettings.TonemapperMaxExpected
+
+    #define GS_PerChannelLuminanceReductionEmulateStrength LumaSettings.GameSettings.PerChannelLuminanceReductionEmulateStrength
+    #define GS_PerChannelLuminanceReductionEmulatePeak LumaSettings.GameSettings.PerChannelLuminanceReductionEmulatePeak
+    #define GS_PerChannelLuminanceReductionEmulateMakeup LumaSettings.GameSettings.PerChannelLuminanceReductionEmulateMakeup
+    
+    #define GS_Bloom LumaSettings.GameSettings.Bloom
+    #define GS_LensFlare LumaSettings.GameSettings.LensFlare
+    #define GS_SlideLensDirt LumaSettings.GameSettings.SlideLensDirt
+    #define GS_ADSSights LumaSettings.GameSettings.ADSSights
+    #define GS_XrayOutline LumaSettings.GameSettings.XrayOutline
+    #define GS_MotionBlur LumaSettings.GameSettings.MotionBlur
+    #define GS_VolumetricFog LumaSettings.GameSettings.VolumetricFog
+    #define GS_RCAS LumaSettings.GameSettings.RCAS
+    #define GS_IsDLAA LumaSettings.GameSettings.IsDLAA
+
+    #define GS_LUTBuilderExpansionChrominance LumaSettings.GameSettings.LUTBuilderExpansionChrominance
+    #define GS_LUTBuilderExpansionLuminance LumaSettings.GameSettings.LUTBuilderExpansionLuminance
+    #define GS_LUTBuilderHighlightSat LumaSettings.GameSettings.LUTBuilderHighlightSat
+    #define GS_LUTBuilderHighlightSatHighlightsOnly LumaSettings.GameSettings.LUTBuilderHighlightSatHighlightsOnly
+    
+    #define GS_LUTBuilderNeutralChrominance LumaSettings.GameSettings.LUTBuilderNeutralChrominance
+    #define GS_LUTBuilderNeutralHue LumaSettings.GameSettings.LUTBuilderNeutralHue
+    #define GS_LUTBuilderNeutralLuma LumaSettings.GameSettings.LUTBuilderNeutralLuma
+
+    #define GS_LUTBuilderGradeSMH LumaSettings.GameSettings.LUTBuilderGradeSMH
+    #define GS_LUTBuilderGradeTint LumaSettings.GameSettings.LUTBuilderGradeTint
+    #define GS_LUTBuilderGradeSat LumaSettings.GameSettings.LUTBuilderGradeSat
+
+    #define GS_PCCHue LumaSettings.GameSettings.PCCHue
+    #define GS_PCCChrominance LumaSettings.GameSettings.PCCChrominance
+    #define GS_PCCPeak LumaSettings.GameSettings.PCCPeak
+
+    #define GS_BlackFloorSDRTonemap LumaSettings.GameSettings.BlackFloorSDRTonemap
+    #define GS_BlackFloorLUT LumaSettings.GameSettings.BlackFloorLUT
+
+    #define GS_CGContrast LumaSettings.GameSettings.CGContrast
+    #define GS_CGContrastMidGray LumaSettings.GameSettings.CGContrastMidGray
+    #define GS_CGSaturation LumaSettings.GameSettings.CGSaturation
+    #define GS_CGHighlightsStrength LumaSettings.GameSettings.CGHighlightsStrength
+    #define GS_CGHighlightsMidGray LumaSettings.GameSettings.CGHighlightsMidGray
+    #define GS_CGShadowsStrength LumaSettings.GameSettings.CGShadowsStrength
+    #define GS_CGShadowsMidGray LumaSettings.GameSettings.CGShadowsMidGray
+
+    #define GS_MovPeakRatio LumaSettings.GameSettings.MovPeakRatio
+    #define GS_MovShoulderPow LumaSettings.GameSettings.MovShoulderPow
+#else
+    struct LumaGameSettings
+    {
+        float PeakWhiteNits;
+        float GamePaperWhiteNits;
+        float UIPaperWhiteNits;
+        float GammaCorrection;
+
+        float TonemapperMaxExpected;
+        float PerChannelLuminanceReductionEmulateStrength;
+
+        float Bloom;
+        float LensFlare;
+        float SlideLensDirt;
+        float ADSSights;
+        float XrayOutline;
+        float MotionBlur;
+        float VolumetricFog;
+        float RCAS;
+        
+        float PCCChrominance;
+        float BlackFloorSDRTonemap;
+    };
+    #define GS_PeakWhiteNits CB::shader_injection.PeakWhiteNits
+    #define GS_GamePaperWhiteNits CB::shader_injection.GamePaperWhiteNits
+    #define GS_UIPaperWhiteNits CB::shader_injection.UIPaperWhiteNits
+    #define GS_GammaCorrection CB::shader_injection.GammaCorrection
+
+    #define GS_GammaInfluence 1
+    #define GS_GammaPerceptualChrominanceCorrect 0.21
+    #define GS_Exposure 1
+    #define GS_TonemapperRolloffStart 0
+    #define GS_TonemapperMaxExpected CB::shader_injection.TonemapperMaxExpected
+
+    #define GS_PerChannelLuminanceReductionEmulateStrength CB::shader_injection.PerChannelLuminanceReductionEmulateStrength
+    #define GS_PerChannelLuminanceReductionEmulatePeak 1.3
+    #define GS_PerChannelLuminanceReductionEmulateMakeup 1.2
+    
+    #define GS_Bloom CB::shader_injection.Bloom
+    #define GS_LensFlare CB::shader_injection.LensFlare
+    #define GS_SlideLensDirt CB::shader_injection.SlideLensDirt
+    #define GS_ADSSights CB::shader_injection.ADSSights
+    #define GS_XrayOutline CB::shader_injection.XrayOutline
+    #define GS_MotionBlur CB::shader_injection.MotionBlur
+    #define GS_VolumetricFog CB::shader_injection.VolumetricFog
+    #define GS_RCAS CB::shader_injection.RCAS
+    #define GS_IsDLAA 1
+
+    #define GS_LUTBuilderExpansionChrominance 0
+    #define GS_LUTBuilderExpansionLuminance 0
+    #define GS_LUTBuilderHighlightSat 0
+    #define GS_LUTBuilderHighlightSatHighlightsOnly 0
+    
+    #define GS_LUTBuilderNeutralChrominance 0
+    #define GS_LUTBuilderNeutralHue 0
+    #define GS_LUTBuilderNeutralLuma 0
+
+    #define GS_LUTBuilderGradeSMH 0
+    #define GS_LUTBuilderGradeTint 0
+    #define GS_LUTBuilderGradeSat 0
+
+    #define GS_PCCHue 0.2
+    #define GS_PCCChrominance CB::shader_injection.PCCChrominance
+    #define GS_PCCPeak 5.0
+
+    #define GS_BlackFloorSDRTonemap CB::shader_injection.BlackFloorSDRTonemap
+    #define GS_BlackFloorLUT 0
+
+    #define GS_CGContrast 0
+    #define GS_CGContrastMidGray 0
+    #define GS_CGSaturation 0
+    #define GS_CGHighlightsStrength 0
+    #define GS_CGHighlightsMidGray 0
+    #define GS_CGShadowsStrength 0
+    #define GS_CGShadowsMidGray 0
+
+    #define GS_MovPeakRatio 1
+    #define GS_MovShoulderPow 0
+
+    #ifndef __cplusplus
+        // #if ((__SHADER_TARGET_MAJOR == 5 && __SHADER_TARGET_MINOR >= 1) || __SHADER_TARGET_MAJOR >= 6)
+            // cbuffer shader_injection : register(b13, space50) {
+        // #elif (__SHADER_TARGET_MAJOR < 5) || ((__SHADER_TARGET_MAJOR == 5) && (__SHADER_TARGET_MINOR < 1))
+            cbuffer shader_injection : register(b13) {
+        // #endif
+            LumaGameSettings shader_injection : packoffset(c0);
+        }
+    #endif
+#endif
+
    struct LumaGameData
    {
         float Dummy;
@@ -166,16 +315,11 @@ struct PerSceneConsts
   float4 fogConsts8;
   float4 fogConsts9;
   float3 sunFogDir; float p0;
-  
   float4 sunFogColor;
   float2 sunFog; float2 p1;
-
-	
   float4 zNear;
   float3 clothPrimaryTint; float p2;
-  
   float3 clothSecondaryTint; float p3;
-  
   float4 renderTargetSize;
   float4 upscaledTargetSize;
   float4 materialColor;

@@ -345,7 +345,9 @@ void main(uint3 vThreadID : SV_DispatchThreadID)
   // lut3D[uint3(vThreadID.xyz)] = float4(r0.xyz, 1);
   // return;
 
-  r0.xyz = lerp(colorBefore0, r0.xyz, GS.LUTBuilderGradeSMH); //user settings
+  #if CUSTOM_LUTBUILDER_VANILLA > 0
+    r0.xyz = lerp(colorBefore0, r0.xyz, GS_LUTBuilderGradeSMH); //user settings
+  #endif
 
   //luma based tint
   float3 colorBefore2 = r0.xyz;
@@ -359,7 +361,10 @@ void main(uint3 vThreadID : SV_DispatchThreadID)
   #else
     r1.xyz = r0.xyz;
   #endif
-  r1.xyz = lerp(colorBefore2, r1.xyz, GS.LUTBuilderGradeTint); //user settings
+
+  #if CUSTOM_LUTBUILDER_VANILLA > 0
+    r1.xyz = lerp(colorBefore2, r1.xyz, GS_LUTBuilderGradeTint); //user settings
+  #endif
 
   /// COLOR GRADE DONE ///
   // lut3D[uint3(vThreadID.xyz)] = float4(r1.xyz, 1);
@@ -398,7 +403,9 @@ void main(uint3 vThreadID : SV_DispatchThreadID)
   r1.xyz/* w */ = r3.xyz/* w */ + -r0.xyz/* .wyzw */; //WEIRD SWIZZLE!
   r0.xyz/* w */ = postFxControl7.w * r1.xyz/* w */ + r0.xyz/* w */; //desat final
 
-  r0.xyz = lerp(colorBefore1, r0.xyz, GS.LUTBuilderGradeSat); //user settings
+  #if CUSTOM_LUTBUILDER_VANILLA > 0
+    r0.xyz = lerp(colorBefore1, r0.xyz, GS_LUTBuilderGradeSat); //user settings
+  #endif
 
   /// DECODE Rec709 ///
 
@@ -415,45 +422,50 @@ void main(uint3 vThreadID : SV_DispatchThreadID)
   //   r0.xyzw = r2.xyzw ? r0.xyzw : r1.xyzw;
   // }
 
-
-#if CUSTOM_LUTBUILDER_SATBOOST == 0 || CUSTOM_SDR > 0
-  r0.xyz = BT709_To_BT2020(DecodeRec709(r0.xyz));
+#if CUSTOM_LUTBUILDER_COLORSPACE == 0
+  r0.xyz = DecodeRec709(r0.xyz);
 #else
-  float3 color709 = r0.xyz;
-  float3 color2020 = BT709_To_BT2020(r0.xyz);
+  #if CUSTOM_LUTBUILDER_SATBOOST == 0 || CUSTOM_SDR > 0
+    r0.xyz = BT709_To_BT2020(DecodeRec709(r0.xyz));
+  #else
+    float3 color709 = r0.xyz;
+    float3 color2020 = BT709_To_BT2020(r0.xyz);
 
-  color709 = DecodeRec709(color709);
-  color2020 = DecodeRec709(color2020);
+    color709 = DecodeRec709(color709);
+    color2020 = DecodeRec709(color2020);
 
-  color709 = UCSTo(color709, CS_BT709);
-  color2020 = UCSTo(color2020, CS_BT2020);
-  r0.xyz = RestoreHueAndChrominanceUcs(color709, color2020, 0, GS.LUTBuilderExpansionChrominance, 1);
-  r0.x = lerp(color709.x, color2020.x, GS.LUTBuilderExpansionLuminance);
-  // r0.xyz = color709;
+    color709 = UCSTo(color709, CS_BT709);
+    color2020 = UCSTo(color2020, CS_BT2020);
+    r0.xyz = RestoreHueAndChrominanceUcs(color709, color2020, 0, GS_LUTBuilderExpansionChrominance, 1);
+    r0.x = lerp(color709.x, color2020.x, GS_LUTBuilderExpansionLuminance);
+    // r0.xyz = color709;
 
-  // r0.xyz = CorrectPerChannelTonemapHiglightsDesaturationBo3(r0.xyz, 1.0, 1 - GS.LUTBuilderHighlightSat, GS.LUTBuilderHighlightSatHighlightsOnly, CS_BT2020);
-  {
-    float sourceChrominance = length(r0.yz);
-    float3 color = UCSFrom(r0.xyz, CS_BT2020);
+    // r0.xyz = CorrectPerChannelTonemapHiglightsDesaturationBo3(r0.xyz, 1.0, 1 - GS_LUTBuilderHighlightSat, GS_LUTBuilderHighlightSatHighlightsOnly, CS_BT2020);
+    {
+      float sourceChrominance = length(r0.yz);
+      float3 color = UCSFrom(r0.xyz, CS_BT2020);
 
-    float maxBrightness = max3(color); 
-    float midBrightness = GetMidValue(color);
-	  float minBrightness = min3(color);
-	  float brightnessRatio = saturate(maxBrightness / 1.0f);
+      float maxBrightness = max3(color); 
+      float midBrightness = GetMidValue(color);
+      float minBrightness = min3(color);
+      float brightnessRatio = saturate(maxBrightness / 1.0f);
 
-    brightnessRatio = lerp(brightnessRatio, sqrt(brightnessRatio), sqrt(saturate(InverseLerp(minBrightness, maxBrightness, midBrightness))));
-    brightnessRatio = pow(brightnessRatio, GS.LUTBuilderHighlightSatHighlightsOnly); //skewed towards highlights only
+      brightnessRatio = lerp(brightnessRatio, sqrt(brightnessRatio), sqrt(saturate(InverseLerp(minBrightness, maxBrightness, midBrightness))));
+      brightnessRatio = pow(brightnessRatio, GS_LUTBuilderHighlightSatHighlightsOnly); //skewed towards highlights only
 
-    float chrominancePow = lerp(1.0, 1.0 / (1 - GS.LUTBuilderHighlightSat), brightnessRatio);
-    
-    float targetChrominance = sourceChrominance > 1.0 ? pow(sourceChrominance, chrominancePow) : (1.0 - pow(1.0 - sourceChrominance, chrominancePow));
-    float chrominanceRatio = safeDivision(targetChrominance, sourceChrominance, 1);
+      float chrominancePow = lerp(1.0, 1.0 / (1 - GS_LUTBuilderHighlightSat), brightnessRatio);
+      
+      float targetChrominance = sourceChrominance > 1.0 ? pow(sourceChrominance, chrominancePow) : (1.0 - pow(1.0 - sourceChrominance, chrominancePow));
+      float chrominanceRatio = safeDivision(targetChrominance, sourceChrominance, 1);
 
-    r0.yz *= chrominanceRatio;
-  }
+      r0.yz *= chrominanceRatio * 1.0115;
+    }
 
-  r0.xyz = UCSFrom(r0.xyz, CS_BT2020);
+    r0.xyz = UCSFrom(r0.xyz, CS_BT2020);
+  #endif
 #endif
+
+
 
 
   // r0.xyzw = float4(32768,32768,32768,32768) * r0.xyzw; //packing, eww

@@ -35,7 +35,7 @@ void main(
   float2 v2 : TEXCOORD0,
   out float4 o0 : SV_TARGET0)
 {
-  if (!GS.IsHud) discard;
+  if (!GS_IsHud) discard;
 
   const float4 icb[] = { { 0.007959, 0, 0, 0},
                               { 0.008049, 0, 0, 0},

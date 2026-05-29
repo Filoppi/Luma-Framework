@@ -199,17 +199,25 @@ void main(
   r4.xyzw = r3.xyxy * aberrationFactors.xxyy + r1.xzxz;
   r1.yw = r2.xy * r1.ww;
   r1.yw = float2(0.125,0.125) * r1.yw;
-  r5.x = 0;
-  r2.x = 0;
+
+  //radial blur
+  r5.x = 0; //color aggregate
+  r2.x = 0; //loop index
   while (true) {
     r2.y = cmp((int)r2.x >= 8);
     if (r2.y != 0) break;
     r2.y = (int)r2.x;
     r2.yw = saturate(r1.yw * r2.yy + r4.xy);
+
     r2.y = frameBuffer.Sample(bilinearClampler_s, r2.yw).x;
+    // float3 bruh = frameBuffer.Sample(bilinearClampler_s, r2.yw);
+    // bruh = Trade_Out(bruh);
+    // r2.y = bruh.x;
+
     r5.x = r5.x + r2.y;
     r2.x = (int)r2.x + 1;
   }
+
   r5.y = 0;
   r2.x = 0;
   while (true) {
@@ -217,10 +225,16 @@ void main(
     if (r2.y != 0) break;
     r2.y = (int)r2.x;
     r2.yw = saturate(r1.yw * r2.yy + r4.zw);
+
     r2.y = frameBuffer.Sample(bilinearClampler_s, r2.yw).y;
+    // float3 bruh = frameBuffer.Sample(bilinearClampler_s, r2.yw);
+    // bruh = Trade_Out(bruh);
+    // r2.y = bruh.y;
+
     r5.y = r5.y + r2.y;
     r2.x = (int)r2.x + 1;
   }
+
   r1.xz = r3.xy * aberrationFactors.zz + r1.xz;
   r5.z = 0;
   r2.x = 0;
@@ -229,10 +243,17 @@ void main(
     if (r2.y != 0) break;
     r2.y = (int)r2.x;
     r2.yw = saturate(r1.yw * r2.yy + r1.xz);
+
     r2.y = frameBuffer.Sample(bilinearClampler_s, r2.yw).z;
+    // float3 bruh = frameBuffer.Sample(bilinearClampler_s, r2.yw);
+    // bruh = Trade_Out(bruh);
+    // r2.y = bruh.z;
+    
     r5.z = r5.z + r2.y;
     r2.x = (int)r2.x + 1;
   }
+
+  //something
   r1.xy = float2(0.0174532924,0.0174532924) * scriptVector1.yx;
   sincos(r1.xy, r1.xy, r2.xy);
   r3.x = r2.x * r2.y;
@@ -256,24 +277,30 @@ void main(
   r2.xyz = r3.xyz * r1.yyy;
   r1.yzw = r4.xyz * r1.zzz;
 
-  #if CUSTOM_SDR == 0
-    r3.xyz = float3(3.81469727e-006,3.81469727e-006,3.81469727e-006) * r5.xyz;
-    r0.xyz = -r5.xyz * float3(3.81469727e-006,3.81469727e-006,3.81469727e-006) + r0.xyz;
-  #else
+  // #if CUSTOM_SDR == 0
+  //   r3.xyz = float3(3.81469727e-006,3.81469727e-006,3.81469727e-006) * r5.xyz;
+  //   r0.xyz = -r5.xyz * float3(3.81469727e-006,3.81469727e-006,3.81469727e-006) + r0.xyz;
+  // #else
+    r5.xyz = Trade_Out(r5.xyz);
+    r5.xyz *= 32768 / 64;
     r3.xyz = r5.xyz;
     r0.xyz = -r5.xyz + r0.xyz;
-  #endif
+  // #endif
 
   r0.xyz = r0.www * r0.xyz + r3.xyz;
   r0.xyz = r2.xyz * r1.xxx + r0.xyz;
   r0.xyz = r1.yzw * r1.xxx + r0.xyz;
 
   o0.xyz = r0.xyz;
-  #if CUSTOM_SDR == 0
-    o0.xyz *= float3(32768, 32768, 32768);
-  #else
-    o0.xyz *= 0.125f;
-  #endif
+
+  o0.xyz /= 32768;
+  o0.xyz = Trade_In(o0.xyz);
+
+  // #if CUSTOM_SDR == 0
+  //   o0.xyz *= float3(32768, 32768, 32768);
+  // #else
+  //   o0.xyz *= 0.125f;
+  // #endif
 
   o0.w = 1;
   return;

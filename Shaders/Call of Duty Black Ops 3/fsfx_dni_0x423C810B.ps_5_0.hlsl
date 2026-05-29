@@ -1,3 +1,5 @@
+//Tint + Animated Overlay
+
 // ---- Created with 3Dmigoto v1.3.16 on Fri Aug 29 18:05:13 2025
 
 cbuffer _Globals : register(b0)
@@ -159,14 +161,16 @@ void main(
   r1.w = 0.200000003 * r1.w;
   r2.xy = renderTargetSize.zw * r1.ww;
   r2.zw = r0.zw * r2.xy + v1.xy;
-  r3.xyz = frameBuffer.Sample(trilinearSampler_s, r2.zw).xyz;
-  r4.xyzw = frameBuffer.Sample(trilinearSampler_s, v1.xy).xyzw;
+
+  r3.xyz = frameBuffer.Sample(trilinearSampler_s, r2.zw).xyz; /* r3.xyz = Trade_Out_NoCS(r3.xyz); */
+  r4.xyzw = frameBuffer.Sample(trilinearSampler_s, v1.xy).xyzw; /* r4.xyz = Trade_Out_NoCS(r4.xyz); */
   r2.zw = -r0.zw * r2.xy + v1.xy;
-  r5.xyz = frameBuffer.Sample(trilinearSampler_s, r2.zw).xyz;
+  r5.xyz = frameBuffer.Sample(trilinearSampler_s, r2.zw).xyz; /* r5.xyz = Trade_Out_NoCS(r5.xyz); */
   r2.zw = -r0.zw * r2.xy + r2.zw;
-  r6.xyz = frameBuffer.Sample(trilinearSampler_s, r2.zw).xyz;
+  r6.xyz = frameBuffer.Sample(trilinearSampler_s, r2.zw).xyz; /* r6.xyz = Trade_Out_NoCS(r6.xyz); */
   r0.zw = -r0.zw * r2.xy + r2.zw;
-  r2.xyz = frameBuffer.Sample(trilinearSampler_s, r0.zw).xyz;
+  r2.xyz = frameBuffer.Sample(trilinearSampler_s, r0.zw).xyz; /* r2.xyz = Trade_Out_NoCS(r2.xyz); */
+  
   if (r1.z != 0) {
     r3.xyz = r4.xyz + r3.xyz;
     r3.xyz = r3.xyz + r5.xyz;
@@ -176,6 +180,7 @@ void main(
   } else {
     r2.xyz = float3(0,0,0);
   }
+
   r0.xy = scriptVector0.zz * r0.xy;
   r0.xy = saturate(r0.xy * float2(0.5,0.5) + float2(0.5,0.5));
   r3.xyzw = cmp(r0.xyxy == float4(0,0,1,1));
@@ -183,9 +188,9 @@ void main(
   r0.z = (int)r0.w | (int)r0.z;
   r0.z = r0.z ? 0 : scriptVector0.w;
   r3.xyzw = irisTexture.Sample(trilinearSampler_s, r0.xy).xyzw;
-  r3.xyz = FixFSFX(r3.xyz, 0.05f, true);
-
   r0.xyw = irisGlowColor.xyz * r3.xyz;
+  // r3.xyz = FixFSFX(r3.xyz, 0.01f, true);
+
   r1.z = saturate(-revealEdgeSoftness * 0.5 + scriptVector0.y);
   r1.w = saturate(scriptVector0.y);
   r2.w = r1.w + -r1.z;
@@ -209,7 +214,12 @@ void main(
   r1.z = exp2(r1.z);
   r0.z = irisGlowAmount * r1.z + r0.z;
   r3.xyz = float3(3.05175781e-005,3.05175781e-005,3.05175781e-005) * r4.xyz;
+  // r3.xyz = FixFSFX(r3.xyz, 1.f, true);
+
+  r2.xyz = Trade_Out(r2.xyz);
   r2.xyz = -r4.xyz * float3(3.05175781e-005,3.05175781e-005,3.05175781e-005) + r2.xyz;
+  r2.xyz = Trade_In(r2.xyz);
+
   r1.yzw = r1.yyy * r2.xyz + r3.xyz;
   r1.x = saturate(scriptVector1.x * r1.x);
   r2.x = dot(r1.yzw, float3(0.212599993,0.715200007,0.0722000003));
@@ -217,7 +227,6 @@ void main(
   r1.xyz = r1.xxx * r2.xyz + r1.yzw;
   r0.xyz = r0.xyw * r0.zzz + r1.xyz;
   o0.xyz = float3(32768,32768,32768) * r0.xyz;
-
 
   o0.w = r4.w;
   return;

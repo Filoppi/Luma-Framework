@@ -163,7 +163,7 @@ void main(
   r0.xyzw = codeTexture0.Sample(biLinearClamp_s, r0.zw).xyzw;
   r1.xyzw = r2.xyzw + r1.xyzw;
   r0.xyzw = r1.xyzw + r0.xyzw;
-  r0.w = 0.142857149 * r0.w;
+  r0.w = 0.142857149 * r0.w; //1/7
   r0.xyz = postFxBloom02.xyz * r0.xyz;
   r1.xyz = postFxBloom03.xyz * r0.www;
   r0.xyz = r0.xyz * float3(0.142857149,0.142857149,0.142857149) + r1.xyz;
@@ -171,33 +171,61 @@ void main(
   r0.xyz = r1.xyz + r0.xyz;
   r0.xyz = max(0, r0.xyz);
 
-  r1.xyz = 1 + r0.xyz;
-  r0.xyz = r0.xyz / r1.xyz;
+  // tonemap (Reinhard)
+  //  r1.xyz = 1 + r0.xyz;
+  //  r0.xyz = r0.xyz / r1.xyz;
+  #if CUSTOM_SDR == 0
+    #if CUSTOM_BLOOM_TONEMAP == 0
+      //max channel reinhard
+      {
+        float y = max(r0.x, max(r0.y, r0.z)); /* GetLuminance(r0.xyz, CS_BT709); */
+        if (y > 0) {
+          float y1 = Reinhard::ReinhardSimple(y, 1);
+          float ratio = y1 / y;
+          r0.xyz *= ratio;
+        }
+      }
+    #elif CUSTOM_BLOOM_TONEMAP == 1
+      // jodie
+      r0.xyz = Reinhard::Jodie(r0.xyz, 1, 0.25, CS_BT709);
+    #endif
+  #else
+    //per channel reinhard
+    r0.xyz = Reinhard::ReinhardSimple(r0.xyz, 1);
+  #endif
 
+  //contrast and stuff
   r0.xyz = sqrt(r0.xyz);
-  r0.xyz = saturate(r0.xyz * postFxBloom12.xyz + postFxBloom13.xyz);
+  r0.xyz = saturate(r0.xyz * postFxBloom12.xyz + postFxBloom13.xyz); //tint?
   r0.xyz = log2(r0.xyz);
-  r0.xyz = postFxBloom14.xyz * r0.xyz;
+  r0.xyz = postFxBloom14.xyz * r0.xyz; //gamma
   r0.xyz = exp2(r0.xyz);
-  r0.xyz = saturate(r0.xyz * postFxBloom15.xyz + postFxBloom16.xyz);
+  r0.xyz = saturate(r0.xyz * postFxBloom15.xyz + postFxBloom16.xyz); //tint?
   r0.xyz = r0.xyz * r0.xyz;
-  r0.w = dot(r0.xyz, postFxBloom17.xyz);
-  r1.x = saturate(postFxBloom17.w + r0.w);
+
+  //luminance based perchannel strength
+  r0.w = dot(r0.xyz, postFxBloom17.xyz); 
+  r1.x = /* saturate */(postFxBloom17.w + r0.w); //r
+
   r0.w = dot(r0.xyz, postFxBloom18.xyz);
+  r1.y = /* saturate */(postFxBloom18.w + r0.w); //g
+
   r0.x = dot(r0.xyz, postFxBloom19.xyz);
-  r1.z = saturate(postFxBloom19.w + r0.x);
-  r1.y = saturate(postFxBloom18.w + r0.w);
-  // r0.xyz = max(0, r0.xyz); //new, replaces saturate
+  r1.z = /* saturate */(postFxBloom19.w + r0.x); //g
 
-  r0.xyz = log2(r1.xyz);
-  r0.xyz = float3(0.449999988,0.449999988,0.449999988) * r0.xyz;
-  r0.xyz = exp2(r0.xyz);
-  r0.xyz = r0.xyz * float3(1.09899998,1.09899998,1.09899998) + float3(-0.0989999995,-0.0989999995,-0.0989999995);
-  r2.xyz = cmp(float3(0.0179999992,0.0179999992,0.0179999992) >= r1.xyz);
-  r1.xyz = float3(4.5,4.5,4.5) * r1.xyz;
-  r0.xyz = r2.xyz ? r1.xyz : r0.xyz;
+  r1.xyz = max(0, r1.xyz); //clean
+  // r0.xyz = log2(r1.xyz);
+  // r0.xyz = float3(0.449999988,0.449999988,0.449999988) * r0.xyz;
+  // r0.xyz = exp2(r0.xyz);
+  // r0.xyz = r0.xyz * float3(1.09899998,1.09899998,1.09899998) + float3(-0.0989999995,-0.0989999995,-0.0989999995);
+  // r2.xyz = cmp(float3(0.0179999992,0.0179999992,0.0179999992) >= r1.xyz);
+  // r1.xyz = float3(4.5,4.5,4.5) * r1.xyz;
+  // r0.xyz = r2.xyz ? r1.xyz : r0.xyz;
+  r0.xyz = EncodeRec709(r1.xyz);
 
-  r0.xyz = max(0, r0.xyz);
-  o0.xyz = /* 256.f * */ r0.xyz * GS.Bloom;
+  o0.xyz = /* 256.f * */ r0.xyz;
+  #if CUSTOM_SDR > 0
+    o0.xyz *= GS_Bloom;
+  #endif
   return;
 }

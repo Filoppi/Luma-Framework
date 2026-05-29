@@ -144,9 +144,7 @@ void main(
     LET_THIS_BREAK;
   #endif
 
-  r0.xyzw = colorMap.Sample(bilinearSampler_s, v1.xy).xyzw;
-  r0.xyz = FixFSFX(r0.xyz, 0.005f);
-  
+  r0.xyzw = colorMap.Sample(bilinearSampler_s, v1.xy).xyzw;  
   r1.xyz = float3(-1,-1,-1) + scriptVector1.xyz;
   r1.xyz = scriptVector0.zzz * r1.xyz + float3(1,1,1);
   r0.xyz = r1.xyz * r0.xyz;
@@ -183,10 +181,12 @@ void main(
   }
   r1.yz = saturate(v1.xy + r1.yz);
   r2.xyzw = frameBuffer.Sample(bilinearSampler_s, r1.yz).xyzw;
+  r2.xyz = Trade_Out(r2.xyz);
   r1.x = r1.x * r0.w;
-  r3.xyzw = float4(3.05175781e-005,3.05175781e-005,3.05175781e-005,1) * r2.xyzw;
-  r0.xyzw = -r2.xyzw * float4(3.05175781e-005,3.05175781e-005,3.05175781e-005,1) + r0.xyzw;
+  r3.xyzw = /* float4(3.05175781e-005,3.05175781e-005,3.05175781e-005,1) * */ r2.xyzw;
+  r0.xyzw = -r2.xyzw /* * float4(3.05175781e-005,3.05175781e-005,3.05175781e-005,1) */ + r0.xyzw;
   r0.xyzw = r1.xxxx * r0.xyzw + r3.xyzw;
-  o0.xyzw = float4(32768,32768,32768,1) * r0.xyzw;
+  o0.xyzw = /* float4(32768,32768,32768,1) * */ r0.xyzw;
+  o0.xyz = Trade_In(o0.xyz);
   return;
 }

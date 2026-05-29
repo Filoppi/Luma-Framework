@@ -4,6 +4,7 @@
 // #define LUT_OUT_MULTIPLIER (1/32768.)
 
 #include "./Includes/Common.hlsl"
+
 #include "../Includes/Math.hlsl"
 #include "../Includes/Color.hlsl"
 #include "../Includes/Tonemap.hlsl"
@@ -14,6 +15,25 @@
 #define TRADE_SCALE HDR_PEAK * 0.25 /*  Still have no clue why 0.3 is good fudge factor. */
 
 #define cmp -
+
+#if CUSTOM_LUTBUILDER_COLORSPACE == 0
+  const static uint lutbuilder_colorspace = CS_BT709;
+#else
+  const static uint lutbuilder_colorspace = CS_BT2020;
+#endif
+
+static struct TonemapStuffStruct {
+  float3 colorU;
+  float3 colorT;
+
+  float3 colorTRaw; //baseline raw after tonemap, before bloom/lensflare
+  float3 colorTRawLUTed; //baseline raw now LUTed, right before Upgrade()
+
+  float3 colorTWithBloom; //raw + bloom
+  float3 colorTWithLens; //raw + lensflare
+
+  float3 LutMinimumOutput; //Lut results sampled at (0,0,0)
+} TS;
 
 ////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
 float3 UCSTo(float3 x, uint cs) {
@@ -69,7 +89,7 @@ ENCODEREC709(float3)
 ENCODEREC709(float4)
 #undef ENCODEREC709
 ////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
-//From Musa (I think)
+//https://github.com/clshortfuse/renodx/blob/main/src/shaders/tonemap/reinhard.hlsl
 namespace Reinhard {
   float ReinhardPiecewiseExtended(float x, float white_max, float x_max = 1.f, float shoulder = 0.18f)
   {
@@ -97,6 +117,20 @@ namespace Reinhard {
      float scale = safeDivision(mapped_peak, peak, 0);
 
      return scale;
+  }
+
+  //https://github.com/patriciogonzalezvivo/lygia/blob/main/color/tonemap/reinhardJodie.hlsl
+  //https://web.archive.org/web/20210205114323/http://www.cmap.polytechnique.fr/~peyre/cours/x2005signal/hdr_photographic.pdf
+  float3 Jodie(float3 x, float peak = 1.f, float perchannelInfluence = 1.f, uint cs = CS_BT709) {
+     float3 perScaled = Reinhard::ReinhardSimple(x, peak);
+
+     float y = GetLuminance(x, cs);
+     float3 yScaled = x / (y + 1.0f);
+
+     x = lerp(yScaled, perScaled, y * perchannelInfluence);
+     x = min(x, peak);
+
+     return x;
   }
 
   namespace inverse {
@@ -127,6 +161,41 @@ namespace Reinhard {
     }
   }
 }
+////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
+// Uchimura 2018, "Practical HDR and Wide Color Techniques in Gran Turismo SPORT"
+// https://www.desmos.com/calculator/gslcdxvipg
+// http://cdn2.gran-turismo.com/data/www/pdi_publications/PracticalHDRandWCGinGTS.pdf
+#define GTTONEMAP_GENERATOR(T)                \
+  T GTTonemap(T x,                            \
+              float P = 1.f,                  \
+              float a = 1.f,                  \
+              float m = 0.22f,                \
+              float l = 0.5f,                 \
+              float c = 1.33f,                \
+              float b = 0.f) {                \
+    float l0 = ((P - m) * l) / a;             \
+    float L0 = m - (m / a);                   \
+    float L1 = m + (1.0f - m) / a;            \
+                                              \
+    T S0 = m + l0;                            \
+    T S1 = m + a * l0;                        \
+    T C2 = (a * P) / (P - S1);                \
+    T CP = -C2 / P;                           \
+                                              \
+    T w0 = 1.0f - smoothstep(0.0f, m, x);     \
+    T w2 = step(m + l0, x);                   \
+    T w1 = 1.0f - w0 - w2;                    \
+                                              \
+    T T_ = m * pow(x / m, c) + b;             \
+    T S_ = P - (P - S1) * exp(CP * (x - S0)); \
+    T L_ = m + a * (x - m);                   \
+                                              \
+    return T_ * w0 + L_ * w1 + S_ * w2;       \
+  }
+
+GTTONEMAP_GENERATOR(float)
+GTTONEMAP_GENERATOR(float3)
+#undef GTTONEMAP_GENERATOR
 ////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
 //https://github.com/clshortfuse/renodx/blob/main/src/shaders/tonemap/hermite_spline.hlsl
 namespace HermiteSpline {
@@ -180,6 +249,16 @@ namespace HermiteSpline {
 
     return min(e_4, target_white);
   }
+  float3 HermiteSplinePerChannelRolloff(float3 input, float target_white = 1.f, float max_white = 20.f) {
+    float target_white_log2 = log2(target_white);
+    float max_white_log2 = log2(max_white);
+    float3 scaled = float3(
+        input.r == 0 ? 0 : exp2(HermiteSplineRolloff(log2(input.r), target_white_log2, max_white_log2)),
+        input.g == 0 ? 0 : exp2(HermiteSplineRolloff(log2(input.g), target_white_log2, max_white_log2)),
+        input.b == 0 ? 0 : exp2(HermiteSplineRolloff(log2(input.b), target_white_log2, max_white_log2)));
+    return scaled;
+  }
+
   float HermiteSplineLuminanceRolloff(float luminance, float target_white = 1.f, float max_white = 20.f) {
     if (luminance <= 0) return 0;
     return exp2(HermiteSplineRolloff(log2(luminance), log2(target_white), log2(max_white)));
@@ -188,13 +267,240 @@ namespace HermiteSpline {
 ////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
 //https://github.com/clshortfuse/renodx/blob/main/src/shaders/tonemap/neutwo.hlsl
 namespace NeuTwo {
-  float NeuTwo(float x, float peak) {
-    // also written as x * rhypot(x, peak)
-    float p = peak;
+// f\left(x\right)=\frac{x}{\sqrt{xx+1}}
+float NeuTwo(float x) {
+  // also written as x * rhypot(x, 1.0)
+  float numerator = x;
+  float denominator_squared = mad(x, x, 1.0);
+  return numerator * rsqrt(denominator_squared);
+}
 
-    float numerator = p * x;
-    float denominator_squared = mad(x, x, p * p);
-    return numerator * rsqrt(denominator_squared);
+// f_{p}\left(x\right)=\frac{px}{\sqrt{xx+pp}}
+float NeuTwo(float x, float peak) {
+  // also written as x * rhypot(x, peak)
+  float p = peak;
+
+  float numerator = p * x;
+  float denominator_squared = mad(x, x, p * p);
+  return numerator * rsqrt(denominator_squared);
+}
+
+// f_{c}\left(x\right)=\frac{cpx}{\sqrt{xx\cdot\left(cc-pp\right)+\left(cc\cdot pp\right)}}
+float NeuTwo(float x, float peak, float clip) {
+  float p = peak;
+  float c = clip;
+  float cc = c * c;
+  float pp = p * p;
+  float xx = x * x;
+
+  float numerator = c * p * x;
+  float denominator_squared = mad(xx, (cc - pp), cc * pp);
+
+  return numerator * rsqrt(denominator_squared);
+}
+
+// f_{g}\left(x\right)=\frac{pgx\left(cc-gg\right)}{\sqrt{\left(cc-gg\right)\cdot gg\cdot\left(xx\cdot\left(cc-pp\right)+cc\cdot\left(pp-gg\right)\right)}}
+float NeuTwo(float x, float peak, float clip, float gray) {
+  float p = peak;
+  float g = gray;
+  float c = clip;
+
+  float cc = c * c;
+  float pp = p * p;
+  float gg = g * g;
+  float xx = x * x;
+  float cc_minus_gg = cc - gg;
+
+  float numerator = p * g * x * cc_minus_gg;
+  float denominator_squared = cc_minus_gg * gg * (mad(xx, (cc - pp), cc * (pp - gg)));
+  return numerator * rsqrt(denominator_squared);
+}
+
+// f_{o}\left(x\right)=\frac{pox\left(cc-gg\right)}{\sqrt{\left(cc-gg\right)\cdot\left(xx\cdot\left(ccoo-ppgg\right)+ccgg\cdot\left(pp-oo\right)\right)}}
+float NeuTwo(float x, float peak, float clip, float gray_in, float gray_out) {
+  float p = peak;
+  float g = gray_in;
+  float o = gray_out;
+
+  float cc = clip * clip;
+  float pp = peak * peak;
+  float gg = g * g;
+  float oo = o * o;
+  float xx = x * x;
+
+  float cc_minus_gg = cc - gg;
+
+  float numerator = p * o * x * cc_minus_gg;
+
+  float ccoo = cc * oo;
+  float ppgg = pp * gg;
+  float ccgg = cc * gg;
+
+  float denominator_squared = cc_minus_gg * mad(xx, (ccoo - ppgg), ccgg * (pp - oo));
+
+  return numerator * rsqrt(denominator_squared);
+}
+
+// // f_{m}\left(x\right)=\frac{qzx\left(cc-gg\right)}{\sqrt{\left(cc-gg\right)\cdot\left(xx\cdot\left(cczz-qqgg\right)+ccgg\cdot\left(qq-zz\right)\right)}}+m
+// float NeuTwo(float x, float peak, float clip, float gray_in, float gray_out, float minimum) {
+//   float m = minimum;
+//   float g = gray_in;
+//   float z = gray_out - m;
+//   float q = peak - m;
+//   float c = clip;
+// 
+//   float cc = c * c;
+//   float gg = g * g;
+//   float cc_minus_gg = cc - gg;
+// 
+//   float numerator = q * z * x * cc_minus_gg;
+// 
+//   float xx = x * x;
+//   float zz = z * z;
+//   float qq = q * q;
+// 
+//   float cczz = cc * zz;
+//   float qqgg = qq * gg;
+//   float ccgg = cc * gg;
+// 
+//   float denominator_squared = cc_minus_gg * mad(xx, (cczz - qqgg), ccgg * (qq - zz));
+// 
+//   return mad(numerator, rsqrt(denominator_squared), m);
+// }
+
+  float3 PerChannel(float3 color) {
+    return float3(NeuTwo(color.r),
+                  NeuTwo(color.g),
+                  NeuTwo(color.b));
+  }
+
+  float3 PerChannel(float3 color, float3 peak) {
+    return float3(NeuTwo(color.r, peak.r),
+                  NeuTwo(color.g, peak.g),
+                  NeuTwo(color.b, peak.b));
+  }
+
+  float3 PerChannel(float3 color, float3 peak, float3 clip) {
+    return float3(NeuTwo(color.r, peak.r, clip.r),
+                  NeuTwo(color.g, peak.g, clip.g),
+                  NeuTwo(color.b, peak.b, clip.b));
+  }
+
+  float3 PerChannel(float3 color, float3 peak, float3 clip, float3 gray) {
+    return float3(NeuTwo(color.r, peak.r, clip.r, gray.r),
+                  NeuTwo(color.g, peak.g, clip.g, gray.g),
+                  NeuTwo(color.b, peak.b, clip.b, gray.b));
+  }
+
+  float3 PerChannel(float3 color, float3 peak, float3 clip, float3 gray_in, float3 gray_out) {
+    return float3(NeuTwo(color.r, peak.r, clip.r, gray_in.r, gray_out.r),
+                  NeuTwo(color.g, peak.g, clip.g, gray_in.g, gray_out.g),
+                  NeuTwo(color.b, peak.b, clip.b, gray_in.b, gray_out.b));
+  }
+
+
+  namespace inverse {
+    // f_{i}\left(x\right)=\frac{x}{\sqrt{-xx+1}}
+    float NeuTwo(float x) {
+      float numerator = x;
+      float denominator_squared = mad(-x, x, 1.0);
+      return numerator * rsqrt(denominator_squared);
+    }
+
+    float3 PerChannel(float3 color) {
+       return float3(NeuTwo(color.r),
+                     NeuTwo(color.g),
+                     NeuTwo(color.b));
+    }
+
+    // f_{pi}\left(x\right)=\frac{px}{\sqrt{-xx+pp}}
+    float NeuTwo(float x, float peak) {
+      float p = peak;
+
+      float numerator = p * x;
+      float denominator_squared = mad(-x, x, p * p);
+      return numerator * rsqrt(denominator_squared);
+    }
+
+    float3 PerChannel(float3 color, float3 peak) {
+       return float3(NeuTwo(color.r, peak.r),
+                     NeuTwo(color.g, peak.g),
+                     NeuTwo(color.b, peak.b));
+    }
+
+    // f_{ci}\left(x\right)=\frac{cpx}{\sqrt{-xx\cdot\left(cc-pp\right)+\left(cc\cdot pp\right)}}
+    float NeuTwo(float x, float peak, float clip) {
+      float p = peak;
+      float c = clip;
+      float cc = c * c;
+      float pp = p * p;
+      float xx = x * x;
+
+      float numerator = c * p * x;
+      float denominator_squared = mad(-xx, (cc - pp), cc * pp);
+
+      return numerator * rsqrt(denominator_squared);
+    }
+
+    float3 PerChannel(float3 color, float3 peak, float3 clip) {
+       return float3(NeuTwo(color.r, peak.r, clip.r),
+                     NeuTwo(color.g, peak.g, clip.g),
+                     NeuTwo(color.b, peak.b, clip.b));
+    }
+
+    // f_{gi}\left(x\right)=\frac{pgx\left(cc-gg\right)}{\sqrt{\left(cc-gg\right)\cdot gg\cdot\left(-xx\cdot\left(cc-pp\right)+cc\cdot\left(pp-gg\right)\right)}}
+    float NeuTwo(float x, float peak, float clip, float gray) {
+      float p = peak;
+      float g = gray;
+      float c = clip;
+
+      float cc = c * c;
+      float pp = p * p;
+      float gg = g * g;
+      float xx = x * x;
+      float cc_minus_gg = cc - gg;
+
+      float numerator = p * g * x * cc_minus_gg;
+      float denominator_squared = cc_minus_gg * gg * (mad(-xx, (cc - pp), cc * (pp - gg)));
+      return numerator * rsqrt(denominator_squared);
+    }
+
+    float3 PerChannel(float3 color, float3 peak, float3 clip, float3 gray) {
+       return float3(NeuTwo(color.r, peak.r, clip.r, gray.r),
+                     NeuTwo(color.g, peak.g, clip.g, gray.g),
+                     NeuTwo(color.b, peak.b, clip.b, gray.b));
+    }
+
+    // f_{oi}\left(x\right)=\frac{pox\left(cc-gg\right)}{\sqrt{\left(cc-gg\right)\cdot\left(-xx\cdot\left(ccoo-ppgg\right)+ccgg\cdot\left(pp-oo\right)\right)}}
+    float NeuTwo(float x, float peak, float clip, float gray_in, float gray_out) {
+      float p = peak;
+      float g = gray_in;
+      float o = gray_out;
+
+      float cc = clip * clip;
+      float pp = peak * peak;
+      float gg = g * g;
+      float oo = o * o;
+      float xx = x * x;
+
+      float cc_minus_gg = cc - gg;
+
+      float numerator = p * o * x * cc_minus_gg;
+
+      float ccoo = cc * oo;
+      float ppgg = pp * gg;
+      float ccgg = cc * gg;
+
+      float denominator_squared = cc_minus_gg * mad(-xx, (ccoo - ppgg), ccgg * (pp - oo));
+
+      return numerator * rsqrt(denominator_squared);
+    }
+
+    float3 PerChannel(float3 color, float3 peak, float3 clip, float3 gray_in, float3 gray_out) {
+       return float3(NeuTwo(color.r, peak.r, clip.r, gray_in.r, gray_out.r),
+                     NeuTwo(color.g, peak.g, clip.g, gray_in.g, gray_out.g),
+                     NeuTwo(color.b, peak.b, clip.b, gray_in.b, gray_out.b));
+    }
   }
 }
 ////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
@@ -219,31 +525,6 @@ float3 ClampByMaxChannel(float3 x, float peak) {
   return x;
 }
 ////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
-float3 CorrectPerChannelTonemapHiglightsDesaturationBo3(float3 color, float peakBrightness, float desaturationExponent = 2.0, float highlightsOnly = 2, uint colorSpace = CS_DEFAULT)
-{
-  float sourceChrominance = length(UCSTo(color, CS_BT2020).yz);
-
-  float maxBrightness = max3(color); 
-  float midBrightness = GetMidValue(color);
-	float minBrightness = min3(color);
-	float brightnessRatio = saturate(maxBrightness / peakBrightness);
-
-  brightnessRatio = lerp(brightnessRatio, sqrt(brightnessRatio), sqrt(saturate(InverseLerp(minBrightness, maxBrightness, midBrightness))));
-  brightnessRatio = pow(brightnessRatio, highlightsOnly); // skewed towards highlights only
-
-  float chrominancePow = lerp(1.0, 1.0 / desaturationExponent, brightnessRatio);
-  
-  float targetChrominance = sourceChrominance > 1.0 ? pow(sourceChrominance, chrominancePow) : (1.0 - pow(1.0 - sourceChrominance, chrominancePow));
-  float chrominanceRatio = safeDivision(targetChrominance, sourceChrominance, 1);
-
-  // return RestoreLuminance(SetChrominance(color, chrominanceRatio), color, true, colorSpace);
-  color = UCSTo(color, CS_BT2020);
-  color.yz *= chrominanceRatio;
-  color = UCSFrom(color, CS_BT2020);
-  color = max(0, color); //clamp BT2020
-  return color;
-}
-
 float3 RestoreHueAndChrominanceUcsInternal(float3 targetUcs, float3 sourceUcs, float currentChrominance, float hueStrength, float chrominanceStrength, float minChromaRatio = 0.f)
 {
   if (targetUcs.x == 0) return targetUcs;
@@ -306,12 +587,16 @@ float3 Trade_Out_NoCS(float3 x) {
 }
 
 float3 Trade_In(float3 x) {
-  x = BT709_To_BT2020(x);
+  #if CUSTOM_LUTBUILDER_COLORSPACE == 1
+    x = BT709_To_BT2020(x);
+  #endif
   x = Trade_In_NoCS(x);
   return x;
 }
 float3 Trade_Out(float3 x) {
-  x = BT2020_To_BT709(x);
+  #if CUSTOM_LUTBUILDER_COLORSPACE == 1
+    x = BT2020_To_BT709(x);
+  #endif
   x = Trade_Out_NoCS(x);
   return x;
 }
@@ -331,22 +616,29 @@ float3 FixFSFX(float3 color, float scale = 1, bool isDoColorSpace = true, bool i
   return color;
 }
 ////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
-float3 GammaCorrection_Linear(float3 x) {
+float3 GammaCorrection_Linear(float3 x, uint cs) {
   #if CUSTOM_SDR > 0
     return x;
   #endif
 
+  #if CUSTOM_LUTBUILDER_COLORSPACE == 0
+    #ifdef CUSTOM_GAMMA_CORRECTION_MODE
+      #undef CUSTOM_GAMMA_CORRECTION_MODE
+      #define CUSTOM_GAMMA_CORRECTION_MODE 0
+    #endif
+  #endif
+
   #if CUSTOM_GAMMA_CORRECTION_MODE == 1
-    float3 xBack = UCSTo(x, CS_BT2020);
+    float3 xBak = UCSTo(x, cs);
   #endif
 
   //gamma correction
   #if GAMMA_CORRECTION_TYPE > 0 && CUSTOM_HDTVREC709 > 0
     x = EncodeRec709(x);
-    x = gamma_to_linear(x, GCT_POSITIVE);
+    x = pow(x, DefaultGamma);
   #elif GAMMA_CORRECTION_TYPE > 0 && CUSTOM_HDTVREC709 == 0
     x = linear_to_sRGB_gamma(x, GCT_POSITIVE);
-    x = gamma_to_linear(x, GCT_POSITIVE);
+    x = pow(x, DefaultGamma);
   #elif GAMMA_CORRECTION_TYPE == 0 && CUSTOM_HDTVREC709 > 0
     x = EncodeRec709(x);
     x = gamma_sRGB_to_linear(x, GCT_POSITIVE);
@@ -355,77 +647,88 @@ float3 GammaCorrection_Linear(float3 x) {
     // x = gamma_sRGB_to_linear(x, GCT_POSITIVE);
   #endif
 
-  #if CUSTOM_GAMMA_CORRECTION_MODE == 1
-    x = UCSTo(x, CS_BT2020);
-    x = RestoreHueAndChrominanceUcs(x, xBack, 1, 0, 1); //hue correct w/ no chrominance loss
-    x = UCSFrom(x, CS_BT2020);
+  #if CUSTOM_GAMMA_CORRECTION_MODE == 1 //TODO: too expensive?
+    x = UCSTo(x, cs);
+    x = RestoreHueAndChrominanceUcs(x, xBak, 1, GS_GammaPerceptualChrominanceCorrect, 0);
+    x = UCSFrom(x, cs);
+    x = max(x, 0);
   #endif
 
   return x;
 }
 
 float3 GammaCorrection_IntermediateEncode(float3 x) {
-  //gamma correct
-  #if GAMMA_CORRECTION_TYPE == 0 || CUSTOM_SDR > 0
-    x = linear_to_sRGB_gamma(x, GCT_MIRROR);
+  #if CUSTOM_LUTBUILDER_COLORSPACE == 0
+    const uint gct = GCT_NONE;
   #else
-    x = linear_to_gamma(x, GCT_MIRROR);
+    const uint gct = GCT_MIRROR;
   #endif
 
-  //rec709 encode
+  //gamma encode
+  #if GAMMA_CORRECTION_TYPE == 0 || CUSTOM_SDR > 0
+    x = linear_to_sRGB_gamma(x, gct);
+  #else
+    x = linear_to_gamma(x, gct);
+  #endif
+
+  //additional rec709 encode
   #if CUSTOM_HDTVREC709 > 0
-    x = sign(x) * DecodeRec709(abs(x));
-    x = linear_to_sRGB_gamma(x, GCT_MIRROR);
+    #if CUSTOM_LUTBUILDER_COLORSPACE == 0
+      x = DecodeRec709(x);
+    #else
+      x = sign(x) * DecodeRec709(abs(x));
+    #endif
+
+    x = linear_to_sRGB_gamma(x, gct);
   #endif
 
   return x;
 }
 ////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
-//AI ahh moment
-static const float K_A  =  0.0727029592f;
-static const float K_B  =  0.598205984f;
-static const float K_C  =  0.0669102818f;
-
-float ForwardPoly(float t)
-{
-    float p = 7.71294689f;
-    p = p * t - 19.3115273f;
-    p = p * t + 14.2751675f;
-    p = p * t - 2.49004531f;
-    p = p * t + 0.87808305f;
-    return p * t - K_C;
-}
-
-float ForwardPolyDeriv(float t)
-{
-    float dp = 5.0f * 7.71294689f;
-    dp = dp * t - 4.0f * 19.3115273f;
-    dp = dp * t + 3.0f * 14.2751675f;
-    dp = dp * t - 2.0f * 2.49004531f;
-    dp = dp * t + 0.87808305f;
-    return dp;
-}
-
-float InvertPoly(float y)
-{
-    static const float F0 = -K_C;
-    static const float F1 =  0.99715394f;
-    float t = saturate((y - F0) / (F1 - F0));
-
-    [unroll]
-    for (int i = 0; i < 5; ++i)
-    {
-        float f  = ForwardPoly(t) - y;
-        float df = ForwardPolyDeriv(t);
-        t -= f / (df + 1e-10f);
-        t  = saturate(t);   // clamped — gracefully clips at forward ceiling
-    }
-    return t;
-}
+// //AI ahh moment
+// static const float K_A  =  0.0727029592f;
+// static const float K_B  =  0.598205984f;
+// static const float K_C  =  0.0669102818f;
+// 
+// float ForwardPoly(float t)
+// {
+//     float p = 7.71294689f;
+//     p = p * t - 19.3115273f;
+//     p = p * t + 14.2751675f;
+//     p = p * t - 2.49004531f;
+//     p = p * t + 0.87808305f;
+//     return p * t - K_C;
+// }
+// 
+// float ForwardPolyDeriv(float t)
+// {
+//     float dp = 5.0f * 7.71294689f;
+//     dp = dp * t - 4.0f * 19.3115273f;
+//     dp = dp * t + 3.0f * 14.2751675f;
+//     dp = dp * t - 2.0f * 2.49004531f;
+//     dp = dp * t + 0.87808305f;
+//     return dp;
+// }
+// 
+// float InvertPoly(float y)
+// {
+//     static const float F0 = -K_C;
+//     static const float F1 =  0.99715394f;
+//     float t = saturate((y - F0) / (F1 - F0));
+// 
+//     [unroll]
+//     for (int i = 0; i < 5; ++i)
+//     {
+//         float f  = ForwardPoly(t) - y;
+//         float df = ForwardPolyDeriv(t);
+//         t -= f / (df + 1e-10f);
+//         t  = saturate(t);   // clamped — gracefully clips at forward ceiling
+//     }
+//     return t;
+// }
 
 float3 TonemapVanilla_Inverse(float3 y)
 {
-//     float  k = 0.00872999988f * GS.SDRTonemapFloorRaiseScale;
     float3 result;
 // 
 //     [unroll]
@@ -442,208 +745,169 @@ float3 TonemapVanilla_Inverse(float3 y)
     return result;
 }
 ////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
-float3 TonemapVanilla_Internal(float3 x) { //https://www.desmos.com/calculator/1hmlnb6z1m (compresses color to about rec709 encode)
+float3 TonemapVanilla_Internal(float3 x) { //https://www.desmos.com/calculator/1hmlnb6z1m
   float3 r0, r1;
-  r0 = x;
 
-  r0 += 0.00872999988 * GS.SDRTonemapFloorRaiseScale;
+  #if CUSTOM_SDRTONEMAP > 0
+    // x += 0.05/203.;
+    // x *= DVS9;
+    x = pow(x, 1/2.35);
+    x = gamma_sRGB_to_linear(x);
+    
+    #if CUSTOM_SDRTONEMAP == 1
+      x = NeuTwo::PerChannel(x, 3.);
+    #elif CUSTOM_SDRTONEMAP == 2
+      // if (DVS7 > 0) x = ExponentialRollOff(x, DVS6, DVS7);
+      x = Reinhard::ReinhardSimple(x, 3.);
+    #endif
+      // if (DVS7 > 0) x = Reinhard::ReinhardSimple(x, DVS7);
+      // x = GTTonemap(x, DVS7, DVS6, 0.18, 0, 1, 0);
+
+    // x *= 1.125;
+
+    {
+      float y = max3(x);
+      float y1 = NeuTwo::NeuTwo(y, 1);
+      float ratio = safeDivision(y1, y, 1);
+      x *= ratio;
+    }
+    x = EncodeRec709(x);
+    // x = pow(x, 1/2.2);
+
+    return x;
+  #endif
+
+  r0 = x;
+  r0 += 0.00872999988 * GS_BlackFloorSDRTonemap;
   r0 = log2(r0);
-  r0 = saturate(r0 * 0.0727029592 + 0.598205984); 
+  r0 = saturate(r0 * 0.0727029592 + 0.598205984);
+  // const float contrast = ;
+  // r0 = saturate(r0 * (0.0727029592 * contrast) + (0.598205984 - 0.17986 * (1.0 - contrast)));
   r1 = r0 * 7.71294689 + -19.3115273;
   r1 = r1 * r0 + 14.2751675;
   r1 = r1 * r0 + -2.49004531;
   r1 = r1 * r0 + 0.87808305;
-  r0 = saturate(r1 * r0 + -0.0669102818);
+  r0 = r1 * r0 + -0.0669102818;
+  r0 = saturate(r0);
 
   return r0.xyz;
 }
-void TonemapVanilla(inout float3 colorT, inout float3 colorU) {
+void TonemapVanilla() {
   //SDR Tonemap
-  float3 colorTBefore = colorT;
-  colorT = TonemapVanilla_Internal(colorT);
+  float3 colorTBefore = TS.colorT;
+  TS.colorT = TonemapVanilla_Internal(TS.colorT);
 
   #if CUSTOM_SDR > 0
     return;
+  #endif
+
+  //SDR perchannel luminance emulate colorU
+  #if CUSTOM_PERCHANNELLUMAEMULATE > 0
+  {
+    const float p = GS_PerChannelLuminanceReductionEmulatePeak;
+    const float makeup = GS_PerChannelLuminanceReductionEmulateMakeup;
+    const float strength = GS_PerChannelLuminanceReductionEmulateStrength;
+    const uint cs = CS_BT709;
+
+    float3 colorUBak = TS.colorU;
+    float colorUBakY = GetLuminance(colorUBak, cs);
+
+    //down perchannel
+    TS.colorU = NeuTwo::PerChannel(TS.colorU, p);
+    TS.colorU = min(TS.colorU, p); //clip
+
+    //up luminance
+    float y = GetLuminance(TS.colorU, cs);
+    float y1 = NeuTwo::inverse::NeuTwo(y, p);
+    y1 *= makeup; //makeup
+
+    //ratio
+    float ratio = y1 / colorUBakY;
+    ratio = lerp(1, ratio, saturate(/* sqrt */(colorUBakY))); //high pass
+    ratio = lerp(1, ratio, strength); //global
+
+    //apply
+    colorUBak *= ratio;
+    TS.colorU = colorUBak;
+  }
   #endif
 
   // Per Channel Correct
-  #if CUSTOM_PCC > 0
-    //sample from less blownout exposure
-    float3 colorTLessBlow = colorTBefore * GS.PCCLookback; //multiply down, helps gives variance
-    colorTLessBlow = TonemapVanilla_Internal(colorTLessBlow);
+  #if CUSTOM_PCC > 0 && CUSTOM_SDRTONEMAP == 0
+    //sample from less blown out spot
+    float3 colorTLessBlow;
 
-    // float3 colorTLessBlowG = colorTBefore * (GS.PCCLookback / GetLuminance(colorTBefore, CS_BT709)); //fixed and guaranteed
-    // colorTLessBlowG = TonemapVanilla_Internal(colorTLessBlowG);
+    // //multiply down
+    // {
+    //    colorTLessBlow = colorTBefore * GS_PCCLookback; 
+    //    colorTLessBlow = TonemapVanilla_Internal(colorTLessBlow);
+    // }
 
+    //lerp down to best point
+    // {
+    //    colorTLessBlow = colorTBefore;
+    //    float y = GetLuminance(colorTLessBlow, CS_BT709);
+    //    float y1 = lerp(0.183, y, GS_PCCLookback); //lerp to roughly where derivative is 1.
+    //    float ratio = safeDivision(y1, y, 1);
+    //    colorTLessBlow *= ratio;
+    //    colorTLessBlow = TonemapVanilla_Internal(colorTLessBlow);
+    // }
+
+    // 2nd perchannel
+    {
+      // // colorTLessBlow = colorTBefore;
+      // colorTLessBlow = NeuTwo::PerChannel(colorTBefore, GS_PCCPeak, 8.93, 1.13, 0.444);
+      // // colorTLessBlow = NeuTwo::PerChannel(colorTBefore, 1.38, 7.5, 1.13, 0.444);
+      // // colorTLessBlow = Reinhard::ReinhardSimple(colorTBefore, GS_PCCLookback * 20);
+
+      float3 x = colorTBefore;
+      // x += 0.05/203.; //TODO: remove, prob not needed for correction
+      x = pow(x, 1/2.35);
+      x = gamma_sRGB_to_linear(x);
+      x = NeuTwo::PerChannel(x, GS_PCCPeak);
+      colorTLessBlow = x;
+    }
+    
     //pcc setup
-    float colorTMax = max(colorT.x, max(colorT.y, colorT.z));
-    float colorTY = GetLuminance(colorT, CS_BT709);
+    float colorTMax = max(TS.colorT.x, max(TS.colorT.y, TS.colorT.z));
+    float colorTY = GetLuminance(TS.colorT, CS_BT709);
+    float colorTLessBlowY = GetLuminance(colorTLessBlow, CS_BT709);
 
     // ucs
-    colorT = UCSTo(colorT, CS_BT709);
+    TS.colorT = DecodeRec709(TS.colorT); //approx linearization
+    TS.colorT = UCSTo(TS.colorT, CS_BT709);
 
+    // colorTLessBlow = DecodeRec709(colorTLessBlow);
     colorTLessBlow = UCSTo(colorTLessBlow, CS_BT709);
-    colorTLessBlow.yz *= GS.PCCChrominanceBoost;
-
-    // colorTLessBlowG = UCSTo(colorTLessBlowG, CS_BT709);
-    // colorTLessBlowG.yz *= GS.PCCChrominanceBoost;
 
     // do
-    float s = saturate(colorTY * colorTY);
-    float sH = s * GS.PCCHue;
-    float sC = s * GS.PCCChrominance;
-    colorT = RestoreHueAndChrominanceUcs(colorT, colorTLessBlow, sH, sC, 1.f);
+    float s = colorTY;
+    s = smoothstep(0.183, 0.88, s);
+    float sH = s * GS_PCCHue;
+    float sC = s * GS_PCCChrominance;
+    TS.colorT = RestoreHueAndChrominanceUcs(TS.colorT, colorTLessBlow, sH, sC, 1.f);
 
-    //BRUH
-    #if BRUH > 0
-      colorU = UCSTo(colorU, CS_BT709);
-      colorU.yz = colorT.yz;
-      colorU = UCSFrom(colorU, CS_BT709);
-      colorU = max(0, colorU); //clamp BT709
-    #endif
-
-    // colorT = RestoreHueAndChrominanceUcs(colorT, colorTLessBlowG, sH * min(GS.PCCGuaranteed, 0.25f), sC * GS.PCCGuaranteed, 1.f);
-    colorT = UCSFrom(colorT, CS_BT709); //back to linear
+    // colorT = RestoreHueAndChrominanceUcs(colorT, colorTLessBlowG, sH * min(GS_PCCGuaranteed, 0.25f), sC * GS_PCCGuaranteed, 1.f);
+    TS.colorT = UCSFrom(TS.colorT, CS_BT709); //back to linear
+    TS.colorT = EncodeRec709(TS.colorT);
 
     //clamp
-    float colorTMaxAfter = max(colorT.x, max(colorT.y, colorT.z));
+    float colorTMaxAfter = max(TS.colorT.x, max(TS.colorT.y, TS.colorT.z));
     // colorTMax = lerp(colorTMax, colorTMaxAfter, 0.8f); //reduce max channel feeling
     colorTMax = min(1, colorTMax);
-    colorT *= colorTMax / colorTMaxAfter; //prevent clip
-    colorT = max(0, colorT); //clamp BT709
+    TS.colorT *= colorTMax / colorTMaxAfter; //prevent clip
+    TS.colorT = max(0, TS.colorT); //clamp BT709
   #endif
 
-    // midgray match
-    // colorU *= (0.5f / 0.18f); //TODO: remove this, it's causing too much labyrinth-ness
-}
-////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
-void Bloom_Comp_ColorU(inout float3 colorU, in float3 bloomBefore, in float3 bloomAfter, in float3 bloomColor) {
-  // //mask
-  // float3 bloomMask = bloomAfter - bloomBefore;
-  // bloomMask = max(0, bloomMask);
-  // bloomMask = TonemapVanilla_Inverse(bloomMask);
-  // colorU += bloomMask;
-
-  // bloomColor = TonemapVanilla_Inverse(bloomColor);
-  bloomColor = RenoDX_Contrast(bloomColor, 1.5f, 0.103f) * 0.125f;
-
-  //screen
-  const float m = 100.f;
-  // bloomColor *= 4.f;
-  // bloomColor *= 1/7.f;
-  bloomColor = clamp(bloomColor, 0, m);
-  // bloomColor = EncodeRec709(bloomColor);
-  colorU = bloomColor + colorU * max(0, 1.0 - bloomColor / m);
-}
-
-void Bloom_Comp(inout float3 colorT, inout float3 colorU, in Texture2D<float4> bloomTex, in SamplerState bloomTex_s, in float2 uv) {
-  float3 colorTBefore = colorT;
-
-  // original SDR bloom composite, but named
-  float3 bloomColor = bloomTex.Sample(bloomTex_s, uv.xy).xyz /* * (GS.Bloom / 256.f) */;
-  float3 bloomColorScaledUnclamped = bloomColor;
-  float3 bloomColorScaled = saturate(bloomColorScaledUnclamped);
-
-  //normal
-  float3 bloomAdded = bloomColorScaled + colorT;
-  float3 colorT1 = -colorT * bloomColorScaled + bloomAdded;
-  // float3 colorT1 = bloomAdded;
-
-  #if CUSTOM_SDR > 0
-    colorT = colorT1;
-    return;
-  #endif
-
-  #if 0/* CUSTOM_BLOOM_SATURATIONPRESERVE > 0 */
-    less blownout
-    bloomColorScaled *= 0.25f; //TODO: user settings
-    bloomAdded = bloomColorScaled + colorT;
-    float3 colorT2 = -colorT * bloomColorScaled + bloomAdded;
-
-    //steal chroma from less blown out
-    colorT1 = UCSTo(colorT1, CS_BT709);
-    colorT2 = UCSTo(colorT2, CS_BT709);
-    colorT1 = RestoreHueAndChrominanceUcs(colorT1, colorT2, 0.2f, 0.85f, 1.f);
-    colorT1.x = lerp(colorT1.x, colorT2.x, 0.125f);
-    colorT = UCSFrom(colorT1, CS_BT709);
-  #else
-    colorT = colorT1;
-  #endif
-
-  #if CUSTOM_LUT_MAXCHANNELCLAMPINPUT == 0
-    colorT = saturate(colorT);
-  #else
-    colorT = max(0, colorT);
-    colorT = ClampByMaxChannel(colorT, 1.f);
-  #endif
-
-  //HDR custom composite
-  Bloom_Comp_ColorU(colorU, colorTBefore, colorT, bloomColorScaledUnclamped);
-}
-void Bloom_Comp_HDR(inout float3 colorT, inout float3 colorU, in Texture2D<float4> bloomTex, in SamplerState bloomTex_s, in float2 uv) {
-  float3 bloom = bloomTex.Sample(bloomTex_s, uv.xy).xyz;
-  const float m = 100.f;
-  // bloom = ClampByMaxChannel(bloom, m);
-  colorT = bloom + colorT * max(0, 1.0 - bloom / m);
-
-  bloom *= 1.65;
-  colorU = bloom + colorU * max(0, 1.0 - bloom / m);
-}
-
-////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
-void LensFlare_Comp(inout float3 colorT, inout float3 colorU, in Texture2D<float4> flareTex, in SamplerState flareTex_s, in float2 uv) {
-  const float mult = (1 / 32768.f) * GS.LensFlare;
-
-  float3 lens = flareTex.Sample(flareTex_s, uv).xyz * mult;
-
-  //normal
-  float3 colorT1 = colorT + lens;
-
-  #if CUSTOM_SDR > 0
-    colorT = saturate(colorT1);
-    return;
-  #endif
-
-  #if 0
-    //less blownout blend (kinda overkill)
-    float3 colorT2 = colorT + (lens * 0.7f); //TODO: user settings
-    colorT1 = UCSTo(colorT1, CS_BT709);
-    colorT2 = UCSTo(colorT2, CS_BT709);
-    colorT1 = RestoreHueAndChrominanceUcs(colorT1, colorT2, 0.3f, 0.5f, 1.f);
-    // colorT1.x = lerp(colorT1.x, colorT2.x, 0.2f);
-    colorT = UCSFrom(colorT1, CS_BT709);
-  #else
-    colorT = colorT1;
-  #endif
-
-  #if CUSTOM_LUT_MAXCHANNELCLAMPINPUT == 0
-    colorT = saturate(colorT);
-  #else
-    colorT = max(0, colorT);
-    colorT = ClampByMaxChannel(colorT, 1.f);
-  #endif
-
-  //HDR
-  lens = TonemapVanilla_Inverse(lens);
-  // lens = EncodeRec709(lens) * 4.f;
-  // colorU += lens;
-  const float m = 100.f;
-  lens = clamp(lens, 0, m);
-  lens = EncodeRec709(lens);
-  colorU = lens + colorU * max(0, 1.0 - lens / m);
-
-}
-void LensFlare_Comp_HDR(inout float3 colorT, inout float3 colorU, in Texture2D<float4> flareTex, in SamplerState flareTex_s, in float2 uv) {
-  float3 flare = flareTex.Sample(flareTex_s, uv).xyz * GS.LensFlare;
-  // flare = ClampByMaxChannel(flare, 1.f);
-  colorT += flare;
+  //save this result as baseline
+  TS.colorTRaw = TS.colorT;
 }
 ////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
 float LUTNeutralize_LumaStrength(float3 lutUcs, float3 neutralUcs, float strengthLuma) {
   #if CUSTOM_LUTBUILDER_NEUTRAL_LUMA == 0
     //high pass
     float sL = saturate(lutUcs.x);
-    sL = smoothstep(0.36/* GS.LUTBuilderNeutralLumaHPStart */, 1, sL);
+    sL = smoothstep(0.36/* GS_LUTBuilderNeutralLumaHPStart */, 1, sL);
     sL = sqrt(sL);
     return strengthLuma * sL;
   #else
@@ -659,9 +923,9 @@ float3 LUTNeutralize(float3 lutCoord, float3 lutColor, uint lutSize) {
   #endif
 
   //const
-  const float strengthChromi = GS.LUTBuilderNeutralChrominance;
-  const float strengthHue = GS.LUTBuilderNeutralHue;
-  const float strengthLuma = GS.LUTBuilderNeutralLuma;
+  const float strengthChromi = GS_LUTBuilderNeutralChrominance;
+  const float strengthHue = GS_LUTBuilderNeutralHue;
+  const float strengthLuma = GS_LUTBuilderNeutralLuma;
 
   //get neutral
   float3 neutral = float3(lutCoord / (lutSize - 1));
@@ -700,7 +964,7 @@ float3 LUTNeutralize(float3 lutCoord, float3 lutColor, uint lutSize) {
   #elif CUSTOM_LUTBUILDER_NEUTRAL == 2
     float3 lutUcs = UCSTo(lutColor, CS_BT709);
     float3 neutralUcs = UCSTo(neutral, CS_BT709);
-    lutUcs = RestoreHueAndChrominanceUcs(lutUcs, neutralUcs, strengthHue, strengthChromi, 1.f);
+    lutUcs = RestoreHueAndChrominanceUcs(lutUcs, neutralUcs, strengthHue, strengthChromi, 1 - strengthChromi);
     lutUcs.x = lerp(lutUcs.x, neutralUcs.x, LUTNeutralize_LumaStrength(lutUcs, neutralUcs, strengthLuma));
     lutColor = UCSFrom(lutUcs, CS_BT709);
   #endif
@@ -717,11 +981,45 @@ float3 UpgradeToneMapBo3(
     float3 color_tonemapped_graded,
     float3 color_tonemapped_neutral) {
     
+  //ratio setup
   float ratio = 1.f;
+
+  //y setups
   float y_untonemapped = GetLuminance(color_untonemapped, CS_BT709);
-  // float y_tonemapped = Reinhard::ReinhardPiecewiseExtended(y_untonemapped, 100, 1, 0.18);
-  float y_tonemapped = HermiteSpline::HermiteSplineLuminanceRolloff(y_untonemapped, 1, 200); //we need a natural but smooth rolloff
-  float y_tonemapped_graded = GetLuminance(color_tonemapped_graded, CS_BT2020);
+
+  // float y_tonemapped = NeuTwo::NeuTwo(y_untonemapped, 1);
+  #if CUSTOM_SDRTONEMAP > 0
+    float3 x = color_untonemapped;
+    x *= DVS9;
+    // x = pow(x, 1/2.35);
+    // x = gamma_sRGB_to_linear(x);
+
+    #if CUSTOM_SDRTONEMAP == 1
+      x = NeuTwo::PerChannel(x, 3.);
+    #elif CUSTOM_SDRTONEMAP == 2
+      // if (DVS7 > 0) x = ExponentialRollOff(x, DVS6, DVS7);
+      x = Reinhard::ReinhardSimple(x, 3.);
+    #endif
+      // if (DVS7 > 0) x = Reinhard::ReinhardSimple(x, DVS7);
+      // x = GTTonemap(x, DVS7, DVS6, 0.18, 0, 1, 0);
+
+    // x *= 1.125;
+
+    {
+      float y = max3(x);
+      float y1 = NeuTwo::NeuTwo(y, 1);
+      float ratio = safeDivision(y1, y, 1);
+      x *= ratio;
+    }
+    // x = EncodeRec709(x);
+    float y_tonemapped = GetLuminance(x, CS_BT709); 
+  #else
+    float y_tonemapped = HermiteSpline::HermiteSplineLuminanceRolloff(y_untonemapped, 1, 200);
+  #endif
+
+  float y_tonemapped_graded = GetLuminance(color_tonemapped_graded, lutbuilder_colorspace);
+
+  //luma upgrade
   if (y_untonemapped < y_tonemapped) {
     ratio = y_untonemapped / y_tonemapped;
   } else {
@@ -731,15 +1029,18 @@ float3 UpgradeToneMapBo3(
     const bool y_valid = (y_tonemapped_graded > 0);
     ratio = y_valid ? (y_new / y_tonemapped_graded) : 0;
   }
+
+  //apply ratio
   float3 color_scaled = color_tonemapped_graded * ratio;
+  // color_scaled = max(0, color_scaled); //clean
 
-  #if CUSTOM_UPGRADE_HUE_CORRECTION > 0
-    float3 color_scaled_ucs = UCSTo(color_scaled, CS_BT2020);
-    float3 color_tonemapped_graded_ucs = UCSTo(color_tonemapped_graded, CS_BT2020);
-    color_scaled_ucs = RestoreHueAndChrominanceUcs(color_scaled_ucs, color_tonemapped_graded_ucs, 1.f, 1.f, 1.f);
-    color_scaled = UCSFrom(color_scaled_ucs, CS_BT2020);
-  #endif
+  //hue correct //TODO: remove, meh
+  // float3 color_scaled_ucs = UCSTo(color_scaled, CS_BT2020);
+  // float3 color_tonemapped_graded_ucs = UCSTo(color_tonemapped_graded, CS_BT2020);
+  // color_scaled_ucs = RestoreHueAndChrominanceUcs(color_scaled_ucs, color_tonemapped_graded_ucs, 1.f, 0.f, 1.f);
+  // color_scaled = UCSFrom(color_scaled_ucs, CS_BT2020);
 
+  //debug output //TODO: CUSTOM_LUTBUILDER_COLORSPACE
   #if CUSTOM_UPGRADE_DEBUG == 0
     return color_scaled;
   #elif CUSTOM_UPGRADE_DEBUG == 1
@@ -759,27 +1060,53 @@ float3 UpgradeToneMapBo3(
   #endif
 }
 
-void LUT(inout float3 colorU, inout float3 colorT, in Texture3D lut, in SamplerState lut_s) {
-  //BRUH
-  #if BRUH > 0
-    colorT = colorU;
-    float y = GetLuminance(colorT, CS_BT709);
-    if (y > 0) colorT *= TonemapVanilla_Internal(y).x / y;
-  #endif
-  
+float3 LUT_Sample(float3 x, Texture3D lut, SamplerState lut_s) {
+  x = x * 0.96875 + 0.015625; //x * (31/32) + (0.5/32)
+  x = lut.Sample(lut_s, x).xyz;
+  return x;
+}
 
-  //clamp
-  #if CUSTOM_LUT_MAXCHANNELCLAMPINPUT > 0
-    colorT = max(0, colorT);
-    colorT = ClampByMaxChannel(colorT, 1.f);
-  #else
-    colorT = saturate(colorT);
+void LUT_WarmMinimum(Texture3D lut) {
+  TS.LutMinimumOutput = lut.Load(int4(0, 0, 0, 0)).xyz;
+}
+
+static float BloomAndLensHDRHeadRoom = 0.6f;
+void LUT(Texture3D lut, SamplerState lut_s) {  
+  #if CUSTOM_SDR == 0
+    TS.colorT = ClampByMaxChannel(TS.colorT, 1.f); 
   #endif
 
   //sample lut
-  float3 colorN = colorT;
-  colorT = colorT * 0.96875 + 0.015625;
-  colorT = lut.Sample(lut_s, colorT).xyz;
+  float3 colorN = TS.colorT;
+  TS.colorT = LUT_Sample(TS.colorT, lut, lut_s);
+  #if CUSTOM_SDR == 0
+    TS.colorTRawLUTed = LUT_Sample(TS.colorTRaw * BloomAndLensHDRHeadRoom, lut, lut_s);
+  #endif
+
+  //new minimum
+  #if CUSTOM_BLACKFLOOR_LUT > 0
+  {
+    const float minStrength = GS_BlackFloorLUT;
+    #if CUSTOM_BLACKFLOOR_LUT == 1
+      float y = GetLuminance(TS.colorT, lutbuilder_colorspace);
+      if (y > 0) {
+        float3 minimum3 = TS.LutMinimumOutput;
+        float minimum = max(minimum3.x, max(minimum3.y, minimum3.z));
+        float y1 = InverseLerp(minimum, 1, y);
+        y1 = lerp(y, y1, minStrength);
+        TS.colorT *= y1 / y;
+        TS.colorT = max(0, TS.colorT);
+      }
+    #elif CUSTOM_BLACKFLOOR_LUT == 2
+      float3 minimum3 = TS.LutMinimumOutput;
+      float3 colorTnew = float3(InverseLerp(minimum3.x, 1, TS.colorT.x),
+                                InverseLerp(minimum3.y, 1, TS.colorT.y),
+                                InverseLerp(minimum3.z, 1, TS.colorT.z));
+      TS.colorT = lerp(TS.colorT, colorTnew, minStrength);
+    #endif
+    TS.colorT = max(0, TS.colorT);
+  }
+  #endif
 
   #if CUSTOM_SDR > 0
     return;
@@ -787,15 +1114,227 @@ void LUT(inout float3 colorU, inout float3 colorT, in Texture3D lut, in SamplerS
 
   //mid gray change sampling
   const float mid = 0.5; //approx 0.18 in rec709
-  colorU *= (GetLuminance(lut.Sample(lut_s, mid).xyz, CS_BT2020) / mid) * (0.5f / 0.18f);
+  TS.colorU *= (GetLuminance(lut.Sample(lut_s, mid).xyz, lutbuilder_colorspace) / mid) * (0.5f / 0.18f);
 
   //lut resolve 0 (UpgradeToneMap crutch ahh ahh)
-  colorU = UpgradeToneMapBo3(colorU, colorT, colorN);
+  TS.colorU = UpgradeToneMapBo3(TS.colorU, TS.colorT, colorN);
+}
+////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
+void Bloom_Comp_ColorU(inout float3 colorU, in float3 bloomBefore, in float3 bloomAfter, in float3 bloomColor) {
+  // //mask
+  // float3 bloomMask = bloomAfter - bloomBefore;
+  // bloomMask = max(0, bloomMask);
+  // bloomMask = TonemapVanilla_Inverse(bloomMask);
+  // colorU += bloomMask;
+
+  // bloomColor = TonemapVanilla_Inverse(bloomColor);
+  bloomColor = RenoDX_Contrast(bloomColor, 1.5f, 0.103f) * 0.125f;
+
+  //screen
+  const float m = 100.f;
+  // bloomColor *= 4.f;
+  // bloomColor *= 1/7.f;
+  bloomColor = clamp(bloomColor, 0, m);
+  // bloomColor = EncodeRec709(bloomColor);
+  colorU = bloomColor + colorU * max(0, 1.0 - bloomColor / m);
+}
+
+void Bloom_Comp_SDR(in Texture2D<float4> bloomTex, in SamplerState bloomTex_s, in float2 uv) {
+  float3 colorTBefore = TS.colorT;
+
+  // original SDR bloom composite, but named
+  float3 bloomColor = bloomTex.Sample(bloomTex_s, uv.xy).xyz;
+  float3 bloomColorScaledUnclamped = bloomColor;
+  float3 bloomColorScaled = saturate(bloomColorScaledUnclamped);
+
+  //normal (Bloom MUST BE COMP this way, else vanilla hues are lost)
+  float3 colorTForBloom = TS.colorT;
+  #if CUSTOM_SDR == 0
+    colorTForBloom *= BloomAndLensHDRHeadRoom; //give headroom
+  #endif
+  float3 bloomAdded = bloomColorScaled + colorTForBloom;
+  TS.colorT = -colorTForBloom * bloomColorScaled + bloomAdded;
+  // TS.colorT = max(0, TS.colorT); //clean
+  TS.colorTWithBloom = TS.colorT;
+
+  #if CUSTOM_SDR > 0
+    return;
+  #endif
+
+  //swap back to baseline
+  TS.colorT = TS.colorTRaw;
+
+  // //colorU parallel mimic
+  // #if CUSTOM_SDR == 0 && CUSTOM_BLOOM_COMP == 0 
+  //   Bloom_Comp_ColorU(TS.colorU, colorTBefore, TS.colorT, bloomColorScaledUnclamped);
+  // #endif
+}
+void Bloom_Comp_HDR(Texture2D<float4> bloomTex, Texture3D<float4> lutTex, SamplerState samp, float2 uv) {
+  //SDR
+  #if CUSTOM_SDR > 0
+     return;
+  #endif
+
+  //separate
+  TS.colorTWithBloom = LUT_Sample(TS.colorTWithBloom, lutTex, samp);
+  float3 colorOnlyBloom = TS.colorTWithBloom - TS.colorTRawLUTed;
+  colorOnlyBloom = max(0, colorOnlyBloom);
+  {
+    float y = GetLuminance(colorOnlyBloom, lutbuilder_colorspace);
+    // float y = max(colorOnlyBloom.x, max(colorOnlyBloom.y, colorOnlyBloom.z));
+    if (y <= 0) return;
+
+    float y1 = y;
+    y1 /= BloomAndLensHDRHeadRoom;
+    y1 = min(y1, 2.0f);
+    float c = 2.01f;
+    y1 = NeuTwo::inverse::NeuTwo(y1, c); //helps restores highlights.
+    y1 *= BloomAndLensHDRHeadRoom;
+    #if CUSTOM_BLOOM_TONEMAP == 0
+    #elif CUSTOM_BLOOM_TONEMAP == 1
+      y1 *= 0.725f;
+    #endif
+    y1 *= 0.926f;
+    y1 *= GS_Bloom;
+    colorOnlyBloom *= y1 / y;
+  }
+  TS.colorU += colorOnlyBloom;
+
+//   //HDR
+//   float3 bloomColor = bloomTex.Sample(samp, uv.xy).xyz * GS_Bloom;
+//   // bloomColor = NeuTwo::PerChannel(bloomColor, 1.0f); //per-channel blowout
+//   {
+//     float y = GetLuminance(bloomColor, CS_BT709);
+//     float y1 = RenoDX_Shadows(y, 1.4f, 0.18f);
+//     float ratio = y1 / y;
+//     bloomColor *= ratio;
+//   }
+//   bloomColor = LUT_Sample(bloomColor, lutTex, samp);
+// 
+//   //min
+//   float3 minimum = TS.LutMinimumOutput;
+//   bloomColor = float3(InverseLerp(minimum.x, 1, bloomColor.x),
+//                       InverseLerp(minimum.y, 1, bloomColor.y),
+//                       InverseLerp(minimum.z, 1, bloomColor.z));
+// 
+//   //boost
+//   float y = GetLuminance(bloomColor, lutbuilder_colorspace);
+//   if (y > 0) {
+//     float y1 = NeuTwo::inverse::NeuTwo(y, 1.0f);
+//     y1 = DecodeRec709(y1) * 8;
+//     y1 = RenoDX_Shadows(y, 0.6f, 0.46f);
+//     float ratio = y1 / y;
+//     bloomColor *= ratio;
+//   }
+//   //screen
+//   const float m = 100.f;
+//   bloomColor = clamp(bloomColor, 0, m);
+//   TS.colorU = bloomColor + TS.colorU * max(0, 1.0 - bloomColor / m);
+// 
+//   // // bloomColor = DecodeRec709(bloomColor) * 12;
+//   // bloomColor *= 2.2;
+//   // TS.colorU += bloomColor;
+}
+////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
+void LensFlare_Comp_SDR(Texture2D<float4> flareTex, SamplerState flareTex_s, float2 uv) {
+  const float mult = (1 / 32768.f);
+  float3 lens = flareTex.Sample(flareTex_s, uv).xyz * mult;
+
+
+  float3 colorT1 = TS.colorT; 
+  #if CUSTOM_SDR == 0
+    colorT1 *= BloomAndLensHDRHeadRoom;
+  #endif
+  colorT1 += lens;
+  TS.colorT = saturate(colorT1);
+  TS.colorTWithLens = TS.colorT;
+
+  //SDR
+  #if CUSTOM_SDR > 0
+    return;
+  #endif
+
+  //swap back to baseline
+  TS.colorT = TS.colorTRaw;
+
+  // //colorU parallel mimic
+  // #if CUSTOM_SDR == 0 && CUSTOM_LENSFLARE_COMP == 0
+  //   lens = TonemapVanilla_Inverse(lens);
+  //   // lens = EncodeRec709(lens) * 2.2;
+  //   lens *= 2.f;
+  //   TS.colorU += lens;
+  //   // const float m = 100.f;
+  //   // lens = clamp(lens, 0, m);
+  //   // lens = EncodeRec709(lens);
+  //   // colorU = lens + colorU * max(0, 1.0 - lens / m);
+  // #endif
+}
+void LensFlare_Comp_HDR(Texture2D<float4> flareTex, Texture3D<float4> lutTex, SamplerState samp, float2 uv) {
+  //SDR
+  #if CUSTOM_SDR > 0
+     return;
+  #endif
+
+  //separate
+  TS.colorTWithLens = LUT_Sample(TS.colorTWithLens, lutTex, samp);
+  float3 colorOnlyLens = TS.colorTWithLens - TS.colorTRawLUTed;
+  colorOnlyLens = max(0, colorOnlyLens);
+//   {
+//     float y = GetLuminance(colorOnlyLens, lutbuilder_colorspace);
+//     if (y <= 0) return;
+// 
+//     float y1 = NeuTwo::inverse::NeuTwo(y, 1.0f);
+//     y1 *= 2.f; //makeup
+//     colorOnlyLens *= y1 / y;
+//   }
+  colorOnlyLens *= /* (1/BloomAndLensHDRHeadRoom) * */ 0.67f * GS_LensFlare;
+  TS.colorU += colorOnlyLens;
+
+  // HDR
+  float3 lens = flareTex.Sample(samp, uv).xyz * (1.f / 32768.f) * GS_LensFlare;
+  const float p = 1.f;
+  {
+    float y = GetLuminance(lens, lutbuilder_colorspace);
+    if (y <= 0) return;
+
+    // perchannel blowout
+    float3 lensB = lens;
+    lensB *= 4.f;
+    lensB = ExponentialRollOff(lensB, 0/* .18f */, p);
+    // lensB = NeuTwo::PerChannel(lensB, p);
+    lensB = min(lensB, p);
+    // lensB *= y / GetLuminance(lensB, lutbuilder_colorspace);
+    lens = lensB;
+  }
+  lens = LUT_Sample(lens, lutTex, samp);
+
+  //min
+  float3 minimum = TS.LutMinimumOutput;
+  lens = float3(InverseLerp(minimum.x, 1, lens.x),
+                InverseLerp(minimum.y, 1, lens.y),
+                InverseLerp(minimum.z, 1, lens.z));
+  lens = max(0, lens);
+
+  //boost
+  float y = GetLuminance(lens, lutbuilder_colorspace);
+  if (y > 0) {
+    float y1 = NeuTwo::inverse::NeuTwo(y, p);
+
+    y1 *= 1.46f;
+    y1 = pow(y1, 1.6f);
+    y1 *= 0.46f * 0.67f;
+    y1 *= GS_LensFlare;
+
+    float ratio = y1 / y;
+    lens *= ratio;
+  }
+
+  TS.colorU += lens;
 }
 ////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
 float TonemapGetLumaForAA(float3 color) {
   float o1;
-  o1 = GetLuminance(color, CS_BT2020);
+  o1 = GetLuminance(color, lutbuilder_colorspace);
   // o1 = Reinhard::ReinhardSimple(o1.x);
   o1 = NeuTwo::NeuTwo(o1, 1);
   // o1 = sqrt(o1.x);
@@ -823,7 +1362,7 @@ float3 TonemapHDRAndTradeIn(float3 colorU) {
   //tonemap
   #if CUSTOM_TONEMAP > 0 && CUSTOM_SDR == 0 /* && CUSTOM_UPGRADE_DEBUG <= 1 */
     #if CUSTOM_TONEMAP_SCALING == 0
-      float l = GetLuminance(colorU, CS_BT2020); //luma
+      float l = GetLuminance(colorU, lutbuilder_colorspace); //luma
     #elif CUSTOM_TONEMAP_SCALING == 1
       float l = max(colorU.x, max(colorU.y, colorU.z)); //max channel
     #endif
@@ -832,6 +1371,7 @@ float3 TonemapHDRAndTradeIn(float3 colorU) {
       #if CUSTOM_TONEMAP == 1
         lT = Reinhard::ReinhardPiecewiseExtended(l, HDR_MAXEXPECTED, HDR_PEAK, HDR_SHOULDERSTART);
       #elif CUSTOM_TONEMAP == 2
+        // float me = DVS2 == 0 ? HDR_MAXEXPECTED : 100000 / GamePaperWhiteNits;
         lT = HermiteSpline::HermiteSplineLuminanceRolloff(l, HDR_PEAK, HDR_MAXEXPECTED);
       #endif
       colorU *= lT / l;
@@ -840,7 +1380,7 @@ float3 TonemapHDRAndTradeIn(float3 colorU) {
     //clamp
     #if CUSTOM_TONEMAP_SCALING != 1 /* skip if max channel. */
       #if CUSTOM_TONEMAP_CLAMP == 1
-        colorU = min(HDR_PEAK, colorU);
+        colorU = min(colorU, HDR_PEAK);
       #elif CUSTOM_TONEMAP_CLAMP == 2
         colorU = ClampByMaxChannel(colorU, HDR_PEAK);
       #endif
@@ -852,49 +1392,43 @@ float3 TonemapHDRAndTradeIn(float3 colorU) {
 
   return colorU;
 }
-void TonemapShader_Out(inout float3 o0, inout float3 colorT, float3 colorU) {
-  #if CUSTOM_SR == 0 || CUSTOM_SDR > 0
-    colorT = BT2020_To_BT709(colorT);
-    colorT = max(0, colorT);
-  #endif
-
+void TonemapShader_Out(inout float3 o0) {
+  uint cs = lutbuilder_colorspace;
+  
   //case: SDR
   #if CUSTOM_SDR > 0
-    o0 = colorT; //use colorT BT709
+    o0 = TS.colorT; //use colorT BT709
     #if CUSTOM_SR == 0
-      colorT *= 32768.f; //scale up for normal AA luma calculation
+      TS.colorT *= 32768.f; //scale up for normal AA luma calculation
     #endif
   #else
-    o0 = colorU; //use colorU BT2020
-  #endif
-  
-  //exposure & gamma correction
-  #if GAMMA_CORRECTION_TYPE > 0
-    o0 *= GS.GammaInfluence;
-    o0 = GammaCorrection_Linear(o0);
-    o0 *= GS.Exposure / GS.GammaInfluence;
-  #else
-    o0 = GammaCorrection_Linear(o0);
-    o0 *= GS.Exposure;
+    o0 = TS.colorU; //use colorU BT2020
   #endif
 
-  //case: SDR (returns)
+  //SDR (returns)
   #if CUSTOM_SDR > 0
-    #if CUSTOM_SR == 0
-      o0 = Trade_In_NoCS(o0); //do it here instead of in SMAA T2x shader
-    #endif
     return;
+  #endif
+
+  //exposure & gamma correction
+  #if GAMMA_CORRECTION_TYPE > 0
+    o0 *= GS_GammaInfluence;
+    o0 = GammaCorrection_Linear(o0, cs);
+    o0 *= GS_Exposure / GS_GammaInfluence;
+  #else
+    o0 = GammaCorrection_Linear(o0, cs);
+    o0 *= GS_Exposure;
   #endif
 
   //color grade
   #if CUSTOM_COLORGRADE > 0
     o0 = RenoDX_ColorGrade(
       o0,
-      GS.CGContrast, GS.CGContrastMidGray / GamePaperWhiteNits,
-      GS.CGHighlightsStrength, GS.CGHighlightsMidGray / GamePaperWhiteNits,
-      GS.CGShadowsStrength, GS.CGShadowsMidGray / GamePaperWhiteNits,
-      GS.CGSaturation,
-      CS_BT2020
+      GS_CGContrast, GS_CGContrastMidGray / GamePaperWhiteNits,
+      GS_CGHighlightsStrength, GS_CGHighlightsMidGray / GamePaperWhiteNits,
+      GS_CGShadowsStrength, GS_CGShadowsMidGray / GamePaperWhiteNits,
+      GS_CGSaturation,
+      cs
     );
   #endif
 
@@ -907,28 +1441,53 @@ void TonemapShader_Out(inout float3 o0, inout float3 colorT, float3 colorU) {
   #endif  
 }
 ////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
+float TonemapShader_Alpha(float o) {
+  // o = 1-o; //invert
+  // o *= o; //gamma
+  return o;
+}
+////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
 #include "./Includes/RCAS.hlsl"
 float3 FinalShader_Resolve(Texture2D<float4> tex, SamplerState tex_s, float2 uv) {
   float3 o;
-  o = tex.Sample(tex_s, uv.xy).xyz;
+  o = tex.Sample(tex_s, uv.xy).xyz; //scale back from 15-bit FP used for bloom/lens composite
 
   //scaling
   #if CUSTOM_RCAS == 1
-    o = RCAS_BO3(Trade_Out_NoCS(o), tex, tex_s, uv, GS.RCAS, HDR_PEAK);
+    #if CUSTOM_SR == 0
+      o = RCAS_BO3(o, tex, tex_s, uv, GS_RCAS, HDR_PEAK, true);
+    #else
+      o = RCAS_BO3(o, tex, tex_s, uv, GS_RCAS, HDR_PEAK, GS_IsDLAA > 0);
+    #endif
   #else
-    o = Trade_Out_NoCS(o);
+    #if CUSTOM_SR == 0
+      o = Trade_Out_NoCS(o);
+    #else
+      if (GS_IsDLAA > 0) o = Trade_Out_NoCS(o);
+    #endif
   #endif
 
   //HDR clamp BT2020, SDR clamp BT709
   o = max(0, o);
 
-  //intermediate colorspace encode
-  #if CUSTOM_SDR == 0
-    o = BT2020_To_BT709(o);
-  #else
-    return o; //skip rest for SDR
+  //clamp peak
+  #if CUSTOM_FINAL_CLAMP == 1
+    o = min(o, HDR_PEAK);
+  #elif CUSTOM_FINAL_CLAMP == 2
+    o = ClampByMaxChannel(o, HDR_PEAK);
   #endif
 
+  //skip rest for SDR
+  #if CUSTOM_SDR > 0
+    return o;
+  #endif
+
+  //intermediate colorspace encode
+  #if CUSTOM_LUTBUILDER_COLORSPACE == 0
+    //noop
+  #else
+    o = BT2020_To_BT709(o);
+  #endif
 
   //intermediate scaling
   o *= HDR_INTSCALING;

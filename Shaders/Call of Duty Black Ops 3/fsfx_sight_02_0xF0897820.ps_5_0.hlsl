@@ -141,7 +141,7 @@ void main(
     r1.x = cmp(0 < relHDRExposure.w);
     r1.yzw = float3(32768,32768,32768) * r0.xyz;
     o0.xyz = r1.xxx ? r1.yzw : r0.xyz;
-    o0.xyz = FixFSFX(o0.xyz, GS.ADSSights, false, false);
+    o0.xyz = FixFSFX(o0.xyz, GS_ADSSights, false, false);
     o0.w = r0.w;
   } else {
     o0.xyzw = float4(0,0,0,0);

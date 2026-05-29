@@ -195,7 +195,7 @@ void main(
   r1.w = cmp(0 < relHDRExposure.w);
   o0.xyz = r1.www ? r1.xyz : r0.xyz;
 
-  o0.xyz = FixFSFX(o0.xyz, GS.ADSSights, false, false);
+  o0.xyz = FixFSFX(o0.xyz, GS_ADSSights, false, false);
   o0.w = r0.w;
   return;
 }

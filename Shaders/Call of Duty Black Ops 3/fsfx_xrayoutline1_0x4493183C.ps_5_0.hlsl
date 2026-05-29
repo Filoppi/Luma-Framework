@@ -25,14 +25,14 @@ void main(
   r0.xy = (int2)v0.xy;
   r0.zw = float2(0,0);
   r1.xyz = codeTexture0.Load(r0.xyw).xyz;
-  r1.w = floatZSampler.Load(r0.xyw).x;
 
-  if (GS.XrayOutline == 0) {
-    o0.xyz = r0.xyz;
+  if (GS_XrayOutline == 0) {
+    o0.xyz = r1.xyz;
     o0.w = 1;
     return;
   }
 
+  r1.w = floatZSampler.Load(r0.xyw).x;
   r2.x = cmp(0.899999976 < r1.w);
   if (r2.x != 0) {
     o0.xyz = r1.xyz;
@@ -116,10 +116,16 @@ void main(
     return;
   }
   r2.x = r2.y * r2.y;
-  o0.xyz = r2.xzw * float3(32768,32768,32768) + r1.xyz;
-  
-  o0.xyz = FixFSFX(o0.xyz, GS.XrayOutline * 1, false, false);
-  // o0.xyz *= GS.XrayOutline;
+  o0.xyz = r2.xzw /* * float3(32768,32768,32768) + r1.xyz */;
+  o0.xyz *= GS_XrayOutline;
+  #if CUSTOM_SDR == 0
+    r1.xyz = Trade_Out(r1.xyz);
+    r1.xyz = max(r1.xyz, 0);
+    o0.xyz += r1.xyz;
+    o0.xyz = Trade_In(o0.xyz);
+  #else
+    o0.xyz = o0.xyz * 32768 + r1.xyz;
+  #endif
 
   o0.w = 1;
   return;
