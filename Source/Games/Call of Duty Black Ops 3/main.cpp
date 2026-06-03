@@ -891,7 +891,7 @@ namespace ForcedLODBias
 }
 #endif
 
-#ifdef DEVELOPMENT
+#if DEVELOPMENT
 namespace FSFXTracking
 {
    //hash set of uint for shader hashes that are encountered
