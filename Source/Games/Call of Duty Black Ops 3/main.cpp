@@ -8,9 +8,6 @@
    #define ENABLE_FIDELITY_SK 0
 #endif
 
-// if DLSS, do insane hot swap of bindings to try and preserve DLSS output to final shader.
-// #define CUSTOM_DLSS_KMS
-
 // if DLSS, do DLSS right before final shader.
 #define CUSTOM_DLSS_KMS_1
 
@@ -2022,8 +2019,8 @@ public:
             if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled)) ImGui::SetTooltip("Replacement for in-game Display Mode setting.\nBEWARE: This is applying gamma onto already linear color, crushing shadows/blacks.");
             // if (ENABLE_SR == 1) ImGui::EndDisabled();
          }
-      }
 #endif
+      }
       
       ImGui::Separator(); ////////////////////////////////////////////////////////////////////////////////////
       
@@ -2948,7 +2945,7 @@ public:
       // if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled)) ImGui::SetTooltip("Override jitter offset (0 = disabled, uses game value).");
 
 #if DEVELOPMENT
-      ImGui::Separator();
+      ImGui::Separator(); ////////////////////////////////////////////////////////////////////////////////////
 
       ImGui::Text("Debug:");
       {
@@ -2979,17 +2976,6 @@ public:
 
          const std::string s12 = "device_data.has_drawn_sr: " + std::to_string(device_data.has_drawn_sr);
          ImGui::BulletText(s12.c_str());
-
-#ifdef CUSTOM_DLSS_KMS
-         const std::string s6 = "Cached FSFX Items for Upscaling: " + std::to_string(game_device_data.fsfx_hash_to_indices_cache.size());
-         ImGui::BulletText(s6.c_str());
-
-         const std::string s9 = "FSFX Count: " + std::to_string(game_device_data.fsfx_count);
-         ImGui::BulletText(s9.c_str());
-
-         const std::string s10 = "FSFX Valid: " + std::to_string(game_device_data.fsfx_valid);
-         ImGui::BulletText(s10.c_str());
-#endif
 
          const std::string s8 = "Is DLAA: " + std::to_string(game_device_data.IsDLAA());
          ImGui::BulletText(s8.c_str());
