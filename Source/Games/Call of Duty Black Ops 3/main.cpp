@@ -836,14 +836,14 @@ namespace ForcedLODBias
       }
 
 #if DEVELOPMENT
-      // //r_lightingShadowFilter
-      // if (r_lightingShadowFilter != -1)
-      // {
-      //    *lightingShadowFilter_ptr_value0 = r_lightingShadowFilter;
-      //    *lightingShadowFilter_ptr_value1 = r_lightingShadowFilter;
-      //    *lightingShadowFilter_ptr_value2 = r_lightingShadowFilter;
-      //    *lightingShadowFilter_ptr_value3 = r_lightingShadowFilter;
-      // }
+      //r_lightingShadowFilter
+      if (r_lightingShadowFilter != -1)
+      {
+         *lightingShadowFilter_ptr_value0 = r_lightingShadowFilter;
+         *lightingShadowFilter_ptr_value1 = r_lightingShadowFilter;
+         *lightingShadowFilter_ptr_value2 = r_lightingShadowFilter;
+         *lightingShadowFilter_ptr_value3 = r_lightingShadowFilter;
+      }
 #endif
    }
 
@@ -880,12 +880,12 @@ namespace ForcedLODBias
       DrawResetButton(r_modelLodBias, 1.f, "r_modelLodBias", runtime);
 
 #if DEVELOPMENT
-      // if (Globals::UIIsAdvanced)
-      // {
-      //    if (ImGui::SliderInt("r_lightingShadowFilter", &r_lightingShadowFilter, -1, 1)) SetLightingShadowFilter(runtime, r_lightingShadowFilter);
-      //    if (ImGui::IsItemHovered()) ImGui::SetTooltip("Toggle Shadow Dither/Filtering. (The game heavily relies on this!)");
-      //    DrawResetButton(r_lightingShadowFilter, -1, "r_lightingShadowFilter", runtime);
-      // }
+      if (Globals::UIIsAdvanced)
+      {
+         if (ImGui::SliderInt("r_lightingShadowFilter", &r_lightingShadowFilter, -1, 1)) SetLightingShadowFilter(runtime, r_lightingShadowFilter);
+         if (ImGui::IsItemHovered()) ImGui::SetTooltip("Toggle Shadow Dither/Filtering. (The game heavily relies on this!)");
+         DrawResetButton(r_lightingShadowFilter, -1, "r_lightingShadowFilter", runtime);
+      }
 #endif
    }
 }
