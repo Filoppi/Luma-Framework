@@ -103,6 +103,8 @@ Project("{8BC9CEB8-8B4A-11D0-8D11-00A0C91BC942}") = "Mortal Kombat 11", "Source\
 EndProject
 Project("{8BC9CEB8-8B4A-11D0-8D11-00A0C91BC942}") = "Monster Hunter World", "Source\Games\Monster Hunter World\Monster Hunter World.vcxproj", "{5A0992EF-93A2-4565-86C1-11610EC27193}"
 EndProject
+Project("{8BC9CEB8-8B4A-11D0-8D11-00A0C91BC942}") = "Mass Effect Andromeda", "Source\Games\Mass Effect Andromeda\Mass Effect Andromeda.vcxproj", "{7FC545FF-0D9A-4F33-B0D2-7AF72239FBD4}"
+EndProject
 Global
 	GlobalSection(SolutionConfigurationPlatforms) = preSolution
 		Development-Debug|Win32 = Development-Debug|Win32
@@ -755,6 +757,18 @@ Global
 		{5A0992EF-93A2-4565-86C1-11610EC27193}.Test-Release|Win32.Build.0 = Test-Release|x64
 		{5A0992EF-93A2-4565-86C1-11610EC27193}.Test-Release|x64.ActiveCfg = Test-Release|x64
 		{5A0992EF-93A2-4565-86C1-11610EC27193}.Test-Release|x64.Build.0 = Test-Release|x64
+		{7FC545FF-0D9A-4F33-B0D2-7AF72239FBD4}.Development-Debug|Win32.ActiveCfg = Development-Debug|x64
+		{7FC545FF-0D9A-4F33-B0D2-7AF72239FBD4}.Development-Debug|x64.ActiveCfg = Development-Debug|x64
+		{7FC545FF-0D9A-4F33-B0D2-7AF72239FBD4}.Development-Debug|x64.Build.0 = Development-Debug|x64
+		{7FC545FF-0D9A-4F33-B0D2-7AF72239FBD4}.Development-Release|Win32.ActiveCfg = Development-Release|x64
+		{7FC545FF-0D9A-4F33-B0D2-7AF72239FBD4}.Development-Release|x64.ActiveCfg = Development-Release|x64
+		{7FC545FF-0D9A-4F33-B0D2-7AF72239FBD4}.Development-Release|x64.Build.0 = Development-Release|x64
+		{7FC545FF-0D9A-4F33-B0D2-7AF72239FBD4}.Publishing-Release|Win32.ActiveCfg = Publishing-Release|x64
+		{7FC545FF-0D9A-4F33-B0D2-7AF72239FBD4}.Publishing-Release|x64.ActiveCfg = Publishing-Release|x64
+		{7FC545FF-0D9A-4F33-B0D2-7AF72239FBD4}.Publishing-Release|x64.Build.0 = Publishing-Release|x64
+		{7FC545FF-0D9A-4F33-B0D2-7AF72239FBD4}.Test-Release|Win32.ActiveCfg = Test-Release|x64
+		{7FC545FF-0D9A-4F33-B0D2-7AF72239FBD4}.Test-Release|x64.ActiveCfg = Test-Release|x64
+		{7FC545FF-0D9A-4F33-B0D2-7AF72239FBD4}.Test-Release|x64.Build.0 = Test-Release|x64
 	EndGlobalSection
 	GlobalSection(SolutionProperties) = preSolution
 		HideSolutionNode = FALSE
@@ -807,6 +821,7 @@ Global
 		{6CC6AE7C-9E02-4497-B397-897332ED4805} = {02EA681E-C7D8-13C7-8484-4AC65E1B71E8}
 		{8066E72F-C800-45D1-ADE9-F40D23430505} = {02EA681E-C7D8-13C7-8484-4AC65E1B71E8}
 		{5A0992EF-93A2-4565-86C1-11610EC27193} = {02EA681E-C7D8-13C7-8484-4AC65E1B71E8}
+		{7FC545FF-0D9A-4F33-B0D2-7AF72239FBD4} = {02EA681E-C7D8-13C7-8484-4AC65E1B71E8}
 	EndGlobalSection
 	GlobalSection(ExtensibilityGlobals) = postSolution
 		SolutionGuid = {8B799422-BA66-3174-B21F-B9FA07C4B2E3}
