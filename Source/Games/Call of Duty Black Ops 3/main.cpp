@@ -15,6 +15,7 @@
 
 #include <includes/d3d11TokenizedProgramFormat.hpp>
 
+#include "../../../../Program Files (x86)/Windows Kits/10/Include/10.0.26100.0/ucrt/complex.h"
 #include "..\..\Core\core.hpp"
 
 
@@ -48,6 +49,7 @@ namespace Globals
    static bool IsSkipManualReloadShaders = true;
    static bool IsSkipOnDrawOrDispatch = false;
    static bool IsSkipDLSSDraw = false;
+   static bool IsSkipDLSSFinalLinearize = false;
    static bool IsSuperDebug = false;
    static bool IsSkipImGUI = false;
 #endif
@@ -361,6 +363,11 @@ struct CallOfDutyBlackOps3GameDeviceData final : public GameDeviceData
          #if DEVELOPMENT
             ASSERT_ONCE(SUCCEEDED(hr0));
          #endif
+
+      auto hr3 = resources.tex->QueryInterface(&resources.res);
+         #if DEVELOPMENT
+            ASSERT_ONCE(SUCCEEDED(hr3));
+         #endif
       
       auto hr1 = device->CreateRenderTargetView(resources.tex.get(), nullptr, &resources.rtv);
          #if DEVELOPMENT
@@ -380,11 +387,7 @@ struct CallOfDutyBlackOps3GameDeviceData final : public GameDeviceData
    Resources resources_depth;
    // Resources resources_oit;
    Resources resources_exposure;
-   
-   DrawStateStack<DrawStateStackType::FullGraphics> draw_state_stack_tonemap;
-   
-   //For "CoDBO3 PreSR"
-   CustomPixelShaderPassData dlss_linearize_data;
+   Resources resources_dlss_linearize;
 
    //sr input structs/datas
    SR::SettingsData sr_settings_data = {};
@@ -509,7 +512,7 @@ namespace DLSSJitter
    static float* addr_8;
    static float* addr_12;
    
-   static bool enabled = false;
+   static bool enabled = true;
 
    constexpr byte is_sync_needed_max = 4;
    static byte is_sync_needed = is_sync_needed_max;
@@ -573,10 +576,10 @@ namespace DLSSJitter
    static void OnPresent(DeviceData& device_data, CallOfDutyBlackOps3GameDeviceData& game_device_data)
    {
       //gatekeep
-      if (!IsReady()) return;
-      if (sr_user_type == SR::UserType::None) return;
+      if (MemoryHack::exe_type == MemoryHack::Unknown) return;
 
-      if (game_device_data.drawn_smaat2x)
+      //case: valid, so replace next
+      if (enabled && sr_user_type != SR::UserType::None && game_device_data.drawn_smaat2x)
       {
          //++
          frame++;
@@ -599,6 +602,7 @@ namespace DLSSJitter
          //set
          SetJitter(jitter, frame);
       }
+      //case: reset
       else
       {
          SetJitterReset();
@@ -616,45 +620,45 @@ namespace DLSSJitter
          ImGui::PushStyleColor(ImGuiCol_Text, IM_COL32(255, 100, 100, 255));
          ImGui::BulletText("Unsupported version of the game detected. Memory hack features are unavailable.");
          ImGui::PopStyleColor();
-         return;
       }
-
-      //checkmark enabled
-      ImGui::PushID("DLSSJitterEnabled");
-      if (ImGui::Checkbox("Enable", &enabled))
+      else
       {
-         if (!enabled) SetJitterReset();
-         is_sync_needed = is_sync_needed_max;
-         reshade::set_config_value(runtime, NAME, "DLSSJitterEnabled", enabled);
-      }
+         //checkmark enabled
+         ImGui::PushID("DLSSJitterEnabled");
+         if (ImGui::Checkbox("Enable", &enabled))
+         {
+            is_sync_needed = is_sync_needed_max;
+            reshade::set_config_value(runtime, NAME, "DLSSJitterEnabled", enabled);
+         }
       
-      //status
-      if (IsReady())
-      {
-         ImGui::PushStyleColor(ImGuiCol_Text, IM_COL32(100, 255, 100, 255));
-         ImGui::BulletText("ACTIVE AND PATCHING! (%.5f, %.5f)", jitter.x, jitter.y, frame % 2 != 0);
-         ImGui::PopStyleColor();
-      }
+         //status
+         if (IsReady())
+         {
+            ImGui::PushStyleColor(ImGuiCol_Text, IM_COL32(100, 255, 100, 255));
+            ImGui::BulletText("ACTIVE AND PATCHING! (%.5f, %.5f)", jitter.x, jitter.y, frame % 2 != 0);
+            ImGui::PopStyleColor();
+         }
       
-      ImGui::NewLine(); ///////////////////////
+         ImGui::NewLine(); ///////////////////////
 
-      //DLSSJitter::jitter_sel
-      if (ImGui::SliderInt("Jitter Phases", &phases_sel, 0, 32)) //TODO save
-      {
-         device_data.force_reset_sr = true; //soft reset for new jitters
-         // CallOfDutyBlackOps3GameDeviceData::HardResetSR(device_data, game_device_data);
-      }
-      if (ImGui::IsItemHovered()) ImGui::SetTooltip("Set the amount of offsets before repeating.\n\nHighest isn't automatically best, especially for DLAA,\nsince it'll takes more time to return and update that subpixel position."); 
-      ImGui::BulletText("Active: %d", enabled ? phases : -1);
+         //DLSSJitter::jitter_sel
+         if (ImGui::SliderInt("Jitter Phases", &phases_sel, 0, 32)) //TODO save
+         {
+            device_data.force_reset_sr = true; //soft reset for new jitters
+            // CallOfDutyBlackOps3GameDeviceData::HardResetSR(device_data, game_device_data);
+         }
+         if (ImGui::IsItemHovered()) ImGui::SetTooltip("Set the amount of offsets before repeating.\n\nHighest isn't automatically best, especially for DLAA,\nsince it'll takes more time to return and update that subpixel position."); 
+         ImGui::BulletText("Active: %d", enabled ? phases : -1);
       
-      // ImGui::NewLine(); ///////////////////////
+         // ImGui::NewLine(); ///////////////////////
 
-      // //jitter_multiplier
-      // if (ImGui::SliderFloat("Jitter Multiplier", &jitter_multiplier, 0.f, 1.f))
-      // {
-      //    reshade::set_config_value(runtime, NAME, "JitterMultiplier", jitter_multiplier);
-      // }
-      // ImGui::BulletText("Range: +/-%.3f", jitter_multiplier * 0.5f);
+         // //jitter_multiplier
+         // if (ImGui::SliderFloat("Jitter Multiplier", &jitter_multiplier, 0.f, 1.f))
+         // {
+         //    reshade::set_config_value(runtime, NAME, "JitterMultiplier", jitter_multiplier);
+         // }
+         // ImGui::BulletText("Range: +/-%.3f", jitter_multiplier * 0.5f);
+      }
       
       ImGui::NewLine(); ///////////////////////
       
@@ -1039,7 +1043,7 @@ public:
       // default_luma_global_game_settings.PCCGuaranteed = cb_luma_global_settings.GameSettings.PCCGuaranteed = 0.25f;
       default_luma_global_game_settings.BlackFloorSDRTonemap = cb_luma_global_settings.GameSettings.BlackFloorSDRTonemap = 1.0f; //this is precalced, where 1 is disabled
       default_luma_global_game_settings.BlackFloorLUT = cb_luma_global_settings.GameSettings.BlackFloorLUT = 0.0f;
-      default_luma_global_game_settings.CGContrast = cb_luma_global_settings.GameSettings.CGContrast = 0.f;
+      default_luma_global_game_settings.CGContrast = cb_luma_global_settings.GameSettings.CGContrast = 1.f;
       default_luma_global_game_settings.CGContrastMidGray = cb_luma_global_settings.GameSettings.CGContrastMidGray = 36.f;
       default_luma_global_game_settings.CGSaturation = cb_luma_global_settings.GameSettings.CGSaturation = 1.f;
       default_luma_global_game_settings.CGHighlightsStrength = cb_luma_global_settings.GameSettings.CGHighlightsStrength = 1.f;
@@ -1442,9 +1446,8 @@ public:
          //fetch srv 0
          {
             ID3D11ShaderResourceView* raw_srv = nullptr;
-            native_device_context->PSGetShaderResources(0, 1, &raw_srv);
-            // game_device_data.tex_color_srv.reset(raw_srv);
-            game_device_data.resources_smaa_color_input.srv.reset(raw_srv);
+            native_device_context->PSGetShaderResources(0, 1, &raw_srv); //get
+            game_device_data.resources_smaa_color_input.srv.reset(raw_srv); //take
          }
 
          //fetch srv 11-14
@@ -1529,27 +1532,15 @@ public:
             //release prev
             CallOfDutyBlackOps3GameDeviceData::HardResetSR(device_data, game_device_data);
             
+            //setup resources_sr_output
+            CallOfDutyBlackOps3GameDeviceData::SetUpFSFXResources(native_device, game_device_data.resources_sr_output, output_resolution);
+            
+            //setup resources_dlss_linearize
+            CallOfDutyBlackOps3GameDeviceData::SetUpFSFXResources(native_device, game_device_data.resources_dlss_linearize, output_resolution);
+
             //new desc with desired output_resolution
             game_device_data.resources_sr_output.desc = CallOfDutyBlackOps3GameDeviceData::GetDefaultDesc(output_resolution);
             
-            //create tex
-            auto hr1 = native_device->CreateTexture2D(&game_device_data.resources_sr_output.desc, nullptr, &game_device_data.resources_sr_output.tex);
-               #if DEVELOPMENT
-                  ASSERT_ONCE(SUCCEEDED(hr1));
-               #endif
-
-            //get res
-            auto hr2 = game_device_data.resources_sr_output.tex->QueryInterface(&game_device_data.resources_sr_output.res);
-               #if DEVELOPMENT
-                  ASSERT_ONCE(SUCCEEDED(hr2));
-               #endif
-
-            //create srv
-            auto hr3 = native_device->CreateShaderResourceView(game_device_data.resources_sr_output.tex.get(), nullptr, &game_device_data.resources_sr_output.srv);
-               #if DEVELOPMENT
-                  ASSERT_ONCE(SUCCEEDED(hr3));
-               #endif
-
             //stats
             #if DEVELOPMENT
                Globals::CountSRTexChange++;
@@ -1577,27 +1568,15 @@ public:
          
          game_device_data.sr_draw_data.render_width = game_device_data.sr_settings_data.render_width;
          game_device_data.sr_draw_data.render_height = game_device_data.sr_settings_data.render_height;
-         
          game_device_data.sr_draw_data.near_plane = 0;
          game_device_data.sr_draw_data.far_plane = 1;
-         
-         auto res0 = game_device_data.resources_smaa_color_input.res.get();
-         game_device_data.sr_draw_data.source_color = res0;
-         
-         auto res1 = game_device_data.resources_sr_output.res.get();
-         game_device_data.sr_draw_data.output_color = res1;
-         
-         auto res2 = game_device_data.resources_velocity.res.get();
-         game_device_data.sr_draw_data.motion_vectors = res2;
+         game_device_data.sr_draw_data.source_color = game_device_data.resources_smaa_color_input.res.get();
+         game_device_data.sr_draw_data.output_color = game_device_data.resources_sr_output.res.get();
+         game_device_data.sr_draw_data.motion_vectors = game_device_data.resources_velocity.res.get();
+         game_device_data.sr_draw_data.depth_buffer = game_device_data.resources_depth.res.get();
+         game_device_data.sr_draw_data.exposure = Globals::SRAutoExposure ? nullptr : game_device_data.resources_exposure.res.get();
 
-         auto res3 = game_device_data.resources_depth.res.get();
-         game_device_data.sr_draw_data.depth_buffer = res3;
-
-         auto res4 = game_device_data.resources_exposure.res.get();
-         game_device_data.sr_draw_data.exposure = Globals::SRAutoExposure ? nullptr : res4;
-
-         // auto res5 = game_device_data.resources_oit.res.get();
-         // game_device_data.sr_draw_data.transparency_alpha = res5;
+         // game_device_data.sr_draw_data.transparency_alpha = game_device_data.resources_oit.res.get();
 
 #if ENABLE_FIDELITY_SK == 1
          constexpr  float radians_60 = 1.0472f; //TODO: bruh
@@ -1676,19 +1655,38 @@ public:
             native_device_context->PSGetShaderResources(0, 1, &final_srv);
             ID3D11Resource* final_res = nullptr;
             final_srv->GetResource(&final_res); //This is the Luma replaced SRV (16f)
-
-            //Clone pipeline
-            DrawStateStack<DrawStateStackType::FullGraphics> draw_state_stack;
-            draw_state_stack.Cache(native_device_context, device_data.uav_max_count);
+            
+            //Clone pipeline before inserting custom linearize
+            DrawStateStack<DrawStateStackType::SimpleGraphics> draw_state_stack;
+            #if DEVELOPMENT
+               if (Globals::IsSkipDLSSFinalLinearize) goto AfterLinearize;
+            #endif
+            draw_state_stack.Cache(native_device_context, 0/*device_data.uav_max_count*/);
 
             //Draw custom linearize
-            DrawCustomPixelShaderPass(native_device, native_device_context, final_srv, device_data, CompileTimeStringHash("CoDBO3 PreSR"), game_device_data.dlss_linearize_data);
-
+            {
+               //get shaders
+               const auto vs = device_data.native_vertex_shaders.find(Math::CompileTimeStringHash("Copy VS"));
+               const auto ps = device_data.native_pixel_shaders.find(CompileTimeStringHash("CoDBO3 PreSR"));
+               if (vs == device_data.native_vertex_shaders.end() || !vs->second.get() || ps == device_data.native_pixel_shaders.end() || !ps->second.get())
+               {
+                  #if DEVELOPMENT
+                     ASSERT_ONCE_MSG(false, "Failed to find shaders for DLSS Final linearize!");
+                  #endif
+                  goto AfterLinearize;
+               }
+            
+               //final's srv --> resources_dlss_linearize
+               DrawCustomPixelShader(native_device_context, nullptr, nullptr, device_data.sampler_state_point.get(), vs->second.get(), ps->second.get(),
+                  final_srv, game_device_data.resources_dlss_linearize.rtv.get(), game_device_data.resources_dlss_linearize.desc.Width, game_device_data.resources_dlss_linearize.desc.Height);
+            }
+            
             //Restore pipeline
             draw_state_stack.Restore(native_device_context, true, true);
-            
-            //set correct sr src color
-            game_device_data.sr_draw_data.source_color = final_res;
+            AfterLinearize:
+
+            //set correct sr src color (resources_dlss_linearize --> resources_sr_output)
+            game_device_data.sr_draw_data.source_color = game_device_data.resources_dlss_linearize.res.get();
             
             //get sr_instance_data
             auto* sr_instance_data = device_data.GetSRInstanceData();
@@ -1721,7 +1719,7 @@ public:
                return DrawOrDispatchOverrideType::Skip;
             }
 
-            //set final's srv 0 as sr output color
+            //set final's srv 0 as sr output color (resources_sr_output --> final's rtv)
             native_device_context->PSSetShaderResources(0, 1, &game_device_data.resources_sr_output.srv);
          } AfterDLSS:
          
@@ -2292,19 +2290,27 @@ public:
             ImGui::TextWrapped(combined_str.c_str());
          }
          
-         if (ImGui::CollapsingHeader("Super Resolution: Misc. Important Info"))
+         if (ImGui::CollapsingHeader("Super Resolution: README"))
          {
             ImGui::Bullet(); ImGui::SameLine(); ImGui::TextWrapped("When upscaling (e.g. DLSS, opposed to of native resolution DLAA),\nSuper Resolution is drawn after fullscreen overlay/effect shaders (e.g. SoE Beast Mode, Zombie Blood, etc.), so they will flicker & smear.\n(You don't wanna know what it'll take to have upscaling before them...)");
-            ImGui::Bullet(); ImGui::SameLine(); ImGui::TextWrapped("The lower the internal resolution, the more dithered the shadows.");
+            ImGui::Bullet(); ImGui::SameLine(); ImGui::TextWrapped("The lower the internal resolution, the more dithered the shadows. (The fix is rather brutal.)");
             ImGui::Bullet(); ImGui::SameLine(); ImGui::TextWrapped("Motion Blur will cause fireflies, since it is drawn before Super Resolution.");
             ImGui::Bullet(); ImGui::SameLine(); ImGui::TextWrapped("Use OptiScaler in conjunction for FSR (it breaks output until restart otherwise).");
                ImGui::SameLine(); if (ImGui::Button("GitHub")) Website::OpenWebsite("https://github.com/optiscaler/OptiScaler/releases");
-            ImGui::Bullet(); ImGui::SameLine(); ImGui::TextWrapped(R"(See "Auto Exposure" in the "Quirks" section for a different highlight resolve.)");
+            ImGui::NewLine();
+            ImGui::Bullet(); ImGui::SameLine(); ImGui::TextWrapped("Preset E (CNN): Fast enough for DLAA, though blurry. Slightly fails to resolve flickering light sources. Slightly smears, i.e. particles, but at least they get resolved in motion unlike SMAA T2x Filmic.");
+            ImGui::Bullet(); ImGui::SameLine(); ImGui::TextWrapped("Preset F (CNN): Fast enough for DLAA, though most blurry, where finer edges are lost. Requires sharpening to make up.");
+            ImGui::Bullet(); ImGui::SameLine(); ImGui::TextWrapped("Preset J (Trans. 1): Slower, way sharper & nicer than E/F, but it's overconfident with flicking light sources.");
+            ImGui::Bullet(); ImGui::SameLine(); ImGui::TextWrapped("Preset K (Trans. 1): Seems to even more overconfident than J on flickering light sources. So, just use J?");
+            ImGui::Bullet(); ImGui::SameLine(); ImGui::TextWrapped("Preset L (Trans. 2): Gorgeous, but a deadly performance cost the higher the internal resolution is set to.");
+            ImGui::Bullet(); ImGui::SameLine(); ImGui::TextWrapped("Preset M (Trans. 2): Rather indistinguishable from L with slightly less cost, though able to cause blocky artefacts from 1 frame flashesfl stu like muzzle flashes.");
+            ImGui::Bullet(); ImGui::SameLine(); ImGui::TextWrapped("FSR 3 via OptiScaler: Performance cost is between E/F & J/K. Sharpness is comparable to E, but anti-aliasing takes a while to kick in and settle.");
+            ImGui::Bullet(); ImGui::SameLine(); ImGui::TextWrapped("FSR 4 & XeSS via OptiScaler: Idk, \"Team Green\" goofy ahh");
          }
          
          {
             if (DLSSJitter::IsReady()) ImGui::PushStyleColor(ImGuiCol_Header, IM_COL32(64, 128, 64, 255));
-            auto open = ImGui::CollapsingHeader("Super Resolution: Additional Jitter (BO3Enhanced)");
+            auto open = ImGui::CollapsingHeader("Super Resolution: Jitter & Additional Jitter (BO3Enhanced)");
             if (DLSSJitter::IsReady()) ImGui::PopStyleColor();
             if (open) DLSSJitter::OnUI(runtime, device_data, game_device_data);
          }
@@ -2370,8 +2376,7 @@ public:
                if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
                   ImGui::SetTooltip("Change texture Mipmaps LOD bias to negative every frame for DLSS jitter to sample the correct texel to aggregate.\n(A negative LOD bias forces sharper textures even at a distance.)\nBest to leave on, unless there is outstanding shadow map issues (I saw this once or twice, don't know if this is even cause).");
                DrawResetButton(Globals::SRSetMipLodBias, true, "SRSetMipLodBias", runtime);
-
-               //Globals::
+               
                ImGui::PushID("SR: Mipmaps LOD Bias Manual Override");
                if (ImGui::SliderFloat("Set Mipmaps LOD Bias Manual", &Globals::SRSetMipLodBiasManual, -4.f, 0.f, "%.2f"))
                   reshade::set_config_value(runtime, NAME, "SRSetMipLodBiasManual", Globals::SRSetMipLodBiasManual);
@@ -2717,39 +2722,53 @@ public:
             
             is_disabled = ShaderDefineInfo::Get(ShaderDefineInfo::CUSTOM_COLORGRADE) == 0;
             if (is_disabled) ImGui::BeginDisabled();
-      
-            if (ImGui::SliderFloat("CG: Saturation", &cb_luma_global_settings.GameSettings.CGSaturation, 0.f, 2.f, "%.4f"))
+
+            ImGui::PushID("CG: Saturation");
+            if (ImGui::SliderFloat("Saturation", &cb_luma_global_settings.GameSettings.CGSaturation, 0.f, 2.f, "%.4f"))
                reshade::set_config_value(runtime, NAME, "CGSaturation", cb_luma_global_settings.GameSettings.CGSaturation);
+            ImGui::PopID();
             if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled)) ImGui::SetTooltip("Final saturation before HDR tonemap.");
             DrawResetButton(cb_luma_global_settings.GameSettings.CGSaturation, default_luma_global_game_settings.CGSaturation, "CGSaturation", runtime);
-      
-            if (ImGui::SliderFloat("CG: Contrast", &cb_luma_global_settings.GameSettings.CGContrast, 0.f, 2.f, "%.4f"))
+
+            ImGui::PushID("CG: Contrast");
+            if (ImGui::SliderFloat("Contrast", &cb_luma_global_settings.GameSettings.CGContrast, 0.f, 2.f, "%.4f"))
                reshade::set_config_value(runtime, NAME, "CGContrast", cb_luma_global_settings.GameSettings.CGContrast);
+            ImGui::PopID();
             if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled)) ImGui::SetTooltip("RenoDX power based contrast before HDR tonemap.");
             DrawResetButton(cb_luma_global_settings.GameSettings.CGContrast, default_luma_global_game_settings.CGContrast, "CGContrast", runtime);
-            
-            if (ImGui::SliderFloat("CG: Contrast Mid Gray", &cb_luma_global_settings.GameSettings.CGContrastMidGray, 0.f, 500.f))
+
+            ImGui::PushID("CG: Contrast Mid Gray");
+            if (ImGui::SliderFloat("Contrast Mid Gray", &cb_luma_global_settings.GameSettings.CGContrastMidGray, 0.f, 500.f))
                reshade::set_config_value(runtime, NAME, "CGContrastMidGray", cb_luma_global_settings.GameSettings.CGContrastMidGray);
+            ImGui::PopID();
             if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled)) ImGui::SetTooltip("Contrast's mid gray value to stretch in/out luminance.");
             DrawResetButton(cb_luma_global_settings.GameSettings.CGContrastMidGray, default_luma_global_game_settings.CGContrastMidGray, "CGContrastMidGray", runtime);
-            
-            if (ImGui::SliderFloat("CG: Highlights", &cb_luma_global_settings.GameSettings.CGHighlightsStrength, 0.f, 2.f))
+
+            ImGui::PushID("CG: Highlights");
+            if (ImGui::SliderFloat(" Highlights", &cb_luma_global_settings.GameSettings.CGHighlightsStrength, 0.f, 2.f))
                reshade::set_config_value(runtime, NAME, "CGHighlightsStrength", cb_luma_global_settings.GameSettings.CGHighlightsStrength);
+            ImGui::PopID();
             if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled)) ImGui::SetTooltip("RenoDX highlights boost/compress.");
             DrawResetButton(cb_luma_global_settings.GameSettings.CGHighlightsStrength, default_luma_global_game_settings.CGHighlightsStrength, "CGHighlightsStrength", runtime);
-            
-            if (ImGui::SliderFloat("CG: Highlights Mid Gray", &cb_luma_global_settings.GameSettings.CGHighlightsMidGray, 0.f, 500.f))
+
+            ImGui::PushID("CG: Highlights Mid Gray");
+            if (ImGui::SliderFloat("Highlights Mid Gray", &cb_luma_global_settings.GameSettings.CGHighlightsMidGray, 0.f, 500.f))
                reshade::set_config_value(runtime, NAME, "CGHighlightsMidGray", cb_luma_global_settings.GameSettings.CGHighlightsMidGray);
+            ImGui::PopID();
             if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled)) ImGui::SetTooltip("Highlights mid gray / threshold value to manipulate luminance around.");
             DrawResetButton(cb_luma_global_settings.GameSettings.CGHighlightsMidGray, default_luma_global_game_settings.CGHighlightsMidGray, "CGHighlightsMidGray", runtime);
-      
-            if (ImGui::SliderFloat("CG: Shadows", &cb_luma_global_settings.GameSettings.CGShadowsStrength, 0.f, 2.f))
+
+            ImGui::PushID("CG: Shadows");
+            if (ImGui::SliderFloat("Shadows", &cb_luma_global_settings.GameSettings.CGShadowsStrength, 0.f, 2.f))
                reshade::set_config_value(runtime, NAME, "CGShadowsStrength", cb_luma_global_settings.GameSettings.CGShadowsStrength);
+            ImGui::PopID();
             if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled)) ImGui::SetTooltip("RenoDX shadows boost/compress.");
             DrawResetButton(cb_luma_global_settings.GameSettings.CGShadowsStrength, default_luma_global_game_settings.CGShadowsStrength, "CGShadowsStrength", runtime);
-            
-            if (ImGui::SliderFloat("CG: Shadows Mid Gray", &cb_luma_global_settings.GameSettings.CGShadowsMidGray, 0.f, 500.f))
+
+            ImGui::PushID("CG: Shadows Mid Gray");
+            if (ImGui::SliderFloat("Shadows Mid Gray", &cb_luma_global_settings.GameSettings.CGShadowsMidGray, 0.f, 500.f))
                reshade::set_config_value(runtime, NAME, "CGShadowsMidGray", cb_luma_global_settings.GameSettings.CGShadowsMidGray);
+            ImGui::PopID();
             if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled)) ImGui::SetTooltip("Shadows mid gray / threshold value to manipulate luminance around.");
             DrawResetButton(cb_luma_global_settings.GameSettings.CGShadowsMidGray, default_luma_global_game_settings.CGShadowsMidGray, "CGShadowsMidGray", runtime);
       
@@ -2995,6 +3014,11 @@ public:
          if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
             ImGui::SetTooltip("When we ever reach the DLSS draw call. Should it be skipped, even though all info is gathered?");
 
+         if (ImGui::Checkbox("Skip DLSS Final Linearize", &Globals::IsSkipDLSSFinalLinearize))
+            reshade::set_config_value(runtime, NAME, "IsSkipDLSSFinalLinearize", Globals::IsSkipDLSSFinalLinearize);
+         if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
+            ImGui::SetTooltip("Skip the custom linearize pass at final when DLSS.");
+
          //IsSuperDebug
          ImGui::Checkbox("Super Debug", &Globals::IsSuperDebug);
       }
@@ -3027,6 +3051,7 @@ public:
       ImGui::BulletText("Bug Hunter: adap");
       ImGui::BulletText("Bug Hunter: ʚଓ");
       ImGui::BulletText("Bug Hunter: RooniVarooni");
+      ImGui::BulletText("Bug Hunter: soulshot96");
 
       ImGui::NewLine();
       ImGui::Text("Third Party:");
