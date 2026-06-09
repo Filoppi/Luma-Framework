@@ -354,6 +354,13 @@ public:
    {
       auto& game_device_data = GetGameDeviceData(device_data);
 
+      if (QuantumBreakUpscaling::IsDepthLinearizationPass(original_shader_hashes))
+      {
+         QuantumBreakUpscaling::CaptureClipDepthFromLinearizationPass(native_device_context, game_device_data.upscaling);
+
+         return DrawOrDispatchOverrideType::None;
+      }
+
       if (QuantumBreakUpscaling::IsHistoryReprojectionPass(original_shader_hashes))
       {
          game_device_data.saw_history_reprojection_pass = true;

@@ -7,6 +7,7 @@ These notes describe the current Quantum Break SR/DLSS integration in Luma.
 Relevant files:
 
 - `Source/Games/Quantum Break/main.cpp`
+- `Source/Games/Quantum Break/Upscaling.hpp`
 - `Shaders/Quantum Break/Luma_QB_PreSRDecode.hlsl`
 - `Shaders/Quantum Break/temporal_resolve_0x99274617.ps_5_0.hlsl`
 - `Shaders/Quantum Break/unused/history_reprojection_clamp_0xE8337D48.cs_5_0.hlsl`
@@ -28,13 +29,31 @@ The post draw/dispatch callback is required because Luma temporarily replaces th
 Shader hashes:
 
 ```cpp
-shader_hashes_history_reprojection.compute_shaders.emplace(std::stoul("E8337D48", nullptr, 16));
-shader_hashes_temporal_resolve.pixel_shaders.emplace(std::stoul("99274617", nullptr, 16));
+DepthLinearizationHashes().pixel_shaders.emplace(hash_depth_linearization);
+HistoryReprojectionHashes().compute_shaders.emplace(hash_history_reprojection);
+TemporalResolveHashes().pixel_shaders.emplace(hash_temporal_resolve);
 ```
+
+Development builds also force shader names into Luma's debugger:
+
+- `0xA43343D6`: `QB Depth Linearization (Clip Depth -> Linear Depth)`
+- `0xE8337D48`: `QB History Reprojection (Motion Vectors)`
+- `0x99274617`: `QB Temporal Resolve / TAA`
+- `0x037FCE62`: `QB MSAA GBuffer Reconstruction Mask`
+- `0x84DD3C0C`: `QB MSAA GBuffer Depth Resolve`
+
+Depth linearization pass:
+
+- Pixel shader hash `A43343D6`.
+- Suggested name: `QB Depth Linearization (Clip Depth -> Linear Depth)`.
+- Captures clip/device depth from `PS SRV slot 0`.
+- The shader writes linear depth to `OM RTV slot 0`, but Luma deliberately does **not** use that output for SR.
+- The pass can run at full, half, and quarter resolution. Luma keeps the largest captured `PS SRV 0` resource each frame so downscaled linear-depth passes cannot replace main scene depth.
 
 History reprojection pass:
 
 - Compute shader hash `E8337D48`.
+- Suggested name: `QB History Reprojection (Motion Vectors)`.
 - Marks TAA detected.
 - Captures motion vectors from `CS SRV slot 0`.
 - Stores the resource in `game_device_data.sr_motion_vectors`.
@@ -42,12 +61,43 @@ History reprojection pass:
 Temporal resolve pass:
 
 - Pixel shader hash `99274617`.
+- Suggested name: `QB Temporal Resolve / TAA`.
 - Main SR insertion point.
-- Captures depth from `PS SRV slot 0`.
+- Uses cached clip/device depth from the `A43343D6` depth-linearization input when it matches source color and motion-vector size.
+- Falls back to temporal resolve `PS SRV slot 0`, named `g_tClipDepth` in the shader dump, if the explicit depth cache is missing or mismatched.
 - Captures source color from `PS SRV slot 2`.
 - Captures final resolve RTV from `OM RTV slot 0`.
 - Reads only the SR-required values from `cb_update_1` and the temporal resolve `ssaa` cbuffer through staging readback.
 - Runs SR before executing the original temporal resolve draw.
+
+MSAA-specific depth path:
+
+- `0x037FCE62`: MSAA GBuffer/depth reconstruction mask, reads `Texture2DMS<float> g_tDepthMS`.
+- `0x84DD3C0C`: MSAA GBuffer/depth resolve, reads `Texture2DMS<float> g_tDepthMS` and writes `SV_Depth`.
+- These disappear when the in-game AA option disables MSAA.
+- They are not used as SR depth inputs because they are the MSAA path, not the stable single-sample clip-depth resource used by temporal resolve.
+
+## SR Input Map
+
+Every SR input is taken from a specific QB pass/binding:
+
+| SR input | Source pass | Binding | Resource meaning |
+|---|---|---|---|
+| Source color | `0x99274617` Temporal Resolve | `PS SRV2` / `g_tColor` | Current temporal color at render resolution, still in QB gamma-space before Luma decodes it. |
+| Depth | `0xA43343D6` Depth Linearization | `PS SRV0` | Pre-linearized clip/device depth, viewed as `r32_float` on an `r32_typeless` resource. This is the preferred SR depth. |
+| Depth fallback | `0x99274617` Temporal Resolve | `PS SRV0` / `g_tClipDepth` | Same kind of clip-depth resource, used only if the explicit `0xA43343D6` cache is missing or size-mismatched. |
+| Motion vectors | `0xE8337D48` History Reprojection | `CS SRV0` / `g_tGeometryVelocityTexture` | Geometry velocity texture, observed as `r16g16_float` at render resolution. |
+| Output color | `0x99274617` Temporal Resolve | `OM RTV0` | Final temporal resolve target, normally output/upscaled resolution. |
+| Main camera constants | `0x99274617` Temporal Resolve | `PS CB0` / `cb_update_1` | Near plane, projection scale/FOV fallback, and cbuffer jitter fallback. |
+| Temporal jitter | `0x99274617` Temporal Resolve | `PS CB1` / `ssaa` | `g_vSSAAJitterOffset[0]`, the jitter used by the temporal resolve when sampling current color. |
+
+Depth chain summary:
+
+```text
+0xA43343D6 PS SRV0   clip/device depth      -> Luma SR depth cache
+0xA43343D6 RTV0      linear r16 depth       -> not used for SR
+0x99274617 PS SRV0   g_tClipDepth fallback  -> used only if cache is unavailable
+```
 
 ## Resolution Source
 
@@ -117,8 +167,8 @@ settings_data.hdr = true;
 settings_data.auto_exposure = false;
 settings_data.inverted_depth = false;
 settings_data.mvs_jittered = false;
-settings_data.mvs_x_scale = static_cast<float>(render_width) * Settings::SuperResolution::mv_scale;
-settings_data.mvs_y_scale = static_cast<float>(render_height) * Settings::SuperResolution::mv_scale;
+settings_data.mvs_x_scale = static_cast<float>(render_width) * Settings::mv_scale;
+settings_data.mvs_y_scale = static_cast<float>(render_height) * Settings::mv_scale;
 settings_data.render_preset = dlss_render_preset;
 ```
 
@@ -135,7 +185,7 @@ Current `SR::SuperResolutionImpl::DrawData`:
 - `source_color`: `sr_linear_input_color`
 - `output_color`: `device_data.sr_output_color`
 - `motion_vectors`: captured history reprojection motion-vector resource
-- `depth_buffer`: temporal resolve `PS SRV slot 0`
+- `depth_buffer`: cached `A43343D6` depth-linearization `PS SRV slot 0` resource when it matches source color and motion-vector resolution; otherwise temporal resolve `PS SRV slot 0` fallback
 - `pre_exposure`: `1.f`
 - `jitter_x/y`: SSAA jitter if available, otherwise `cb_update_1` jitter
 - `vert_fov`: derived from projection scale, fallback `0.775934f`
@@ -219,7 +269,9 @@ In development/test builds, collapsible SR debug sections show:
 
 - history reprojection pass seen
 - temporal resolve pass seen
+- clip depth captured from the depth-linearization pass
 - motion vectors captured
+- whether cached clip depth was used for the last SR draw
 - UI-only hold frames
 - last SR render size
 - last SR output size
@@ -237,6 +289,7 @@ MV scale and jitter scale are fixed at `1.f`.
 
 Main remaining validation work:
 
+- Confirm `Clip Depth Captured` and `Cached Clip Depth Used For SR` are both true during gameplay SR draws.
 - Confirm MV scale and sign. Current fixed scale is `render_width/height`.
 - Confirm jitter sign and units. Current fixed scale is `1.f`.
 - Confirm whether FSR behaves best with the same linear/HDR path used for DLSS.
@@ -248,4 +301,5 @@ Most useful runtime checks:
 
 1. Confirm `Last SR Render Width/Height` matches the source/depth/MV texture resolution.
 2. Confirm `Last SR Output Width/Height` matches the actual final output resolution.
-3. Test camera cuts, pause/menu transitions, loading, and resolution changes.
+3. Confirm the cached clip-depth path stays selected with MSAA off; MSAA reconstruction/resolve hashes should not appear in that mode.
+4. Test camera cuts, pause/menu transitions, loading, and resolution changes.
