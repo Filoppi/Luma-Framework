@@ -67,13 +67,22 @@ namespace QuantumBreakUpscaling
    }
 
    constexpr float vertical_fov_fallback = 0.775934f; // ~44.46 degrees
+   // Counted in valid scene temporal-resolve draws, not seconds. DLSS is held off for this many
+   // resolves after startup/loading/no-scene periods so QB's AA-off scene transition can stabilize.
+   constexpr uint32_t dlss_scene_warmup_resolve_count = 120u;
    // Byte offsets into QB's cb_update_1 cbuffer for the SR inputs that are not available from textures.
    constexpr uint32_t cb_update_1_inv_near_offset = 47u * 16u;
    constexpr uint32_t cb_update_1_view_to_clip_offset = 10u * 16u;
    constexpr uint32_t cb_update_1_tess_view_to_clip_11_offset = 112u * 16u + 12u;
    constexpr uint32_t cb_update_1_jitter_offset = 121u * 16u;
    constexpr uint32_t cb_update_1_min_size = cb_update_1_jitter_offset + sizeof(float) * 2u;
-   // The temporal resolve samples current color with g_vSSAAJitterOffset[0].
+   // The temporal resolve samples current color with g_vSSAAJitterOffset[0], directly added to UVs.
+   // Logged scene frames repeat a 4-sample raw UV pattern:
+   //   ( 0.00014648, -0.00008681), (-0.00014648,  0.00008681),
+   //   ( 0.00004883,  0.00026042), (-0.00004883, -0.00026042).
+   // At 2560x1440, observed when QB's own upscaling is enabled for 4K output,
+   // this becomes roughly (0.375, 0.125), (-0.375, -0.125),
+   // (0.125, -0.375), (-0.125, 0.375) render pixels after the SR Y flip.
    constexpr uint32_t ssaa_jitter_offset = 12u * 16u;
    constexpr uint32_t ssaa_min_size = ssaa_jitter_offset + sizeof(float) * 2u;
 
@@ -101,6 +110,8 @@ namespace QuantumBreakUpscaling
       float sr_jitter_y = 0.f;
       float sr_cb_jitter_x = 0.f;
       float sr_cb_jitter_y = 0.f;
+      float sr_render_pixel_jitter_x = 0.f;
+      float sr_render_pixel_jitter_y = 0.f;
       float sr_vertical_fov = vertical_fov_fallback;
       float sr_near_plane = 0.1f;
       float sr_far_plane = 1000.f;
@@ -121,6 +132,10 @@ namespace QuantumBreakUpscaling
       uint32_t previous_render_height = 0u;
       uint32_t previous_output_width = 0u;
       uint32_t previous_output_height = 0u;
+      // DLSS transition state. previous_sr_type detects switching into DLSS; dlss_scene_warmup_remaining
+      // also gets refreshed by no-scene frames so DLSS does not start on the first unstable gameplay resolves.
+      uint32_t dlss_scene_warmup_remaining = 0u;
+      SR::Type previous_sr_type = SR::Type::None;
 #endif
    };
 
@@ -205,7 +220,9 @@ namespace QuantumBreakUpscaling
       }
 
       const float fov = 2.f * std::atan(1.f / abs_projection_scale);
-      return (std::isfinite(fov) && fov > 0.f && fov < 3.13f) ? fov : 0.f;
+      // Loading/menu variants of QB's temporal resolve can expose non-scene constants that decode to a
+      // technically positive but effectively zero FOV. Do not feed those into DLSS; keep the previous/fallback FOV.
+      return (std::isfinite(fov) && fov >= 0.1f && fov < 3.13f) ? fov : 0.f;
    }
 
    inline bool HasTextureShapeChanged(const D3D11_TEXTURE2D_DESC& current_desc, const D3D11_TEXTURE2D_DESC& previous_desc)
@@ -428,7 +445,8 @@ namespace QuantumBreakUpscaling
 
    inline bool CaptureSSAAData(ID3D11Device* native_device, ID3D11DeviceContext* native_device_context, Data& data)
    {
-      // The temporal resolve samples current color with g_vSSAAJitterOffset[0], so keep this as the jitter source.
+      // Prefer the temporal resolve's SSAA jitter over cb_update_1. It is the exact UV offset
+      // used for the current color/depth sample, and the captured values identify QB's 4-sample pattern.
       data.has_ssaa_data = false;
       data.sr_jitter_x = 0.f;
       data.sr_jitter_y = 0.f;
@@ -626,7 +644,13 @@ namespace QuantumBreakUpscaling
       result.requested = IsRequested(device_data);
 
 #if ENABLE_SR
-   data.used_cached_clip_depth = false;
+      data.used_cached_clip_depth = false;
+      // Switching into DLSS is equivalent to a fresh scene start for DLSS history purposes.
+      if (data.previous_sr_type != device_data.sr_type)
+      {
+         data.previous_sr_type = device_data.sr_type;
+         data.dlss_scene_warmup_remaining = device_data.sr_type == SR::Type::DLSS ? dlss_scene_warmup_resolve_count : 0u;
+      }
 
       com_ptr<ID3D11ShaderResourceView> ps_shader_resources[3];
       com_ptr<ID3D11RenderTargetView> render_target_views[D3D11_SIMULTANEOUS_RENDER_TARGET_COUNT];
@@ -645,10 +669,38 @@ namespace QuantumBreakUpscaling
          return ps_shader_resources[0].get() && ps_shader_resources[2].get() && render_target_views[0].get();
       }();
 
+      bool captured_cb_update_1 = false;
+      bool captured_ssaa = false;
       if (has_main_temporal_resolve_bindings)
       {
-         CaptureCBUpdate1Data(native_device, native_device_context, data);
-         CaptureSSAAData(native_device, native_device_context, data);
+         // These constant buffers distinguish the real scene temporal resolve from transition variants
+         // that use the same shader/resources but do not carry valid scene camera/jitter state.
+         captured_cb_update_1 = CaptureCBUpdate1Data(native_device, native_device_context, data);
+         captured_ssaa = CaptureSSAAData(native_device, native_device_context, data);
+      }
+
+      if (result.requested && has_main_temporal_resolve_bindings && !captured_cb_update_1 && !captured_ssaa)
+      {
+         // Loading-to-gameplay transition resolves can bind scene-looking resources without the scene
+         // constant buffers. Do not run SR, and do not replay the draw through the post-SR resolve path.
+         device_data.force_reset_sr = true;
+         if (cb_luma_global_settings.SRType != 0u)
+         {
+            cb_luma_global_settings.SRType = 0u;
+            device_data.cb_luma_global_settings_dirty = true;
+         }
+         result.stop_processing = true;
+         return result;
+      }
+
+      if (result.requested && device_data.sr_type == SR::Type::DLSS && has_main_temporal_resolve_bindings && captured_cb_update_1 && captured_ssaa && data.dlss_scene_warmup_remaining > 0u)
+      {
+         // This is not a wall-clock delay: it consumes one count per valid scene temporal resolve.
+         // During the warmup, QB's own temporal resolve runs normally and DLSS history is kept reset.
+         --data.dlss_scene_warmup_remaining;
+         device_data.force_reset_sr = true;
+         result.requested = false;
+         return result;
       }
 
       if (result.requested && immediate_context && data.sr_motion_vectors.get() && has_main_temporal_resolve_bindings)
@@ -709,16 +761,17 @@ namespace QuantumBreakUpscaling
                   data.used_cached_clip_depth = true;
                }
 
-               if (SetupOutput(native_device, device_data, data, output_desc))
+               const bool output_ready = SetupOutput(native_device, device_data, data, output_desc);
+               if (output_ready)
                {
                   auto* sr_instance_data = device_data.GetSRInstanceData();
                   if (sr_instance_data)
                   {
-                     // Use the smallest SR input texture so color, depth, and motion vectors cover the full render area.
-                     const uint32_t max_input_width = (std::min)(source_desc.Width, (std::min)(depth_desc.Width, motion_vectors_desc.Width));
-                     const uint32_t max_input_height = (std::min)(source_desc.Height, (std::min)(depth_desc.Height, motion_vectors_desc.Height));
-                     const uint32_t render_width = max_input_width;
-                     const uint32_t render_height = max_input_height;
+                     // Use the smallest SR input texture so color, depth, and motion vectors all cover the full render area.
+                     const uint32_t input_width = (std::min)(source_desc.Width, (std::min)(depth_desc.Width, motion_vectors_desc.Width));
+                     const uint32_t input_height = (std::min)(source_desc.Height, (std::min)(depth_desc.Height, motion_vectors_desc.Height));
+                     const uint32_t render_width = input_width;
+                     const uint32_t render_height = input_height;
 
                      const uint32_t output_width = output_desc.Width;
                      const uint32_t output_height = output_desc.Height;
@@ -730,6 +783,22 @@ namespace QuantumBreakUpscaling
                         device_data.force_reset_sr = true;
                         result.stop_processing = true;
                         return result;
+                     }
+
+                     // g_vSSAAJitterOffset[0] is a normalized UV offset; shader 0x99274617 adds it directly to sampling UVs.
+                     // Convert UV -> input pixels for DLSS/FSR and flip Y to match SR convention. Do not apply
+                     // projection/NDC-style *0.5f scaling here; that would make the logged pattern half-strength.
+                     if (data.has_ssaa_data)
+                     {
+                        data.sr_render_pixel_jitter_x = jitter_x * static_cast<float>(render_width);
+                        data.sr_render_pixel_jitter_y = -jitter_y * static_cast<float>(render_height);
+                     }
+                     else
+                     {
+                        // Fallback g_vJitterOffset is not the temporal resolve sample offset. Captured scene frames had it
+                        // at zero, and other QB shaders add it to SV_Position, so treat it as already pixel-space if used.
+                        data.sr_render_pixel_jitter_x = jitter_x;
+                        data.sr_render_pixel_jitter_y = -jitter_y;
                      }
 
                      Settings::SetRenderData(render_width, render_height, output_width, output_height, jitter_x, jitter_y, device_data);
@@ -780,9 +849,9 @@ namespace QuantumBreakUpscaling
                         draw_data.motion_vectors = data.sr_motion_vectors.get();
                         draw_data.depth_buffer = sr_depth_resource;
                         draw_data.pre_exposure = 1.f;
-                        draw_data.jitter_x = jitter_x * Settings::jitter_scale;
-                        draw_data.jitter_y = jitter_y * Settings::jitter_scale;
-                        draw_data.vert_fov = (std::isfinite(data.sr_vertical_fov) && data.sr_vertical_fov > 0.f)
+                        draw_data.jitter_x = data.sr_render_pixel_jitter_x * Settings::jitter_scale;
+                        draw_data.jitter_y = data.sr_render_pixel_jitter_y * Settings::jitter_scale;
+                        draw_data.vert_fov = (std::isfinite(data.sr_vertical_fov) && data.sr_vertical_fov >= 0.1f)
                                                 ? data.sr_vertical_fov
                                                 : vertical_fov_fallback;
                         draw_data.near_plane = data.sr_near_plane;
@@ -807,7 +876,12 @@ namespace QuantumBreakUpscaling
                            source_desc.Width,
                            source_desc.Height);
 
-                        result.succeeded = pre_sr_encoded && sr_implementations[device_data.sr_type]->Draw(sr_instance_data, native_device_context, draw_data);
+                        bool sr_drawn = false;
+                        if (pre_sr_encoded)
+                        {
+                           sr_drawn = sr_implementations[device_data.sr_type]->Draw(sr_instance_data, native_device_context, draw_data);
+                        }
+                        result.succeeded = pre_sr_encoded && sr_drawn;
 
                         {
                            ID3D11ShaderResourceView* null_srvs[D3D11_COMMONSHADER_INPUT_RESOURCE_SLOT_COUNT] = {};
@@ -891,6 +965,7 @@ namespace QuantumBreakUpscaling
    {
 #if ENABLE_SR
       // Drop all transient SR resources so the next valid scene frame rebuilds them and resets DLSS history.
+      // If DLSS is currently selected, the rebuild is also treated as a fresh scene warmup.
       device_data.force_reset_sr = true;
       device_data.has_drawn_sr = false;
 
@@ -903,6 +978,8 @@ namespace QuantumBreakUpscaling
       data.output_changed = false;
       data.has_sr_clip_depth_desc = false;
       data.used_cached_clip_depth = false;
+      data.sr_render_pixel_jitter_x = 0.f;
+      data.sr_render_pixel_jitter_y = 0.f;
 
       data.has_previous_source_desc = false;
       data.has_previous_depth_desc = false;
@@ -915,6 +992,7 @@ namespace QuantumBreakUpscaling
       data.previous_render_height = 0u;
       data.previous_output_width = 0u;
       data.previous_output_height = 0u;
+      data.dlss_scene_warmup_remaining = device_data.sr_type == SR::Type::DLSS ? dlss_scene_warmup_resolve_count : 0u;
 #else
       (void)device_data;
       (void)data;
@@ -924,10 +1002,20 @@ namespace QuantumBreakUpscaling
    inline void OnPresent(DeviceData& device_data, Data& data)
    {
 #if ENABLE_SR
+      const bool had_clip_depth = data.sr_clip_depth.get() != nullptr;
+      const bool had_motion_vectors = data.sr_motion_vectors.get() != nullptr;
+
       // If SR was requested but no scene resolve produced SR output, force a history reset for the next scene frame.
       if (device_data.sr_type != SR::Type::None && !device_data.has_drawn_sr)
       {
          device_data.force_reset_sr = true;
+      }
+
+      if (device_data.sr_type == SR::Type::DLSS && !device_data.has_drawn_sr && !had_clip_depth && !had_motion_vectors)
+      {
+         // Title/loading/UI-only frames do not provide a real scene depth/MV pair. Refresh the DLSS warmup
+         // so DLSS waits for stable gameplay resolves once scene rendering resumes.
+         data.dlss_scene_warmup_remaining = (std::max)(data.dlss_scene_warmup_remaining, dlss_scene_warmup_resolve_count);
       }
 
       data.debug_prev_had_clip_depth = data.sr_clip_depth.get() != nullptr;
@@ -1022,6 +1110,13 @@ namespace QuantumBreakUpscaling
             table_row_uint("Last SR Render Height:", data.previous_render_height);
             table_row_uint("Last SR Output Width:", data.previous_output_width);
             table_row_uint("Last SR Output Height:", data.previous_output_height);
+            table_row_bool("Using SSAA Jitter Source:", data.has_ssaa_data);
+            table_row_float("Last Raw SSAA Jitter X:", data.sr_jitter_x);
+            table_row_float("Last Raw SSAA Jitter Y:", data.sr_jitter_y);
+            table_row_float("Last Raw CB Jitter X:", data.sr_cb_jitter_x);
+            table_row_float("Last Raw CB Jitter Y:", data.sr_cb_jitter_y);
+            table_row_float("Last SR Pixel Jitter X:", data.sr_render_pixel_jitter_x);
+            table_row_float("Last SR Pixel Jitter Y:", data.sr_render_pixel_jitter_y);
             table_row_float("Active MV Scale Multiplier:", Settings::mv_scale);
             table_row_float("Active Jitter Scale Multiplier:", Settings::jitter_scale);
             ImGui::EndTable();

@@ -8,6 +8,7 @@ Relevant files:
 
 - `Source/Games/Quantum Break/main.cpp`
 - `Source/Games/Quantum Break/Upscaling.hpp`
+- `Source/Games/Quantum Break/Quantum Break.vcxproj`
 - `Shaders/Quantum Break/Luma_QB_PreSRDecode.hlsl`
 - `Shaders/Quantum Break/temporal_resolve_0x99274617.ps_5_0.hlsl`
 - `Shaders/Quantum Break/unused/history_reprojection_clamp_0xE8337D48.cs_5_0.hlsl`
@@ -23,6 +24,8 @@ Quantum Break enables:
 ```
 
 The post draw/dispatch callback is required because Luma temporarily replaces the temporal resolve color SRV with the SR result, executes the game's original resolve draw, then restores the original binding.
+
+The Visual Studio project copies the built addon and, for symbol-producing configurations, the matching PDB to `LUMA_QUANTUM_BREAK_BIN_PATH`. That keeps the deployed addon debuggable when Quantum Break prompts for manual debugger attach.
 
 ## Hook Points
 
@@ -56,7 +59,7 @@ History reprojection pass:
 - Suggested name: `QB History Reprojection (Motion Vectors)`.
 - Marks TAA detected.
 - Captures motion vectors from `CS SRV slot 0`.
-- Stores the resource in `game_device_data.sr_motion_vectors`.
+- Stores the resource in `game_device_data.upscaling.sr_motion_vectors`.
 
 Temporal resolve pass:
 
@@ -104,10 +107,10 @@ Depth chain summary:
 SR render/input resolution is taken from actual texture dimensions, not cbuffer resolution fields:
 
 ```cpp
-const uint32_t max_input_width = min(source_desc.Width, depth_desc.Width, motion_vectors_desc.Width);
-const uint32_t max_input_height = min(source_desc.Height, depth_desc.Height, motion_vectors_desc.Height);
-const uint32_t render_width = max_input_width;
-const uint32_t render_height = max_input_height;
+const uint32_t input_width = min(source_desc.Width, depth_desc.Width, motion_vectors_desc.Width);
+const uint32_t input_height = min(source_desc.Height, depth_desc.Height, motion_vectors_desc.Height);
+const uint32_t render_width = input_width;
+const uint32_t render_height = input_height;
 ```
 
 SR output resolution is taken from the temporal resolve RTV:
@@ -149,7 +152,7 @@ Pre-SR decode:
 - Shader: `Luma_QB_PreSRDecode.hlsl`
 - Input: temporal resolve color from `PS SRV slot 2`.
 - Operation: `gamma_sRGB_to_linear(..., GCT_POSITIVE)`.
-- Output: `game_device_data.sr_linear_input_color`.
+- Output: `game_device_data.upscaling.sr_linear_input_color`.
 
 Post-SR encode is now in `temporal_resolve_0x99274617.ps_5_0.hlsl` when `LumaSettings.SRType > 0`:
 
@@ -187,7 +190,7 @@ Current `SR::SuperResolutionImpl::DrawData`:
 - `motion_vectors`: captured history reprojection motion-vector resource
 - `depth_buffer`: cached `A43343D6` depth-linearization `PS SRV slot 0` resource when it matches source color and motion-vector resolution; otherwise temporal resolve `PS SRV slot 0` fallback
 - `pre_exposure`: `1.f`
-- `jitter_x/y`: SSAA jitter if available, otherwise `cb_update_1` jitter
+- `jitter_x/y`: chosen raw QB jitter converted to SR input/render pixel space
 - `vert_fov`: derived from projection scale, fallback `0.775934f`
 - `near_plane`: derived from `g_fInvNear`
 - `far_plane`: fixed `1000.f`
@@ -211,7 +214,66 @@ Important resolution naming quirk:
 
 - `g_vSSAAJitterOffset[0]`, preferred DLSS jitter source.
 
-The temporal resolve shader samples current color with `g_vSSAAJitterOffset[0]`, so this remains the most authoritative jitter source until proven otherwise.
+The temporal resolve shader samples current color/depth with `g_vSSAAJitterOffset[0]` added directly to UVs, so this remains the most authoritative jitter source until proven otherwise.
+
+## Jitter Units
+
+Raw jitter source priority:
+
+1. `ssaa` `PS CB1` at `g_vSSAAJitterOffset[0]`.
+2. `cb_update_1` `PS CB0` at `g_vJitterOffset` as fallback.
+
+The raw QB jitter is kept in `cb_luma_global_settings.GameSettings.JitterOffset` for any QB/Luma shader code that needs to reason in the game's original units.
+
+The SR backend receives render-pixel jitter, because DLSS/FSR expect offsets in input pixel space rather than the raw QB cbuffer units:
+
+```cpp
+if (using_ssaa_jitter)
+{
+	// g_vSSAAJitterOffset[0] is already a normalized UV offset.
+	sr_jitter_x = raw_ssaa_jitter_x * render_width;
+	sr_jitter_y = -raw_ssaa_jitter_y * render_height;
+}
+else
+{
+	// cb_update_1.g_vJitterOffset is less authoritative and appears pixel-space in other QB shaders.
+	sr_jitter_x = raw_cb_jitter_x;
+	sr_jitter_y = -raw_cb_jitter_y;
+}
+```
+
+The Y sign is flipped to match the SR convention used by the other Luma integrations.
+
+Before this change, DLSS received QB's tiny raw cbuffer jitter values directly. This change converts the authoritative SSAA jitter to render-pixel units and fixes the Y sign. `g_vSSAAJitterOffset[0]` is a UV offset, so it must use full render-size scaling; a projection/NDC-style `* 0.5f` conversion would make the actual game pattern half-strength.
+
+Captured scene logs show `cb_update_1.g_vJitterOffset` as zero on relevant frames. Other QB shaders add `g_vJitterOffset` to `SV_Position`, which means the fallback should not be multiplied by render size if it ever becomes non-zero. The meaningful temporal resolve input is `ssaa.g_vSSAAJitterOffset[0]`, which repeats this 4-sample UV sequence:
+
+```text
+( 0.00014648, -0.00008681 )
+( -0.00014648,  0.00008681 )
+( 0.00004883,  0.00026042 )
+( -0.00004883, -0.00026042 )
+```
+
+At a 2560x1440 render size, which is the observed internal render resolution when QB's own upscaling option is enabled for 4K output, that maps to this SR pixel-space sequence after the Y flip:
+
+```text
+( 0.375,  0.125 )
+( -0.375, -0.125 )
+( 0.125, -0.375 )
+( -0.125,  0.375 )
+```
+
+With an incorrect projection-style `* 0.5f` conversion, DLSS would receive only:
+
+```text
+( 0.1875,  0.0625 )
+( -0.1875, -0.0625 )
+( 0.0625, -0.1875 )
+( -0.0625,  0.1875 )
+```
+
+The current implementation only fixes units/sign/amplitude for the jitter already produced by QB. Replacing or overriding QB's hardcoded 4-sample pattern with a longer Halton sequence should be a separate follow-up improvement so regressions can be bisected cleanly.
 
 ## FOV And Camera Data
 
@@ -263,6 +325,22 @@ Pause/menu detection:
 - Tracks whether scene temporal resolve was seen this frame.
 - Holds pause state across the swapchain queue to avoid treating UI-only frames as active gameplay.
 
+Loading/transition guards:
+
+- Temporal-resolve draws that bind the main color/depth/output resources but expose neither `cb_update_1` nor `ssaa` are treated as non-scene transition variants.
+- For those transition variants, SR is reset, `LumaSettings.SRType` is cleared, `TemporalResolveResult::stop_processing` is set, and `main.cpp` skips the original draw. This prevents the draw from being replayed through the post-SR resolve path.
+- DLSS is warmed up after switching to DLSS, rebuilding SR resources, or observing a no-scene/title/loading frame.
+- The warmup is counted in valid scene temporal-resolve draws, not wall-clock seconds. `dlss_scene_warmup_resolve_count` is currently `120`.
+- During the warmup window, valid scene temporal resolves run QB's normal temporal resolve and DLSS is skipped with `force_reset_sr` left set. This keeps DLSS history empty until the scene pipeline is stable.
+- This avoids the AA-off save-load device hang seen when DLSS started on the first unstable gameplay resolves after title/loading.
+
+Observed failure that motivated the guard:
+
+- None and FSR could load saves.
+- DLSS selected after loading a save worked.
+- DLSS selected before loading a save could hang the D3D device when Quantum Break's in-game Anti Aliasing option was off.
+- The failing path reached a temporal resolve with scene-looking resources but missing both scene constant buffers. The later `CreateRenderTargetView` assert in Luma core was secondary to `DXGI_ERROR_DEVICE_REMOVED` / `DXGI_ERROR_DEVICE_HUNG`, not the root cause.
+
 ## Debug UI
 
 In development/test builds, collapsible SR debug sections show:
@@ -275,6 +353,10 @@ In development/test builds, collapsible SR debug sections show:
 - UI-only hold frames
 - last SR render size
 - last SR output size
+- active jitter source
+- raw SSAA jitter
+- raw `cb_update_1` jitter
+- SR render-pixel jitter sent to DLSS/FSR
 - MV scale multiplier
 - jitter scale multiplier
 
@@ -285,21 +367,28 @@ User tuning controls:
 FSR sharpness is fixed at `0.f`.
 MV scale and jitter scale are fixed at `1.f`.
 
-## Current Open Questions
+## Validation Status And Follow-Ups
 
-Main remaining validation work:
+Validated in this work:
 
-- Confirm `Clip Depth Captured` and `Cached Clip Depth Used For SR` are both true during gameplay SR draws.
-- Confirm MV scale and sign. Current fixed scale is `render_width/height`.
-- Confirm jitter sign and units. Current fixed scale is `1.f`.
+- SR depth is sourced from the pre-linearized depth-linearization input instead of the linearized depth output.
+- Raw QB jitter is converted to SR render-pixel units before being sent to DLSS/FSR; the preferred SSAA jitter path uses full UV-to-pixel scaling, not raw cbuffer values or half-amplitude projection conversion.
+- DLSS selected before loading a save no longer hangs on the AA-off path after the transition guard and DLSS warmup.
+- The Luma core `CreateRenderTargetView` assert observed during debugging was a secondary symptom of device removal, so no core workaround is kept.
+
+Remaining validation/follow-up work:
+
+- Confirm MV scale and sign over more camera motion. Current fixed scale is `render_width/height`.
+- Consider a separate Halton/game jitter-table patch after the unit/sign/amplitude fix is stable enough to bisect separately.
 - Confirm whether FSR behaves best with the same linear/HDR path used for DLSS.
 - Derive far plane if a reliable source is found.
-- Validate color stability with the gamma->linear->SR->gamma path.
-- Validate render/output sizes in the debug UI across gameplay, menus, cutscenes, and resolution changes.
+- Validate color stability with the gamma->linear->SR->gamma path across gameplay, menus, cutscenes, and resolution changes.
+- Replace the conservative `120`-resolve DLSS warmup with a tighter state-based stability check if a reliable signal is found.
 
 Most useful runtime checks:
 
 1. Confirm `Last SR Render Width/Height` matches the source/depth/MV texture resolution.
 2. Confirm `Last SR Output Width/Height` matches the actual final output resolution.
 3. Confirm the cached clip-depth path stays selected with MSAA off; MSAA reconstruction/resolve hashes should not appear in that mode.
-4. Test camera cuts, pause/menu transitions, loading, and resolution changes.
+4. Test DLSS selected before save load with Anti Aliasing off.
+5. Test camera cuts, pause/menu transitions, loading, and resolution changes.

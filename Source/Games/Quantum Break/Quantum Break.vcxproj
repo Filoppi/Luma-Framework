@@ -153,6 +153,7 @@
     <PostBuildEvent>
       <Command>IF DEFINED LUMA_QUANTUM_BREAK_BIN_PATH (
   xcopy /Y "$(TargetDir)*$(SolutionName)-$(ProjectName).addon" "%LUMA_QUANTUM_BREAK_BIN_PATH%" || exit /B 0
+  IF EXIST "$(TargetDir)$(TargetName).pdb" ( xcopy /Y "$(TargetDir)$(TargetName).pdb" "%LUMA_QUANTUM_BREAK_BIN_PATH%" || exit /B 0 )
   IF EXIST "..\..\External\NGX\bin\dev\nvngx_dlss.dll" ( xcopy /Y "..\..\External\NGX\bin\dev\nvngx_dlss.dll" "%LUMA_QUANTUM_BREAK_BIN_PATH%" || exit /B 0 )
 )</Command>
     </PostBuildEvent>
@@ -253,6 +254,7 @@
     <PostBuildEvent>
       <Command>IF DEFINED LUMA_QUANTUM_BREAK_BIN_PATH (
   xcopy /Y "$(TargetDir)*$(SolutionName)-$(ProjectName).addon" "%LUMA_QUANTUM_BREAK_BIN_PATH%" || exit /B 0
+  IF EXIST "$(TargetDir)$(TargetName).pdb" ( xcopy /Y "$(TargetDir)$(TargetName).pdb" "%LUMA_QUANTUM_BREAK_BIN_PATH%" || exit /B 0 )
   IF EXIST "..\..\External\NGX\bin\rel\nvngx_dlss.dll" ( xcopy /Y "..\..\External\NGX\bin\rel\nvngx_dlss.dll" "%LUMA_QUANTUM_BREAK_BIN_PATH%" || exit /B 0 )
 )</Command>
     </PostBuildEvent>
@@ -301,7 +303,10 @@
       </LinkLibraryDependencies>
     </ProjectReference>
     <PostBuildEvent>
-      <Command>IF DEFINED LUMA_QUANTUM_BREAK_BIN_PATH ( xcopy /Y "$(TargetDir)*$(SolutionName)-$(ProjectName).addon" "%LUMA_QUANTUM_BREAK_BIN_PATH%" || exit /B 0 )</Command>
+      <Command>IF DEFINED LUMA_QUANTUM_BREAK_BIN_PATH (
+  xcopy /Y "$(TargetDir)*$(SolutionName)-$(ProjectName).addon" "%LUMA_QUANTUM_BREAK_BIN_PATH%" || exit /B 0
+  IF EXIST "$(TargetDir)$(TargetName).pdb" ( xcopy /Y "$(TargetDir)$(TargetName).pdb" "%LUMA_QUANTUM_BREAK_BIN_PATH%" || exit /B 0 )
+)</Command>
     </PostBuildEvent>
   </ItemDefinitionGroup>
   <ItemGroup>
