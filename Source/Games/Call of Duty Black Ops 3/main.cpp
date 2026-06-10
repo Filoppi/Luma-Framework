@@ -271,6 +271,7 @@ namespace ShaderDefineInfo
    }
 }
 
+#if ENABLE_SR == 1
 namespace MemoryHack
 {
    enum ExeType
@@ -278,7 +279,7 @@ namespace MemoryHack
       Unknown = -1,
       BO3Enhanced = 0,
    };
-   static ExeType exe_type;
+   static ExeType exe_type = Unknown;
 
    static uintptr_t base; //BlackOps3.exe
    
@@ -289,25 +290,40 @@ namespace MemoryHack
 
       //base
       base = reinterpret_cast<uintptr_t>(GetModuleHandleA("BlackOps3.exe"));
+      if (!base) return;
+
+      //log
+      reshade::log::message(reshade::log::level::info, "MemoryHack::OnInit: Trying to identify the executable...");
       
       //BO3Enhanced
-      //0x0001000: 48 8d 05 19 45 db 02 c7 41 68 09 00 00 00 c7 41 6c 05 00 00 00 48 89 41 58 48 8d 05 00 4d db 02 48 89 41 60 c3 cc
-      exe_type = BO3Enhanced;
       if (exe_type == Unknown)
       {
-         constexpr uintptr_t offset = 0x0001000;
-         auto pattern = std::vector<uint8_t>{0x48, 0x8d, 0x05, 0x19, 0x45, 0xdb, 0x02, 0xc7, 0x41, 0x68, 0x09, 0x00, 0x00, 0x00, 0xc7, 0x41, 0x6c, 0x05, 0x00, 0x00, 0x00, 0x48, 0x89, 0x41, 0x58, 0x48, 0x8d, 0x05, 0x00, 0x4d, 0xdb, 0x02, 0x48, 0x89, 0x41, 0x60, 0xcc};
+         //assume, then invalidate inside
+         exe_type = BO3Enhanced; 
+      
+         //expectations
+         constexpr uintptr_t offset = 0x2cfe874;
+         auto pattern = std::vector<uint8_t>{0x48, 0x83, 0xec, 0x28, 0xe8, 0x53, 0x06, 0x00, 0x00, 0x48, 0x83, 0xc4, 0x28, 0xe9, 0x7a, 0xfe, 0xff, 0xff};
+         
+         //match
          for (uintptr_t i = 0; i < pattern.size(); i++)
          {
             if (*std::bit_cast<uint8_t*>(base + offset + i) != pattern[i])
             {
                exe_type = Unknown;
-               break;
+               goto AfterBO3Enhanced;
             }
          }
       }
+      AfterBO3Enhanced:;
+
+      //TODO: Steam
+
+      //log
+      reshade::log::message(reshade::log::level::info, "MemoryHack::OnInit: Done.");
    }
 }
+#endif
 
 struct CallOfDutyBlackOps3GameDeviceData final : public GameDeviceData
 {
@@ -520,7 +536,7 @@ namespace DLSSJitter
    //if true, you can set jitter OnPresent
    static bool IsReady()
    {
-      return enabled && addr_0 != nullptr /*&& addr4 != nullptr && addr8 != nullptr && addr12 != nullptr*/;
+      return enabled && MemoryHack::exe_type != MemoryHack::Unknown /* && addr_0 != nullptr && addr4 != nullptr && addr8 != nullptr && addr12 != nullptr*/;
    }
    
    void OnInit(MemoryHack::ExeType exe_type)
@@ -685,6 +701,12 @@ namespace DLSSJitter
    
    void OnLoadSettings(reshade::api::effect_runtime* runtime)
    {
+      if (MemoryHack::exe_type == MemoryHack::Unknown)
+      {
+         enabled = false;
+         return;
+      }
+      
       reshade::get_config_value(runtime, NAME, "DLSSJitterEnabled", enabled);
    }
 }
@@ -850,12 +872,18 @@ namespace ForcedLODBias
 
    void OnLoadSettings(reshade::api::effect_runtime* runtime)
    {
+      if (MemoryHack::exe_type == MemoryHack::Unknown) return;
+      
       reshade::get_config_value(runtime, NAME, "r_lodBiasRigid", r_lodBiasRigid);
-      reshade::get_config_value(runtime, NAME, "r_modelLodBias", r_modelLodBias);
-      // reshade::get_config_value(runtime, NAME, "r_lightingShadowFilter", r_lightingShadowFilter);
       if (r_lodBiasRigid != 0.f) SetLodBiasRigid(runtime, r_lodBiasRigid);
+      
+      reshade::get_config_value(runtime, NAME, "r_modelLodBias", r_modelLodBias);
       if (r_modelLodBias != 1.f) SetModelLodBias(runtime, r_modelLodBias);
-      // if (r_lightingShadowFilter != -1) SetLightingShadowFilter(runtime, r_lightingShadowFilter);
+      
+#if DEVELOPMENT
+      reshade::get_config_value(runtime, NAME, "r_lightingShadowFilter", r_lightingShadowFilter);
+      if (r_lightingShadowFilter != -1) SetLightingShadowFilter(runtime, r_lightingShadowFilter);
+#endif
    }
 
    void OnUI(reshade::api::effect_runtime* runtime)
@@ -1002,8 +1030,10 @@ public:
          GetShaderDefineData(char_ptr_crc32("TEST_SDR_HDR_SPLIT_VIEW_MODE")).editable = false;
       }
 
+#if ENABLE_SR == 1
       //native_shaders_definitions
       native_shaders_definitions.emplace(CompileTimeStringHash("CoDBO3 PreSR"), ShaderDefinition{"Luma_CoDBO3_PreSR", reshade::api::pipeline_subobject_type::pixel_shader});
+#endif
       
       //cb
       luma_settings_cbuffer_index = 13;
@@ -1057,8 +1087,8 @@ public:
       default_luma_global_game_settings.MovShoulderPow = cb_luma_global_settings.GameSettings.MovShoulderPow = 3.6f;
       
       //MemoryHack
-      MemoryHack::OnInit();
 #if ENABLE_SR == 1
+      MemoryHack::OnInit();
       DLSSJitter::OnInit(MemoryHack::exe_type);
       ForcedLODBias::OnInit(MemoryHack::exe_type);
 #endif
@@ -1656,15 +1686,17 @@ public:
             ID3D11Resource* final_res = nullptr;
             final_srv->GetResource(&final_res); //This is the Luma replaced SRV (16f)
             
-            //Clone pipeline before inserting custom linearize
-            DrawStateStack<DrawStateStackType::SimpleGraphics> draw_state_stack;
-            #if DEVELOPMENT
-               if (Globals::IsSkipDLSSFinalLinearize) goto AfterLinearize;
-            #endif
-            draw_state_stack.Cache(native_device_context, 0/*device_data.uav_max_count*/);
+
 
             //Draw custom linearize
             {
+               //Clone pipeline before inserting custom linearize
+               DrawStateStack<DrawStateStackType::SimpleGraphics> draw_state_stack;
+               #if DEVELOPMENT
+                  if (Globals::IsSkipDLSSFinalLinearize) goto AfterLinearize;
+               #endif
+               draw_state_stack.Cache(native_device_context, 0/*device_data.uav_max_count*/);
+               
                //get shaders
                const auto vs = device_data.native_vertex_shaders.find(Math::CompileTimeStringHash("Copy VS"));
                const auto ps = device_data.native_pixel_shaders.find(CompileTimeStringHash("CoDBO3 PreSR"));
@@ -1679,10 +1711,10 @@ public:
                //final's srv --> resources_dlss_linearize
                DrawCustomPixelShader(native_device_context, nullptr, nullptr, device_data.sampler_state_point.get(), vs->second.get(), ps->second.get(),
                   final_srv, game_device_data.resources_dlss_linearize.rtv.get(), game_device_data.resources_dlss_linearize.desc.Width, game_device_data.resources_dlss_linearize.desc.Height);
+
+               //Restore pipeline //TODO: Instead, use another Luma native shader so linearize doesn't have to waste to restore. Unsafe for later though?
+               draw_state_stack.Restore(native_device_context, true, true);
             }
-            
-            //Restore pipeline
-            draw_state_stack.Restore(native_device_context, true, true);
             AfterLinearize:
 
             //set correct sr src color (resources_dlss_linearize --> resources_sr_output)
@@ -3099,7 +3131,6 @@ BOOL APIENTRY DllMain(HMODULE hModule, DWORD ul_reason_for_call, LPVOID lpReserv
 // #else
 //       texture_format_upgrades_type   = TextureFormatUpgradesType::None; //TODO: is r11g11b10_float enough already?
 // #endif
-
 
 #if ENABLE_SR == 1
       //sampler upgrade
