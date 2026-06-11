@@ -507,7 +507,8 @@ public: // OnMapBufferRegion is referenced from DllMain (DLL_PROCESS_DETACH unre
                   if (gd.tex_smaa_out_rtv && gd.tex_smaa_out_srv)
                   {
                      // (Re)create the RCAS CB up-front, BEFORE choosing smaa_target: if it fails we must fall back to
-                     // SMAA-straight-to-RTV, else the final RTV is left unwritten (still Replaced) → stale/black.                     if (!gd.cb_sharpen || gd.sharpen_w != w || gd.sharpen_h != h || gd.sharpen_amount != g_smaa_sharpness)
+                     // SMAA-straight-to-RTV, else the final RTV is left unwritten (still Replaced) → stale/black.
+                     if (!gd.cb_sharpen || gd.sharpen_w != w || gd.sharpen_h != h || gd.sharpen_amount != g_smaa_sharpness)
                      {
                         const float sp[4] = {(float)w, (float)h, g_smaa_sharpness, 0.f};
                         if (CreateImmutableCB(native_device, sp, sizeof(sp), gd.cb_sharpen))
@@ -640,7 +641,8 @@ public: // OnMapBufferRegion is referenced from DllMain (DLL_PROCESS_DETACH unre
                   const float2 actual_render_res((float)scene_w, (float)scene_h);
 
                   // Camera was normally captured at the gbuffer VS this frame. Only fall back to the (fragile)
-                  // bound-CB probe if that missed (e.g. a frame with no main gbuffer pass).                  if (!gd.cam_valid_this_frame)
+                  // bound-CB probe if that missed (e.g. a frame with no main gbuffer pass).
+                  if (!gd.cam_valid_this_frame)
                   {
                      if (ID3D11DeviceContext1* ctx1 = GetImmediateCtx1(gd, native_device_context))
                      {
@@ -688,11 +690,13 @@ public: // OnMapBufferRegion is referenced from DllMain (DLL_PROCESS_DETACH unre
 
                   if (gd.tex_dlss_output)
                   {
+                     // Reset history only on genuine discontinuities, not gradual FOV changes — resetting every ramp
+                     // frame starves the upscaler's accumulation; smooth FOV is left to its own history rejection.
+                     const bool reset = device_data.force_reset_sr || gd.first_dlss_frame ||
+                                        res_changed || !gd.cam_valid_this_frame;
+#if DEVELOPMENT || TEST
                      const bool fov_jump = fabsf(gd.cam_proj_m00 - gd.prev_cam_proj_m00) > kFovEps ||
                                            fabsf(gd.cam_proj_m11 - gd.prev_cam_proj_m11) > kFovEps;
-                     const bool reset = device_data.force_reset_sr || gd.first_dlss_frame ||
-                                        res_changed || fov_jump || !gd.cam_valid_this_frame;
-#if DEVELOPMENT || TEST
                      // Finding #2 validation trace: log every RESET (rising edge) with which condition fired and how
                      // many DLAA frames elapsed since the previous reset. Trigger a fast-travel / same-FOV camera cut:
                      // if no RESET logs across it (frames_since_reset keeps climbing) AND you see ghosting → bug real.
