@@ -283,6 +283,8 @@ void main(
   // #else
     r5.xyz = Trade_Out(r5.xyz);
     r5.xyz *= 32768 / 64;
+    r5.xyz /= 32768;
+
     r3.xyz = r5.xyz;
     r0.xyz = -r5.xyz + r0.xyz;
   // #endif
@@ -293,7 +295,6 @@ void main(
 
   o0.xyz = r0.xyz;
 
-  o0.xyz /= 32768;
   o0.xyz = Trade_In(o0.xyz);
 
   // #if CUSTOM_SDR == 0

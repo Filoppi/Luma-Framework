@@ -49,7 +49,7 @@ namespace CB
         
         float PCCHue;
         float PCCChrominance;
-        float PCCPeak;
+        // float PCCPeak;
 
         float BlackFloorSDRTonemap;
         float BlackFloorLUT;
@@ -100,7 +100,7 @@ namespace CB
 
     #define GS_PCCHue LumaSettings.GameSettings.PCCHue
     #define GS_PCCChrominance LumaSettings.GameSettings.PCCChrominance
-    #define GS_PCCPeak LumaSettings.GameSettings.PCCPeak
+    // #define GS_PCCPeak LumaSettings.GameSettings.PCCPeak
 
     #define GS_BlackFloorSDRTonemap LumaSettings.GameSettings.BlackFloorSDRTonemap
     #define GS_BlackFloorLUT LumaSettings.GameSettings.BlackFloorLUT
@@ -124,7 +124,7 @@ namespace CB
         float GammaCorrection;
 
         float TonemapperMaxExpected;
-        float PerChannelLuminanceReductionEmulateStrength;
+        // float PerChannelLuminanceReductionEmulateStrength;
 
         float Bloom;
         float LensFlare;
@@ -135,7 +135,6 @@ namespace CB
         float VolumetricFog;
         float RCAS;
         
-        float PCCChrominance;
         float BlackFloorSDRTonemap;
     };
     #define GS_PeakWhiteNits CB::shader_injection.PeakWhiteNits
@@ -149,9 +148,9 @@ namespace CB
     #define GS_TonemapperRolloffStart 0
     #define GS_TonemapperMaxExpected CB::shader_injection.TonemapperMaxExpected
 
-    #define GS_PerChannelLuminanceReductionEmulateStrength CB::shader_injection.PerChannelLuminanceReductionEmulateStrength
-    #define GS_PerChannelLuminanceReductionEmulatePeak 1.3
-    #define GS_PerChannelLuminanceReductionEmulateMakeup 1.2
+    // #define GS_PerChannelLuminanceReductionEmulateStrength CB::shader_injection.PerChannelLuminanceReductionEmulateStrength
+    // #define GS_PerChannelLuminanceReductionEmulatePeak 1.3
+    // #define GS_PerChannelLuminanceReductionEmulateMakeup 1.2
     
     #define GS_Bloom CB::shader_injection.Bloom
     #define GS_LensFlare CB::shader_injection.LensFlare
@@ -176,9 +175,9 @@ namespace CB
     #define GS_LUTBuilderGradeTint 0
     #define GS_LUTBuilderGradeSat 0
 
-    #define GS_PCCHue 0.2
-    #define GS_PCCChrominance CB::shader_injection.PCCChrominance
-    #define GS_PCCPeak 5.0
+    #define GS_PCCHue 0.475
+    #define GS_PCCChrominance 0.8
+    // #define GS_PCCPeak 5.0
 
     #define GS_BlackFloorSDRTonemap CB::shader_injection.BlackFloorSDRTonemap
     #define GS_BlackFloorLUT 0

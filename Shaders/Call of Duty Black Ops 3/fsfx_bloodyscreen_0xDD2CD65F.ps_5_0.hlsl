@@ -204,9 +204,12 @@ void main(
   r3.xyzw = r4.xyzw + r3.xyzw;
   r3.xyzw = r3.xyzw + r5.xyzw;
 
-  r3.xyz =  r3.xyz;
+  r3.xyz = r3.xyz;
   #if CUSTOM_SDR == 0
-    r3.xyz *= float3(5.08626317e-006, 5.08626317e-006, 5.08626317e-006);
+    r3.xyz = Trade_Out(r3.xyz);
+    r3.xyz *= 32768 / 6;
+    r3.xyz *= 5.08626317e-006;
+    // r3.xyz *= float3(5.08626317e-006, 5.08626317e-006, 5.08626317e-006); //1 / 196608 = 32768 / 6
   #endif
 
   o0.w = (1./6.) * r3.w;
@@ -217,9 +220,7 @@ void main(
 
   o0.xyz = r0.xyz;
   #if CUSTOM_SDR == 0
-    o0.xyz *= float3(32768, 32768, 32768);
-  // #else
-  //   o0.xyz *= (1./6.);
+    o0.xyz = Trade_In(o0.xyz);
   #endif
   return;
 }

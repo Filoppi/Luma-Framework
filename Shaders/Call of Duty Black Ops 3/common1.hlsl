@@ -745,7 +745,7 @@ float3 TonemapVanilla_Inverse(float3 y)
     return result;
 }
 ////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
-float3 TonemapVanilla_Internal(float3 x) { //https://www.desmos.com/calculator/1hmlnb6z1m
+float3 TonemapVanilla_Internal(float3 x, float blackFloor = -1) { //https://www.desmos.com/calculator/1hmlnb6z1m
   float3 r0, r1;
 
   #if CUSTOM_SDRTONEMAP > 0
@@ -777,8 +777,9 @@ float3 TonemapVanilla_Internal(float3 x) { //https://www.desmos.com/calculator/1
     return x;
   #endif
 
+  if (blackFloor < 0) blackFloor = GS_BlackFloorSDRTonemap;
   r0 = x;
-  r0 += 0.00872999988 * GS_BlackFloorSDRTonemap;
+  r0 += 0.00872999988 * blackFloor;
   r0 = log2(r0);
   r0 = saturate(r0 * 0.0727029592 + 0.598205984);
   // const float contrast = ;
@@ -818,6 +819,7 @@ void TonemapVanilla() {
 
     //up luminance
     float y = GetLuminance(TS.colorU, cs);
+    y = min(y, p * 0.999); //clip
     float y1 = NeuTwo::inverse::NeuTwo(y, p);
     y1 *= makeup; //makeup
 
@@ -834,69 +836,49 @@ void TonemapVanilla() {
 
   // Per Channel Correct
   #if CUSTOM_PCC > 0 && CUSTOM_SDRTONEMAP == 0
-    //sample from less blown out spot
-    float3 colorTLessBlow;
-
-    // //multiply down
-    // {
-    //    colorTLessBlow = colorTBefore * GS_PCCLookback; 
-    //    colorTLessBlow = TonemapVanilla_Internal(colorTLessBlow);
-    // }
-
-    //lerp down to best point
-    // {
-    //    colorTLessBlow = colorTBefore;
-    //    float y = GetLuminance(colorTLessBlow, CS_BT709);
-    //    float y1 = lerp(0.183, y, GS_PCCLookback); //lerp to roughly where derivative is 1.
-    //    float ratio = safeDivision(y1, y, 1);
-    //    colorTLessBlow *= ratio;
-    //    colorTLessBlow = TonemapVanilla_Internal(colorTLessBlow);
-    // }
-
-    // 2nd perchannel
-    {
-      // // colorTLessBlow = colorTBefore;
-      // colorTLessBlow = NeuTwo::PerChannel(colorTBefore, GS_PCCPeak, 8.93, 1.13, 0.444);
-      // // colorTLessBlow = NeuTwo::PerChannel(colorTBefore, 1.38, 7.5, 1.13, 0.444);
-      // // colorTLessBlow = Reinhard::ReinhardSimple(colorTBefore, GS_PCCLookback * 20);
-
-      float3 x = colorTBefore;
-      // x += 0.05/203.; //TODO: remove, prob not needed for correction
-      x = pow(x, 1/2.35);
-      x = gamma_sRGB_to_linear(x);
-      x = NeuTwo::PerChannel(x, GS_PCCPeak);
-      colorTLessBlow = x;
-    }
-    
-    //pcc setup
+    // pcc setup
+    TS.colorT = DecodeRec709(TS.colorT);
     float colorTMax = max(TS.colorT.x, max(TS.colorT.y, TS.colorT.z));
     float colorTY = GetLuminance(TS.colorT, CS_BT709);
+
+    // 2nd perchannel
+    float3 colorTLessBlow = colorTBefore;
+    {
+      // float3 x = colorTBefore;
+      // x = pow(x, 1/2.35);
+      // x = gamma_sRGB_to_linear(x);
+      // x = NeuTwo::PerChannel(x, GS_PCCPeak);
+      // colorTLessBlow = x;
+
+      // https://www.desmos.com/calculator/lk9bpn4wkz
+      float3 l = DecodeRec709(TonemapVanilla_Internal(colorTBefore, 1)); //TODO: no other way? we have to recalc w/o black floor lower, else piecewise will not merge
+      float3 u = colorTLessBlow + 0.019988025;
+      colorTLessBlow = colorTLessBlow < 0.1103529061 ? l : u;
+      #if CUSTOM_PCC_ROLLOFF == 0
+        colorTLessBlow = Reinhard::ReinhardPiecewise(colorTLessBlow, HDR_PEAK, 0.1103529061);
+      #elif CUSTOM_PCC_ROLLOFF == 1
+         colorTLessBlow = NeuTwo::PerChannel(colorTLessBlow, HDR_PEAK);
+      #endif
+    }
     float colorTLessBlowY = GetLuminance(colorTLessBlow, CS_BT709);
 
     // ucs
-    TS.colorT = DecodeRec709(TS.colorT); //approx linearization
     TS.colorT = UCSTo(TS.colorT, CS_BT709);
-
-    // colorTLessBlow = DecodeRec709(colorTLessBlow);
     colorTLessBlow = UCSTo(colorTLessBlow, CS_BT709);
 
     // do
-    float s = colorTY;
-    s = smoothstep(0.183, 0.88, s);
-    float sH = s * GS_PCCHue;
-    float sC = s * GS_PCCChrominance;
-    TS.colorT = RestoreHueAndChrominanceUcs(TS.colorT, colorTLessBlow, sH, sC, 1.f);
-
-    // colorT = RestoreHueAndChrominanceUcs(colorT, colorTLessBlowG, sH * min(GS_PCCGuaranteed, 0.25f), sC * GS_PCCGuaranteed, 1.f);
+    TS.colorT = RestoreHueAndChrominanceUcs(TS.colorT, colorTLessBlow, GS_PCCHue, GS_PCCChrominance, 1.f);
     TS.colorT = UCSFrom(TS.colorT, CS_BT709); //back to linear
-    TS.colorT = EncodeRec709(TS.colorT);
+    TS.colorT = max(0, TS.colorT); //clamp BT709
 
-    //clamp
+    // clamp
     float colorTMaxAfter = max(TS.colorT.x, max(TS.colorT.y, TS.colorT.z));
     // colorTMax = lerp(colorTMax, colorTMaxAfter, 0.8f); //reduce max channel feeling
     colorTMax = min(1, colorTMax);
-    TS.colorT *= colorTMax / colorTMaxAfter; //prevent clip
-    TS.colorT = max(0, TS.colorT); //clamp BT709
+    TS.colorT *= colorTMaxAfter > 0 ? colorTMax / colorTMaxAfter : 1; //prevent clip
+
+    // reencode
+    TS.colorT = EncodeRec709(TS.colorT);
   #endif
 
   //save this result as baseline
@@ -932,27 +914,6 @@ float3 LUTNeutralize(float3 lutCoord, float3 lutColor, uint lutSize) {
   if(strengthChromi == 1 && strengthHue == 1 && strengthLuma == 1) return neutral;
 
   //forced neutral   
-//   #if CUSTOM_LUTBUILDER_NEUTRAL == 1
-//     //get chroma
-//     float lutColorChroma = GetChrominance(lutColor);
-//     float neutralChroma = GetChrominance(neutral);
-// 
-//     //skip: lut is more staturated than neutral
-//     if (lutColorChroma > neutralChroma) return lutColor;
-// 
-//     // strength scaled
-//     float strengthScaled = saturate(GetLuminance(lutColor, CS_BT709));
-// 
-//     //get max channel
-//     float lutMax = max(lutColor.x, max(lutColor.y, lutColor.z));
-//     float neutralMax = max(neutral.x, max(neutral.y, neutral.z));
-// 
-//     //scale neutral to match lut tex's max channel, hopefully perserving luma
-//     float3 neutralUnscaled = neutral; //save for later
-//     neutral *= lutMax / neutralMax;
-// 
-//     //perchannel lerp to neutral
-//     return lerp(lutColor, neutral, strength);
   #if CUSTOM_LUTBUILDER_NEUTRAL == 1
     float3 lutUcs = UCSTo(lutColor, CS_BT709);
     float3 neutralUcs = UCSTo(neutral, CS_BT709);
@@ -1318,7 +1279,9 @@ void LensFlare_Comp_HDR(Texture2D<float4> flareTex, Texture3D<float4> lutTex, Sa
   //boost
   float y = GetLuminance(lens, lutbuilder_colorspace);
   if (y > 0) {
-    float y1 = NeuTwo::inverse::NeuTwo(y, p);
+    float y1 = y;
+    y1 = min(y1, p * 0.99f); //clamp from floating point explode
+    y1 = NeuTwo::inverse::NeuTwo(y1, p);
 
     y1 *= 1.46f;
     y1 = pow(y1, 1.6f);

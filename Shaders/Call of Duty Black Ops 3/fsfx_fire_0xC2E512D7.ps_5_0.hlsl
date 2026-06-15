@@ -183,13 +183,13 @@ void main(
   r0.xy = r0.xy / colorRowsCols.xy;
   r0.xy = r1.xy + r0.xy;
   r1.xyzw = colorMap.Sample(bilinearSampler_s, r0.xy).xyzw;
-  r1.xyz = FixFSFX(r1.xyz, 0.01);
   r0.x = saturate(0.100000001 + r1.w);
   r2.xy = renderTargetSize.zw * refractionAmount;
   r0.yz = r2.xy * r0.zw;
   r0.xy = r0.yz * r0.xx + v1.xy;
   r0.xyzw = frameBuffer.Sample(bilinearSampler_s, r0.xy).xyzw;
-  r2.xyz = float3(3.05175781e-005,3.05175781e-005,3.05175781e-005) * r0.xyz;
+  r0.xyz = Trade_Out(r0.xyz);
+  r2.xyz = /* float3(3.05175781e-005,3.05175781e-005,3.05175781e-005) * */ r0.xyz;
   r2.w = min(r2.x, r2.y);
   r2.w = min(r2.w, r2.z);
   r3.xyz = -r2.www * float3(0.5,0.5,0.5) + r2.xyz;
@@ -199,11 +199,12 @@ void main(
   r3.w = max(r3.w, r2.z);
   r2.w = r3.w / r2.w;
   r3.xyz = /* saturate */(r3.xyz * r2.www);
-  r3.xyz = -r0.xyz * float3(3.05175781e-005,3.05175781e-005,3.05175781e-005) + r3.xyz;
+  r3.xyz = -r0.xyz /* * float3(3.05175781e-005,3.05175781e-005,3.05175781e-005) */ + r3.xyz;
   r0.xyz = scriptVector0.yyy * r3.xyz + r2.xyz;
   r2.xyzw = r1.xyzw + -r0.xyzw;
   r1.x = scriptVector0.x * r1.w;
   r0.xyzw = r1.xxxx * r2.xyzw + r0.xyzw;
-  o0.xyzw = float4(32768,32768,32768,1) * r0.xyzw;
+  o0.xyzw = /* float4(32768,32768,32768,1) * */ r0.xyzw;
+  o0.xyz = Trade_In(o0.xyz);
   return;
 }
