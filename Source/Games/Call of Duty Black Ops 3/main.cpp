@@ -14,11 +14,7 @@
 
 // #define ENABLE_ORIGINAL_SHADERS_MEMORY_EDITS 1
 
-#include <includes/d3d11TokenizedProgramFormat.hpp>
-
-#include "../../../../Program Files (x86)/Windows Kits/10/Include/10.0.26100.0/ucrt/complex.h"
 #include "..\..\Core\core.hpp"
-
 
 namespace Globals
 {
