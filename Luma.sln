@@ -107,6 +107,8 @@ Project("{8BC9CEB8-8B4A-11D0-8D11-00A0C91BC942}") = "Mass Effect Andromeda", "So
 EndProject
 Project("{8BC9CEB8-8B4A-11D0-8D11-00A0C91BC942}") = "The Evil Within 2", "Source\Games\The Evil Within 2\The Evil Within 2.vcxproj", "{73FD1D51-5863-4617-B48A-F1C31AF79793}"
 EndProject
+Project("{8BC9CEB8-8B4A-11D0-8D11-00A0C91BC942}") = "Borderlands GOTY Enhanced", "Source\Games\Borderlands GOTY Enhanced\Borderlands GOTY Enhanced.vcxproj", "{B0DE12A4-5C7A-4E91-9F3B-08891303C0DE}"
+EndProject
 Global
 	GlobalSection(SolutionConfigurationPlatforms) = preSolution
 		Development-Debug|Win32 = Development-Debug|Win32
@@ -771,6 +773,18 @@ Global
 		{7FC545FF-0D9A-4F33-B0D2-7AF72239FBD4}.Test-Release|Win32.ActiveCfg = Test-Release|x64
 		{7FC545FF-0D9A-4F33-B0D2-7AF72239FBD4}.Test-Release|x64.ActiveCfg = Test-Release|x64
 		{7FC545FF-0D9A-4F33-B0D2-7AF72239FBD4}.Test-Release|x64.Build.0 = Test-Release|x64
+		{B0DE12A4-5C7A-4E91-9F3B-08891303C0DE}.Development-Debug|Win32.ActiveCfg = Development-Debug|x64
+		{B0DE12A4-5C7A-4E91-9F3B-08891303C0DE}.Development-Debug|x64.ActiveCfg = Development-Debug|x64
+		{B0DE12A4-5C7A-4E91-9F3B-08891303C0DE}.Development-Debug|x64.Build.0 = Development-Debug|x64
+		{B0DE12A4-5C7A-4E91-9F3B-08891303C0DE}.Development-Release|Win32.ActiveCfg = Development-Release|x64
+		{B0DE12A4-5C7A-4E91-9F3B-08891303C0DE}.Development-Release|x64.ActiveCfg = Development-Release|x64
+		{B0DE12A4-5C7A-4E91-9F3B-08891303C0DE}.Development-Release|x64.Build.0 = Development-Release|x64
+		{B0DE12A4-5C7A-4E91-9F3B-08891303C0DE}.Publishing-Release|Win32.ActiveCfg = Publishing-Release|x64
+		{B0DE12A4-5C7A-4E91-9F3B-08891303C0DE}.Publishing-Release|x64.ActiveCfg = Publishing-Release|x64
+		{B0DE12A4-5C7A-4E91-9F3B-08891303C0DE}.Publishing-Release|x64.Build.0 = Publishing-Release|x64
+		{B0DE12A4-5C7A-4E91-9F3B-08891303C0DE}.Test-Release|Win32.ActiveCfg = Test-Release|x64
+		{B0DE12A4-5C7A-4E91-9F3B-08891303C0DE}.Test-Release|x64.ActiveCfg = Test-Release|x64
+		{B0DE12A4-5C7A-4E91-9F3B-08891303C0DE}.Test-Release|x64.Build.0 = Test-Release|x64
 		{73FD1D51-5863-4617-B48A-F1C31AF79793}.Development-Debug|Win32.ActiveCfg = Development-Debug|x64
 		{73FD1D51-5863-4617-B48A-F1C31AF79793}.Development-Debug|Win32.Build.0 = Development-Debug|x64
 		{73FD1D51-5863-4617-B48A-F1C31AF79793}.Development-Debug|x64.ActiveCfg = Development-Debug|x64
@@ -840,6 +854,7 @@ Global
 		{8066E72F-C800-45D1-ADE9-F40D23430505} = {02EA681E-C7D8-13C7-8484-4AC65E1B71E8}
 		{5A0992EF-93A2-4565-86C1-11610EC27193} = {02EA681E-C7D8-13C7-8484-4AC65E1B71E8}
 		{7FC545FF-0D9A-4F33-B0D2-7AF72239FBD4} = {02EA681E-C7D8-13C7-8484-4AC65E1B71E8}
+		{B0DE12A4-5C7A-4E91-9F3B-08891303C0DE} = {02EA681E-C7D8-13C7-8484-4AC65E1B71E8}
 		{73FD1D51-5863-4617-B48A-F1C31AF79793} = {02EA681E-C7D8-13C7-8484-4AC65E1B71E8}
 	EndGlobalSection
 	GlobalSection(ExtensibilityGlobals) = postSolution
