@@ -15,7 +15,8 @@
 #define ENABLE_SMAA 1 // replaces the game's FXAA pass (FXAA AA mode) with SMAA
 
 #include "..\..\Core\core.hpp"
-#include <d3d11_1.h> // ID3D11DeviceContext1 (bound-range CB queries)
+#include <d3d11_1.h>  // ID3D11DeviceContext1 (bound-range CB queries)
+#include <shellapi.h> // ShellExecuteA for the About-tab link buttons (system("start") hangs in exclusive fullscreen)
 
 static constexpr uint32_t kTAAResolveHash = 0xD7E13B2A; // TAA resolve CS — DLAA injection point
 static constexpr uint32_t kFXAAHash = 0x5B81D1F2;       // FXAA PS — replaced with SMAA
@@ -23,12 +24,15 @@ static constexpr uint32_t kGbufferVS_A = 0xC089424D;    // gbuffer VS that binds
 static constexpr uint32_t kGbufferVS_B = 0xFF93953D;    // (reliable jitter capture point)
 // FOV-jump epsilon on projection m00/m11 (history reset on aim/zoom/cut).
 static constexpr float kFovEps = 1e-4f;
+// DLSS far_plane stand-in: MEA's projection is reverse-Z INFINITE-far (no finite far). DLSS is insensitive to the
+// exact large value (used only for depth linearization).
+static constexpr float kCamFar = 100000.f;
 
 // --- User-facing settings (persisted via ReShade config; loaded in LoadConfigs, saved on UI change). Kept as
 // file-scope globals so LoadConfigs (pre-device) can populate them. ---
 static bool g_dlaa_enable = true;
 static bool g_smaa_enable = true;
-static float g_smaa_sharpness = 0.5f;
+static float g_smaa_sharpness = 0.f; // RCAS off by default
 // A reactive/bias mask was evaluated and removed — a dead end for MEA; we pass bias_mask = nullptr.
 
 struct MassEffectAndromedaGameDeviceData final : public GameDeviceData
@@ -62,8 +66,11 @@ struct MassEffectAndromedaGameDeviceData final : public GameDeviceData
    float cam_near = 0.06f;        // [8].w
    float cam_proj_m00 = 0.f;      // [6].x (FOV discriminant)
    float cam_proj_m11 = 0.f;      // [7].y (FOV discriminant)
+#if DEVELOPMENT || TEST
+   // Only read by the DEV/TEST fov_jump trace in OnDrawOrDispatch — gated so shipping doesn't maintain unread state.
    float prev_cam_proj_m00 = 0.f;
    float prev_cam_proj_m11 = 0.f;
+#endif
    // Immediate-context ID3D11DeviceContext1, QI'd once and cached (GetImmediateCtx1). The two call sites are
    // already gated on GetType()==IMMEDIATE; the immediate ctx is unique per device, so this is stable for the
    // device's life. Released in OnDestroyDeviceData (GameDeviceData has no virtual dtor — see that method).
@@ -87,9 +94,6 @@ struct MassEffectAndromedaGameDeviceData final : public GameDeviceData
    bool mvs_jittered = false;
    bool diag_skip_history = false; // don't copy DLSS result into u3 (isolate history feedback)
    bool dev_sim_draw_fail = false; // DEV: force the SR Draw() to "fail" → exercises the finding-#3 recovery-reset latch
-   // DLSS far_plane stand-in: MEA's projection is reverse-Z INFINITE-far (no finite far). DLSS is insensitive to
-   // the exact large value (used only for depth linearization).
-   const float cam_far = 100000.f;
 
    // One-shot diagnostics
    bool logged_sr_diag = false;
@@ -532,25 +536,21 @@ public: // OnMapBufferRegion is referenced from DllMain (DLL_PROCESS_DETACH unre
 
                if (do_sharpen)
                {
-                  // cb_sharpen + the RCAS shaders are guaranteed here: both are folded into the do_sharpen
-                  // viability gate above (CB created up-front, shaders checked via sharpen_shaders_ready), so if
-                  // either were missing SMAA already rendered straight to the final RTV and do_sharpen is false.
+                  // cb_sharpen + both RCAS shaders are guaranteed non-null here: the do_sharpen gate above is set
+                  // false if any is missing (SMAA then renders straight to the final RTV), so no re-guard.
                   auto* sharpen_vs = device_data.native_vertex_shaders[CompileTimeStringHash("Copy VS")].get();
                   auto* sharpen_ps = device_data.native_pixel_shaders[CompileTimeStringHash("MEA Sharpen PS")].get();
-                  if (gd.cb_sharpen && sharpen_vs && sharpen_ps)
-                  {
-                     // DrawCustomPixelShader does NOT restore state → wrap in core's DrawStateStack<FullGraphics>
-                     // (caches/restores all PS SRV/CB/sampler slots, IA, RS, scissors, viewport, blend, DS).
-                     DrawStateStack<DrawStateStackType::FullGraphics> sharpen_state;
-                     sharpen_state.Cache(native_device_context, device_data.uav_max_count);
+                  // DrawCustomPixelShader does NOT restore state → wrap in core's DrawStateStack<FullGraphics>
+                  // (caches/restores all PS SRV/CB/sampler slots, IA, RS, scissors, viewport, blend, DS).
+                  DrawStateStack<DrawStateStackType::FullGraphics> sharpen_state;
+                  sharpen_state.Cache(native_device_context, device_data.uav_max_count);
 
-                     ID3D11Buffer* scb = gd.cb_sharpen.get();
-                     native_device_context->PSSetConstantBuffers(0, 1, &scb);
-                     DrawCustomPixelShader(native_device_context, device_data.default_depth_stencil_state.get(), device_data.default_blend_state.get(), nullptr,
-                        sharpen_vs, sharpen_ps, gd.tex_smaa_out_srv.get(), rtv.get(), w, h, false);
+                  ID3D11Buffer* scb = gd.cb_sharpen.get();
+                  native_device_context->PSSetConstantBuffers(0, 1, &scb);
+                  DrawCustomPixelShader(native_device_context, device_data.default_depth_stencil_state.get(), device_data.default_blend_state.get(), nullptr,
+                     sharpen_vs, sharpen_ps, gd.tex_smaa_out_srv.get(), rtv.get(), w, h, false);
 
-                     sharpen_state.Restore(native_device_context);
-                  }
+                  sharpen_state.Restore(native_device_context);
                }
 
                ID3D11Buffer* vcb = vs_cb1_orig.get();
@@ -725,7 +725,7 @@ public: // OnMapBufferRegion is referenced from DllMain (DLL_PROCESS_DETACH unre
                      draw_data.render_height = (uint32_t)rh;
                      draw_data.reset = reset;
                      draw_data.near_plane = gd.cam_near;
-                     draw_data.far_plane = gd.cam_far;
+                     draw_data.far_plane = kCamFar;
                      // FSR consumes vert FOV (DLSS ignores) and HARD-ASSERTS on ≤0 → fall back to ~60° when m11==0
                      // (first SR frames, pre-capture; that frame is a reset anyway).
                      draw_data.vert_fov = gd.cam_proj_m11 > 0.f ? 2.f * atanf(1.f / gd.cam_proj_m11) : 1.047f;
@@ -801,8 +801,10 @@ public: // OnMapBufferRegion is referenced from DllMain (DLL_PROCESS_DETACH unre
                         if (!gd.diag_skip_history && res_u3)
                            native_device_context->CopySubresourceRegion(res_u3.get(), 0, 0, 0, 0, gd.tex_dlss_output.get(), 0, nullptr);
 
+#if DEVELOPMENT || TEST
                         gd.prev_cam_proj_m00 = gd.cam_proj_m00;
                         gd.prev_cam_proj_m11 = gd.cam_proj_m11;
+#endif
                         gd.first_dlss_frame = false;
                         gd.dlss_ran_this_frame = true;
                         device_data.has_drawn_sr = true; // feeds core's SR-engaged ✓ indicator (copied to has_drawn_sr_imgui)
@@ -845,9 +847,11 @@ public: // OnMapBufferRegion is referenced from DllMain (DLL_PROCESS_DETACH unre
       // the biased sampler lazily on the next descriptor bind — no manual pre-warm.
       if (enable_samplers_upgrade && !custom_texture_mip_lod_bias_offset)
       {
-         // Hold s_mutex_samplers while writing the offset, and skip the DLSS bias while SR is suppressed
+         // Hold s_mutex_samplers EXCLUSIVELY while writing the offset (core reads it as a std::map key under
+         // shared_lock on Frostbite worker threads — core.hpp:8072/8081 — and writes it under unique_lock —
+         // core.hpp:14068; a shared_lock here would race those). Also skip the DLSS bias while SR is suppressed
          // (loading/menus) so we don't over-sharpen those frames.
-         std::shared_lock shared_lock_samplers(s_mutex_samplers);
+         std::unique_lock lock_samplers(s_mutex_samplers);
          const bool dlaa_ran = gd.dlss_ran_this_frame && !device_data.sr_suppressed; // precise: DLSS actually drew this frame
          device_data.texture_mip_lod_bias_offset = dlaa_ran
                                                       ? SR::GetMipLODBias(device_data.render_resolution.y, device_data.output_resolution.y) // -1 at native, more negative when upscaling
@@ -949,6 +953,7 @@ public: // OnMapBufferRegion is referenced from DllMain (DLL_PROCESS_DETACH unre
    // in core's "Super Resolution" section above.
    void DrawImGuiSettings(DeviceData& device_data) override
    {
+      ImGui::SeparatorText("TAA mode");
       if (ImGui::Checkbox("Native AA (DLSS/FSR)", &g_dlaa_enable))
          reshade::set_config_value(nullptr, NAME, "DLAAEnable", g_dlaa_enable);
       if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
@@ -1013,12 +1018,38 @@ public: // OnMapBufferRegion is referenced from DllMain (DLL_PROCESS_DETACH unre
    {
       ImGui::PushTextWrapPos(0.f);
       ImGui::Text(
-         "Mass Effect: Andromeda - Luma mod.\n"
-         "- Native AA: replaces the game's TAA with DLSS or FSR at native resolution (in-game AA = TAA).\n"
-         "- SMAA: replaces the game's FXAA (in-game AA = FXAA), with optional RCAS sharpening.\n"
-         "- 16x anisotropic filtering + negative LOD bias for sharper textures.\n"
-         "- Pick the DLSS/FSR backend and quality preset in the Super Resolution section above.");
+         "Luma for \"Mass Effect: Andromeda\" is developed by DristoforColumb and is open source and free.\n"
+         "It replaces the game's TAA with DLSS or FSR (Native AA) and the game's FXAA with SMAA, plus 16x "
+         "anisotropic filtering.\n"
+         "Set in-game Anti-Aliasing to TAA for DLSS/FSR, or to FXAA for SMAA.\n"
+         "Thanks to the Luma team and contributors.");
       ImGui::PopTextWrapPos();
+
+      ImGui::NewLine();
+      static const std::string social_link = std::string("Join our \"HDR Den\" Discord ") + std::string(ICON_FK_SEARCH);
+      if (ImGui::Button(social_link.c_str()))
+      {
+         // Unique link for Luma's HDR Den (tracks the origin of people joining); do not share for other purposes.
+         static const std::string discord_link = std::string("https://discord.gg/J9fM") + std::string("3EVuEZ");
+         ShellExecuteA(nullptr, "open", discord_link.c_str(), nullptr, nullptr, SW_SHOWNORMAL);
+      }
+      static const std::string contributing_link = std::string("Contribute on Github ") + std::string(ICON_FK_FILE_CODE);
+      if (ImGui::Button(contributing_link.c_str()))
+         ShellExecuteA(nullptr, "open", "https://github.com/Filoppi/Luma-Framework", nullptr, nullptr, SW_SHOWNORMAL);
+
+      ImGui::NewLine();
+      ImGui::Text("Build Date: %s %s", __DATE__, __TIME__);
+
+      ImGui::NewLine();
+      ImGui::Text("Credits:"
+         "\n\nMain:"
+         "\nDristoforColumb"
+         "\n\nThird Party:"
+         "\nReShade"
+         "\nImGui"
+         "\nSMAA (Iryoku)"
+         "\nAMD FidelityFX (RCAS + FSR Native AA)"
+         "\nNVIDIA NGX (DLSS)", "");
    }
 };
 
@@ -1027,7 +1058,7 @@ BOOL APIENTRY DllMain(HMODULE hModule, DWORD ul_reason_for_call, LPVOID lpReserv
    if (ul_reason_for_call == DLL_PROCESS_ATTACH)
    {
       Globals::SetGlobals(PROJECT_NAME, "Mass Effect: Andromeda - Luma DLAA mod");
-      Globals::DEVELOPMENT_STATE = Globals::ModDevelopmentState::Playable;
+      Globals::DEVELOPMENT_STATE = Globals::ModDevelopmentState::Finished;
       Globals::VERSION = 2;
 
       // DLAA-only: leave HDR / swapchain / texture-format handling alone.
