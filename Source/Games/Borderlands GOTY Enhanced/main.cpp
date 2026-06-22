@@ -27,7 +27,7 @@ static constexpr uint32_t kCelShadingHash = 0x08DC66D1;  // cel-shading edge PS 
 
 // User-facing settings (persisted via ReShade config; loaded in LoadConfigs, saved on UI change).
 static bool g_smaa_enable = true;
-static float g_rcas_sharpness = 0.4f; // RCAS sharpen on SMAA output (0 = off). Conservative — ink outlines already AA'd; higher haloes.
+static float g_rcas_sharpness = 0.f; // RCAS sharpen on SMAA output (0 = off). Conservative — ink outlines already AA'd; higher haloes.
 static bool g_hide_ui = false;        // hide the game's HUD (skips swapchain-targeting UI draws) — for clean screenshots
 
 // Loading-movie memory-leak fix (toggle "Fix Movie Memory Leak" under Fixes; default ON).
