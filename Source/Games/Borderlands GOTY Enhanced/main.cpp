@@ -30,6 +30,167 @@ static bool g_smaa_enable = true;
 static float g_rcas_sharpness = 0.4f; // RCAS sharpen on SMAA output (0 = off). Conservative — ink outlines already AA'd; higher haloes.
 static bool g_hide_ui = false;        // hide the game's HUD (skips swapchain-targeting UI draws) — for clean screenshots
 
+// Loading-movie memory-leak fix (toggle "Fix Movie Memory Leak" under Fixes; default ON).
+// The game's Bink movies create D3D11 YUV decode buffers and never release them -> linear RAM
+// growth -> OOM. The leak is the GAME, not Luma. We drop the game's leaked COM refs on OLD movie
+// generations (orphaned: a movie's buffers are sampled only during its own playback). Tagged by
+// creation call-stack RVAs in BorderlandsGOTY.exe (frozen remaster; non-matching build tags nothing
+// = safe no-op). Movies keep playing. Diagnosis/validation: Source/Tools/BL Leak Tracker.
+static bool g_fix_movie_leak = true; // default ON; persisted as "FixMovieLeak"
+
+namespace BLMovieLeakFix
+{
+   // Build-specific RVAs (frozen remaster). A non-matching build shifts these -> nothing tags ->
+   // silent no-op; BUILD_CHECK_FRAME drives a one-shot telemetry warning for that case.
+   constexpr uintptr_t RVA_CREATE_WRAPPER = 0xBFF27;       // ret addr after the RHI CreateTexture call
+   constexpr uintptr_t RVA_STREAM_LO = 0x58A000;            // streaming/movie fn span (create call sites)
+   constexpr uintptr_t RVA_STREAM_HI = 0x58C000;
+   constexpr uint32_t  BUILD_CHECK_FRAME = 18000;          // ~5 min; movies tag well before this if build matches
+   constexpr uint32_t  NEW_GEN_GAP_FRAMES   = 90;           // frame gap that separates two movies into "generations"
+   constexpr int       MAX_FRAMES = 32, SKIP_FRAMES = 1;
+   constexpr uint64_t  STACKWALK_MIN_BYTES  = 2ull * 1024 * 1024; // only walk the stack for big resources (cheap)
+   constexpr int       RELEASE_GEN_LAG      = 2;            // release only gen <= cur_gen-2 (keep current + previous)
+   constexpr uint32_t  RELEASE_IDLE_FRAMES  = 600;          // and only after this many frames since creation (~10s)
+   constexpr uint32_t  RELEASE_FLUSH_PERIOD = 120;          // flush at most every N present frames
+
+   struct MovieTex { uint64_t bytes; int gen; uint32_t created_frame; };
+
+   static std::mutex g_mtx;
+   static std::unordered_map<uint64_t, MovieTex> g_movie;    // resource handle -> info
+   static std::unordered_map<uint64_t, uint64_t> g_view2res; // view handle -> resource handle (tagged textures only)
+   static uintptr_t g_exe_base = 0;
+   static int       g_cur_gen = 0;
+   static uint32_t  g_last_movie_frame = 0;
+   static bool      g_first_movie = true;
+   // Coarse cross-thread gates (present thread writes g_frame; workers read). atomic = no data race;
+   // real map sync is g_mtx.
+   static std::atomic<bool>     g_have_movie{ false };
+   static std::atomic<uint32_t> g_frame{ 0 };
+   static uint64_t  g_freed_bytes = 0;
+   static uint32_t  g_freed_tex = 0;
+   static bool      g_build_checked = false; // one-shot build-mismatch telemetry guard (present thread only)
+
+   inline uint64_t EstimateBytes(const reshade::api::resource_desc& d)
+   {
+      using namespace reshade::api;
+      if (d.type == resource_type::buffer) return d.buffer.size;
+      const uint32_t w = d.texture.width ? d.texture.width : 1;
+      const uint32_t h = d.texture.height ? d.texture.height : 1;
+      const uint32_t layers = d.texture.depth_or_layers ? d.texture.depth_or_layers : 1;
+      const uint32_t levels = d.texture.levels ? d.texture.levels : 1;
+      const uint32_t slice = format_slice_pitch(d.texture.format, format_row_pitch(d.texture.format, w), h);
+      uint64_t s = (uint64_t)slice * layers, total = 0;
+      for (uint32_t l = 0; l < levels; ++l) { total += s; s = s > 4 ? s / 4 : 1; }
+      return total;
+   }
+
+   inline bool StackIsMovie(void* const* frames, int n)
+   {
+      if (!g_exe_base) return false;
+      bool has_create = false, has_stream = false;
+      for (int i = 0; i < n; ++i)
+      {
+         const uintptr_t a = reinterpret_cast<uintptr_t>(frames[i]);
+         if (a < g_exe_base) continue;
+         const uintptr_t rva = a - g_exe_base;
+         if (rva == RVA_CREATE_WRAPPER) has_create = true;
+         else if (rva >= RVA_STREAM_LO && rva < RVA_STREAM_HI) has_stream = true;
+      }
+      return has_create && has_stream;
+   }
+
+   // Tag movie YUV decode buffers at creation (stack walk only for >= 2MB buffers).
+   void OnInitResource(reshade::api::device*, const reshade::api::resource_desc& desc, const reshade::api::subresource_data*, reshade::api::resource_usage, reshade::api::resource handle)
+   {
+      // Decode targets are BUFFERS (measured); gating on type excludes the textures that share the
+      // streaming-fn span -> no mistag/UAF, and skips the stack walk for every texture.
+      if (desc.type != reshade::api::resource_type::buffer) return;
+      const uint64_t bytes = EstimateBytes(desc);
+      if (bytes < STACKWALK_MIN_BYTES) return;
+      void* frames[MAX_FRAMES];
+      const int n = RtlCaptureStackBackTrace(SKIP_FRAMES, MAX_FRAMES, frames, nullptr);
+      if (n <= 0 || !StackIsMovie(frames, n)) return;
+      const std::lock_guard<std::mutex> lk(g_mtx);
+      const uint32_t f = g_frame;
+      if (g_first_movie || (f - g_last_movie_frame) > NEW_GEN_GAP_FRAMES) { g_cur_gen += 1; g_first_movie = false; }
+      g_last_movie_frame = f;
+      g_movie[handle.handle] = MovieTex{ bytes, g_cur_gen, f };
+      g_have_movie = true;
+   }
+
+   void OnDestroyResource(reshade::api::device*, reshade::api::resource handle)
+   {
+      if (!g_have_movie) return;
+      const std::lock_guard<std::mutex> lk(g_mtx);
+      g_movie.erase(handle.handle);
+   }
+
+   void OnInitResourceView(reshade::api::device*, reshade::api::resource res, reshade::api::resource_usage, const reshade::api::resource_view_desc&, reshade::api::resource_view view)
+   {
+      if (!g_have_movie || !view.handle) return;
+      const std::lock_guard<std::mutex> lk(g_mtx);
+      if (g_movie.find(res.handle) != g_movie.end()) g_view2res[view.handle] = res.handle;
+   }
+
+   void OnDestroyResourceView(reshade::api::device*, reshade::api::resource_view view)
+   {
+      if (!g_have_movie) return;
+      const std::lock_guard<std::mutex> lk(g_mtx);
+      g_view2res.erase(view.handle);
+   }
+
+   // Release the game's leaked COM refs on old orphaned generations. Re-entrancy-safe: our Release()
+   // re-enters OnDestroyResource[View] on this thread -> COLLECT+UNLINK under lock, then RELEASE unlocked.
+   void Flush()
+   {
+      struct Plan { uintptr_t res; std::vector<uintptr_t> views; uint64_t bytes; };
+      std::vector<Plan> plans;
+      {
+         const std::lock_guard<std::mutex> lk(g_mtx);
+         for (const auto& kv : g_movie) // Phase A: pick victims (keep current + previous gen, must be idle)
+         {
+            const MovieTex& m = kv.second;
+            if (m.gen > g_cur_gen - RELEASE_GEN_LAG) continue;
+            if ((g_frame - m.created_frame) < RELEASE_IDLE_FRAMES) continue;
+            plans.push_back({ kv.first, {}, m.bytes });
+         }
+         if (plans.empty()) return;
+         std::unordered_map<uintptr_t, size_t> idx;
+         for (size_t i = 0; i < plans.size(); ++i) idx[plans[i].res] = i;
+         for (const auto& vk : g_view2res) { auto it = idx.find(vk.second); if (it != idx.end()) plans[it->second].views.push_back(vk.first); }
+         for (const auto& p : plans) // Phase B: UNLINK before any Release (re-entrant callbacks then find nothing)
+         {
+            for (uintptr_t v : p.views) g_view2res.erase(v);
+            g_movie.erase(p.res);
+         }
+      }
+      uint32_t ft = 0; uint64_t fb = 0; // Phase C: RELEASE with the lock released
+      uint32_t partial = 0;
+      for (const Plan& p : plans)
+      {
+         for (uintptr_t v : p.views) reinterpret_cast<IUnknown*>(v)->Release();
+         // rc==0 => actually freed (count it); rc>0 => game holds extra refs, not reclaimed. (rc is a
+         // by-value ULONG, never a deref of a freed object.)
+         const ULONG rc = reinterpret_cast<IUnknown*>(p.res)->Release();
+         if (rc == 0) { ft++; fb += p.bytes; }
+         else partial++;
+      }
+      g_freed_tex += ft; g_freed_bytes += fb;
+#if DEVELOPMENT || TEST
+      if (ft || partial)
+      {
+         char b[224];
+         snprintf(b, sizeof(b), "[BL-Leak] reclaimed %u movie textures, ~%.1f MB (cum %.1f MB)%s",
+            ft, fb / 1048576.0, g_freed_bytes / 1048576.0,
+            partial ? " [WARN: some buffers held extra game refs, not reclaimed]" : "");
+         reshade::log::message(reshade::log::level::info, b);
+      }
+#else
+      (void)partial;
+#endif
+   }
+}
+
 struct BorderlandsGotyGameDeviceData final : public GameDeviceData
 {
 #if DEVELOPMENT || TEST
@@ -463,6 +624,20 @@ public:
    {
       auto& gd = GetGameDeviceData(device_data);
 
+      // Leak fix: detect in OnInitResource (any thread), release here (present thread, no create in flight).
+      BLMovieLeakFix::g_frame++;
+      if (g_fix_movie_leak && (BLMovieLeakFix::g_frame % BLMovieLeakFix::RELEASE_FLUSH_PERIOD) == 0)
+         BLMovieLeakFix::Flush();
+
+      // One-shot telemetry: warn if a non-matching build tagged nothing (otherwise a silent no-op).
+      if (g_fix_movie_leak && !BLMovieLeakFix::g_build_checked && BLMovieLeakFix::g_frame >= BLMovieLeakFix::BUILD_CHECK_FRAME)
+      {
+         BLMovieLeakFix::g_build_checked = true;
+         if (!BLMovieLeakFix::g_have_movie.load())
+            reshade::log::message(reshade::log::level::warning,
+               "[BL-Leak] no movie buffers detected after warmup -- game build may differ from the one this leak fix targets; the fix is inactive (RAM-growth crash not mitigated).");
+      }
+
       // Predication depth is captured per-frame at the cel pass; drop it every present so a frame without that pass
       // (menu/transition/reorder) uses NO predication, not last frame's (possibly wrong-size) depth. Null handled at bind.
       gd.srv_depth.reset();
@@ -483,6 +658,7 @@ public:
       reshade::get_config_value(nullptr, NAME, "Dithering", cb_luma_global_settings.GameSettings.Dithering);
       reshade::get_config_value(nullptr, NAME, "FlareOut", cb_luma_global_settings.GameSettings.FlareOut);
       reshade::get_config_value(nullptr, NAME, "HideUI", g_hide_ui);
+      reshade::get_config_value(nullptr, NAME, "FixMovieLeak", g_fix_movie_leak);
    }
 
    void DrawImGuiSettings(DeviceData& device_data) override
@@ -569,13 +745,24 @@ public:
          device_data.cb_luma_global_settings_dirty = true;
       }
       if (ImGui::IsItemHovered())
-         ImGui::SetTooltip("Anti-banding dither at output (breaks gradient banding on flat fills).");
+         ImGui::SetTooltip("Reduces gradient banding.");
 
       ImGui::SeparatorText("UI");
       if (ImGui::Checkbox("Hide Gameplay UI", &g_hide_ui))
          reshade::set_config_value(nullptr, NAME, "HideUI", g_hide_ui);
       if (ImGui::IsItemHovered())
          ImGui::SetTooltip("Disables the in-game UI.");
+
+      ImGui::SeparatorText("Fixes");
+      if (ImGui::Checkbox("Fix Movie Memory Leak", &g_fix_movie_leak))
+         reshade::set_config_value(nullptr, NAME, "FixMovieLeak", g_fix_movie_leak);
+      if (ImGui::IsItemHovered())
+         ImGui::SetTooltip("Frees the loading/cutscene movie textures the game leaks on each transition (fixes the RAM-growth crash). Movies still play.");
+      if (g_fix_movie_leak && !BLMovieLeakFix::g_have_movie.load() && BLMovieLeakFix::g_frame >= BLMovieLeakFix::BUILD_CHECK_FRAME)
+         ImGui::TextColored(ImVec4(1.f, 0.6f, 0.f, 1.f), "Inactive: no movie buffers detected (game build may differ).");
+#if DEVELOPMENT || TEST
+      ImGui::Text("freed: %u textures, %.1f MB", BLMovieLeakFix::g_freed_tex, BLMovieLeakFix::g_freed_bytes / 1048576.0);
+#endif
    }
 
    void PrintImGuiAbout() override
@@ -654,6 +841,17 @@ BOOL APIENTRY DllMain(HMODULE hModule, DWORD ul_reason_for_call, LPVOID lpReserv
    }
 
    CoreMain(hModule, ul_reason_for_call, lpReserved);
+
+   // Leak-fix resource hooks: register AFTER CoreMain's reshade::register_addon. Multiple callbacks per
+   // event are allowed (coexist with core); CoreMain's DLL_PROCESS_DETACH unregister_addon removes them.
+   if (ul_reason_for_call == DLL_PROCESS_ATTACH)
+   {
+      BLMovieLeakFix::g_exe_base = reinterpret_cast<uintptr_t>(GetModuleHandleW(nullptr));
+      reshade::register_event<reshade::addon_event::init_resource>(BLMovieLeakFix::OnInitResource);
+      reshade::register_event<reshade::addon_event::destroy_resource>(BLMovieLeakFix::OnDestroyResource);
+      reshade::register_event<reshade::addon_event::init_resource_view>(BLMovieLeakFix::OnInitResourceView);
+      reshade::register_event<reshade::addon_event::destroy_resource_view>(BLMovieLeakFix::OnDestroyResourceView);
+   }
 
    return TRUE;
 }
