@@ -77,6 +77,8 @@ Project("{8BC9CEB8-8B4A-11D0-8D11-00A0C91BC942}") = "NieR Automata", "Source\Gam
 EndProject
 Project("{8BC9CEB8-8B4A-11D0-8D11-00A0C91BC942}") = "Vanquish", "Source\Games\Vanquish\Vanquish.vcxproj", "{51BFC834-EC5F-4F25-90DC-A2001E88B491}"
 EndProject
+Project("{8BC9CEB8-8B4A-11D0-8D11-00A0C91BC942}") = "Borderlands 2 and The Pre-Sequel", "Source\Games\Borderlands 2 and The Pre-Sequel\Borderlands 2 and The Pre-Sequel.vcxproj", "{56B56CAD-A792-42A8-B7CD-7CFE9FF7D402}"
+EndProject
 Project("{8BC9CEB8-8B4A-11D0-8D11-00A0C91BC942}") = "Project Diva Mega Mix", "Source\Games\Project Diva Mega Mix\Project Diva Mega Mix.vcxproj", "{E9C6A0CB-74CC-4202-855B-FA91EBA2104B}"
 EndProject
 Project("{8BC9CEB8-8B4A-11D0-8D11-00A0C91BC942}") = "Call of Duty Black Ops 3", "Source\Games\Call of Duty Black Ops 3\Call of Duty Black Ops 3.vcxproj", "{ADAE0E50-F63A-4FA5-BC6A-E1D974CC2D2C}"
@@ -574,6 +576,18 @@ Global
 		{51BFC834-EC5F-4F25-90DC-A2001E88B491}.Test-Release|Win32.ActiveCfg = Test-Release|Win32
 		{51BFC834-EC5F-4F25-90DC-A2001E88B491}.Test-Release|Win32.Build.0 = Test-Release|Win32
 		{51BFC834-EC5F-4F25-90DC-A2001E88B491}.Test-Release|x64.ActiveCfg = Test-Release|Win32
+		{56B56CAD-A792-42A8-B7CD-7CFE9FF7D402}.Development-Debug|Win32.ActiveCfg = Development-Debug|Win32
+		{56B56CAD-A792-42A8-B7CD-7CFE9FF7D402}.Development-Debug|Win32.Build.0 = Development-Debug|Win32
+		{56B56CAD-A792-42A8-B7CD-7CFE9FF7D402}.Development-Debug|x64.ActiveCfg = Development-Debug|Win32
+		{56B56CAD-A792-42A8-B7CD-7CFE9FF7D402}.Development-Release|Win32.ActiveCfg = Development-Release|Win32
+		{56B56CAD-A792-42A8-B7CD-7CFE9FF7D402}.Development-Release|Win32.Build.0 = Development-Release|Win32
+		{56B56CAD-A792-42A8-B7CD-7CFE9FF7D402}.Development-Release|x64.ActiveCfg = Development-Release|Win32
+		{56B56CAD-A792-42A8-B7CD-7CFE9FF7D402}.Publishing-Release|Win32.ActiveCfg = Publishing-Release|Win32
+		{56B56CAD-A792-42A8-B7CD-7CFE9FF7D402}.Publishing-Release|Win32.Build.0 = Publishing-Release|Win32
+		{56B56CAD-A792-42A8-B7CD-7CFE9FF7D402}.Publishing-Release|x64.ActiveCfg = Publishing-Release|Win32
+		{56B56CAD-A792-42A8-B7CD-7CFE9FF7D402}.Test-Release|Win32.ActiveCfg = Test-Release|Win32
+		{56B56CAD-A792-42A8-B7CD-7CFE9FF7D402}.Test-Release|Win32.Build.0 = Test-Release|Win32
+		{56B56CAD-A792-42A8-B7CD-7CFE9FF7D402}.Test-Release|x64.ActiveCfg = Test-Release|Win32
 		{E9C6A0CB-74CC-4202-855B-FA91EBA2104B}.Development-Debug|Win32.ActiveCfg = Development-Debug|x64
 		{E9C6A0CB-74CC-4202-855B-FA91EBA2104B}.Development-Debug|x64.ActiveCfg = Development-Debug|x64
 		{E9C6A0CB-74CC-4202-855B-FA91EBA2104B}.Development-Debug|x64.Build.0 = Development-Debug|x64
@@ -853,6 +867,7 @@ Global
 		{597555CF-7003-4B06-8409-C3A0AC818E59} = {02EA681E-C7D8-13C7-8484-4AC65E1B71E8}
 		{457A69B6-422F-4E49-9EC0-111BF35941E1} = {02EA681E-C7D8-13C7-8484-4AC65E1B71E8}
 		{51BFC834-EC5F-4F25-90DC-A2001E88B491} = {02EA681E-C7D8-13C7-8484-4AC65E1B71E8}
+		{56B56CAD-A792-42A8-B7CD-7CFE9FF7D402} = {02EA681E-C7D8-13C7-8484-4AC65E1B71E8}
 		{E9C6A0CB-74CC-4202-855B-FA91EBA2104B} = {02EA681E-C7D8-13C7-8484-4AC65E1B71E8}
 		{ADAE0E50-F63A-4FA5-BC6A-E1D974CC2D2C} = {02EA681E-C7D8-13C7-8484-4AC65E1B71E8}
 		{36D63B53-C40A-479C-94F9-FC93CBB49FEB} = {02EA681E-C7D8-13C7-8484-4AC65E1B71E8}
