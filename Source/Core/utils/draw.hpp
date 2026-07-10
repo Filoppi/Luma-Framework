@@ -947,32 +947,34 @@ void SetViewportFullscreen(ID3D11DeviceContext* device_context, uint2 size = {})
          return;
       }
 
-#if DEVELOPMENT
-      // Scissors are often set after viewports in games (e.g. Prey), so check them separately.
-      // We need to make sure that all the draw calls after SR upscaling run at full resolution and not rendering resolution.
-      com_ptr<ID3D11RasterizerState> state;
-      device_context->RSGetState(&state);
-      if (state.get())
-      {
-         D3D11_RASTERIZER_DESC state_desc;
-         state->GetDesc(&state_desc);
-         if (state_desc.ScissorEnable)
-         {
-            D3D11_RECT scissor_rects[D3D11_VIEWPORT_AND_SCISSORRECT_OBJECT_COUNT_PER_PIPELINE];
-            UINT scissor_rects_num = 0;
-            // This will get the number of scissor rects used
-            device_context->RSGetScissorRects(&scissor_rects_num, nullptr);
-            ASSERT_ONCE(scissor_rects_num == 1); // Possibly innocuous as long as it's > 0, but we should only ever have one viewport and one RT!
-            device_context->RSGetScissorRects(&scissor_rects_num, &scissor_rects[0]);
-
-            // If this ever triggered, we'd need to replace scissors too after SR upscaling (and make them full resolution).
-            ASSERT_ONCE(scissor_rects[0].left == 0 && scissor_rects[0].top == 0 && scissor_rects[0].right == render_target_texture_2d_desc.Width && scissor_rects[0].bottom == render_target_texture_2d_desc.Height);
-         }
-      }
-#endif // DEVELOPMENT
-
       size.x = render_target_texture_2d_desc.Width;
       size.y = render_target_texture_2d_desc.Height;
+   }
+
+   // A render-resolution scissor clips a fullscreen viewport to the top-left subregion.
+   // Keep scissor and viewport coverage in sync whenever this helper expands a target for SR.
+   com_ptr<ID3D11RasterizerState> state;
+   device_context->RSGetState(&state);
+   if (state.get())
+   {
+      D3D11_RASTERIZER_DESC state_desc;
+      state->GetDesc(&state_desc);
+      if (state_desc.ScissorEnable)
+      {
+         UINT scissor_rects_num = 0;
+         device_context->RSGetScissorRects(&scissor_rects_num, nullptr);
+         scissor_rects_num = min(scissor_rects_num, UINT(D3D11_VIEWPORT_AND_SCISSORRECT_OBJECT_COUNT_PER_PIPELINE));
+         if (scissor_rects_num > 0)
+         {
+            D3D11_RECT scissor_rects[D3D11_VIEWPORT_AND_SCISSORRECT_OBJECT_COUNT_PER_PIPELINE];
+            device_context->RSGetScissorRects(&scissor_rects_num, scissor_rects);
+            for (UINT i = 0; i < scissor_rects_num; ++i)
+            {
+               scissor_rects[i] = { 0, 0, static_cast<LONG>(size.x), static_cast<LONG>(size.y) };
+            }
+            device_context->RSSetScissorRects(scissor_rects_num, scissor_rects);
+         }
+      }
    }
 
    D3D11_VIEWPORT viewports[D3D11_VIEWPORT_AND_SCISSORRECT_OBJECT_COUNT_PER_PIPELINE];
