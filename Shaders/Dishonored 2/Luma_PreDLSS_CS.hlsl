@@ -76,9 +76,9 @@ void main(uint3 dtid : SV_DispatchThreadID)
 	float4 color = uav[dtid.xy];
 
 	// As done in the game's native TAA.
-	color.rgb = cb_usecompressedhdrbuffers ? color.rgb * r1w : color.rgb;
-	color.rgb = max(0.0, color.rgb);
-	color.rgb = min(cb_env_tonemapping_white_level, color.rgb);
+	//color.rgb = cb_usecompressedhdrbuffers ? color.rgb * r1w : color.rgb;
+	//color.rgb = max(0.0, color.rgb);
+	//color.rgb = min(cb_env_tonemapping_white_level, color.rgb);
 
 	uav[dtid.xy] = color;
 }

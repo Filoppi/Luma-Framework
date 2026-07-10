@@ -82,7 +82,7 @@ RWTexture2D<float3> rw_taaresult : register(u1);
 [numthreads(DISPATCH_BLOCK, DISPATCH_BLOCK, 1)]
 void main(uint3 vThreadID : SV_DispatchThreadID, uint3 vGroupID : SV_GroupID, uint3 vThreadIDInGroup : SV_GroupThreadID)
 {
-#if 1 // Disable TAA
+#if 0 // Disable TAA
     const uint2 vPixelPosUInt = vGroupID.xy * uint2(DISPATCH_BLOCK, DISPATCH_BLOCK) + vThreadIDInGroup.xy; // Equal to "vThreadID.xy"
     GroupMemoryBarrierWithGroupSync();
     //rw_taaresult[vThreadID.xy] = ro_viewcolormap[vThreadID.xy].rgb;
@@ -402,7 +402,7 @@ void main(uint3 vThreadID : SV_DispatchThreadID, uint3 vGroupID : SV_GroupID, ui
   r2.xyzw = r7.xyzw + -r1.wyzw;
   r1.xyzw = r0.xxxx * r2.xyzw + r1.xyzw;
 // No code for instruction (needs manual fix):
-store_uav_typed u0.xyzw, vThreadID.xyyy, r1.xyzw
+  rw_taahistory_write[vThreadID.xy] = r1.xyz;
   r0.x = -r1.z * 0.5 + r1.w;
   r0.y = r1.z + r0.x;
   r0.x = -r1.y * 0.5 + r0.x;
@@ -421,6 +421,6 @@ store_uav_typed u0.xyzw, vThreadID.xyyy, r1.xyzw
   r1.z = r0.x / r0.y;
   r0.xyzw = r1.xyzw / r0.zzzz;
 // No code for instruction (needs manual fix):
-store_uav_typed u1.xyzw, vThreadID.xyyy, r0.xyzw
+  rw_taaresult[vThreadID.xy] = r0.xyz;
 #endif
 }
