@@ -18,10 +18,33 @@
 #include <d3d11_1.h>  // ID3D11DeviceContext1 (bound-range CB queries)
 #include <shellapi.h> // ShellExecuteA for the About-tab link buttons (system("start") hangs in exclusive fullscreen)
 
-static constexpr uint32_t kTAAResolveHash = 0xD7E13B2A; // TAA resolve CS — DLAA injection point
-static constexpr uint32_t kFXAAHash = 0x5B81D1F2;       // FXAA PS — replaced with SMAA
-static constexpr uint32_t kGbufferVS_A = 0xC089424D;    // gbuffer VS that binds the main camera CB at VS slot 2
-static constexpr uint32_t kGbufferVS_B = 0xFF93953D;    // (reliable jitter capture point)
+// TAA color-resolve CS — DLAA/FSR injection point. The game ships this resolve as a permutation matrix: 4
+// logic variants × 2 GPU tile-sizes (32x16 = warp-32/NVIDIA, 8x8 = wave-64/AMD+Intel), and picks the tile by
+// GPU arch at runtime — so different vendors dispatch DIFFERENT hashes of the SAME pass, instruction-for-
+// instruction identical per pair (e.g. 0x70E49B83 (8x8) == 0xD7E13B2A (32x16)). Hooking only one perm
+// silently no-ops SR on every other vendor, so we match the whole set. (Broader feature variants with extra
+// t5/t6 SRVs + u4/u5 UAVs are NOT hooked until confirmed color-resolve, not a temporal SSR/AO pass; the
+// DEV/TEST outlier logger below surfaces any we miss.)
+static constexpr uint32_t kTAAResolveHashes[] = {
+   0xD7E13B2A,
+   0x70E49B83, // variant A  (32x16 / 8x8)
+   0xFE348A4C,
+   0x174F06D1, // variant B
+   0x789DECF6,
+   0x3D06A19E, // variant C
+   0x960B6C89,
+   0x1986BDD0, // variant D
+};
+static bool IsTAAResolve(const ShaderHashesList<OneShaderPerPipeline>& hashes)
+{
+   for (uint32_t h : kTAAResolveHashes)
+      if (hashes.Contains(h, reshade::api::shader_stage::compute))
+         return true;
+   return false;
+}
+static constexpr uint32_t kFXAAHash = 0x5B81D1F2;    // FXAA PS — replaced with SMAA
+static constexpr uint32_t kGbufferVS_A = 0xC089424D; // gbuffer VS that binds the main camera CB at VS slot 2
+static constexpr uint32_t kGbufferVS_B = 0xFF93953D; // (reliable jitter capture point)
 // FOV-jump epsilon on projection m00/m11 (history reset on aim/zoom/cut).
 static constexpr float kFovEps = 1e-4f;
 // DLSS far_plane stand-in: MEA's projection is reverse-Z INFINITE-far (no finite far). DLSS is insensitive to the
@@ -109,6 +132,11 @@ struct MassEffectAndromedaGameDeviceData final : public GameDeviceData
    // the bug is confirmed (DLSS accumulated old scene onto new). frames_since_reset shows the gap spanning the cut.
    bool prev_reset = false;
    uint32_t frames_since_reset = 0;
+   // Outlier TAA-resolve diagnostic: distinct compute hashes with a resolve-like binding (u2+u3+t1) that are NOT
+   // in kTAAResolveHashes, logged once each in OnDrawOrDispatch. Mutex: dispatches fire on Frostbite worker
+   // threads (same reason as map_recs_mutex).
+   std::unordered_set<uint32_t> diag_resolve_hashes;
+   std::mutex diag_resolve_mutex;
 #endif
 
    // --- Edge-triggered situational logging (DEV/TEST only): one summary line in OnPresent that
@@ -565,8 +593,46 @@ public: // OnMapBufferRegion is referenced from DllMain (DLL_PROCESS_DETACH unre
       }
 #endif // ENABLE_SMAA
 
+#if DEVELOPMENT || TEST
+      // Outlier self-diagnostic: if the game dispatches a resolve-like compute (writes u2+u3, reads a
+      // motion-vector-like t1) whose hash is NOT in kTAAResolveHashes, log it once. Surfaces a TAA-resolve perm
+      // we don't yet hook (a feature variant, or a new GPU tile-size) so it can be verified + added — see the
+      // perm-matrix note at kTAAResolveHashes.
+      {
+         uint32_t outlier_cs = 0;
+         for (auto h : original_shader_hashes.compute_shaders)
+            if (h != UINT64_MAX)
+            {
+               outlier_cs = (uint32_t)h;
+               break;
+            }
+         if (outlier_cs != 0 && !IsTAAResolve(original_shader_hashes))
+         {
+            ComPtr<ID3D11UnorderedAccessView> o_u2, o_u3;
+            native_device_context->CSGetUnorderedAccessViews(2, 1, o_u2.put());
+            native_device_context->CSGetUnorderedAccessViews(3, 1, o_u3.put());
+            ComPtr<ID3D11ShaderResourceView> o_t1;
+            native_device_context->CSGetShaderResources(1, 1, o_t1.put());
+            if (o_u2 && o_u3 && o_t1) // TAA-resolve fingerprint: two ping-pong UAV outputs + MV-like t1 input
+            {
+               bool fresh;
+               {
+                  const std::lock_guard<std::mutex> lock(gd.diag_resolve_mutex);
+                  fresh = gd.diag_resolve_hashes.insert(outlier_cs).second;
+               }
+               if (fresh)
+               {
+                  char b[176];
+                  snprintf(b, sizeof(b), "MEA DIAG: unhooked resolve-like CS 0x%08X (u2+u3+t1 bound) — candidate TAA-resolve perm missing from the hooked set", outlier_cs);
+                  reshade::log::message(reshade::log::level::warning, b);
+               }
+            }
+         }
+      }
+#endif
+
       // --- TAA resolve dispatch: replace with DLSS. ---
-      if (original_shader_hashes.Contains(kTAAResolveHash, reshade::api::shader_stage::compute))
+      if (IsTAAResolve(original_shader_hashes))
       {
          gd.taa_hits_this_frame++;
          gd.taa_hits_total++;
@@ -575,8 +641,16 @@ public: // OnMapBufferRegion is referenced from DllMain (DLL_PROCESS_DETACH unre
          if (!gd.logged_first_hit)
          {
             gd.logged_first_hit = true;
-            reshade::log::message(reshade::log::level::info,
-               "MEA: TAA resolve compute (0xD7E13B2A) detected — DLAA injection point reached.");
+            uint32_t matched_cs = 0;
+            for (auto h : original_shader_hashes.compute_shaders)
+               if (h != UINT64_MAX)
+               {
+                  matched_cs = (uint32_t)h;
+                  break;
+               }
+            char hit_msg[128];
+            snprintf(hit_msg, sizeof(hit_msg), "MEA: TAA resolve compute 0x%08X detected — SR injection point reached (perm-matrix hook).", matched_cs);
+            reshade::log::message(reshade::log::level::info, hit_msg);
          }
 #endif
 
@@ -1042,14 +1116,15 @@ public: // OnMapBufferRegion is referenced from DllMain (DLL_PROCESS_DETACH unre
 
       ImGui::NewLine();
       ImGui::Text("Credits:"
-         "\n\nMain:"
-         "\nDristoforColumb"
-         "\n\nThird Party:"
-         "\nReShade"
-         "\nImGui"
-         "\nSMAA (Iryoku)"
-         "\nAMD FidelityFX (RCAS + FSR Native AA)"
-         "\nNVIDIA NGX (DLSS)", "");
+                  "\n\nMain:"
+                  "\nDristoforColumb"
+                  "\n\nThird Party:"
+                  "\nReShade"
+                  "\nImGui"
+                  "\nSMAA (Iryoku)"
+                  "\nAMD FidelityFX (RCAS + FSR Native AA)"
+                  "\nNVIDIA NGX (DLSS)",
+         "");
    }
 };
 
