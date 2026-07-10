@@ -53,7 +53,6 @@ static constexpr float kCamFar = 100000.f;
 
 // --- User-facing settings (persisted via ReShade config; loaded in LoadConfigs, saved on UI change). Kept as
 // file-scope globals so LoadConfigs (pre-device) can populate them. ---
-static bool g_dlaa_enable = true;
 static bool g_smaa_enable = true;
 static float g_smaa_sharpness = 0.f; // RCAS off by default
 // A reactive/bias mask was evaluated and removed — a dead end for MEA; we pass bias_mask = nullptr.
@@ -140,8 +139,8 @@ struct MassEffectAndromedaGameDeviceData final : public GameDeviceData
 #endif
 
    // --- Edge-triggered situational logging (DEV/TEST only): one summary line in OnPresent that
-   // re-prints ONLY when the situation changes, so you can toggle AA mode / DLAA / SMAA / sharpness
-   // in-game (or hit a loading screen) and read each transition in ReShade.log without per-frame spam. ---
+   // re-prints ONLY when the situation changes — a different in-game AA mode, DLAA engaging/dropping, an
+   // SMAA/sharpness change, a loading screen — so you can read each transition in ReShade.log without spam. ---
    bool dlss_ran_this_frame = false;  // set true only when DLSS Draw() actually succeeded this frame
    uint32_t fxaa_seen_this_frame = 0; // game's FXAA pass seen this frame (counted regardless of smaa_enable)
 #if DEVELOPMENT || TEST
@@ -150,12 +149,12 @@ struct MassEffectAndromedaGameDeviceData final : public GameDeviceData
    // parallel log_* shadows + a hand-written change expression).
    struct LogState
    {
-      int aa_mode = -2, dlaa = -1, smaa_replaced = -1, sharpen = -1, sr_supp = -1, sr_type = -99, master = -1, smaa_en = -1, cam_valid = -1;
+      int aa_mode = -2, dlaa = -1, smaa_replaced = -1, sharpen = -1, sr_supp = -1, sr_type = -99, smaa_en = -1, cam_valid = -1;
       float bias = -999.f;
       bool DiffersFrom(const LogState& o) const
       {
          return aa_mode != o.aa_mode || dlaa != o.dlaa || smaa_replaced != o.smaa_replaced || sharpen != o.sharpen ||
-                sr_supp != o.sr_supp || sr_type != o.sr_type || master != o.master || smaa_en != o.smaa_en ||
+                sr_supp != o.sr_supp || sr_type != o.sr_type || smaa_en != o.smaa_en ||
                 cam_valid != o.cam_valid || fabsf(bias - o.bias) > 1e-4f;
       }
    } log_state;
@@ -660,8 +659,8 @@ public: // OnMapBufferRegion is referenced from DllMain (DLL_PROCESS_DETACH unre
          {
             gd.logged_sr_diag = true;
             char b[192];
-            snprintf(b, sizeof(b), "MEA SR diag: sr_type=%d (DLSS=0,FSR=1,None=-1) master=%d immediate=%d out=%.0fx%.0f render=%.0fx%.0f cam_valid=%d jitterClip=%.6f,%.6f",
-               (int)device_data.sr_type, (int)g_dlaa_enable,
+            snprintf(b, sizeof(b), "MEA SR diag: sr_type=%d (DLSS=0,FSR=1,None=-1) immediate=%d out=%.0fx%.0f render=%.0fx%.0f cam_valid=%d jitterClip=%.6f,%.6f",
+               (int)device_data.sr_type,
                (int)is_immediate,
                device_data.output_resolution.x, device_data.output_resolution.y,
                device_data.render_resolution.x, device_data.render_resolution.y,
@@ -669,7 +668,7 @@ public: // OnMapBufferRegion is referenced from DllMain (DLL_PROCESS_DETACH unre
             reshade::log::message(reshade::log::level::info, b);
          }
 #endif
-         if (device_data.sr_type != SR::Type::None && g_dlaa_enable && is_immediate)
+         if (device_data.sr_type != SR::Type::None && is_immediate)
          {
             auto* sr_instance_data = device_data.GetSRInstanceData();
             if (sr_instance_data)
@@ -942,7 +941,6 @@ public: // OnMapBufferRegion is referenced from DllMain (DLL_PROCESS_DETACH unre
          cur.sharpen = (g_smaa_sharpness > 0.f) ? 1 : 0;
          cur.sr_supp = device_data.sr_suppressed ? 1 : 0;
          cur.sr_type = (int)device_data.sr_type;
-         cur.master = g_dlaa_enable ? 1 : 0;
          cur.smaa_en = g_smaa_enable ? 1 : 0;
          cur.cam_valid = gd.cam_valid_this_frame ? 1 : 0;
          cur.bias = device_data.texture_mip_lod_bias_offset;
@@ -955,15 +953,14 @@ public: // OnMapBufferRegion is referenced from DllMain (DLL_PROCESS_DETACH unre
             // Why DLAA isn't running (only meaningful in TAA mode; in FXAA/none mode there's no TAA to hook):
             const char* reason =
                cur.aa_mode != 0 ? "no-TAA-pass" : cur.sr_type == (int)SR::Type::None ? "sr=None"
-                                               : !cur.master                         ? "master-off"
                                                : cur.sr_supp                         ? "sr-suppressed"
                                                : !cur.dlaa                           ? "capture/draw-fail"
                                                                                      : "ok";
             char b[256];
             snprintf(b, sizeof(b),
-               "MEA[f=%llu] aa=%s dlaa_active=%d smaa_replaced=%d sharpen=%d | sr=%d master=%d supp=%d smaa_en=%d camValid=%d bias=%.2f reason=%s",
+               "MEA[f=%llu] aa=%s dlaa_active=%d smaa_replaced=%d sharpen=%d | sr=%d supp=%d smaa_en=%d camValid=%d bias=%.2f reason=%s",
                (unsigned long long)cb_luma_global_settings.FrameIndex, aa, cur.dlaa, cur.smaa_replaced, cur.sharpen,
-               cur.sr_type, cur.master, cur.sr_supp, cur.smaa_en, cur.cam_valid, cur.bias, reason);
+               cur.sr_type, cur.sr_supp, cur.smaa_en, cur.cam_valid, cur.bias, reason);
             reshade::log::message(reshade::log::level::info, b);
          }
       }
@@ -1018,7 +1015,6 @@ public: // OnMapBufferRegion is referenced from DllMain (DLL_PROCESS_DETACH unre
    // Persist the user settings across launches (ReShade config section NAME="Luma"). Called on boot.
    void LoadConfigs() override
    {
-      reshade::get_config_value(nullptr, NAME, "DLAAEnable", g_dlaa_enable);
       reshade::get_config_value(nullptr, NAME, "SMAAEnable", g_smaa_enable);
       reshade::get_config_value(nullptr, NAME, "SMAASharpness", g_smaa_sharpness);
    }
@@ -1027,12 +1023,6 @@ public: // OnMapBufferRegion is referenced from DllMain (DLL_PROCESS_DETACH unre
    // in core's "Super Resolution" section above.
    void DrawImGuiSettings(DeviceData& device_data) override
    {
-      ImGui::SeparatorText("TAA mode");
-      if (ImGui::Checkbox("Native AA (DLSS/FSR)", &g_dlaa_enable))
-         reshade::set_config_value(nullptr, NAME, "DLAAEnable", g_dlaa_enable);
-      if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
-         ImGui::SetTooltip("Replaces the game's TAA with the Super Resolution backend selected above (DLSS on NVIDIA, FSR on any GPU).\nSet in-game Anti-Aliasing to TAA.");
-
       ImGui::SeparatorText("FXAA mode");
       if (ImGui::Checkbox("SMAA", &g_smaa_enable))
          reshade::set_config_value(nullptr, NAME, "SMAAEnable", g_smaa_enable);
