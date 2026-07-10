@@ -49,6 +49,12 @@ static constexpr uint32_t kLumaBloomSlotBL2 = 5;
 static constexpr uint32_t kLumaBloomSlotTPS = 8;
 static constexpr uint32_t kLumaDoFSlot = 7;
 
+// Scaleform item-card price shaders: mask-fill + digit-glyph PS hashes (a pair per dgVoodoo build).
+static constexpr uint32_t kScaleformMaskFillHash2813 = 0x9F8EA541;
+static constexpr uint32_t kScaleformDigitGlyphHash2813 = 0x63898919;
+static constexpr uint32_t kScaleformMaskFillHash2873 = 0x616BEBBD;
+static constexpr uint32_t kScaleformDigitGlyphHash2873 = 0x79CDF7BA;
+
 // User settings (persisted via ReShade config under the project name; loaded in LoadConfigs).
 static bool g_smaa_enable = true;
 static float g_rcas_sharpness = 0.f;                                   // RCAS sharpen on SMAA output (0 = off)
@@ -124,6 +130,21 @@ struct Borderlands2GameDeviceData final : public GameDeviceData
    ComPtr<ID3D11UnorderedAccessView> uav_dof_blur_h, uav_dof_blur_out;
    ComPtr<ID3D11Buffer> cb_dof_blur_h, cb_dof_blur_v; // cb_dof_blur (b0): axis-step + sigma, per pass
    float dof_blur_radius = -1.f;                      // recreate the CBs when the DoF Radius slider changes
+
+   // Scaleform price-digit stencil repair: armed between a mask-submit and the glyph strips; the mask is
+   // duplicated into a private scratch D24S8 (cached per RT size) that the strips then test EQUAL/ref=1 against.
+   bool scaleform_mask_armed = false;
+   ComPtr<ID3D11DepthStencilState> dss_scaleform_mask_write;
+   ComPtr<ID3D11DepthStencilState> dss_scaleform_mask_test;
+   ComPtr<ID3D11DepthStencilView> dsv_scaleform_mask_active;
+   struct ScaleformMaskDS
+   {
+      uint32_t width = 0, height = 0;
+      ComPtr<ID3D11Texture2D> tex;
+      ComPtr<ID3D11DepthStencilView> dsv;
+   };
+   ScaleformMaskDS scaleform_mask_ds_cache[4];
+   uint32_t scaleform_mask_ds_next = 0;
 };
 
 class Borderlands2 final : public Game
@@ -462,6 +483,14 @@ public:
          gd.tex_rcas_out.reset();
          gd.tex_rcas_out_rtv.reset();
          gd.srv_luma_bloom.reset();
+         gd.dss_scaleform_mask_write.reset();
+         gd.dss_scaleform_mask_test.reset();
+         gd.dsv_scaleform_mask_active.reset();
+         for (auto& slot : gd.scaleform_mask_ds_cache)
+         {
+            slot.dsv.reset();
+            slot.tex.reset();
+         }
       }
       delete device_data.game;
       device_data.game = nullptr;
@@ -643,10 +672,203 @@ public:
       blur_state.Restore(ctx);
    }
 
+   // Re-applies the stencil test dgVoodoo drops on the item card's rolling price digits. Returns true iff it ran
+   // the original draw itself (caller returns Replaced).
+   bool RepairScaleformStencilMask(ID3D11Device* native_device, ID3D11DeviceContext* native_device_context, Borderlands2GameDeviceData& gd, const ShaderHashesList<OneShaderPerPipeline>& original_shader_hashes, bool is_custom_pass, bool is_immediate, std::function<void()>* original_draw_dispatch_func)
+   {
+      if (!is_immediate || is_custom_pass)
+         return false;
+      const bool is_mask_shader = original_shader_hashes.Contains(kScaleformMaskFillHash2813, reshade::api::shader_stage::pixel) || original_shader_hashes.Contains(kScaleformMaskFillHash2873, reshade::api::shader_stage::pixel);
+      if (!gd.scaleform_mask_armed && !is_mask_shader)
+         return false;
+
+      // A mask submit is the mask PS drawn with color writes off + a stencil-writing state.
+      bool mask_submit = false;
+      if (is_mask_shader)
+      {
+         ComPtr<ID3D11BlendState> blend_state;
+         FLOAT blend_factor[4];
+         UINT sample_mask = 0;
+         native_device_context->OMGetBlendState(blend_state.put(), blend_factor, &sample_mask);
+         if (blend_state)
+         {
+            D3D11_BLEND_DESC bd;
+            blend_state->GetDesc(&bd);
+            if (bd.RenderTarget[0].RenderTargetWriteMask == 0)
+            {
+               ComPtr<ID3D11DepthStencilState> ds_state;
+               UINT stencil_ref = 0;
+               native_device_context->OMGetDepthStencilState(ds_state.put(), &stencil_ref);
+               if (ds_state)
+               {
+                  D3D11_DEPTH_STENCIL_DESC dsd;
+                  ds_state->GetDesc(&dsd);
+                  mask_submit = dsd.StencilEnable != FALSE;
+               }
+            }
+         }
+      }
+
+      if (mask_submit)
+      {
+         // Duplicate the mask into the scratch stencil (REPLACE/1); arm only when the duplicate actually lands.
+         gd.scaleform_mask_armed = false;
+         ComPtr<ID3D11RenderTargetView> rtv;
+         ComPtr<ID3D11DepthStencilView> prev_dsv;
+         native_device_context->OMGetRenderTargets(1, rtv.put(), prev_dsv.put());
+         if (rtv && original_draw_dispatch_func != nullptr)
+         {
+            ComPtr<ID3D11Resource> rt_res;
+            rtv->GetResource(rt_res.put());
+            ComPtr<ID3D11Texture2D> rt_tex;
+            if (rt_res && SUCCEEDED(rt_res->QueryInterface(IID_PPV_ARGS(rt_tex.put()))))
+            {
+               D3D11_TEXTURE2D_DESC rt_desc;
+               rt_tex->GetDesc(&rt_desc);
+               Borderlands2GameDeviceData::ScaleformMaskDS* scratch = nullptr;
+               for (auto& slot : gd.scaleform_mask_ds_cache)
+               {
+                  if (slot.dsv && slot.width == rt_desc.Width && slot.height == rt_desc.Height)
+                  {
+                     scratch = &slot;
+                     break;
+                  }
+               }
+               if (!scratch)
+               {
+                  for (auto& slot : gd.scaleform_mask_ds_cache)
+                  {
+                     if (!slot.dsv)
+                     {
+                        scratch = &slot;
+                        break;
+                     }
+                  }
+                  if (!scratch)
+                     scratch = &gd.scaleform_mask_ds_cache[gd.scaleform_mask_ds_next++ % std::size(gd.scaleform_mask_ds_cache)];
+                  scratch->dsv.reset();
+                  scratch->tex.reset();
+                  D3D11_TEXTURE2D_DESC ds_desc = {};
+                  ds_desc.Width = rt_desc.Width;
+                  ds_desc.Height = rt_desc.Height;
+                  ds_desc.MipLevels = 1;
+                  ds_desc.ArraySize = 1;
+                  ds_desc.Format = DXGI_FORMAT_D24_UNORM_S8_UINT;
+                  ds_desc.SampleDesc = rt_desc.SampleDesc;
+                  ds_desc.Usage = D3D11_USAGE_DEFAULT;
+                  ds_desc.BindFlags = D3D11_BIND_DEPTH_STENCIL;
+                  if (SUCCEEDED(native_device->CreateTexture2D(&ds_desc, nullptr, scratch->tex.put())))
+                     native_device->CreateDepthStencilView(scratch->tex.get(), nullptr, scratch->dsv.put());
+                  scratch->width = rt_desc.Width;
+                  scratch->height = rt_desc.Height;
+               }
+               if (!gd.dss_scaleform_mask_write)
+               {
+                  D3D11_DEPTH_STENCIL_DESC write_desc = {};
+                  write_desc.DepthEnable = FALSE;
+                  write_desc.DepthWriteMask = D3D11_DEPTH_WRITE_MASK_ZERO;
+                  write_desc.DepthFunc = D3D11_COMPARISON_ALWAYS;
+                  write_desc.StencilEnable = TRUE;
+                  write_desc.StencilReadMask = D3D11_DEFAULT_STENCIL_READ_MASK;
+                  write_desc.StencilWriteMask = D3D11_DEFAULT_STENCIL_WRITE_MASK;
+                  write_desc.FrontFace.StencilFailOp = D3D11_STENCIL_OP_KEEP;
+                  write_desc.FrontFace.StencilDepthFailOp = D3D11_STENCIL_OP_KEEP;
+                  write_desc.FrontFace.StencilPassOp = D3D11_STENCIL_OP_REPLACE;
+                  write_desc.FrontFace.StencilFunc = D3D11_COMPARISON_ALWAYS;
+                  write_desc.BackFace = write_desc.FrontFace;
+                  native_device->CreateDepthStencilState(&write_desc, gd.dss_scaleform_mask_write.put());
+               }
+               if (scratch->dsv && gd.dss_scaleform_mask_write)
+               {
+                  ComPtr<ID3D11DepthStencilState> prev_ds_state;
+                  UINT prev_stencil_ref = 0;
+                  native_device_context->OMGetDepthStencilState(prev_ds_state.put(), &prev_stencil_ref);
+                  native_device_context->ClearDepthStencilView(scratch->dsv.get(), D3D11_CLEAR_STENCIL, 1.f, 0);
+                  ID3D11RenderTargetView* rtv_raw = rtv.get();
+                  native_device_context->OMSetRenderTargets(1, &rtv_raw, scratch->dsv.get());
+                  native_device_context->OMSetDepthStencilState(gd.dss_scaleform_mask_write.get(), 1u);
+                  (*original_draw_dispatch_func)();
+                  native_device_context->OMSetDepthStencilState(prev_ds_state.get(), prev_stencil_ref);
+                  native_device_context->OMSetRenderTargets(1, &rtv_raw, prev_dsv.get());
+                  gd.dsv_scaleform_mask_active = scratch->dsv;
+                  gd.scaleform_mask_armed = true;
+               }
+            }
+         }
+         return false; // the real mask draw still proceeds through the normal path
+      }
+
+      if (gd.scaleform_mask_armed && (original_shader_hashes.Contains(kScaleformDigitGlyphHash2813, reshade::api::shader_stage::pixel) || original_shader_hashes.Contains(kScaleformDigitGlyphHash2873, reshade::api::shader_stage::pixel)))
+      {
+         // Only intervene on glyph draws with stencil ENABLED but the test neutered (ALWAYS func / zero read mask /
+         // no stencil plane) = the broken masked content; StencilEnable FALSE = genuinely unmasked glyphs (leave),
+         // an effective test = a correctly translated path (leave).
+         ComPtr<ID3D11DepthStencilState> prev_ds_state;
+         UINT prev_stencil_ref = 0;
+         native_device_context->OMGetDepthStencilState(prev_ds_state.put(), &prev_stencil_ref);
+         ComPtr<ID3D11RenderTargetView> rtv;
+         ComPtr<ID3D11DepthStencilView> prev_dsv;
+         native_device_context->OMGetRenderTargets(1, rtv.put(), prev_dsv.put());
+         D3D11_DEPTH_STENCIL_DESC dsd = {};
+         if (prev_ds_state)
+            prev_ds_state->GetDesc(&dsd);
+         const bool stencil_enabled = prev_ds_state && dsd.StencilEnable != FALSE;
+         bool effective_stencil_test = false;
+         if (stencil_enabled && prev_dsv)
+         {
+            D3D11_DEPTH_STENCIL_VIEW_DESC dsv_desc;
+            prev_dsv->GetDesc(&dsv_desc);
+            const bool has_stencil_plane = dsv_desc.Format == DXGI_FORMAT_D24_UNORM_S8_UINT || dsv_desc.Format == DXGI_FORMAT_D32_FLOAT_S8X24_UINT;
+            const bool any_func_tests = dsd.FrontFace.StencilFunc != D3D11_COMPARISON_ALWAYS || dsd.BackFace.StencilFunc != D3D11_COMPARISON_ALWAYS;
+            effective_stencil_test = dsd.StencilReadMask != 0 && has_stencil_plane && any_func_tests;
+         }
+         if (stencil_enabled && !effective_stencil_test && original_draw_dispatch_func != nullptr && gd.dsv_scaleform_mask_active && rtv)
+         {
+            if (!gd.dss_scaleform_mask_test)
+            {
+               // Test-only: pass exactly where the duplicated mask wrote 1, never write, depth off.
+               D3D11_DEPTH_STENCIL_DESC test_desc = {};
+               test_desc.DepthEnable = FALSE;
+               test_desc.DepthWriteMask = D3D11_DEPTH_WRITE_MASK_ZERO;
+               test_desc.DepthFunc = D3D11_COMPARISON_ALWAYS;
+               test_desc.StencilEnable = TRUE;
+               test_desc.StencilReadMask = D3D11_DEFAULT_STENCIL_READ_MASK;
+               test_desc.StencilWriteMask = 0;
+               test_desc.FrontFace.StencilFailOp = D3D11_STENCIL_OP_KEEP;
+               test_desc.FrontFace.StencilDepthFailOp = D3D11_STENCIL_OP_KEEP;
+               test_desc.FrontFace.StencilPassOp = D3D11_STENCIL_OP_KEEP;
+               test_desc.FrontFace.StencilFunc = D3D11_COMPARISON_EQUAL;
+               test_desc.BackFace = test_desc.FrontFace;
+               native_device->CreateDepthStencilState(&test_desc, gd.dss_scaleform_mask_test.put());
+            }
+            if (gd.dss_scaleform_mask_test)
+            {
+               ID3D11RenderTargetView* rtv_raw = rtv.get();
+               native_device_context->OMSetRenderTargets(1, &rtv_raw, gd.dsv_scaleform_mask_active.get());
+               native_device_context->OMSetDepthStencilState(gd.dss_scaleform_mask_test.get(), 1u);
+               (*original_draw_dispatch_func)();
+               native_device_context->OMSetDepthStencilState(prev_ds_state.get(), prev_stencil_ref);
+               native_device_context->OMSetRenderTargets(1, &rtv_raw, prev_dsv.get());
+               return true;
+            }
+         }
+         return false;
+      }
+
+      // Any other draw ends the mask span.
+      gd.scaleform_mask_armed = false;
+      gd.dsv_scaleform_mask_active.reset();
+      return false;
+   }
+
    DrawOrDispatchOverrideType OnDrawOrDispatch(ID3D11Device* native_device, ID3D11DeviceContext* native_device_context, CommandListData& cmd_list_data, DeviceData& device_data, reshade::api::shader_stage stages, const ShaderHashesList<OneShaderPerPipeline>& original_shader_hashes, bool is_custom_pass, bool& updated_cbuffers, std::function<void()>* original_draw_dispatch_func) override
    {
       auto& gd = GetGameDeviceData(device_data);
       const bool is_immediate = native_device_context->GetType() == D3D11_DEVICE_CONTEXT_IMMEDIATE;
+
+      // Scaleform item-card price-digit stencil repair: returns Replaced when it re-runs the draw itself.
+      if (RepairScaleformStencilMask(native_device, native_device_context, gd, original_shader_hashes, is_custom_pass, is_immediate, original_draw_dispatch_func))
+         return DrawOrDispatchOverrideType::Replaced;
 
       // Track the LDR buffer (the tonemap's render target). The HUD draws onto it afterwards; the Hide UI
       // toggle uses this to recognize (and drop) those HUD draws.
@@ -784,6 +1006,9 @@ public:
    {
       auto& gd = GetGameDeviceData(device_data);
       gd.tonemap_fired_this_frame = false; // new frame: re-arm Hide UI's post-tonemap alpha-blend scope
+      // Never carry a Scaleform mask span across frames.
+      gd.scaleform_mask_armed = false;
+      gd.dsv_scaleform_mask_active.reset();
    }
 
    void LoadConfigs() override
@@ -969,7 +1194,7 @@ public:
          reshade::set_config_value(nullptr, PROJECT_NAME, "VideoAutoHDREnable", g_video_auto_hdr_enable);
       }
       if (ImGui::IsItemHovered())
-         ImGui::SetTooltip("Adds light HDR highlights to pre-rendered Bink videos, HDR only (off = flat SDR at paper white).");
+         ImGui::SetTooltip("Adds HDR highlights to pre-rendered videos.");
 
       ImGui::BeginDisabled(!g_video_auto_hdr_enable);
       if (ImGui::SliderFloat("Video HDR Boost", &gs.VideoAutoHDRBoost, 0.f, 1.f))
@@ -977,7 +1202,7 @@ public:
       if (ImGui::IsItemDeactivatedAfterEdit())
          reshade::set_config_value(nullptr, PROJECT_NAME, "VideoAutoHDRBoost", gs.VideoAutoHDRBoost);
       if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
-         ImGui::SetTooltip("Video highlight-expansion strength (0 = off).");
+         ImGui::SetTooltip("Highlight expansion strength.");
       if (DrawResetButton<float, false>(gs.VideoAutoHDRBoost, gd_def.VideoAutoHDRBoost, "VideoAutoHDRBoost"))
       {
          device_data.cb_luma_global_settings_dirty = true;
