@@ -116,7 +116,7 @@ struct DrawStateStack
          device_context->CSGetUnorderedAccessViews(0, state->uav_num, &state->unordered_access_views[0]);
 #if ENABLE_SHADER_CLASS_INSTANCES
          device_context->CSGetShader(&state->cs, &state->cs_instances[0], &state->cs_instances_count);
-         ASSERT_ONCE(state->vs_instances_count == 0 && state->cs_instances_count == 0);
+         ASSERT_ONCE(state->cs_instances_count == 0);  // Make sure they are never used
 #else
          device_context->CSGetShader(&state->cs, nullptr, 0);
 #endif
