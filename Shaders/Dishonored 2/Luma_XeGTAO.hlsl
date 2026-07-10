@@ -67,6 +67,18 @@ cbuffer PerViewCB : register(b1)
 #define RADIUS_MULTIPLIER 1.457 // Default 1.457
 #endif
 
+#ifndef RADIUS_SCALING_MIN_DEPTH
+#define RADIUS_SCALING_MIN_DEPTH 8.0 // View-space depth where radius scaling starts
+#endif
+
+#ifndef RADIUS_SCALING_MAX_DEPTH
+#define RADIUS_SCALING_MAX_DEPTH 1000.0 // View-space depth where radius scaling reaches its maximum
+#endif
+
+#ifndef RADIUS_SCALING_MULTIPLIER
+#define RADIUS_SCALING_MULTIPLIER 200.0 // Maximum depth-based radius multiplier
+#endif
+
 #ifndef EFFECT_FALLOFF_RANGE
 #define EFFECT_FALLOFF_RANGE 0.95 // Default 0.615
 #endif
@@ -80,7 +92,7 @@ cbuffer PerViewCB : register(b1)
 #endif
 
 #ifndef FINAL_VALUE_POWER
-#define FINAL_VALUE_POWER 4.3 // Default 2.2
+#define FINAL_VALUE_POWER 2.5 // Default 2.2
 #endif
 
 #ifndef DEPTH_MIP_SAMPLING_OFFSET
@@ -97,7 +109,8 @@ cbuffer PerViewCB : register(b1)
 
 //
 
-#define VIEWPORT_PIXEL_SIZE LumaSettings.SwapchainInvSize
+#define SOURCE_DEPTH_PIXEL_SIZE LumaSettings.SwapchainInvSize
+#define VIEWPORT_PIXEL_SIZE (LumaSettings.SwapchainInvSize / max(cb_resolutionscale.xy, 0.0001))
 
 #define TAN_HALF_FOV_X rcp(cb_projectionmatrix._m00)
 #define TAN_HALF_FOV_Y rcp(cb_projectionmatrix._m11)
@@ -151,7 +164,7 @@ void XeGTAO_PrefilterDepths16x16(uint2 dispatchThreadID, uint2 groupThreadID, Te
     // MIP 0
     const uint2 baseCoord = dispatchThreadID;
     const uint2 pixCoord = baseCoord * 2;
-    float4 depths4 = sourceNDCDepth.GatherRed(depthSampler, float2(pixCoord * VIEWPORT_PIXEL_SIZE), int2(1, 1));
+    float4 depths4 = sourceNDCDepth.GatherRed(depthSampler, float2(pixCoord * SOURCE_DEPTH_PIXEL_SIZE), int2(1, 1));
     float depth0 = XeGTAO_ClampDepth(XeGTAO_ScreenSpaceToViewSpaceDepth(depths4.w));
     float depth1 = XeGTAO_ClampDepth(XeGTAO_ScreenSpaceToViewSpaceDepth(depths4.z));
     float depth2 = XeGTAO_ClampDepth(XeGTAO_ScreenSpaceToViewSpaceDepth(depths4.x));
@@ -233,6 +246,12 @@ float3 XeGTAO_ComputeViewspacePosition(float2 screenPos, float viewspaceDepth)
     ret.xy = (NDC_TO_VIEW_MUL * screenPos.xy + NDC_TO_VIEW_ADD) * viewspaceDepth;
     ret.z = viewspaceDepth;
     return ret;
+}
+
+float XeGTAO_DepthRadiusMultiplier(float viewspaceDepth)
+{
+    float remapT = saturate((viewspaceDepth - RADIUS_SCALING_MIN_DEPTH) * rcp(RADIUS_SCALING_MAX_DEPTH - RADIUS_SCALING_MIN_DEPTH));
+    return lerp(1.0, RADIUS_SCALING_MULTIPLIER, remapT);
 }
 
 float3 XeGTAO_CalculateNormal(const float4 edgesLRTB, const float3 pixCenterPos, float3 pixLPos, float3 pixRPos, float3 pixTPos, float3 pixBPos)
@@ -319,7 +338,7 @@ void XeGTAO_MainPass(uint2 pixCoord, float2 localNoise, Texture2D sourceViewspac
     // prevents normals that are facing away from the view vector - xeGTAO struggles with extreme cases, but in Vanilla it seems rare so it's disabled by default
     viewspaceNormal = normalize(viewspaceNormal + max(0, -dot(viewspaceNormal, viewVec)) * viewVec);
 
-    const float effectRadius = EFFECT_RADIUS * RADIUS_MULTIPLIER;
+    const float effectRadius = EFFECT_RADIUS * RADIUS_MULTIPLIER * XeGTAO_DepthRadiusMultiplier(viewspaceZ);
     const float sampleDistributionPower = SAMPLE_DISTRIBUTION_POWER;
     const float thinOccluderCompensation = THIN_OCCLUDER_COMPENSATION;
     const float falloffRange = EFFECT_FALLOFF_RANGE * effectRadius;
@@ -577,5 +596,6 @@ void main_pass_ps(float4 pos : SV_Position, out float4 outWorkingAOTermAndPacked
 {
     // tex0 = g_srcWorkingDepth
     // smp = g_samplerPointClamp
-    XeGTAO_MainPass(pos.xy, SpatioTemporalNoise(pos.xy, cb_framenumber), tex, smp, outWorkingAOTermAndPackedDepth);
+    uint2 pixCoord = uint2(pos.xy);
+    XeGTAO_MainPass(pixCoord, SpatioTemporalNoise(pixCoord, uint(cb_framenumber)), tex, smp, outWorkingAOTermAndPackedDepth);
 }
