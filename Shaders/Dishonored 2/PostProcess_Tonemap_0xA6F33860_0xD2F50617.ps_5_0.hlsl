@@ -1,5 +1,6 @@
 #define LUT_3D 1
 
+#include "Includes/GameCBuffers.hlsl"
 #include "../Includes/ColorGradingLUT.hlsl"
 #include "../Includes/Tonemap.hlsl"
 
@@ -101,8 +102,6 @@ StructuredBuffer<postfx_luminance_autoexposure_t> ro_postfx_luminance_buffautoex
 
 #define FIX_RAISED_BLACKS 0
 
-static const float bloomStrength = 1.0;
-static const float lensDirtStrength = 1.0;
 static const float colorGradeLUTStrength = 1.f;
 
 // Neutral tonemap used here only as a linear-domain range compressor for LUT input coordinates.
@@ -296,12 +295,7 @@ void main(
   {
     r1.xy = cb_resolutionscale.xy * v0.xy;
     r1.z = cmp(0 < cb_postfx_lensdirt_usedefault.x);
-    
-    if (lensDirtStrength == 0)
-    {
-      r1.z = false; // skip dirty lens effect
-    }
-    
+
     if (r1.z != 0)
     {
       r1.zw = cb_subpixeloffset.xy + v0.xy;
@@ -312,7 +306,7 @@ void main(
       r3.xyz = ro_postfx_bloom_lensdirt_from.SampleLevel(smp_linearclamp_s, r1.zw, 0).xyz;
       r4.xyz = ro_postfx_bloom_lensdirt_to.SampleLevel(smp_linearclamp_s, r1.zw, 0).xyz;
       r4.xyz = r4.xyz + -r3.xyz;
-      r2.xyz = cb_postfx_bloom_lensdirt_blendweight * r4.xyz * lensDirtStrength + r3.xyz;
+      r2.xyz = cb_postfx_bloom_lensdirt_blendweight * r4.xyz + r3.xyz;
     }
     r1.z = cmp(0 < cb_env_bloom_veil_strength);
     if (r1.z != 0)
@@ -321,19 +315,13 @@ void main(
       r4.xyz = r3.xyz * r0.www;
       r3.xyz = cb_usecompressedhdrbuffers ? r4.xyz : r3.xyz;
 
-      float3 vanillaBloom = cb_env_bloom_veil_strength * r3.xyz;
-      r3.xyz = bloomStrength * cb_env_bloom_veil_strength * r3.xyz;  // bloom strength
-
-      if (bloomStrength != 1)
-      {
-        float vanillaBloomLum = GetLuminance(vanillaBloom);
-        r3.xyz = lerp(vanillaBloom.rgb, r3.xyz, saturate(vanillaBloomLum/0.18f));
-      }
-      
-      r4.xyz = cb_postfx_bloom_lensdirt_strength * r2.xyz * lensDirtStrength; // lens dirt
+      r3.xyz = cb_env_bloom_veil_strength * r3.xyz;
+      r4.xyz = cb_postfx_bloom_lensdirt_strength * r2.xyz * LumaSettings.GameSettings.LensDirtStrength;
       r3.xyz = r4.xyz * r3.xyz + r3.xyz;
-      r0.xyz = r3.xyz + r0.xyz;
+      r0.xyz = r3.xyz * LumaSettings.GameSettings.BloomStrength + r0.xyz;
     }
+    // Lens dirt also modulates the flare texture below. Scale it separately from the bloom modulation.
+    r2.xyz *= LumaSettings.GameSettings.LensDirtStrength;
     r1.zw = float2(-0.5,-0.5) + v0.xy;
     r2.w = cb_viewmatrix._m02 + cb_viewmatrix._m21;
     sincos(r2.w, r3.x, r4.x);
@@ -392,7 +380,7 @@ void main(
     r3.xyz = r1.xyz * r0.www;
     r1.xyz = cb_usecompressedhdrbuffers ? r3.xyz : r1.xyz;
     r2.xyz = r2.xyz * float3(0.800000012,0.800000012,0.800000012) + float3(0.200000003,0.200000003,0.200000003);
-    r0.xyz = r1.xyz * r2.xyz + r0.xyz;
+    r0.xyz = r1.xyz * r2.xyz * LumaSettings.GameSettings.LensFlareStrength + r0.xyz;
   }
   r0.xyz = v0.zzz * r0.xyz; // auto exposure
   float3 untonemapped = r0.xyz;

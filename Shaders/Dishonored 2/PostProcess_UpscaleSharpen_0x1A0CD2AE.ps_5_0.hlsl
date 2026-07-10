@@ -48,7 +48,8 @@ void main(
   float4 r0,r1,r2,r3,r4,r5,r6,r7,r8;
   float4 fDest;
 
-  if (all(cb_resolutionscale.xy == 1.0))
+  // SR already produced a full-resolution image, so only copy it instead of upscaling it again.
+  if (LumaSettings.SRType != 0 || all(cb_resolutionscale.xy == 1.0))
   {
     o0.xyzw = ro_identity_bufferin.SampleLevel(smp_bilinearsampler_s, v0.xy, 0).xyzw;
     return;

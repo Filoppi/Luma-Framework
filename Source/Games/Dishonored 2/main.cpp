@@ -8,6 +8,7 @@
 // Not used by Dishonored 2?
 #define ENABLE_SHADER_CLASS_INSTANCES 1
 
+#include "../../../Shaders/Dishonored 2/Includes/GameCBuffers.hlsl"
 #include "..\..\Core\core.hpp"
 
 struct CBPerViewGlobals
@@ -51,6 +52,7 @@ struct CBPerViewGlobals
 namespace
 {
    ShaderHashesList shader_hashes_TAA;
+   ShaderHashesList shader_hashes_Tonemap;
    ShaderHashesList shader_hashes_UpscaleSharpen;
    ShaderHashesList shader_hashes_DownsampleDepth;
    ShaderHashesList shader_hashes_UnprojectDepth;
@@ -92,8 +94,11 @@ namespace
 
 struct GameDeviceDataDishonored2 final : public GameDeviceData
 {
-   // If this is valid, the game's TAA was running on a deferred command list, and thus we delay DLSS
+   // TAA runs on a deferred context. Split its command list so the scene inputs execute before SR,
+   // then inject SR before the game replays the post-TAA remainder.
    std::atomic<void*> sr_deferred_command_list = nullptr;
+   std::atomic<void*> sr_remainder_command_list = nullptr;
+   ComPtr<ID3D11CommandList> sr_partial_command_list;
    com_ptr<ID3D11Resource> sr_source_color;
    com_ptr<ID3D11Resource> sr_motion_vectors;
    //com_ptr<ID3D11Texture2D> sr_output_color_2; //TODOFT: delete this and related code
@@ -258,7 +263,6 @@ public:
          // Once we detect the user enabled DRS, we can't ever know it's been disabled because the game only occasionally drops to lower rendering resolutions, so we couldn't know if it was ever disabled
          if (game_device_data.prey_drs_active)
          {
-            device_data.sr_suppressed = true;
             game_device_data.prey_drs_detected = true;
 
             float resolution_scale = device_data.render_resolution.y / device_data.output_resolution.y;
@@ -545,8 +549,27 @@ public:
          return DrawOrDispatchOverrideType::None;
       }
 
+#if ENABLE_SR
+      // Native TAA only fills the render-resolution region, but SR has written a full-resolution
+      // result to the same texture. Tonemap is the first confirmed consumer of that result, so it
+      // must rasterize over the full target for its SV_POSITION Load to address all SR pixels.
+      if (cb_luma_global_settings.SRType > 0 && original_shader_hashes.Contains(shader_hashes_Tonemap))
+      {
+         SetViewportFullscreen(native_device_context);
+      }
+#endif
+
       if (!device_data.has_drawn_main_post_processing && original_shader_hashes.Contains(shader_hashes_UpscaleSharpen))
       {
+#if ENABLE_SR
+         // All preceding post-processing still uses render-resolution resources. The game's native
+         // upscale/copy pass is the resolution-transition point, so make only this output full size.
+         if (cb_luma_global_settings.SRType > 0)
+         {
+            SetViewportFullscreen(native_device_context);
+         }
+#endif
+
          if (native_device_context->GetType() != D3D11_DEVICE_CONTEXT_IMMEDIATE)
          {
             game_device_data.final_post_process_command_list = native_device_context;
@@ -821,6 +844,10 @@ public:
                }
                else // "delay_dlss"
                {
+                  // Seal and replay all commands preceding TAA before SR. Otherwise the immediate
+                  // context sees stale or only partially initialized SR inputs when DLSS runs.
+                  HRESULT finish_hr = native_device_context->FinishCommandList(TRUE, game_device_data.sr_partial_command_list.put());
+                  ASSERT_ONCE(SUCCEEDED(finish_hr));
                   game_device_data.sr_deferred_command_list = native_device_context;
                   return DrawOrDispatchOverrideType::Skip;
                }
@@ -911,11 +938,19 @@ public:
                device_data.has_drawn_main_post_processing = true;
             }
 
-            if (game_device_data.sr_deferred_command_list != native_command_list.get())
+            if (game_device_data.sr_remainder_command_list != native_command_list.get())
             {
                return;
             }
-            game_device_data.sr_deferred_command_list = nullptr;
+            game_device_data.sr_remainder_command_list = nullptr;
+
+            // This command list only contains commands after TAA. Execute the preserved prefix
+            // first, so the current frame's color, motion vectors, and depth are available to SR.
+            if (game_device_data.sr_partial_command_list)
+            {
+               native_device_context->ExecuteCommandList(game_device_data.sr_partial_command_list.get(), FALSE);
+               game_device_data.sr_partial_command_list.reset();
+            }
 
             ASSERT_ONCE(game_device_data.depth_buffer.get());
 
@@ -962,6 +997,11 @@ public:
 		    native_device_context->CSSetShaderResources(0, 1, &game_device_data.srv_ro_postfx_luminance_buffautoexposure);
 
 		    native_device_context->Dispatch((render_width_dlss + 8 - 1) / 8, (render_height_dlss + 8 - 1) / 8, 1);
+
+            // SR reads this texture while the native TAA output remains bound as a UAV from the
+            // replayed command list. Clear the conflicting compute views before the SR backend.
+            std::array<ID3D11UnorderedAccessView*, 2> null_uavs = {};
+            native_device_context->CSSetUnorderedAccessViews(0, null_uavs.size(), null_uavs.data(), nullptr);
 		    
 		    //
 
@@ -1065,7 +1105,8 @@ public:
             }
             if (game_device_data.sr_deferred_command_list == native_device_context.get())
             {
-               game_device_data.sr_deferred_command_list = native_command_list.get();
+               game_device_data.sr_deferred_command_list = nullptr;
+               game_device_data.sr_remainder_command_list = native_command_list.get();
             }
             return;
          }
@@ -1079,11 +1120,58 @@ public:
       reshade::api::effect_runtime* runtime = nullptr;
 
       reshade::get_config_value(runtime, NAME, "XeGTAOEnable", g_xegtao_enable);
+
+      auto& game_settings = cb_luma_global_settings.GameSettings;
+      reshade::get_config_value(runtime, NAME, "BloomStrength", game_settings.BloomStrength);
+      reshade::get_config_value(runtime, NAME, "LensDirtStrength", game_settings.LensDirtStrength);
+      reshade::get_config_value(runtime, NAME, "LensFlareStrength", game_settings.LensFlareStrength);
+      reshade::get_config_value(runtime, NAME, "VignetteStrength", game_settings.VignetteStrength);
    }
 
    void DrawImGuiSettings(DeviceData& device_data) override
    {
       reshade::api::effect_runtime* runtime = nullptr;
+
+      ImGui::SeparatorText("Effects");
+      auto& game_settings = cb_luma_global_settings.GameSettings;
+
+      if (ImGui::SliderFloat("Bloom Strength", &game_settings.BloomStrength, 0.f, 2.f))
+         device_data.cb_luma_global_settings_dirty = true;
+      if (ImGui::IsItemDeactivatedAfterEdit())
+         reshade::set_config_value(runtime, NAME, "BloomStrength", game_settings.BloomStrength);
+      if (ImGui::IsItemHovered())
+         ImGui::SetTooltip("Bloom strength (1 = vanilla, 0 = disabled).");
+      if (DrawResetButton(game_settings.BloomStrength, default_luma_global_game_settings.BloomStrength, "BloomStrength"))
+         device_data.cb_luma_global_settings_dirty = true;
+
+      if (ImGui::SliderFloat("Lens Dirt Strength", &game_settings.LensDirtStrength, 0.f, 2.f))
+         device_data.cb_luma_global_settings_dirty = true;
+      if (ImGui::IsItemDeactivatedAfterEdit())
+         reshade::set_config_value(runtime, NAME, "LensDirtStrength", game_settings.LensDirtStrength);
+      if (ImGui::IsItemHovered())
+         ImGui::SetTooltip("Lens dirt strength (1 = vanilla, 0 = disabled).");
+      if (DrawResetButton(game_settings.LensDirtStrength, default_luma_global_game_settings.LensDirtStrength, "LensDirtStrength"))
+         device_data.cb_luma_global_settings_dirty = true;
+
+      if (ImGui::SliderFloat("Lens Flare Strength", &game_settings.LensFlareStrength, 0.f, 2.f))
+         device_data.cb_luma_global_settings_dirty = true;
+      if (ImGui::IsItemDeactivatedAfterEdit())
+         reshade::set_config_value(runtime, NAME, "LensFlareStrength", game_settings.LensFlareStrength);
+      if (ImGui::IsItemHovered())
+         ImGui::SetTooltip("Lens flare and streak strength (1 = vanilla, 0 = disabled).");
+      if (DrawResetButton(game_settings.LensFlareStrength, default_luma_global_game_settings.LensFlareStrength, "LensFlareStrength"))
+         device_data.cb_luma_global_settings_dirty = true;
+
+      if (ImGui::SliderFloat("Vignette Strength", &game_settings.VignetteStrength, 0.f, 2.f))
+         device_data.cb_luma_global_settings_dirty = true;
+      if (ImGui::IsItemDeactivatedAfterEdit())
+         reshade::set_config_value(runtime, NAME, "VignetteStrength", game_settings.VignetteStrength);
+      if (ImGui::IsItemHovered())
+         ImGui::SetTooltip("Screen-overlay vignette strength (1 = vanilla, 0 = disabled).");
+      if (DrawResetButton(game_settings.VignetteStrength, default_luma_global_game_settings.VignetteStrength, "VignetteStrength"))
+         device_data.cb_luma_global_settings_dirty = true;
+
+      ImGui::SeparatorText("Ambient Occlusion");
 
       if (ImGui::Checkbox("XeGTAO Enable", &g_xegtao_enable))
       {
@@ -1207,9 +1295,17 @@ BOOL APIENTRY DllMain(HMODULE hModule, DWORD ul_reason_for_call, LPVOID lpReserv
       Globals::VERSION = 1;
       Globals::DEVELOPMENT_STATE = Globals::ModDevelopmentState::WorkInProgress;
 
+      default_luma_global_game_settings.BloomStrength = 1.f;
+      default_luma_global_game_settings.LensDirtStrength = 1.f;
+      default_luma_global_game_settings.LensFlareStrength = 1.f;
+      default_luma_global_game_settings.VignetteStrength = 1.f;
+      cb_luma_global_settings.GameSettings = default_luma_global_game_settings;
+
       shader_hashes_TAA.compute_shaders.emplace(std::stoul("06BBC941", nullptr, 16)); // DH2
       shader_hashes_TAA.compute_shaders.emplace(std::stoul("8EDF67D9", nullptr, 16)); // DH2 Low quality TAA? // TODO: add an assert on this!
       shader_hashes_TAA.compute_shaders.emplace(std::stoul("9F77B624", nullptr, 16)); // DH DOTO
+      shader_hashes_Tonemap.pixel_shaders.emplace(0xA6F33860); // DH2
+      shader_hashes_Tonemap.pixel_shaders.emplace(0xD2F50617); // DH DOTO
       shader_hashes_UpscaleSharpen.pixel_shaders.emplace(std::stoul("1A0CD2AE", nullptr, 16)); // DH2 + DH DOTO
       shader_hashes_DownsampleDepth.compute_shaders.emplace(std::stoul("27BD5265", nullptr, 16)); // DH2 + DH DOTO
       shader_hashes_UnprojectDepth.compute_shaders.emplace(std::stoul("223FB9DA", nullptr, 16)); // DH2
