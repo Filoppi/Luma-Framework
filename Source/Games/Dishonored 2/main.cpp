@@ -401,6 +401,7 @@ public:
 
       game_device_data.has_drawn_scene_previous = game_device_data.has_drawn_scene;
       game_device_data.has_drawn_scene = false;
+      game_device_data.final_post_process_command_list = nullptr;
 
       //TODOFT: do this in the super?
       device_data.has_drawn_main_post_processing = false;
@@ -904,15 +905,10 @@ public:
          {
             auto& device_data = *cmd_list->get_device()->get_private_data<DeviceData>();
             auto& game_device_data = GetGameDeviceData(device_data);
-            if (game_device_data.final_post_process_command_list == native_device_context.get())
+            if (game_device_data.final_post_process_command_list == native_command_list.get())
             {
                game_device_data.final_post_process_command_list = nullptr;
                device_data.has_drawn_main_post_processing = true;
-               if (enable_ui_separation) // TODO: is this still needed?
-               {
-                  ID3D11RenderTargetView* const ui_texture_rtv_const = device_data.ui_texture_rtv.get();
-                  native_device_context->OMSetRenderTargets(1, &ui_texture_rtv_const, nullptr);
-               }
             }
 
             if (game_device_data.sr_deferred_command_list != native_command_list.get())
@@ -1263,6 +1259,7 @@ BOOL APIENTRY DllMain(HMODULE hModule, DWORD ul_reason_for_call, LPVOID lpReserv
       enable_samplers_upgrade = true;
 
       enable_ui_separation = true;
+      ui_separation_use_ui_hashes_only = true;
       ui_separation_format = DXGI_FORMAT_R16G16B16A16_FLOAT; // TODO: pick the best format, it's probably DXGI_FORMAT_R16G16B16A16_UNORM or DXGI_FORMAT_R8G8B8A8_UNORM.
 
       game = new Dishonored2();

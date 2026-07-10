@@ -633,6 +633,9 @@ namespace
       DXGI_FORMAT ui_separation_format = DXGI_FORMAT_UNKNOWN;
       // Optionally add the UI shaders to this list, to make sure they draw to a separate render target for proper HDR composition
       ShaderHashesList shader_hashes_UI;
+      // If true, only shaders in "shader_hashes_UI" are redirected to the separate UI render target.
+      // Otherwise, any draw after main post-processing that targets the same render target is treated as UI unless excluded.
+      bool ui_separation_use_ui_hashes_only = false;
       // Shaders that might be running after "has_drawn_main_post_processing" has turned true, but that are still not UI (most games don't have a fixed last shader that runs on the scene rendering before UI, e.g. FXAA might add a pass based on user settings etc), so we have to exclude them like this
       ShaderHashesList shader_hashes_UI_excluded;
       // Hides gameplay UI (or well, any UI that draws when the main scene also draws, some games always render the main scene, even behind pause or main menus).
@@ -3230,7 +3233,7 @@ namespace
 #endif
 
       swapchain_data.vanilla_was_linear_space = last_swapchain_linear_space || force_vanilla_swapchain_linear;
-#if !GAME_MAFIA_III // We don't care for this case, it's dev only, if we didn't do this, when we unload shaders the game would be washed out (the UI still is)
+#if !GAME_MAFIA_III && !GAME_DISHONORED_2 // We don't care for this case, it's dev only, if we didn't do this, when we unload shaders the game would be washed out (the UI still is)
       // We expect this define to be set to linear if the swapchain was already linear in Vanilla SDR (there might be code that makes such assumption)
       ASSERT_ONCE(!swapchain_data.vanilla_was_linear_space || (GetShaderDefineCompiledNumericalValue(POST_PROCESS_SPACE_TYPE_HASH) == 1));
 #endif
@@ -6390,13 +6393,14 @@ namespace
       if (enable_ui_separation && mod_active)
       {
          ID3D11RenderTargetView* const ui_texture_rtv_const = device_data.ui_texture_rtv.get();
+         const bool is_known_ui_shader = original_shader_hashes.Contains(shader_hashes_UI);
          // We can either provide an include list, of all the UI shaders (we check if the render target matches below),
          // or an exclude list, of all the scene post processing shaders, and then manually setting "has_drawn_main_post_processing" somewhere in your game's code (and exclude any non UI shader that possibly runs after it).
          // If the main post processing shaders didn't run, it means the scene isn't rendering, or showing anyway, so we don't need to separate the UI,
          // as it'd likely already draw correctly on the swapchain or whatever is its render target.
          // 
          // We expect the UI to draw on the immediate context, as it does in most games, if not, handle the render targets yourself for the custom case.
-         if ((device_data.has_drawn_main_post_processing && native_device_context->GetType() == D3D11_DEVICE_CONTEXT_IMMEDIATE) || original_shader_hashes.Contains(shader_hashes_UI))
+         if (is_known_ui_shader || (!ui_separation_use_ui_hashes_only && device_data.has_drawn_main_post_processing && native_device_context->GetType() == D3D11_DEVICE_CONTEXT_IMMEDIATE))
          {
             com_ptr<ID3D11RenderTargetView> rtv;
             native_device_context->OMGetRenderTargets(1, &rtv, nullptr);
@@ -6415,7 +6419,7 @@ namespace
                   const std::shared_lock lock(device_data.mutex);
                   targeting_swapchain = device_data.back_buffers.contains((uint64_t)rtv.get());
                }
-               if (targeting_swapchain || (AreViewsOfSameResource(rtv.get(), device_data.ui_initial_original_rtv.get()) && rtv_desc.Texture2D.MipSlice == 0)) // Make sure it was writing to the base mip (just in case the game did weird stuff)
+               if ((ui_separation_use_ui_hashes_only && is_known_ui_shader) || targeting_swapchain || (AreViewsOfSameResource(rtv.get(), device_data.ui_initial_original_rtv.get()) && rtv_desc.Texture2D.MipSlice == 0)) // Make sure it was writing to the base mip (just in case the game did weird stuff)
                {
                   device_data.ui_latest_original_rtv = rtv;
 
@@ -6458,6 +6462,16 @@ namespace
                   native_device_context->OMSetRenderTargets(1, &device_data.ui_latest_original_rtv, nullptr);
                   device_data.ui_latest_original_rtv = nullptr;
                }
+            }
+         }
+         else if (ui_separation_use_ui_hashes_only)
+         {
+            com_ptr<ID3D11RenderTargetView> rtv;
+            native_device_context->OMGetRenderTargets(1, &rtv, nullptr);
+            if (rtv && rtv == ui_texture_rtv_const)
+            {
+               native_device_context->OMSetRenderTargets(1, &device_data.ui_latest_original_rtv, nullptr);
+               device_data.ui_latest_original_rtv = nullptr;
             }
          }
       }

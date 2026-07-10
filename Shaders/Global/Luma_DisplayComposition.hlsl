@@ -244,49 +244,46 @@ bool DrawDebugTexture(float3 pos, inout float4 outColor, float gamePaperWhite, f
 
 float3 ComposeUI(float3 pos, float3 linearSceneColor, float gamePaperWhite, float UIPaperWhite)
 {
-#if 0
-	float3 sceneColorGamma = linear_to_game_gamma(linearSceneColor.rgb, GCT_MIRROR);
-	float3 UIRelativeColor = linearSceneColor.rgb * (gamePaperWhite / UIPaperWhite);
-    float3 sceneColorGammaTonemapped = linear_to_game_gamma((UIRelativeColor / (UIRelativeColor + 1.f)) / (gamePaperWhite / UIPaperWhite), GCT_MIRROR); // Tonemap the UI background based on the UI intensity to avoid bright backgrounds (e.g. sun) burning through the UI
-	float3 UIInverseInfluence = 1.0;
+#if POST_PROCESS_SPACE_TYPE != 1
 	float4 UIColor = uiTexture.Load((int3)pos.xyz);
     float UIIntensity = saturate(UIColor.a);
-	sceneColorGamma *= pow(gamePaperWhite, 1.0 / DefaultGamma);
-	sceneColorGammaTonemapped *= pow(gamePaperWhite, 1.0 / DefaultGamma);
-	UIColor.rgb *= pow(UIPaperWhite, 1.0 / DefaultGamma);
-	// Darken the scene background based on the UI intensity
-	float3 composedColor = lerp(sceneColorGamma, sceneColorGammaTonemapped, UIIntensity) * (1.0 - UIIntensity);
-    // Calculate how much the additive UI influenced the darkened scene color, so we can determine the intensity to blend the composed color with the scene paper white (it's better to calculate this in gamma space)
-	UIInverseInfluence = safeDivision(composedColor, composedColor + UIColor.rgb, 1); //TODO: handle negative colors?
-	// Add pre-multiplied UI
-	composedColor += UIColor.rgb;
-	
-	float3 compositionPaperWhite = lerp(pow(UIPaperWhite, 1.0 / DefaultGamma), pow(gamePaperWhite, 1.0 / DefaultGamma), UIInverseInfluence);
-	composedColor /= compositionPaperWhite;
+	float UIPaperWhiteScale = UIPaperWhite / gamePaperWhite;
 
-  	float3 linearComposedColor = game_gamma_to_linear(composedColor, GCT_MIRROR) * pow(compositionPaperWhite, DefaultGamma); // Note: this won't scale the paper white 100% correctly, slightly shifting colors
+	// The scene and UI arrive in the game's native gamma encoding. Normalize the scene to UI paper white in linear space,
+	// restore its original encoding for the blend, then return to the encoded post-process path after restoring the scale.
+	float3 UIBackgroundLinear = game_gamma_to_linear(linearSceneColor.rgb, GCT_MIRROR) / UIPaperWhiteScale;
+	float3 UIBackgroundGamma = linear_to_game_gamma(UIBackgroundLinear, GCT_MIRROR);
+	float3 composedColorGamma = UIBackgroundGamma * (1.0 - UIIntensity) + UIColor.rgb;
+	float3 linearComposedColor = game_gamma_to_linear(composedColorGamma, GCT_MIRROR) * UIPaperWhiteScale;
+	return linear_to_game_gamma(linearComposedColor, GCT_MIRROR);
 #else
-	linearSceneColor.rgb /= UIPaperWhite / gamePaperWhite;
-	//linearSceneColor.rgb /= UIPaperWhite;
-	float3 sceneColorGamma = linear_to_game_gamma(linearSceneColor.rgb, GCT_MIRROR);
-    float3 sceneColorGammaTonemapped = linear_to_game_gamma(linearSceneColor.rgb / (linearSceneColor.rgb + 1.f), GCT_MIRROR); // Tonemap the UI background based on the UI intensity to avoid bright backgrounds (e.g. sun) burning through the UI
-	float3 UIInverseInfluence = 1.0;
 	float4 UIColor = uiTexture.Load((int3)pos.xyz);
     float UIIntensity = saturate(UIColor.a);
-	// Darken the scene background based on the UI intensity
-	float3 composedColor = lerp(sceneColorGamma, sceneColorGammaTonemapped, UIIntensity) * (1.0 - UIIntensity);
-	composedColor = sceneColorGamma * (1.0 - UIIntensity); // Disable TM for now
-    // Calculate how much the additive UI influenced the darkened scene color, so we can determine the intensity to blend the composed color with the scene paper white (it's better to calculate this in gamma space)
-	UIInverseInfluence = safeDivision(composedColor, composedColor + UIColor.rgb, 1);
-	// Add pre-multiplied UI
-	composedColor += UIColor.rgb;
+	float UIPaperWhiteScale = UIPaperWhite / gamePaperWhite;
+
+	// Preserve the game's original gamma-space UI blending. Normalize the linear scene to the UI paper-white range,
+	// encode it into the same space as the separated UI, blend the premultiplied UI there, then decode and restore
+	// the UI-relative scale. The final gamePaperWhite multiply consequently controls the scene while this scale
+	// independently controls the UI.
+	float3 UIBackgroundLinear = linearSceneColor.rgb / UIPaperWhiteScale;
+	float3 UIBackgroundGamma;
 	float3 linearComposedColor;
-  	linearComposedColor.rgb = game_gamma_to_linear(composedColor, GCT_MIRROR);
-	linearComposedColor.rgb *= UIPaperWhite / gamePaperWhite;
-	//linearComposedColor.rgb *= UIPaperWhite;
-	//linearComposedColor.rgb *= lerp(1.0, gamePaperWhite, saturate(UIInverseInfluence));
+
+	// If gamma correction still occurs after composition, use sRGB as the intermediate storage/blending encoding;
+	// the later correction makes it visually match gamma 2.2. If correction already happened, blend in gamma 2.2 directly.
+#if (!EARLY_DISPLAY_ENCODING && GAMMA_CORRECTION_TYPE <= 1) || GAMMA_CORRECTION_TYPE >= 2
+	UIBackgroundGamma = linear_to_sRGB_gamma(UIBackgroundLinear, GCT_MIRROR);
+	float3 composedColorGamma = UIBackgroundGamma * (1.0 - UIIntensity) + UIColor.rgb;
+	linearComposedColor = gamma_sRGB_to_linear(composedColorGamma, GCT_MIRROR);
+#else
+	UIBackgroundGamma = linear_to_gamma(UIBackgroundLinear, GCT_MIRROR);
+	float3 composedColorGamma = UIBackgroundGamma * (1.0 - UIIntensity) + UIColor.rgb;
+	linearComposedColor = gamma_to_linear(composedColorGamma, GCT_MIRROR);
 #endif
+
+	linearComposedColor *= UIPaperWhiteScale;
 	return linearComposedColor;
+#endif
 }
 
 // Custom Luma shader to apply the display (or output) transfer function from a linear input (or apply custom gamma correction)
