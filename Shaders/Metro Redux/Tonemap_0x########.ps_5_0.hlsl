@@ -446,6 +446,7 @@ void main(
   //tonemapped_bt709 = linear_to_sRGB_gamma(tonemapped_bt709, GCT_MIRROR);
 
   r0.xyz = tonemapped_bt709;
+  //r0.xyz = untonemapped;
   }
 
 #if HAS_GASMASK
@@ -475,22 +476,8 @@ void main(
   o0.w = sqrt(r0.w);
   } else {
 #if 1
-      // float3 gamut_compressed_bt709 = renodx_custom::color::macleod_boynton::GamutCompressBT709(r0.xyz);
-      // float3 gamut_scale = safeDivision(gamut_compressed_bt709, r0.xyz, 1);
-      // r0.xyz *= gamut_scale;
-  //r0.xyz = gamma_sRGB_to_linear(r0.xyz, GCT_MIRROR);
   scale = ComputeReinhardSmoothClampScale(r0.xyz);
-  r0.xyz *= scale;
-  //r0.xyz = linear_to_sRGB_gamma(r0.xyz, GCT_MIRROR);
-  r1.xyz = t_grade.Sample(s_clamp_bi_s, r0.zyx).xyz; // Also applies fade to black!
-  r0.xyz = r1.zyx * float3(2, 2, 2) + r0.xyz;
-  r0.xyz = float3(-1, -1, -1) + r0.xyz;
-
-  //r0.xyz /= scale;
-  //r0.xyz = gamma_sRGB_to_linear(r0.xyz, GCT_MIRROR);
-  r0.xyz = safeDivision(r0.xyz, scale, 2);
-  //r0.xyz = linear_to_sRGB_gamma(r0.xyz, GCT_MIRROR);
-  //r0.xyz = safeDivision(r0.xyz, gamut_scale, 1);
+  r0.xyz = ApplyMetroLUTWithFadeToWhite(t_grade, s_clamp_bi_s, r0.xyz, scale);
 #else
       float3 = r0.xyz;
   r1.xyz = SampleLUT(t_grade, s_clamp_bi_s, r0.zyx, 16u, true);
@@ -507,7 +494,6 @@ void main(
   //o0.w = saturate(r0.w);
   }
   o0.xyz = r0.xyz;
-
   //o0.xyz = tonemapped_bt709;
   return;
 }

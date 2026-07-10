@@ -34,6 +34,44 @@ ColorGradeConfig DefaultColorGradeConfig() {
     return config;
 }
 
+float3 SampleMetroLUT(Texture3D<float4> lut, SamplerState samplerState, float3 lutInput) {
+    const float3 lutSample = lut.SampleLevel(samplerState, lutInput.zyx, 0.f).xyz;
+    return lutSample.zyx * 2.f + lutInput - 1.f;
+}
+
+float GetMetroLUTFadeToWhiteAmount(Texture3D<float4> lut, SamplerState samplerState) {
+    const float3 blackOutput = SampleMetroLUT(lut, samplerState, 0.f);
+    const float raisedBlack = saturate(GetLuminance(max(blackOutput, 0.f)));
+
+    // Ignore one 8-bit step near black and consider one step below white complete.
+    // Range-collapse and chroma checks can prevent a real fade from ever reaching 1,
+    // which leaves part of the HDR path visible at the white endpoint.
+    const float quantizationTolerance = 1.f / 255.f;
+    return saturate(
+        (raisedBlack - quantizationTolerance)
+        / (1.f - 2.f * quantizationTolerance));
+}
+
+float3 ApplyMetroLUTWithFadeToWhite(
+    Texture3D<float4> lut,
+    SamplerState samplerState,
+    float3 color,
+    float hdrScale)
+{
+    const float fadeToWhiteAmount = GetMetroLUTFadeToWhiteAmount(lut, samplerState);
+
+    const float3 hdrInput = color * hdrScale;
+    const float3 hdrOutput = safeDivision(
+        SampleMetroLUT(lut, samplerState, hdrInput),
+        hdrScale,
+        2);
+
+    const float3 vanillaInput = saturate(color);
+    const float3 vanillaOutput = saturate(SampleMetroLUT(lut, samplerState, vanillaInput));
+
+    return lerp(hdrOutput, vanillaOutput, fadeToWhiteAmount);
+}
+
 float Highlights(float x, float highlights, float mid_gray) {
     if (highlights == 1.f) return x;
 
