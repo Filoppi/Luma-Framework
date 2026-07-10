@@ -38,8 +38,8 @@ cbuffer PerViewCB : register(b1)
 SamplerState smp_bilinearsampler_s : register(s0);
 Texture2D<float4> ro_identity_bufferin : register(t0);
 
-// This is a "copy" shader that always runs on the tonemapped buffer to make a copy of it (sRGB view to SRGB view) before the UI starts blending in.
-// The UI uses non sRGB views to draw in gamma space, so to make it draw correctly on FP16 textures, we need to apply sRGB gamma here, and then linearize at the end.
+// This is a "copy" shader that always runs on the tonemapped buffer to make a copy of it before the UI starts blending in.
+// Keep the scene in linear space; UI shaders are redirected to a separate gamma-space pass and composed at the end.
 // This also does upscaling (if we have DRS enabled) and sharpening!
 void main(
   float4 v0 : INTERP0,
@@ -47,6 +47,12 @@ void main(
 {
   float4 r0,r1,r2,r3,r4,r5,r6,r7,r8;
   float4 fDest;
+
+  if (all(cb_resolutionscale.xy == 1.0))
+  {
+    o0.xyzw = ro_identity_bufferin.SampleLevel(smp_bilinearsampler_s, v0.xy, 0).xyzw;
+    return;
+  }
 
   r0.xy = cb_resolutionscale.xy * v0.xy;
   ro_identity_bufferin.GetDimensions(0, fDest.x, fDest.y, fDest.z);
