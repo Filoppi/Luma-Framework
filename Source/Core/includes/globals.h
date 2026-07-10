@@ -33,12 +33,9 @@ namespace Globals
 	__forceinline void SetGlobals(const char* game_name, const char* mod_description = "", const char* mod_website = "", uint32_t mod_version = 0)
 	{
 		// We should complain if the attempted written size is greater but whatever
-		strncpy(GAME_NAME, game_name, sizeof(GAME_NAME));
-		GAME_NAME[sizeof(GAME_NAME) - 1] = '\0'; // ensure null-termination
-		strncpy(DESCRIPTION, mod_description, sizeof(DESCRIPTION));
-		DESCRIPTION[sizeof(DESCRIPTION) - 1] = '\0';
-		strncpy(WEBSITE, mod_website, sizeof(WEBSITE));
-		WEBSITE[sizeof(WEBSITE) - 1] = '\0';
+		strcpy_s(GAME_NAME, sizeof(GAME_NAME), game_name);
+		strcpy_s(DESCRIPTION, sizeof(DESCRIPTION), mod_description);
+		strcpy_s(WEBSITE, sizeof(WEBSITE), mod_website);
 
 		if (mod_version != 0 && mod_version != uint32_t(-1))
 		{
