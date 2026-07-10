@@ -463,10 +463,11 @@ float4 main(float4 pos : SV_Position) : SV_Target0
 		//color.rgb = game_gamma_to_linear(uiTexture.Load((int3)pos.xyz, GCT_MIRROR).rgb);
 		//color.rgb = uiTexture.Load((int3)pos.xyz, GCT_MIRROR).a;
 	}
-	// There's no scene rendering, which imply the image is all UI, so scale the overall brightness with the UI brightness parameter instead of the game scene one
+	// There is no scene rendering, so both the source and separated layers are UI content (for example, loading screens).
+	// Compose the separated layer as well: explicit UI shader routing may leave the source texture completely black.
 	else
 	{
-		//color.rgb = game_gamma_to_linear(color.rgb, GCT_MIRROR);
+		color.rgb = ComposeUI(pos.xyz, color.rgb, UIPaperWhite, UIPaperWhite);
 		gamePaperWhite = UIPaperWhite;
 	}
 
