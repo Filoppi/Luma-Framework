@@ -23,7 +23,7 @@ cbuffer SmaaMetricsCB : register(b1)
 #define SMAA_PRESET_ULTRA
 #define SMAA_PREDICATION       1
 #define SMAA_PREDICATION_SCALE SmaaPredication.x
-// Predication tuned to ReShade-community best-practice + BL2's clean view-Z depth signal:
+// Predication tuned to BL2's clean view-Z depth signal:
 //  - flat threshold  = SCALE * SMAA_THRESHOLD            = 2.0 * 0.05      = 0.10 (recommended; rejects busy
 //    cel-shade texture color-noise so SMAA doesn't over-AA flat detail)
 //  - silhouette thr  = SCALE * SMAA_THRESHOLD * (1-STR)  = 2.0 * 0.05 *0.5 = 0.05 (= plain ULTRA base; predication

@@ -1,14 +1,7 @@
-// Borderlands: The Pre-Sequel — tonemap / HDR injection point (dgVoodoo->DX11 hash 0xFCFE623E).
-// TPS runs the SAME UE3/Gearbox uber-post tonemap as Borderlands 2, but its native shader
-// (tps_tonemap_0xF8997849) inserts a LightShaftTexture at sampler slot 1, which shifts bloom/vignette/LUT/DOF
-// DOWN one slot vs BL2 (the DX9 BL2 tonemap_0x54ED86A0 has LUT@s3/DOF@s4; TPS has lightshaft@s1, LUT@s4,
-// DOF@s5). dgVoodoo maps DX9 sN 1:1 onto DX11 tN, so the same shift lands in the DX11 register space Luma
-// sees, so a dedicated slot map (below) rebinds each named texture to its shifted register.
-//
-// The grade MATH is identical between the two games, so we set the slot-map + light-shaft macros here and
-// pull in the shared grade impl (Luma_BL2TPS_Tonemap.hlsl, one source of truth), then add our own main().
-// Injected Luma bloom moves to t8 because TPS's native DOF occupies t5; the Gaussian DoF prefilter (t7)
-// stays put — free on TPS. The mod binds Luma bloom at t8 when it detects this tonemap hash.
+// Borderlands: The Pre-Sequel — tonemap / HDR injection point (dgVoodoo 2.81.3 -> ps_4_0, hash 0x2079F1E8).
+// Older dgVoodoo builds emit ps_4_0 -> a different CSO hash for the same DX9 shader. Identical I/O + slot map
+// (LightShaft@t1, +1 shift, Luma bloom -> t8) to the 2.87.3 TPS variant (0xFCFE623E), so it reuses the same
+// TPS slot macros over the shared grade impl.
 #define TM_HAS_LIGHTSHAFT 1
 #define TM_T_LIGHTSHAFT   t1 // LightShaftTexture (god rays) — TPS-only, inserted at slot 1
 #define TM_T_BLOOM        t2 // FilterColor1Texture (screen-blend bloom)

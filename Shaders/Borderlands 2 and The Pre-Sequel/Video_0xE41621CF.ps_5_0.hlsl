@@ -5,13 +5,13 @@
 // (0xD00AA2A7). On Luma's fp16 scRGB swapchain that SDR output would sit flat at paper white. So: restore the
 // vanilla clamp, then apply a LIGHT PumboAutoHDR so movies gain a little highlight pop in HDR.
 //
-// Body transcribed VERBATIM from the live dgVoodoo->ps_5_0 disasm of 0xE41621CF (maps the DX9 video shader
+// Body transcribed verbatim from the dgVoodoo->ps_5_0 disasm of 0xE41621CF (maps the DX9 video shader
 // 0x33244F80: tor/tog/tob/consts c0..c3 -> cb4[8..11], same cb4[N+8] mapping as the tonemap). The cb3 and/or
 // pairs are dgVoodoo's texture-format bit emulation (mask+set), kept exactly via asuint/asfloat.
 // NOTE: dgVoodoo dropped the SM3 `saturate(o)` (the vanilla 8-bit UNORM backbuffer clamped for free); the fp16
 // swapchain does not, so we re-add it before the AutoHDR (kills YUV overshoot + negatives).
 
-#include "../Includes/Common.hlsl"
+#include "Includes/Common.hlsl" // game-local: pulls GameCBuffers (LumaGameSettings VideoAutoHDR* fields) + shared Common
 
 // Light AutoHDR on videos (0 = off -> flat SDR at paper white). Peak kept low on purpose (Bink is low-bitrate;
 // pushing peak amplifies block/compression artifacts in highlights). PumboAutoHDR self-noops in SDR (peak==paper).
@@ -78,7 +78,12 @@ void main(
    o0.rgb = saturate(o0.rgb);
    float3 lin = gamma_to_linear(o0.rgb);
 #if ENABLE_VIDEO_AUTO_HDR
-   lin = PumboAutoHDR(lin, VIDEO_AUTO_HDR_PEAK_NITS, LumaSettings.GamePaperWhiteNits);
+   if (LumaSettings.GameSettings.VideoAutoHDREnable > 0.5)
+   {
+      // boost 0 = peak at paper white -> PumboAutoHDR no-ops (off); 1 = full VIDEO_AUTO_HDR_PEAK_NITS.
+      const float peakNits = lerp(sRGB_WhiteLevelNits, VIDEO_AUTO_HDR_PEAK_NITS, saturate(LumaSettings.GameSettings.VideoAutoHDRBoost));
+      lin = PumboAutoHDR(lin, peakNits, LumaSettings.GamePaperWhiteNits);
+   }
 #endif
 #if UI_DRAW_TYPE >= 2
    // Match the tonemap's linear pre-scale: land movies at the same brightness as in-game after the

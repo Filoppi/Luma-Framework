@@ -5,7 +5,7 @@
 //
 // Threshold = soft-knee quadratic (Bloom.hlsl default LUMA_BLOOM_THRESHOLD_FUNCTION). Source is linear scene
 // referred to paper white (1.0), so threshold 1.0 blooms above-paper-white highlights; soft knee 0.5 fades the
-// transition in (web best-practice — avoids hard popping on cel-shade ink edges). Karis firefly weighting is
+// transition in (avoids hard popping on cel-shade ink edges). Karis firefly weighting is
 // applied separately (DrawKarisAverage) before this, since BL2 has no TAA to hide sparkle.
 
 #include "../Includes/Color.hlsl" // GetLuminance, gamma helpers used by Bloom.hlsl

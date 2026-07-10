@@ -4,7 +4,7 @@
 // (re-dumped via devkit). Launch the game exe DIRECTLY: the XNA Launcher.exe also loads d3d9 and would capture
 // ReShade instead of the game. One shared addon serves both games (tonemap hash = discriminator).
 //
-// Pipeline (devkit-verified, see NOTES.md):
+// Pipeline:
 // - TONEMAP PS 0xD00AA2A7 (BL2) / 0xFCFE623E (TPS): scene fp16 + bloom + vignette + LUT + DOF -> 8-bit LDR.
 //   Replaced to recover HDR (DICE + paper-white); UI composites AFTER, on the LDR.
 // - FXAA PS 0x0D3001F6 (only when in-game AA on) -> replaced with SMAA ULTRA + optional RCAS.
@@ -33,6 +33,13 @@ static constexpr uint32_t kFXAAResolveHash = 0x0D3001F6;
 static constexpr uint32_t kTonemapHash = 0xD00AA2A7;    // BL2: writes the LDR buffer the HUD then draws onto
 static constexpr uint32_t kTonemapHashTPS = 0xFCFE623E; // The Pre-Sequel: same engine, different tonemap CSO (one addon serves both)
 
+// dgVoodoo 2.81.3 translates DX9 SM3 to ps_4_0 (2.87.3 -> ps_5_0), so the SAME shaders get DIFFERENT CSO hashes.
+// The shader bodies are identical (thin wrappers over the shared impl); we just match the alt hashes too via the
+// Is* helpers below. FXAA/video/icon are byte-shared between BL2 and TPS -> one 2.81.3 hash each covers both games.
+static constexpr uint32_t kFXAAResolveHash_v281 = 0xDF7DB98D; // BL2/TPS FXAA under dgVoodoo 2.81.3
+static constexpr uint32_t kTonemapHash_v281 = 0xF14F8664;     // BL2 tonemap under dgVoodoo 2.81.3
+static constexpr uint32_t kTonemapHashTPS_v281 = 0x2079F1E8;  // The Pre-Sequel tonemap under dgVoodoo 2.81.3
+
 // Luma-injected SRV slots on the tonemap. These MUST match the shader register macros in
 // Tonemap_0xD00AA2A7.ps_5_0.hlsl (BL2) + Tonemap_0xFCFE623E.ps_5_0.hlsl (TPS) — there is no compile-time link,
 // so keep them in sync if a slot is ever re-RE'd:
@@ -47,11 +54,12 @@ static bool g_smaa_enable = true;
 static float g_rcas_sharpness = 0.f;                                   // RCAS sharpen on SMAA output (0 = off)
 static bool g_hide_ui = false;                                         // hide the game's HUD (for clean screenshots)
 static bool g_smaa_predication = true;                                 // SMAA depth predication (depth from scene-color .a)
-static float g_smaa_pred_k = 1000.f;                                   // predication depth compress (world units): D=z/(z+k); k=1000 measured optimum (~100% far-silhouette recall, ~0% flat false-fire @4K; plateau past 1000)
+static float g_smaa_pred_k = 1000.f;                                   // predication depth compress (world units): D=z/(z+k); k=1000 (far-silhouette recall plateaus past this)
 static bool g_luma_bloom_enable = true;                                // replace the game's clamped bloom with Luma HDR pyramidal bloom (live toggle)
+static bool g_video_auto_hdr_enable = true;                            // light AutoHDR on Bink videos, HDR only (live toggle)
 static int g_bloom_nmips = 6;                                          // bloom pyramid mip count
 static float g_bloom_sigmas[6] = {1.5f, 2.0f, 2.0f, 2.0f, 1.0f, 1.0f}; // per-mip Gaussian sigma (tapered, wider middle for a soft natural halo)
-static int g_dof_type = 2;                                             // DoF path (live): 0 = vanilla game DoF, 2 = Luma separable Gaussian (default, UI checkbox)
+static int g_dof_type = 0;                                             // DoF path (live): 0 = vanilla game DoF (default), 1 = Luma separable Gaussian (UI checkbox)
 static float g_dof_radius = 9.f;                                       // DoF strength (full-res px @ 4K Gaussian blur extent). Default, users tune
 
 struct Borderlands2GameDeviceData final : public GameDeviceData
@@ -125,6 +133,24 @@ class Borderlands2 final : public Game
       return *static_cast<Borderlands2GameDeviceData*>(device_data.game);
    }
 
+   // Pass identity by shader hash, folding every supported dgVoodoo version (2.87.3 ps_5_0 + 2.81.3 ps_4_0).
+   static bool IsBL2Tonemap(const ShaderHashesList<OneShaderPerPipeline>& hashes)
+   {
+      return hashes.Contains(kTonemapHash, reshade::api::shader_stage::pixel) || hashes.Contains(kTonemapHash_v281, reshade::api::shader_stage::pixel);
+   }
+   static bool IsTPSTonemap(const ShaderHashesList<OneShaderPerPipeline>& hashes)
+   {
+      return hashes.Contains(kTonemapHashTPS, reshade::api::shader_stage::pixel) || hashes.Contains(kTonemapHashTPS_v281, reshade::api::shader_stage::pixel);
+   }
+   static bool IsAnyTonemap(const ShaderHashesList<OneShaderPerPipeline>& hashes)
+   {
+      return IsBL2Tonemap(hashes) || IsTPSTonemap(hashes);
+   }
+   static bool IsFXAA(const ShaderHashesList<OneShaderPerPipeline>& hashes)
+   {
+      return hashes.Contains(kFXAAResolveHash, reshade::api::shader_stage::pixel) || hashes.Contains(kFXAAResolveHash_v281, reshade::api::shader_stage::pixel);
+   }
+
    static bool CreateImmutableCB(ID3D11Device* device, const void* data, UINT size, ComPtr<ID3D11Buffer>& out)
    {
       out.reset();
@@ -156,7 +182,7 @@ class Borderlands2 final : public Game
 
 #if ENABLE_SMAA
    // Post-tonemap SMAA on the LDR (gamma space). Runs AFTER the tonemap so it can't perturb the DoF (composited
-   // inside the tonemap; vanilla == SMAA-off, devkit-verified). Snapshot LDR -> SRV (already gamma; fed to both
+   // inside the tonemap; vanilla == SMAA-off). Snapshot LDR -> SRV (already gamma; fed to both
    // DrawSMAA color args, no color-prep) -> DrawSMAA -> optional RCAS -> copy back into the LDR. No-op if not ready.
    void RunPostTonemapSMAA(ID3D11Device* native_device, ID3D11DeviceContext* native_device_context, DeviceData& device_data, Borderlands2GameDeviceData& gd, ID3D11Resource* ldr_res)
    {
@@ -395,22 +421,24 @@ public:
       native_shaders_definitions.emplace(CompileTimeStringHash("BL2TPS DoF Gaussian Blur CS"),
          ShaderDefinition{"Luma_BL2TPS_DoFGaussian", reshade::api::pipeline_subobject_type::compute_shader, nullptr, "dof_blur_cs"});
 
-      // The game's post passes use cb0..cb5; b12/b13 are free for Luma (measured via devkit).
+      // The game's post passes use cb0..cb5; b12/b13 are free for Luma.
       luma_settings_cbuffer_index = 13;
       luma_data_cbuffer_index = 12;
 
       // User HDR grade controls (read in Tonemap_0xD00AA2A7.ps_5_0.hlsl via LumaSettings.GameSettings). All
       // default to a vanilla no-op. Exposure/Bloom/Vignette act on both SDR+HDR; Saturation/Dechroma/Contrast HDR-only.
-      default_luma_global_game_settings.Exposure = 1.f;          // scene multiplier (1x)
-      default_luma_global_game_settings.Saturation = 1.f;        // Oklab saturation
-      default_luma_global_game_settings.HighlightDechroma = 0.f; // off; only mandatory DICE/gamut desat applies
-      default_luma_global_game_settings.BloomIntensity = 1.f;    // Luma HDR bloom strength (additive)
-      default_luma_global_game_settings.Contrast = 1.f;          // slope around 18% mid-gray
-      default_luma_global_game_settings.VignetteIntensity = 1.f; // game vignette darkening scale
-      default_luma_global_game_settings.LumaBloomEnable = 1.f;   // 1 = Luma HDR pyramidal bloom, 0 = vanilla game bloom
-      default_luma_global_game_settings.DOFRadius = 9.f;         // DoF strength (px @ 4K); = vanilla DoF peak (sigma ~1.98 half-res px)
-      default_luma_global_game_settings.DOFType = 2.f;           // 0 = vanilla game DoF, 2 = Luma separable Gaussian (default)
-      default_luma_global_game_settings.Dithering = 1.f;         // animated triangular dither at output (HDR), anti-banding on
+      default_luma_global_game_settings.Exposure = 1.f;           // scene multiplier (1x)
+      default_luma_global_game_settings.Saturation = 1.f;         // Oklab saturation
+      default_luma_global_game_settings.HighlightDechroma = 0.f;  // off; only mandatory DICE/gamut desat applies
+      default_luma_global_game_settings.BloomIntensity = 1.f;     // Luma HDR bloom strength (additive)
+      default_luma_global_game_settings.Contrast = 1.f;           // slope around 18% mid-gray
+      default_luma_global_game_settings.VignetteIntensity = 1.f;  // game vignette darkening scale
+      default_luma_global_game_settings.LumaBloomEnable = 1.f;    // 1 = Luma HDR pyramidal bloom, 0 = vanilla game bloom
+      default_luma_global_game_settings.DOFRadius = 9.f;          // DoF strength (px @ 4K); = vanilla DoF peak (sigma ~1.98 half-res px)
+      default_luma_global_game_settings.DOFType = 0.f;            // 0 = vanilla game DoF (default), 1 = Luma separable Gaussian
+      default_luma_global_game_settings.Dithering = 1.f;          // animated triangular dither at output (HDR), anti-banding on
+      default_luma_global_game_settings.VideoAutoHDREnable = 1.f; // light AutoHDR on Bink videos (HDR only)
+      default_luma_global_game_settings.VideoAutoHDRBoost = 0.5f; // highlight-expansion strength (peak ~165 nits at 0.5)
       cb_luma_global_settings.GameSettings = default_luma_global_game_settings;
    }
 
@@ -564,7 +592,7 @@ public:
       // 3. (Re)create the per-axis CBs (axis-step + sigma) on size or radius change.
       if (size_changed || !gd.cb_dof_blur_h || !gd.cb_dof_blur_v || gd.dof_blur_radius != g_dof_radius)
       {
-         const float sigma = g_dof_radius * 0.22f; // half-res sigma; radius 9 = vanilla DoF peak (sigma ~1.98 half-res px @ 4K, R2 0.98)
+         const float sigma = g_dof_radius * 0.22f; // half-res sigma; radius 9 = vanilla DoF peak
          const float ph[4] = {1.0f / (float)hw, 0.f, sigma, 0.f};
          const float pv[4] = {0.f, 1.0f / (float)hh, sigma, 0.f};
          gd.cb_dof_blur_h.reset();
@@ -622,12 +650,12 @@ public:
 
       // Track the LDR buffer (the tonemap's render target). The HUD draws onto it afterwards; the Hide UI
       // toggle uses this to recognize (and drop) those HUD draws.
-      if (is_immediate && (original_shader_hashes.Contains(kTonemapHash, reshade::api::shader_stage::pixel) || original_shader_hashes.Contains(kTonemapHashTPS, reshade::api::shader_stage::pixel)))
+      if (is_immediate && IsAnyTonemap(original_shader_hashes))
       {
          // The Pre-Sequel's tonemap inserts a LightShaftTexture at slot 1, shifting its native textures down one
          // (LUT@t4, DOF@t5) vs BL2. The replaced tonemap shader (Tonemap_0xFCFE623E) compensates in its register
          // map; the only C++ consequence is the injected Luma bloom must move off t5 (TPS's native DOF) to t8.
-         const bool is_tps = original_shader_hashes.Contains(kTonemapHashTPS, reshade::api::shader_stage::pixel);
+         const bool is_tps = IsTPSTonemap(original_shader_hashes);
          gd.tonemap_fired_this_frame = true; // Hide UI scopes its post-tonemap alpha-blend skip to this span
          ComPtr<ID3D11RenderTargetView> rtv;
          native_device_context->OMGetRenderTargets(1, rtv.put(), nullptr);
@@ -679,7 +707,7 @@ public:
                cb_luma_global_settings.GameSettings.DOFType = dof_type_f;
                device_data.cb_luma_global_settings_dirty = true;
             }
-            if (scene_srv && g_dof_type == 2) // Luma separable Gaussian
+            if (scene_srv && g_dof_type != 0) // Luma separable Gaussian (value-agnostic: any non-zero DOFType)
             {
                RunDoFGaussian(native_device, native_device_context, device_data, gd, scene_srv.get());
                if (gd.srv_dof_blur_out)
@@ -697,7 +725,7 @@ public:
          {
             // Returning Replaced short-circuits core's per-pass SetLumaConstantBuffers (core.hpp), so upload the
             // (possibly dirty) grade/DOFType CB ourselves before running the tonemap draw - else it samples
-            // last-present's values (1-frame lag on grade sliders / DoF toggle). The standard fleet custom-pass idiom.
+            // last-present's values (1-frame lag on grade sliders / DoF toggle).
             SetLumaConstantBuffers(native_device_context, cmd_list_data, device_data, reshade::api::shader_stage::pixel, LumaConstantBufferType::LumaSettings);
             updated_cbuffers = true;
             (*original_draw_dispatch_func)();
@@ -718,7 +746,7 @@ public:
       // buffer-independent: BL2 draws the HUD on the tonemap's LDR, but TPS routes it to a separate post-FXAA buffer.
       // `tonemap_fired_this_frame` scopes this to the current frame's post-tonemap span (so next frame's pre-tonemap
       // transparents survive). RT==LDR kept as a BL2 superset; the mod menu draws post-composition, stays visible.
-      if (g_hide_ui && is_immediate && !is_custom_pass && gd.tonemap_fired_this_frame && !original_shader_hashes.Contains(kTonemapHash, reshade::api::shader_stage::pixel) && !original_shader_hashes.Contains(kTonemapHashTPS, reshade::api::shader_stage::pixel) && !original_shader_hashes.Contains(kFXAAResolveHash, reshade::api::shader_stage::pixel))
+      if (g_hide_ui && is_immediate && !is_custom_pass && gd.tonemap_fired_this_frame && !IsAnyTonemap(original_shader_hashes) && !IsFXAA(original_shader_hashes))
       {
          ComPtr<ID3D11BlendState> blend_state;
          FLOAT blend_factor[4];
@@ -773,8 +801,9 @@ public:
       reshade::get_config_value(nullptr, PROJECT_NAME, "Contrast", gs.Contrast);
       reshade::get_config_value(nullptr, PROJECT_NAME, "VignetteIntensity", gs.VignetteIntensity);
 
-      g_dof_type = 2; // default = Luma Gaussian
+      g_dof_type = 0; // default = vanilla game DoF
       reshade::get_config_value(nullptr, PROJECT_NAME, "DOFType", g_dof_type);
+      g_dof_type = (g_dof_type != 0) ? 1 : 0; // normalize to the 0/1 binary (migrates a legacy saved 2 -> 1)
       reshade::get_config_value(nullptr, PROJECT_NAME, "DOFRadius", g_dof_radius);
       gs.DOFType = (float)g_dof_type;
       gs.DOFRadius = g_dof_radius;
@@ -783,6 +812,10 @@ public:
       gs.LumaBloomEnable = g_luma_bloom_enable ? 1.f : 0.f; // mirror to the shader composite switch
 
       reshade::get_config_value(nullptr, PROJECT_NAME, "Dithering", gs.Dithering);
+
+      reshade::get_config_value(nullptr, PROJECT_NAME, "VideoAutoHDREnable", g_video_auto_hdr_enable);
+      gs.VideoAutoHDREnable = g_video_auto_hdr_enable ? 1.f : 0.f; // mirror to the shader runtime gate
+      reshade::get_config_value(nullptr, PROJECT_NAME, "VideoAutoHDRBoost", gs.VideoAutoHDRBoost);
    }
 
    void DrawImGuiSettings(DeviceData& device_data) override
@@ -798,7 +831,8 @@ public:
          reshade::set_config_value(nullptr, PROJECT_NAME, "RCASSharpness", g_rcas_sharpness);
       if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
          ImGui::SetTooltip("RCAS sharpening applied to the SMAA output (0 = off).");
-      DrawResetButton(g_rcas_sharpness, 0.f, "RCASSharpness");
+      if (DrawResetButton<float, false>(g_rcas_sharpness, 0.f, "RCASSharpness")) // <false>: core's default write goes to [Luma], which LoadConfigs never reads
+         reshade::set_config_value(nullptr, PROJECT_NAME, "RCASSharpness", g_rcas_sharpness);
       ImGui::EndDisabled();
 
       // --- HDR grade (read in Tonemap_0xD00AA2A7.ps_5_0.hlsl via LumaSettings.GameSettings). All vanilla by default.
@@ -813,8 +847,11 @@ public:
          reshade::set_config_value(nullptr, PROJECT_NAME, "Exposure", gs.Exposure);
       if (ImGui::IsItemHovered())
          ImGui::SetTooltip("Scene-referred exposure multiplier (1 = vanilla).");
-      if (DrawResetButton(gs.Exposure, gd_def.Exposure, "Exposure"))
+      if (DrawResetButton<float, false>(gs.Exposure, gd_def.Exposure, "Exposure"))
+      {
          device_data.cb_luma_global_settings_dirty = true;
+         reshade::set_config_value(nullptr, PROJECT_NAME, "Exposure", gs.Exposure);
+      }
 
       if (ImGui::SliderFloat("Contrast", &gs.Contrast, 0.f, 2.f))
          device_data.cb_luma_global_settings_dirty = true;
@@ -822,8 +859,11 @@ public:
          reshade::set_config_value(nullptr, PROJECT_NAME, "Contrast", gs.Contrast);
       if (ImGui::IsItemHovered())
          ImGui::SetTooltip("Slope contrast around 18% mid-gray, HDR only (1 = vanilla).");
-      if (DrawResetButton(gs.Contrast, gd_def.Contrast, "Contrast"))
+      if (DrawResetButton<float, false>(gs.Contrast, gd_def.Contrast, "Contrast"))
+      {
          device_data.cb_luma_global_settings_dirty = true;
+         reshade::set_config_value(nullptr, PROJECT_NAME, "Contrast", gs.Contrast);
+      }
 
       if (ImGui::SliderFloat("Saturation", &gs.Saturation, 0.f, 2.f))
          device_data.cb_luma_global_settings_dirty = true;
@@ -831,8 +871,11 @@ public:
          reshade::set_config_value(nullptr, PROJECT_NAME, "Saturation", gs.Saturation);
       if (ImGui::IsItemHovered())
          ImGui::SetTooltip("Color saturation (Oklab), HDR only (1 = vanilla).");
-      if (DrawResetButton(gs.Saturation, gd_def.Saturation, "Saturation"))
+      if (DrawResetButton<float, false>(gs.Saturation, gd_def.Saturation, "Saturation"))
+      {
          device_data.cb_luma_global_settings_dirty = true;
+         reshade::set_config_value(nullptr, PROJECT_NAME, "Saturation", gs.Saturation);
+      }
 
       if (ImGui::SliderFloat("Highlights Desaturation", &gs.HighlightDechroma, 0.f, 1.f))
          device_data.cb_luma_global_settings_dirty = true;
@@ -840,8 +883,11 @@ public:
          reshade::set_config_value(nullptr, PROJECT_NAME, "HighlightDechroma", gs.HighlightDechroma);
       if (ImGui::IsItemHovered())
          ImGui::SetTooltip("How soon bright sources fade to neutral white, HDR only (0 = keep color at any brightness).");
-      if (DrawResetButton(gs.HighlightDechroma, gd_def.HighlightDechroma, "HighlightDechroma"))
+      if (DrawResetButton<float, false>(gs.HighlightDechroma, gd_def.HighlightDechroma, "HighlightDechroma"))
+      {
          device_data.cb_luma_global_settings_dirty = true;
+         reshade::set_config_value(nullptr, PROJECT_NAME, "HighlightDechroma", gs.HighlightDechroma);
+      }
 
       if (ImGui::Checkbox("Luma HDR Bloom", &g_luma_bloom_enable))
       {
@@ -858,8 +904,11 @@ public:
          reshade::set_config_value(nullptr, PROJECT_NAME, "BloomIntensity", gs.BloomIntensity);
       if (ImGui::IsItemHovered())
          ImGui::SetTooltip("Bloom strength (1 = vanilla). Scales the Luma HDR bloom when enabled, else the vanilla game bloom.");
-      if (DrawResetButton(gs.BloomIntensity, gd_def.BloomIntensity, "BloomIntensity"))
+      if (DrawResetButton<float, false>(gs.BloomIntensity, gd_def.BloomIntensity, "BloomIntensity"))
+      {
          device_data.cb_luma_global_settings_dirty = true;
+         reshade::set_config_value(nullptr, PROJECT_NAME, "BloomIntensity", gs.BloomIntensity);
+      }
 
       if (ImGui::SliderFloat("Vignette Intensity", &gs.VignetteIntensity, 0.f, 1.f))
          device_data.cb_luma_global_settings_dirty = true;
@@ -867,14 +916,17 @@ public:
          reshade::set_config_value(nullptr, PROJECT_NAME, "VignetteIntensity", gs.VignetteIntensity);
       if (ImGui::IsItemHovered())
          ImGui::SetTooltip("Scales the game's vignette darkening (1 = vanilla, 0 = none).");
-      if (DrawResetButton(gs.VignetteIntensity, gd_def.VignetteIntensity, "VignetteIntensity"))
+      if (DrawResetButton<float, false>(gs.VignetteIntensity, gd_def.VignetteIntensity, "VignetteIntensity"))
+      {
          device_data.cb_luma_global_settings_dirty = true;
+         reshade::set_config_value(nullptr, PROJECT_NAME, "VignetteIntensity", gs.VignetteIntensity);
+      }
 
-      // DoF: one checkbox toggles the Luma separable HDR Gaussian (g_dof_type 2) vs the vanilla game DoF (0).
+      // DoF: one checkbox toggles the Luma separable HDR Gaussian (g_dof_type 1) vs the vanilla game DoF (0).
       bool dof_on = (g_dof_type != 0);
       if (ImGui::Checkbox("Luma Gaussian DoF", &dof_on))
       {
-         g_dof_type = dof_on ? 2 : 0;
+         g_dof_type = dof_on ? 1 : 0;
          gs.DOFType = (float)g_dof_type;
          device_data.cb_luma_global_settings_dirty = true;
          reshade::set_config_value(nullptr, PROJECT_NAME, "DOFType", g_dof_type);
@@ -892,10 +944,11 @@ public:
          reshade::set_config_value(nullptr, PROJECT_NAME, "DOFRadius", g_dof_radius);
       if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
          ImGui::SetTooltip("Depth of Field blur strength.");
-      if (DrawResetButton(g_dof_radius, 9.f, "DOFRadius"))
+      if (DrawResetButton<float, false>(g_dof_radius, 9.f, "DOFRadius"))
       {
          gs.DOFRadius = g_dof_radius;
          device_data.cb_luma_global_settings_dirty = true;
+         reshade::set_config_value(nullptr, PROJECT_NAME, "DOFRadius", g_dof_radius);
       }
       ImGui::EndDisabled();
 
@@ -908,6 +961,29 @@ public:
       }
       if (ImGui::IsItemHovered())
          ImGui::SetTooltip("Reduces gradient banding.");
+
+      if (ImGui::Checkbox("Video AutoHDR", &g_video_auto_hdr_enable))
+      {
+         gs.VideoAutoHDREnable = g_video_auto_hdr_enable ? 1.f : 0.f;
+         device_data.cb_luma_global_settings_dirty = true;
+         reshade::set_config_value(nullptr, PROJECT_NAME, "VideoAutoHDREnable", g_video_auto_hdr_enable);
+      }
+      if (ImGui::IsItemHovered())
+         ImGui::SetTooltip("Adds light HDR highlights to pre-rendered Bink videos, HDR only (off = flat SDR at paper white).");
+
+      ImGui::BeginDisabled(!g_video_auto_hdr_enable);
+      if (ImGui::SliderFloat("Video HDR Boost", &gs.VideoAutoHDRBoost, 0.f, 1.f))
+         device_data.cb_luma_global_settings_dirty = true;
+      if (ImGui::IsItemDeactivatedAfterEdit())
+         reshade::set_config_value(nullptr, PROJECT_NAME, "VideoAutoHDRBoost", gs.VideoAutoHDRBoost);
+      if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
+         ImGui::SetTooltip("Video highlight-expansion strength (0 = off).");
+      if (DrawResetButton<float, false>(gs.VideoAutoHDRBoost, gd_def.VideoAutoHDRBoost, "VideoAutoHDRBoost"))
+      {
+         device_data.cb_luma_global_settings_dirty = true;
+         reshade::set_config_value(nullptr, PROJECT_NAME, "VideoAutoHDRBoost", gs.VideoAutoHDRBoost);
+      }
+      ImGui::EndDisabled();
 
       ImGui::SeparatorText("UI");
       if (ImGui::Checkbox("Hide Gameplay UI", &g_hide_ui))

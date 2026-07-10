@@ -1,5 +1,6 @@
-// Borderlands 2 tonemap / HDR injection point (dgVoodoo 2.87.3 -> ps_5_0, hash 0xD00AA2A7).
-// Thin wrapper: identity BL2 slot map (no macros) + the shared grade impl. See Luma_BL2TPS_Tonemap.hlsl.
+// Borderlands 2 tonemap / HDR injection point (dgVoodoo 2.81.3 -> ps_4_0, hash 0xF14F8664).
+// Older dgVoodoo builds emit ps_4_0 -> a different CSO hash for the same DX9 shader. Identical I/O + slot map to
+// the 2.87.3 variant (0xD00AA2A7), so this is the same identity wrapper over the shared grade impl.
 #include "Luma_BL2TPS_Tonemap.hlsl"
 
 void main(
