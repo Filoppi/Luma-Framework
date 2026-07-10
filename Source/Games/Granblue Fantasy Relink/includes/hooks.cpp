@@ -1,23 +1,55 @@
-#include "..\..\Core\core.hpp"
+#include "../../Core/core.hpp"
 #include "cbuffers.h"
 #include "hooks.hpp"
 #include "common.hpp"
 
+namespace
+{
+   uintptr_t ResolveCurrentCamera()
+   {
+      if (g_resolved_addresses.camera_global != 0)
+         return g_resolved_addresses.camera_global;
+
+      const uintptr_t camera_table = g_resolved_addresses.camera_table;
+      const uintptr_t camera_index = g_resolved_addresses.camera_index;
+      if (camera_table == 0 || camera_index == 0)
+         return 0;
+
+      __try
+      {
+         const uint32_t index = *reinterpret_cast<const uint32_t*>(camera_index);
+         if (index > 0x0B)
+            return 0;
+
+         return *reinterpret_cast<const uintptr_t*>(camera_table + index * sizeof(uintptr_t));
+      }
+      __except (EXCEPTION_EXECUTE_HANDLER)
+      {
+         return 0;
+      }
+   }
+} // namespace
+
 bool TryReadCameraJitter(float2& out_jitter)
 {
-   const uintptr_t camera = ResolveGBFRDataOrFallback(
-      g_resolved_addresses.camera_global,
-      kCameraGlobal_RVA);
+   const uintptr_t camera = ResolveCurrentCamera();
    if (camera == 0)
       return false;
 
-   const uintptr_t projection_ptr = *reinterpret_cast<const uintptr_t*>(camera + kCameraProjectionDataOffset);
-   if (projection_ptr == 0)
-      return false;
+   __try
+   {
+      const uintptr_t projection_ptr = *reinterpret_cast<const uintptr_t*>(camera + kCameraProjectionDataOffset);
+      if (projection_ptr == 0)
+         return false;
 
-   out_jitter.x = *reinterpret_cast<const float*>(projection_ptr + kProjectionJitterXOffset);
-   out_jitter.y = *reinterpret_cast<const float*>(projection_ptr + kProjectionJitterYOffset);
-   return true;
+      out_jitter.x = *reinterpret_cast<const float*>(projection_ptr + kProjectionJitterXOffset);
+      out_jitter.y = *reinterpret_cast<const float*>(projection_ptr + kProjectionJitterYOffset);
+      return true;
+   }
+   __except (EXCEPTION_EXECUTE_HANDLER)
+   {
+      return false;
+   }
 }
 
 void OnJitterWrite(safetyhook::Context& ctx)
@@ -150,6 +182,8 @@ static char __fastcall Hooked_InitializeDX11RenderingPipeline(int screen_width, 
 {
    int render_w = screen_width;
    int render_h = screen_height;
+   uintptr_t render_w_addr = 0;
+   uintptr_t render_h_addr = 0;
 
    DeviceData* device_data = g_device_data_ptr.load(std::memory_order_acquire);
    if (device_data && screen_width > 0 && screen_height > 0)
@@ -170,25 +204,27 @@ static char __fastcall Hooked_InitializeDX11RenderingPipeline(int screen_width, 
       render_w = static_cast<int>((std::max)(1u, render_dims[0]));
       render_h = static_cast<int>((std::max)(1u, render_dims[1]));
 
-      // Keep g_renderWidth/g_renderHeight in sync with the args we pass to the trampoline.
-      // CreateRenderTargets initialises these from g_outputWidth/g_outputHeight (always output
-      // dims) and never applies a scale, so without this write the frame graph sees
-      // render == output and skips the temporal upscale path every frame.
-      const uintptr_t render_w_addr = ResolveGBFRDataOrFallback(
+      // Resolve these now, but write them after the trampoline below.
+      render_w_addr = ResolveGBFRDataOrFallback(
          g_resolved_addresses.render_width,
          kRenderWidth_RVA);
-      const uintptr_t render_h_addr = ResolveGBFRDataOrFallback(
+      render_h_addr = ResolveGBFRDataOrFallback(
          g_resolved_addresses.render_height,
          kRenderHeight_RVA);
-      if (render_w_addr != 0 && render_h_addr != 0)
-      {
-         *reinterpret_cast<int*>(render_w_addr) = render_w;
-         *reinterpret_cast<int*>(render_h_addr) = render_h;
-      }
    }
 
    // Pass render dims to the game — g_outputWidth/g_outputHeight are not touched.
-   return g_rt_creation_hook.unsafe_call<char>(render_w, render_h);
+   const char result = g_rt_creation_hook.unsafe_call<char>(render_w, render_h);
+
+   // Sync after the game's RT recreation path sees the new dimensions. Pre-writing these globals
+   // can hide hot render scale changes from the game's size cache, making them restart-only.
+   if (render_w_addr != 0 && render_h_addr != 0)
+   {
+      *reinterpret_cast<int*>(render_w_addr) = render_w;
+      *reinterpret_cast<int*>(render_h_addr) = render_h;
+   }
+
+   return result;
 }
 
 // Not hooked. Hooked_InitializeDX11RenderingPipeline runs every frame and receives

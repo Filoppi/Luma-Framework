@@ -10,21 +10,21 @@
 #define CHECK_GRAPHICS_API_COMPATIBILITY 1
 
 #include <d3d11.h>
-#include "..\..\Core\core.hpp"
-#include "includes\cbuffers.h"
-#include "includes\common.hpp"
-#include "includes\hooks.hpp"
-#include "includes\sigscan.hpp"
-#include "includes\safetyhook.hpp"
-#include "includes\common.cpp"
-#include "includes\sigscan.cpp"
-#include "includes\hooks.cpp"
+#include "../../Core/core.hpp"
+#include "includes/cbuffers.h"
+#include "includes/common.hpp"
+#include "includes/hooks.hpp"
+#include "includes/sigscan.hpp"
+#include "includes/safetyhook.hpp"
+#include "includes/common.cpp"
+#include "includes/sigscan.cpp"
+#include "includes/hooks.cpp"
 
 namespace
 {
-#include "includes\upscale.cpp"
-#include "includes\postprocess.cpp"
-#include "includes\ui_scale.cpp"
+#include "includes/upscale.cpp"
+#include "includes/postprocess.cpp"
+#include "includes/ui_scale.cpp"
 
 } // namespace
 
@@ -414,6 +414,14 @@ public:
 
       if (original_shader_hashes.Contains(shader_hashes_Temporal_Upscale))
       {
+         // Without an active SR implementation, leave the game's temporal upscale draw and
+         // command-list scheduling untouched. Redirecting the native TUP through our temporary
+         // post-AA target adds no SR value and can serialize the deferred path at sub-native scales.
+         if (device_data.sr_type == SR::Type::None || device_data.sr_suppressed)
+         {
+            return DrawOrDispatchOverrideType::None;
+         }
+
          DrawOrDispatchOverrideType override_type = DrawOrDispatchOverrideType::Replaced;
          if (device_data.sr_type != SR::Type::None && !device_data.sr_suppressed)
          {
@@ -655,10 +663,49 @@ public:
       auto& game_device_data = GetGameDeviceData(device_data);
    }
 
+   void CleanExtraSRResources(DeviceData& device_data) override
+   {
+      auto& game_device_data = GetGameDeviceData(device_data);
+#if ENABLE_SR
+      game_device_data.sr_source_color = nullptr;
+      game_device_data.sr_source_color_srv = nullptr;
+      game_device_data.pre_sr_encode_texture = nullptr;
+      game_device_data.pre_sr_encode_srv = nullptr;
+      game_device_data.pre_sr_encode_rtv = nullptr;
+      game_device_data.post_sr_encode_texture = nullptr;
+      game_device_data.post_sr_encode_srv = nullptr;
+      game_device_data.post_sr_encode_rtv = nullptr;
+      game_device_data.depth_buffer = nullptr;
+      game_device_data.sr_motion_vectors = nullptr;
+      game_device_data.sr_output_color = nullptr;
+      game_device_data.sr_output_color_srv = nullptr;
+      game_device_data.draw_device_context = nullptr;
+      game_device_data.remainder_command_list = nullptr;
+      game_device_data.partial_command_list = nullptr;
+      game_device_data.output_changed = false;
+#endif
+      game_device_data.taa_temp_output_resource = nullptr;
+      game_device_data.taa_temp_output_srv = nullptr;
+      game_device_data.taa_temp_output_rtv = nullptr;
+      game_device_data.taa_output_texture = nullptr;
+      game_device_data.taa_output_texture_rtv = nullptr;
+      game_device_data.sr_settings_valid = false;
+      game_device_data.last_sr_settings_data = {};
+   }
+
    void OnInitSwapchain(reshade::api::swapchain* swapchain) override
    {
       auto& device_data = *swapchain->get_device()->get_private_data<DeviceData>();
       auto& game_device_data = GetGameDeviceData(device_data);
+#if ENABLE_SR
+      CleanExtraSRResources(device_data);
+      if (auto* sr_instance_data = device_data.GetSRInstanceData())
+      {
+         sr_instance_data->settings_data = SR::SettingsData{};
+      }
+      device_data.force_reset_sr = true;
+      device_data.has_drawn_sr = false;
+#endif
       EnsureScaledTexture(device_data, game_device_data);
    }
 
@@ -675,13 +722,17 @@ public:
       g_device_data_ptr.store(&device_data, std::memory_order_release);
       g_native_device_ptr.store(native_device, std::memory_order_release);
 
-      ResolveGBFRAddresses();
+      if (!ResolveGBFRAddresses())
+      {
+         reshade::log::message(
+            reshade::log::level::warning,
+            "GBFR sigscan: incomplete; native GBFR hooks disabled for safety");
+         return;
+      }
 
       if (!g_rt_creation_hook)
       {
-         void* rt_creation_fn = ResolveGBFRCodeOrFallback(
-            g_resolved_addresses.initialize_dx11_rendering_pipeline,
-            kInitializeDX11RenderingPipeline_RVA);
+         void* rt_creation_fn = g_resolved_addresses.initialize_dx11_rendering_pipeline;
          if (rt_creation_fn)
          {
             g_rt_creation_hook = safetyhook::create_inline(
@@ -693,9 +744,7 @@ public:
 #if ENABLE_UI_VIEWPORT_SCALING_HOOK
       if (!g_dispatch_viewport_hook)
       {
-         void* dispatch_fn = ResolveGBFRCodeOrFallback(
-            g_resolved_addresses.dispatch_render_pass_viewport,
-            kDispatchRenderPassViewport_RVA);
+         void* dispatch_fn = g_resolved_addresses.dispatch_render_pass_viewport;
          if (dispatch_fn)
          {
             g_dispatch_viewport_hook = safetyhook::create_inline(
@@ -706,9 +755,7 @@ public:
 
       if (!g_ui_orchestrator_hook)
       {
-         void* ui_orchestrator_fn = ResolveGBFRCodeOrFallback(
-            g_resolved_addresses.ui_render_orchestrator,
-            kUIRenderOrchestrator_RVA);
+         void* ui_orchestrator_fn = g_resolved_addresses.ui_render_orchestrator;
          if (ui_orchestrator_fn)
          {
             g_ui_orchestrator_hook = safetyhook::create_mid(
@@ -723,9 +770,7 @@ public:
 #ifdef PATCH_JITTER_TABLE_INIT
       if (!g_taa_init_hook)
       {
-         void* taa_init_fn = ResolveGBFRCodeOrFallback(
-            g_resolved_addresses.temporal_aa_component_init,
-            kTemporalAntiAliasingComponent_Init_RVA);
+         void* taa_init_fn = g_resolved_addresses.temporal_aa_component_init;
          if (taa_init_fn)
          {
             g_taa_init_hook = safetyhook::create_inline(
@@ -737,9 +782,7 @@ public:
 
       if (!g_jitter_write_hook)
       {
-         void* jitter_write_site = ResolveGBFRCodeOrFallback(
-            g_resolved_addresses.jitter_write_site,
-            kJitterWrite_RVA);
+         void* jitter_write_site = g_resolved_addresses.jitter_write_site;
          if (jitter_write_site)
          {
             g_jitter_write_hook = safetyhook::create_mid(
@@ -798,17 +841,6 @@ public:
       }
 #endif
 
-      if (!device_data.has_drawn_sr)
-      {
-         device_data.force_reset_sr = true;
-#if TEST || DEVELOPMENT
-         if (device_data.sr_type != SR::Type::None && !device_data.sr_suppressed && game_device_data.taa_detected_this_frame)
-         {
-            reshade::log::message(reshade::log::level::warning,
-               "[GBFR][TEST] SR not drawn this frame (sr enabled, not suppressed, TAA was seen); force_reset_sr set");
-         }
-#endif
-      }
       device_data.has_drawn_sr = false;
       game_device_data.tonemap_detected_context.store(nullptr, std::memory_order_relaxed);
       game_device_data.ui_scale.ui_detected_context.store(nullptr, std::memory_order_relaxed);
@@ -900,10 +932,15 @@ public:
    void LoadConfigs() override
    {
       reshade::api::effect_runtime* runtime = nullptr;
-      reshade::get_config_value(runtime, NAME, "RenderScale", render_scale);
-      if (render_scale != 1.f)
+      float loaded_render_scale = render_scale;
+      if (reshade::get_config_value(runtime, NAME, "RenderScale", loaded_render_scale))
       {
-         render_scale_changed = true;
+         loaded_render_scale = std::clamp(loaded_render_scale, 0.5f, 1.0f);
+         if (std::abs(loaded_render_scale - render_scale) > 0.0001f)
+         {
+            render_scale = loaded_render_scale;
+            render_scale_changed = true;
+         }
       }
       // Load cbuffer values directly from config
       reshade::get_config_value(runtime, NAME, "Exposure", cb_luma_global_settings.GameSettings.Exposure);
@@ -931,10 +968,14 @@ public:
          int scale = static_cast<int>(render_scale * 100.0f);
          if (ImGui::SliderInt("Render Scale (%)", &scale, 50, 100, "%d%%", ImGuiSliderFlags_AlwaysClamp))
          {
-            scale = (scale / 5) * 5;
-            render_scale = scale / 100.0f;
-            render_scale_changed = true;
-            reshade::set_config_value(runtime, NAME, "RenderScale", render_scale);
+            scale = std::clamp(((scale + 2) / 5) * 5, 50, 100);
+            const float new_render_scale = scale / 100.0f;
+            if (std::abs(new_render_scale - render_scale) > 0.0001f)
+            {
+               render_scale = new_render_scale;
+               render_scale_changed = true;
+               reshade::set_config_value(runtime, NAME, "RenderScale", render_scale);
+            }
          }
       }
 
@@ -1271,7 +1312,7 @@ public:
             else
                ImGui::TextUnformatted("N/A");
             ImGui::TableSetColumnIndex(2);
-            ImGui::TextUnformatted(from_signature ? "Signature" : "RVA fallback");
+            ImGui::TextUnformatted(from_signature ? "Signature" : "Unavailable");
          };
 
          const auto draw_code_addr_row = [](const char* label, void* resolved_abs, uintptr_t fallback_rva)
@@ -1288,7 +1329,7 @@ public:
             else
                ImGui::TextUnformatted("N/A");
             ImGui::TableSetColumnIndex(2);
-            ImGui::TextUnformatted(from_signature ? "Signature" : "RVA fallback");
+            ImGui::TextUnformatted(from_signature ? "Signature" : "Unavailable");
          };
 
          draw_code_addr_row("InitializeDX11RenderingPipeline", g_resolved_addresses.initialize_dx11_rendering_pipeline, kInitializeDX11RenderingPipeline_RVA);
@@ -1304,6 +1345,8 @@ public:
          draw_data_addr_row("g_renderWidth", g_resolved_addresses.render_width, kRenderWidth_RVA);
          draw_data_addr_row("g_renderHeight", g_resolved_addresses.render_height, kRenderHeight_RVA);
          draw_data_addr_row("g_camera", g_resolved_addresses.camera_global, kCameraGlobal_RVA);
+         draw_data_addr_row("g_cameraTable", g_resolved_addresses.camera_table, kCameraTable_RVA);
+         draw_data_addr_row("g_cameraIndex", g_resolved_addresses.camera_index, kCameraIndex_RVA);
          draw_data_addr_row("g_taa_settings_obj", g_resolved_addresses.taa_settings_global, kTAASettingsGlobal_RVA);
          draw_data_addr_row("g_frame_counter", g_resolved_addresses.jitter_phase_counter, kJitterPhaseCounter_RVA);
          draw_data_addr_row("JitterPhaseMask CL imm", g_resolved_addresses.jitter_phase_mask_cl_imm, kJitterPhaseMask_CL_RVA);
@@ -1417,13 +1460,6 @@ public:
       ImGui::PushStyleColor(ImGuiCol_Button, button_color);
       ImGui::PushStyleColor(ImGuiCol_ButtonHovered, button_hovered_color);
       ImGui::PushStyleColor(ImGuiCol_ButtonActive, button_active_color);
-#if 0
-      static const std::string mod_link = std::string("Nexus Mods Page ") + std::string(ICON_FK_SEARCH);
-      if (ImGui::Button(mod_link.c_str()))
-      {
-         system("start https://www.nexusmods.com/prey2017/mods/149");
-      }
-#endif
       static const std::string social_link = std::string("Join our \"HDR Den\" Discord ") + std::string(ICON_FK_SEARCH);
       if (ImGui::Button(social_link.c_str()))
       {

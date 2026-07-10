@@ -56,7 +56,8 @@ static bool SetupSROutput(
          return false;
    }
 
-   CreateOrRecreateTextureIfNeeded(game_device_data, native_device, out_texture_desc, game_device_data.sr_output_color, game_device_data.sr_output_color_srv);
+   game_device_data.output_changed =
+      CreateOrRecreateTextureIfNeeded(game_device_data, native_device, out_texture_desc, game_device_data.sr_output_color, game_device_data.sr_output_color_srv);
 
    return true;
 }

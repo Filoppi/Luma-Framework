@@ -17,6 +17,8 @@ struct GBFRResolvedAddresses
    uintptr_t render_width = 0;
    uintptr_t render_height = 0;
    uintptr_t camera_global = 0;
+   uintptr_t camera_table = 0;
+   uintptr_t camera_index = 0;
    uintptr_t taa_settings_global = 0;
    uintptr_t jitter_phase_counter = 0;
    uintptr_t jitter_phase_mask_cl_imm = 0;
@@ -56,24 +58,26 @@ struct GBFRHookGlobals
 };
 
 constexpr size_t kVSSetConstantBuffers1_VTableIndex = 119;
-constexpr uintptr_t kInitializeDX11RenderingPipeline_RVA = 0x00745510;
+constexpr uintptr_t kInitializeDX11RenderingPipeline_RVA = 0x007F9E10;
 constexpr uintptr_t kUpdateScreenResolution_RVA = 0x005F7960;
-constexpr uintptr_t kDispatchRenderPassViewport_RVA = 0x01BFF340; // GBFR_DispatchRenderPassViewport
-constexpr uintptr_t kUIRenderOrchestrator_RVA = 0x03222A10;       // sub_143222A10 — UI pipeline entry
-constexpr uintptr_t kOutputWidth_RVA = 0x05AA41E8;                // g_outputWidth  — read by the single caller of InitializeDX11RenderingPipeline (args = these globals)
-constexpr uintptr_t kOutputHeight_RVA = 0x05AA41EC;               // g_outputHeight — same
-constexpr uintptr_t kRenderWidth_RVA = 0x05AA41E0;                // g_renderWidth  — frame graph reads this to decide temporal upscale path; must equal the args passed to InitializeDX11RenderingPipeline
-constexpr uintptr_t kRenderHeight_RVA = 0x05AA41E4;               // g_renderHeight — same
-constexpr uintptr_t kCameraGlobal_RVA = 0x068B4F90;
+constexpr uintptr_t kDispatchRenderPassViewport_RVA = 0x022D0500;
+constexpr uintptr_t kUIRenderOrchestrator_RVA = 0x03222A10;
+constexpr uintptr_t kOutputWidth_RVA = 0x06B84090;
+constexpr uintptr_t kOutputHeight_RVA = 0x06B84094;
+constexpr uintptr_t kRenderWidth_RVA = 0x06B84088;
+constexpr uintptr_t kRenderHeight_RVA = 0x06B8408C;
+constexpr uintptr_t kCameraGlobal_RVA = 0x00000000;
+constexpr uintptr_t kCameraTable_RVA = 0x054BF400;
+constexpr uintptr_t kCameraIndex_RVA = 0x07021320;
 constexpr uintptr_t kCameraProjectionDataOffset = 0x60;
 constexpr uintptr_t kProjectionJitterXOffset = 0x940;
 constexpr uintptr_t kProjectionJitterYOffset = 0x944;
-constexpr uintptr_t kTAASettingsGlobal_RVA = 0x05E55EA0;
-constexpr uintptr_t kJitterPhaseCounter_RVA = 0x05E61790;
-constexpr uintptr_t kJitterPhaseMask_CL_RVA = 0x01A9EB76;
-constexpr uintptr_t kJitterPhaseMask_EAX_RVA = 0x01A9EB7C;
-constexpr uintptr_t kJitterWrite_RVA = 0x01A9EB9B;
-constexpr uintptr_t kTemporalAntiAliasingComponent_Init_RVA = 0x01A9E5D0;
+constexpr uintptr_t kTAASettingsGlobal_RVA = 0x07032DE0;
+constexpr uintptr_t kJitterPhaseCounter_RVA = 0x0703F470;
+constexpr uintptr_t kJitterPhaseMask_CL_RVA = 0x02165808;
+constexpr uintptr_t kJitterPhaseMask_EAX_RVA = 0x0216580E;
+constexpr uintptr_t kJitterWrite_RVA = 0x0216582D;
+constexpr uintptr_t kTemporalAntiAliasingComponent_Init_RVA = 0x02165260;
 constexpr uintptr_t kTAAJitterTableOffset = 0x28;
 constexpr uintptr_t kTAAJitterPhaseIndexOffset = 0x24; // this->jitter_phase_index; written by Trans at same time as camera write (mov [rsi+24h], cl @ 0x141A9EB77)
 constexpr size_t kTAAJitterTableCount = 64;
