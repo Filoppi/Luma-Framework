@@ -1,7 +1,7 @@
 // Borderlands GOTY Enhanced — Luma HDR + SMAA mod (Unreal Engine 3.5, D3D11).
 // - HDR: swapchain -> scRGB fp16; replaced UE3 final-color PS (0xB030BAA6 / 0xFE88487E) recovers the clipped
 //   highlights (UpgradeToneMap) + DICE display map. Core Display Composition does the paper-white scale + encode.
-//   One HDR mod owns the swapchain -> RenoDX must be removed from the game folder.
+//   One HDR mod owns the swapchain -> any other HDR mod must be removed from the game folder.
 // - AA: compute FXAA (3.11 work-queue) -> SMAA (ULTRA + color edge + depth predication) + optional RCAS. Runs on
 //   the HDR-linear scene: sRGB-encoded copy for edge detect, linear copy for blend, CopyResource into swapchain.
 
@@ -14,87 +14,125 @@
 #define ENABLE_NGX 0
 #define ENABLE_FIDELITY_SK 0
 #define GEOMETRY_SHADER_SUPPORT 0
-#define ENABLE_SMAA 1 // auto-registers the 6 "SMAA ..." shaders from Luma_SMAA_impl (see core.hpp)
+#define ENABLE_SMAA 1
 
 #include "..\..\Core\core.hpp"
 #include <shellapi.h> // ShellExecuteA for About links (system() hangs the render thread in exclusive fullscreen)
 
-// FXAA is a compute work-queue implementation (FXAA 3.11 CS), verified via devkit disassembly:
+// FXAA is a compute work-queue implementation (FXAA 3.11 CS):
 //   0x81CDE53D = pass 1 edge-detect (builds WorkQueue into scratch buffers; leaves color untouched — left running).
 //   0x08891303 = pass 2 resolve: WorkQueue + Luma + InColor(t2) -> Color(u0, swapchain in-place). Replaced with SMAA.
 static constexpr uint32_t kFXAAResolveHash = 0x08891303; // FXAA resolve CS — replaced with SMAA
 static constexpr uint32_t kCelShadingHash = 0x08DC66D1;  // cel-shading edge PS — binds scene depth at t0 (predication source)
 
+// AO: XeGTAO replaces the game's native NVIDIA HBAO+ (GFSDK_SSAO). Full-res 4K chain:
+// deinterleave 0xFFE232A6 -> normals 0xB2B47225 (left running) -> coarse horizon 0xF534EB09 -> bilateral
+// blur 0x4E1BEE34 -> apply-multiply PS 0x44764BF6. We capture scene depth at the deinterleave and the
+// packed view normals at the coarse pass (skipping both), then at the blur dispatch run the 4 XeGTAO passes
+// into ITS u0 (the game's FINAL r16g16_float AO; apply reads .x) so the apply blit composites our AO
+// unchanged. XeGTAO binds the game's own cb0 ($Globals: ProjInfo) + cb2 (MinZ_MaxZRatioCS), still bound at
+// the injection point. No TAA -> NoiseIndex frozen 0, spatial denoise x2.
+static constexpr uint32_t kAODeinterleaveHash = 0xFFE232A6; // scene depth -> quarter-res array — skipped (we build our own mip pyramid)
+static constexpr uint32_t kAOCoarseHash = 0xF534EB09;       // HBAO+ horizon march (x2), binds view normals at t0 — skipped (capture normals)
+static constexpr uint32_t kAOBlurHash = 0x4E1BEE34;         // bilateral blur -> FINAL r16g16_float u0 — replaced with XeGTAO
+
 // User-facing settings (persisted via ReShade config; loaded in LoadConfigs, saved on UI change).
 static bool g_smaa_enable = true;
 static float g_rcas_sharpness = 0.f; // RCAS sharpen on SMAA output (0 = off). Conservative — ink outlines already AA'd; higher haloes.
-static bool g_hide_ui = false;        // hide the game's HUD (skips swapchain-targeting UI draws) — for clean screenshots
+static bool g_hide_ui = false;       // hide the game's HUD (skips swapchain-targeting UI draws) — for clean screenshots
+
+// Ambient Occlusion: XeGTAO replaces the native HBAO+ (default ON = supersede it). Persisted as "XeGTAOEnable".
+static bool g_gtao_enable = true;
+// Runtime XeGTAO knobs (LumaGTAO cb b11), DEV calibration sliders. FinalValuePower = primary darkness dial
+// (calibrate to the vanilla HBAO+ histogram — its PowExponent does not transfer numerically). DepthScale =
+// viewZ divisor (UE3 units, near plane ~10 -> ~meters) so Intel's tuned radius/falloff apply; the dial
+// against broad over-occlusion. RadiusOverride > 0 overrides EFFECT_RADIUS (in scaled units).
+static float g_gtao_final_value_power = 1.0f;
+static float g_gtao_depth_scale = 50.f;
+static float g_gtao_radius_override = 0.f;
+#if DEVELOPMENT
+static int g_gtao_debug_view = 0; // 0=off 1=depth gradient 2=normals 3=AO x8 4=edges (drawn via the game's apply blit). DEV only: the shader's DebugViewRT blocks are #if DEVELOPMENT.
+#endif
 
 // Loading-movie memory-leak fix (toggle "Fix Movie Memory Leak" under Fixes; default ON).
 // The game's Bink movies create D3D11 YUV decode buffers and never release them -> linear RAM
 // growth -> OOM. The leak is the GAME, not Luma. We drop the game's leaked COM refs on OLD movie
 // generations (orphaned: a movie's buffers are sampled only during its own playback). Tagged by
 // creation call-stack RVAs in BorderlandsGOTY.exe (frozen remaster; non-matching build tags nothing
-// = safe no-op). Movies keep playing. Diagnosis/validation: Source/Tools/BL Leak Tracker.
+// = safe no-op). Movies keep playing. Diagnosis/validation: _tools/BL Leak Tracker.
 static bool g_fix_movie_leak = true; // default ON; persisted as "FixMovieLeak"
 
 namespace BLMovieLeakFix
 {
    // Build-specific RVAs (frozen remaster). A non-matching build shifts these -> nothing tags ->
    // silent no-op; BUILD_CHECK_FRAME drives a one-shot telemetry warning for that case.
-   constexpr uintptr_t RVA_CREATE_WRAPPER = 0xBFF27;       // ret addr after the RHI CreateTexture call
-   constexpr uintptr_t RVA_STREAM_LO = 0x58A000;            // streaming/movie fn span (create call sites)
+   constexpr uintptr_t RVA_CREATE_WRAPPER = 0xBFF27; // ret addr after the RHI CreateTexture call
+   constexpr uintptr_t RVA_STREAM_LO = 0x58A000;     // streaming/movie fn span (create call sites)
    constexpr uintptr_t RVA_STREAM_HI = 0x58C000;
-   constexpr uint32_t  BUILD_CHECK_FRAME = 18000;          // ~5 min; movies tag well before this if build matches
-   constexpr uint32_t  NEW_GEN_GAP_FRAMES   = 90;           // frame gap that separates two movies into "generations"
-   constexpr int       MAX_FRAMES = 32, SKIP_FRAMES = 1;
-   constexpr uint64_t  STACKWALK_MIN_BYTES  = 2ull * 1024 * 1024; // only walk the stack for big resources (cheap)
-   constexpr int       RELEASE_GEN_LAG      = 2;            // release only gen <= cur_gen-2 (keep current + previous)
-   constexpr uint32_t  RELEASE_IDLE_FRAMES  = 600;          // and only after this many frames since creation (~10s)
-   constexpr uint32_t  RELEASE_FLUSH_PERIOD = 120;          // flush at most every N present frames
+   constexpr uint32_t BUILD_CHECK_FRAME = 18000; // ~5 min; movies tag well before this if build matches
+   constexpr uint32_t NEW_GEN_GAP_FRAMES = 90;   // frame gap that separates two movies into "generations"
+   constexpr int MAX_FRAMES = 32, SKIP_FRAMES = 1;
+   constexpr uint64_t STACKWALK_MIN_BYTES = 2ull * 1024 * 1024; // only walk the stack for big resources (cheap)
+   constexpr int RELEASE_GEN_LAG = 2;                           // release only gen <= cur_gen-2 (keep current + previous)
+   constexpr uint32_t RELEASE_IDLE_FRAMES = 600;                // and only after this many frames since creation (~10s)
+   constexpr uint32_t RELEASE_FLUSH_PERIOD = 120;               // flush at most every N present frames
 
-   struct MovieTex { uint64_t bytes; int gen; uint32_t created_frame; };
+   struct MovieTex
+   {
+      uint64_t bytes;
+      int gen;
+      uint32_t created_frame;
+   };
 
    static std::mutex g_mtx;
    static std::unordered_map<uint64_t, MovieTex> g_movie;    // resource handle -> info
    static std::unordered_map<uint64_t, uint64_t> g_view2res; // view handle -> resource handle (tagged textures only)
    static uintptr_t g_exe_base = 0;
-   static int       g_cur_gen = 0;
-   static uint32_t  g_last_movie_frame = 0;
-   static bool      g_first_movie = true;
+   static int g_cur_gen = 0;
+   static uint32_t g_last_movie_frame = 0;
+   static bool g_first_movie = true;
    // Coarse cross-thread gates (present thread writes g_frame; workers read). atomic = no data race;
    // real map sync is g_mtx.
-   static std::atomic<bool>     g_have_movie{ false };
-   static std::atomic<uint32_t> g_frame{ 0 };
-   static uint64_t  g_freed_bytes = 0;
-   static uint32_t  g_freed_tex = 0;
-   static bool      g_build_checked = false; // one-shot build-mismatch telemetry guard (present thread only)
+   static std::atomic<bool> g_have_movie{false};
+   static std::atomic<uint32_t> g_frame{0};
+   static uint64_t g_freed_bytes = 0;
+   static uint32_t g_freed_tex = 0;
+   static bool g_build_checked = false; // one-shot build-mismatch telemetry guard (present thread only)
 
    inline uint64_t EstimateBytes(const reshade::api::resource_desc& d)
    {
       using namespace reshade::api;
-      if (d.type == resource_type::buffer) return d.buffer.size;
+      if (d.type == resource_type::buffer)
+         return d.buffer.size;
       const uint32_t w = d.texture.width ? d.texture.width : 1;
       const uint32_t h = d.texture.height ? d.texture.height : 1;
       const uint32_t layers = d.texture.depth_or_layers ? d.texture.depth_or_layers : 1;
       const uint32_t levels = d.texture.levels ? d.texture.levels : 1;
       const uint32_t slice = format_slice_pitch(d.texture.format, format_row_pitch(d.texture.format, w), h);
       uint64_t s = (uint64_t)slice * layers, total = 0;
-      for (uint32_t l = 0; l < levels; ++l) { total += s; s = s > 4 ? s / 4 : 1; }
+      for (uint32_t l = 0; l < levels; ++l)
+      {
+         total += s;
+         s = s > 4 ? s / 4 : 1;
+      }
       return total;
    }
 
    inline bool StackIsMovie(void* const* frames, int n)
    {
-      if (!g_exe_base) return false;
+      if (!g_exe_base)
+         return false;
       bool has_create = false, has_stream = false;
       for (int i = 0; i < n; ++i)
       {
          const uintptr_t a = reinterpret_cast<uintptr_t>(frames[i]);
-         if (a < g_exe_base) continue;
+         if (a < g_exe_base)
+            continue;
          const uintptr_t rva = a - g_exe_base;
-         if (rva == RVA_CREATE_WRAPPER) has_create = true;
-         else if (rva >= RVA_STREAM_LO && rva < RVA_STREAM_HI) has_stream = true;
+         if (rva == RVA_CREATE_WRAPPER)
+            has_create = true;
+         else if (rva >= RVA_STREAM_LO && rva < RVA_STREAM_HI)
+            has_stream = true;
       }
       return has_create && has_stream;
    }
@@ -104,37 +142,48 @@ namespace BLMovieLeakFix
    {
       // Decode targets are BUFFERS (measured); gating on type excludes the textures that share the
       // streaming-fn span -> no mistag/UAF, and skips the stack walk for every texture.
-      if (desc.type != reshade::api::resource_type::buffer) return;
+      if (desc.type != reshade::api::resource_type::buffer)
+         return;
       const uint64_t bytes = EstimateBytes(desc);
-      if (bytes < STACKWALK_MIN_BYTES) return;
+      if (bytes < STACKWALK_MIN_BYTES)
+         return;
       void* frames[MAX_FRAMES];
       const int n = RtlCaptureStackBackTrace(SKIP_FRAMES, MAX_FRAMES, frames, nullptr);
-      if (n <= 0 || !StackIsMovie(frames, n)) return;
+      if (n <= 0 || !StackIsMovie(frames, n))
+         return;
       const std::lock_guard<std::mutex> lk(g_mtx);
       const uint32_t f = g_frame;
-      if (g_first_movie || (f - g_last_movie_frame) > NEW_GEN_GAP_FRAMES) { g_cur_gen += 1; g_first_movie = false; }
+      if (g_first_movie || (f - g_last_movie_frame) > NEW_GEN_GAP_FRAMES)
+      {
+         g_cur_gen += 1;
+         g_first_movie = false;
+      }
       g_last_movie_frame = f;
-      g_movie[handle.handle] = MovieTex{ bytes, g_cur_gen, f };
+      g_movie[handle.handle] = MovieTex{bytes, g_cur_gen, f};
       g_have_movie = true;
    }
 
    void OnDestroyResource(reshade::api::device*, reshade::api::resource handle)
    {
-      if (!g_have_movie) return;
+      if (!g_have_movie)
+         return;
       const std::lock_guard<std::mutex> lk(g_mtx);
       g_movie.erase(handle.handle);
    }
 
    void OnInitResourceView(reshade::api::device*, reshade::api::resource res, reshade::api::resource_usage, const reshade::api::resource_view_desc&, reshade::api::resource_view view)
    {
-      if (!g_have_movie || !view.handle) return;
+      if (!g_have_movie || !view.handle)
+         return;
       const std::lock_guard<std::mutex> lk(g_mtx);
-      if (g_movie.find(res.handle) != g_movie.end()) g_view2res[view.handle] = res.handle;
+      if (g_movie.find(res.handle) != g_movie.end())
+         g_view2res[view.handle] = res.handle;
    }
 
    void OnDestroyResourceView(reshade::api::device*, reshade::api::resource_view view)
    {
-      if (!g_have_movie) return;
+      if (!g_have_movie)
+         return;
       const std::lock_guard<std::mutex> lk(g_mtx);
       g_view2res.erase(view.handle);
    }
@@ -143,39 +192,62 @@ namespace BLMovieLeakFix
    // re-enters OnDestroyResource[View] on this thread -> COLLECT+UNLINK under lock, then RELEASE unlocked.
    void Flush()
    {
-      struct Plan { uintptr_t res; std::vector<uintptr_t> views; uint64_t bytes; };
+      struct Plan
+      {
+         uintptr_t res;
+         std::vector<uintptr_t> views;
+         uint64_t bytes;
+      };
       std::vector<Plan> plans;
       {
          const std::lock_guard<std::mutex> lk(g_mtx);
          for (const auto& kv : g_movie) // Phase A: pick victims (keep current + previous gen, must be idle)
          {
             const MovieTex& m = kv.second;
-            if (m.gen > g_cur_gen - RELEASE_GEN_LAG) continue;
-            if ((g_frame - m.created_frame) < RELEASE_IDLE_FRAMES) continue;
-            plans.push_back({ kv.first, {}, m.bytes });
+            if (m.gen > g_cur_gen - RELEASE_GEN_LAG)
+               continue;
+            if ((g_frame - m.created_frame) < RELEASE_IDLE_FRAMES)
+               continue;
+            plans.push_back({kv.first, {}, m.bytes});
          }
-         if (plans.empty()) return;
+         if (plans.empty())
+            return;
          std::unordered_map<uintptr_t, size_t> idx;
-         for (size_t i = 0; i < plans.size(); ++i) idx[plans[i].res] = i;
-         for (const auto& vk : g_view2res) { auto it = idx.find(vk.second); if (it != idx.end()) plans[it->second].views.push_back(vk.first); }
+         for (size_t i = 0; i < plans.size(); ++i)
+            idx[plans[i].res] = i;
+         for (const auto& vk : g_view2res)
+         {
+            auto it = idx.find(vk.second);
+            if (it != idx.end())
+               plans[it->second].views.push_back(vk.first);
+         }
          for (const auto& p : plans) // Phase B: UNLINK before any Release (re-entrant callbacks then find nothing)
          {
-            for (uintptr_t v : p.views) g_view2res.erase(v);
+            for (uintptr_t v : p.views)
+               g_view2res.erase(v);
             g_movie.erase(p.res);
          }
       }
-      uint32_t ft = 0; uint64_t fb = 0; // Phase C: RELEASE with the lock released
+      uint32_t ft = 0;
+      uint64_t fb = 0; // Phase C: RELEASE with the lock released
       uint32_t partial = 0;
       for (const Plan& p : plans)
       {
-         for (uintptr_t v : p.views) reinterpret_cast<IUnknown*>(v)->Release();
+         for (uintptr_t v : p.views)
+            reinterpret_cast<IUnknown*>(v)->Release();
          // rc==0 => actually freed (count it); rc>0 => game holds extra refs, not reclaimed. (rc is a
          // by-value ULONG, never a deref of a freed object.)
          const ULONG rc = reinterpret_cast<IUnknown*>(p.res)->Release();
-         if (rc == 0) { ft++; fb += p.bytes; }
-         else partial++;
+         if (rc == 0)
+         {
+            ft++;
+            fb += p.bytes;
+         }
+         else
+            partial++;
       }
-      g_freed_tex += ft; g_freed_bytes += fb;
+      g_freed_tex += ft;
+      g_freed_bytes += fb;
 #if DEVELOPMENT || TEST
       if (ft || partial)
       {
@@ -189,7 +261,7 @@ namespace BLMovieLeakFix
       (void)partial;
 #endif
    }
-}
+} // namespace BLMovieLeakFix
 
 struct BorderlandsGotyGameDeviceData final : public GameDeviceData
 {
@@ -229,6 +301,25 @@ struct BorderlandsGotyGameDeviceData final : public GameDeviceData
    ComPtr<ID3D11Texture2D> tex_rcas_out;
    ComPtr<ID3D11RenderTargetView> tex_rcas_out_rtv;
    uint32_t rcas_out_w = 0, rcas_out_h = 0;
+
+   // --- XeGTAO scratch (all at the game's AO full-res; cached, rebuilt on size change). ---
+   // Game inputs captured per frame (reset in OnPresent): full-res r24 scene depth (deinterleave t0) and
+   // the packed view normals (coarse-AO t0). gtao_active_this_frame arms the blur-dispatch takeover.
+   ComPtr<ID3D11ShaderResourceView> srv_gtao_depth;
+   ComPtr<ID3D11ShaderResourceView> srv_gtao_normals;
+   bool gtao_active_this_frame = false;
+   // Prefiltered viewspace-depth MIP pyramid (R32F, 5 mips) — 5 per-mip UAVs + one full SRV.
+   ComPtr<ID3D11Texture2D> tex_gtao_depth_mips;
+   ComPtr<ID3D11UnorderedAccessView> gtao_depth_mip_uavs[5];
+   ComPtr<ID3D11ShaderResourceView> srv_gtao_depth_mips;
+   // Two working AO+edges buffers (R8G8_UNORM) ping-ponged by main pass -> denoise 1.
+   ComPtr<ID3D11Texture2D> tex_gtao_working[2];
+   ComPtr<ID3D11UnorderedAccessView> uav_gtao_working[2];
+   ComPtr<ID3D11ShaderResourceView> srv_gtao_working[2];
+   uint32_t gtao_w = 0, gtao_h = 0;
+   // LumaGTAO knob CB (b11) = (FinalValuePower, DepthScale, RadiusOverride, DebugView); recreated on change.
+   ComPtr<ID3D11Buffer> cb_gtao;
+   float gtao_cb_fvp = -1.f, gtao_cb_depth_scale = -1.f, gtao_cb_radius = -1.f, gtao_cb_debug = -1.f;
 };
 
 class BorderlandsGoty final : public Game
@@ -273,8 +364,7 @@ public:
       // Game-specific HDR toggles consumed by the replaced tonemap shaders (Luma_BL_Tonemap.hlsl).
       std::vector<ShaderDefineData> game_shader_defines_data = {
          {"TONEMAP_TYPE", '1', true, false, "0 - SDR: Vanilla (clamped reference)\n1 - HDR: recover highlights + DICE display map"},
-         {"TONEMAP_IN_WIDER_GAMUT", '1', true, false, "Run the display map in a BT.2020 working space (gamut-correct saturated highlights). Not a display-gamut expansion.", 1},
-         {"ENABLE_HUE_RESTORATION", '1', true, false, "Lock the HDR result's hue/chroma to the game's SDR grade (preserve artistic intent).", 1},
+         {"XE_GTAO_QUALITY", '3', true, false, "Ambient Occlusion (XeGTAO) quality (slice count)\n0 - Low\n1 - Medium\n2 - High\n3 - Very High\n4 - Ultra", 4},
       };
       shader_defines_data.append_range(game_shader_defines_data);
 
@@ -283,18 +373,30 @@ public:
       // (UI_DRAW_TYPE 2); the core composition decodes gamma + applies paper white + scRGB encode.
       GetShaderDefineData(POST_PROCESS_SPACE_TYPE_HASH).SetDefaultValue('0');
       GetShaderDefineData(EARLY_DISPLAY_ENCODING_HASH).SetDefaultValue('0');
-      GetShaderDefineData(VANILLA_ENCODING_TYPE_HASH).SetDefaultValue('1');    // game shipped gamma-2.2 SDR
+      GetShaderDefineData(VANILLA_ENCODING_TYPE_HASH).SetDefaultValue('1'); // game shipped gamma-2.2 SDR
       GetShaderDefineData(GAMMA_CORRECTION_TYPE_HASH).SetDefaultValue('1');
-      GetShaderDefineData(GAMUT_MAPPING_TYPE_HASH).SetDefaultValue('1');       // gamut-map wild colors in composition
-      GetShaderDefineData(UI_DRAW_TYPE_HASH).SetDefaultValue('2');             // HUD gets its own UIPaperWhite + gamma blend
+      GetShaderDefineData(GAMUT_MAPPING_TYPE_HASH).SetDefaultValue('1'); // gamut-map wild colors in composition
+      GetShaderDefineData(UI_DRAW_TYPE_HASH).SetDefaultValue('2');       // HUD gets its own UIPaperWhite + gamma blend
 
-      // SMAA linearize helper (the 6 SMAA passes are auto-registered by core when ENABLE_SMAA).
+      // SMAA linearize helper (the 6 SMAA passes register automatically under ENABLE_SMAA).
       native_shaders_definitions.emplace(CompileTimeStringHash("SMAA Linear To sRGB CS"),
          ShaderDefinition("Luma_SMAA_LinearTosRGB_CS", reshade::api::pipeline_subobject_type::compute_shader));
 
       // RCAS sharpen PS (drawn via core "Copy VS" + DrawCustomPixelShader after SMAA).
       native_shaders_definitions.emplace(CompileTimeStringHash("BL Sharpen PS"),
          ShaderDefinition{"Luma_BL_Sharpen", reshade::api::pipeline_subobject_type::pixel_shader, nullptr, "sharpen_ps"});
+
+      // XeGTAO (replaces the game's native HBAO+; see the AO hash block above). 4 compute passes out of one
+      // file; the two denoise variants differ only by XE_GTAO_FINAL_APPLY (the final one writes the game's
+      // r16g16_float AO target).
+      native_shaders_definitions.emplace(CompileTimeStringHash("BL XeGTAO Prefilter Depths CS"),
+         ShaderDefinition{"Luma_BL_XeGTAO", reshade::api::pipeline_subobject_type::compute_shader, nullptr, "prefilter_depths16x16_cs"});
+      native_shaders_definitions.emplace(CompileTimeStringHash("BL XeGTAO Main Pass CS"),
+         ShaderDefinition{"Luma_BL_XeGTAO", reshade::api::pipeline_subobject_type::compute_shader, nullptr, "main_pass_cs"});
+      native_shaders_definitions.emplace(CompileTimeStringHash("BL XeGTAO Denoise Pass 1 CS"),
+         ShaderDefinition{"Luma_BL_XeGTAO", reshade::api::pipeline_subobject_type::compute_shader, nullptr, "denoise_pass_cs", {{"XE_GTAO_FINAL_APPLY", "0"}}});
+      native_shaders_definitions.emplace(CompileTimeStringHash("BL XeGTAO Denoise Pass 2 CS"),
+         ShaderDefinition{"Luma_BL_XeGTAO", reshade::api::pipeline_subobject_type::compute_shader, nullptr, "denoise_pass_cs", {{"XE_GTAO_FINAL_APPLY", "1"}}});
 
       // Game uses CB slots b0-b3, so b12/b13 are free for Luma.
       // luma_data is used by the Display Composition; luma_ui stays off (UI drawn by the game).
@@ -307,13 +409,15 @@ public:
       use_os_reference_white_level = false;
 
       // User grade controls (read in Luma_BL_Tonemap.hlsl via LumaSettings.GameSettings). All vanilla by default.
-      default_luma_global_game_settings.Exposure = 1.f;          // multiplier (1x)
+      default_luma_global_game_settings.Exposure = 1.f; // multiplier (1x)
       default_luma_global_game_settings.Saturation = 1.f;
       default_luma_global_game_settings.HighlightDechroma = 0.f; // off by default; only the mandatory DICE/gamut desaturation applies. Slider = optional taste.
       default_luma_global_game_settings.BloomIntensity = 1.f;
       default_luma_global_game_settings.Contrast = 1.f;
-      default_luma_global_game_settings.Dithering = 1.f;         // subtle anti-banding on by default
-      default_luma_global_game_settings.FlareOut = 1.f;          // additive lens-flare/glare scale (1 = vanilla)
+      default_luma_global_game_settings.Dithering = 1.f;          // subtle anti-banding on by default
+      default_luma_global_game_settings.FlareOut = 1.f;           // additive lens-flare/glare scale (1 = vanilla)
+      default_luma_global_game_settings.VideoAutoHDREnable = 1.f; // light AutoHDR on Bink movies, HDR only (on by default)
+      default_luma_global_game_settings.VideoAutoHDRBoost = 0.5f; // highlight-expansion strength (peak ~165 nits at 0.5)
       cb_luma_global_settings.GameSettings = default_luma_global_game_settings;
    }
 
@@ -329,15 +433,33 @@ public:
          auto& gd = GetGameDeviceData(device_data);
          gd.srv_depth.reset();
          gd.cb_smaa_metrics.reset();
-         gd.srv_input.reset(); gd.tex_input.reset();
-         gd.uav_lin.reset(); gd.srv_lin.reset(); gd.tex_lin.reset();
-         gd.uav_gam.reset(); gd.srv_gam.reset(); gd.tex_gam.reset();
+         gd.srv_input.reset();
+         gd.tex_input.reset();
+         gd.uav_lin.reset();
+         gd.srv_lin.reset();
+         gd.tex_lin.reset();
+         gd.uav_gam.reset();
+         gd.srv_gam.reset();
+         gd.tex_gam.reset();
          gd.tex_smaa_out.reset();
          gd.tex_smaa_out_rtv.reset();
          gd.tex_smaa_out_srv.reset();
          gd.cb_sharpen.reset();
          gd.tex_rcas_out.reset();
          gd.tex_rcas_out_rtv.reset();
+         gd.srv_gtao_depth.reset();
+         gd.srv_gtao_normals.reset();
+         gd.tex_gtao_depth_mips.reset();
+         for (auto& uav : gd.gtao_depth_mip_uavs)
+            uav.reset();
+         gd.srv_gtao_depth_mips.reset();
+         for (int i = 0; i < 2; i++)
+         {
+            gd.tex_gtao_working[i].reset();
+            gd.uav_gtao_working[i].reset();
+            gd.srv_gtao_working[i].reset();
+         }
+         gd.cb_gtao.reset();
       }
       delete device_data.game;
       device_data.game = nullptr;
@@ -364,7 +486,10 @@ public:
             if (rtv_res)
             {
                bool targeting_swapchain;
-               { const std::shared_lock lock(device_data.mutex); targeting_swapchain = device_data.back_buffers.contains((uint64_t)rtv_res.get()); }
+               {
+                  const std::shared_lock lock(device_data.mutex);
+                  targeting_swapchain = device_data.back_buffers.contains((uint64_t)rtv_res.get());
+               }
                if (targeting_swapchain)
                   return DrawOrDispatchOverrideType::Replaced; // drop the UI draw
             }
@@ -379,6 +504,227 @@ public:
          if (srv_d)
          {
             gd.srv_depth = srv_d;
+         }
+      }
+
+      // XeGTAO replaces the game's native HBAO+ (chain order: deinterleave x2 -> normals 0xB2B47225 ->
+      // coarse x2 -> blur -> apply blit). We take the chain over ONLY when everything is ready at the first
+      // dispatch — a failure there leaves the whole native chain untouched (graceful fallback, like the SMAA
+      // fp16 guard). The separate normals pass 0xB2B47225 is left running (not hooked) so its ViewNormalTex
+      // output is valid for our main pass.
+      if (g_gtao_enable && is_immediate)
+      {
+         // (a) Deinterleave: capture the full-res r24 scene depth (t0) + build/validate ALL scratch, then skip
+         // the native dispatch. Both dispatches of the pair hit this branch (second is a cheap re-capture).
+         if (original_shader_hashes.Contains(kAODeinterleaveHash, reshade::api::shader_stage::compute))
+         {
+            const bool gtao_shaders_ready =
+               device_data.native_compute_shaders[CompileTimeStringHash("BL XeGTAO Prefilter Depths CS")].get() != nullptr &&
+               device_data.native_compute_shaders[CompileTimeStringHash("BL XeGTAO Main Pass CS")].get() != nullptr &&
+               device_data.native_compute_shaders[CompileTimeStringHash("BL XeGTAO Denoise Pass 1 CS")].get() != nullptr &&
+               device_data.native_compute_shaders[CompileTimeStringHash("BL XeGTAO Denoise Pass 2 CS")].get() != nullptr;
+            if (!gtao_shaders_ready)
+               return DrawOrDispatchOverrideType::None;
+
+            ComPtr<ID3D11ShaderResourceView> srv_d;
+            native_device_context->CSGetShaderResources(0, 1, srv_d.put());
+            if (!srv_d)
+               return DrawOrDispatchOverrideType::None;
+            uint4 dinfo{};
+            DXGI_FORMAT dfmt = DXGI_FORMAT_UNKNOWN;
+            GetResourceInfo(srv_d.get(), dinfo, dfmt);
+            if (dinfo.x == 0 || dinfo.y == 0)
+               return DrawOrDispatchOverrideType::None;
+            // Size the scratch (and dispatches) from the input depth desc (the game's HBAO+ full-res). The
+            // game's own cb0 (InvFullResolution etc.) is content-dimensioned, so the shader's pixel<->UV math
+            // is correct; the final pass writes the game's AO buffer at identical pixel coords.
+            const uint32_t w = dinfo.x, h = dinfo.y;
+
+            // (Re)create the scratch at the game's AO full-res (cached; NOT per-frame).
+            if (gd.gtao_w != w || gd.gtao_h != h || !gd.tex_gtao_depth_mips || !gd.tex_gtao_working[1])
+            {
+               gd.tex_gtao_depth_mips.reset();
+               for (auto& uav : gd.gtao_depth_mip_uavs)
+                  uav.reset();
+               gd.srv_gtao_depth_mips.reset();
+               for (int i = 0; i < 2; i++)
+               {
+                  gd.tex_gtao_working[i].reset();
+                  gd.uav_gtao_working[i].reset();
+                  gd.srv_gtao_working[i].reset();
+               }
+               gd.gtao_w = gd.gtao_h = 0;
+
+               D3D11_TEXTURE2D_DESC td = {};
+               td.Width = w;
+               td.Height = h;
+               td.MipLevels = 5; // XE_GTAO_DEPTH_MIP_LEVELS
+               td.ArraySize = 1;
+               td.Format = DXGI_FORMAT_R32_FLOAT;
+               td.SampleDesc.Count = 1;
+               td.Usage = D3D11_USAGE_DEFAULT;
+               td.BindFlags = D3D11_BIND_SHADER_RESOURCE | D3D11_BIND_UNORDERED_ACCESS;
+               bool ok = SUCCEEDED(native_device->CreateTexture2D(&td, nullptr, gd.tex_gtao_depth_mips.put()));
+               D3D11_UNORDERED_ACCESS_VIEW_DESC ud = {};
+               ud.Format = td.Format;
+               ud.ViewDimension = D3D11_UAV_DIMENSION_TEXTURE2D;
+               for (int i = 0; ok && i < 5; i++)
+               {
+                  ud.Texture2D.MipSlice = i;
+                  ok = SUCCEEDED(native_device->CreateUnorderedAccessView(gd.tex_gtao_depth_mips.get(), &ud, gd.gtao_depth_mip_uavs[i].put()));
+               }
+               ok = ok && SUCCEEDED(native_device->CreateShaderResourceView(gd.tex_gtao_depth_mips.get(), nullptr, gd.srv_gtao_depth_mips.put()));
+
+               td.MipLevels = 1;
+               td.Format = DXGI_FORMAT_R8G8_UNORM;
+               for (int i = 0; ok && i < 2; i++)
+               {
+                  ok = ok && SUCCEEDED(native_device->CreateTexture2D(&td, nullptr, gd.tex_gtao_working[i].put()));
+                  ok = ok && SUCCEEDED(native_device->CreateUnorderedAccessView(gd.tex_gtao_working[i].get(), nullptr, gd.uav_gtao_working[i].put()));
+                  ok = ok && SUCCEEDED(native_device->CreateShaderResourceView(gd.tex_gtao_working[i].get(), nullptr, gd.srv_gtao_working[i].put()));
+               }
+               if (!ok)
+               {
+                  gd.tex_gtao_depth_mips.reset();
+                  for (auto& uav : gd.gtao_depth_mip_uavs)
+                     uav.reset();
+                  gd.srv_gtao_depth_mips.reset();
+                  for (int i = 0; i < 2; i++)
+                  {
+                     gd.tex_gtao_working[i].reset();
+                     gd.uav_gtao_working[i].reset();
+                     gd.srv_gtao_working[i].reset();
+                  }
+                  return DrawOrDispatchOverrideType::None; // native chain runs whole
+               }
+               gd.gtao_w = w;
+               gd.gtao_h = h;
+            }
+
+            // Knob CB (b11): immutable, recreated when a slider moves.
+#if DEVELOPMENT
+            const float dbg = (float)g_gtao_debug_view;
+#else
+            const float dbg = 0.f; // shader DebugViewRT is DEV-only; keep 0 elsewhere so the knob CB never churns
+#endif
+            if (!gd.cb_gtao || gd.gtao_cb_fvp != g_gtao_final_value_power || gd.gtao_cb_depth_scale != g_gtao_depth_scale ||
+                gd.gtao_cb_radius != g_gtao_radius_override || gd.gtao_cb_debug != dbg)
+            {
+               const float knobs[4] = {g_gtao_final_value_power, g_gtao_depth_scale, g_gtao_radius_override, dbg};
+               if (CreateImmutableCB(native_device, knobs, sizeof(knobs), gd.cb_gtao))
+               {
+                  gd.gtao_cb_fvp = g_gtao_final_value_power;
+                  gd.gtao_cb_depth_scale = g_gtao_depth_scale;
+                  gd.gtao_cb_radius = g_gtao_radius_override;
+                  gd.gtao_cb_debug = dbg;
+               }
+            }
+            if (!gd.cb_gtao)
+               return DrawOrDispatchOverrideType::None;
+
+            gd.srv_gtao_depth = srv_d;
+            gd.gtao_active_this_frame = true;
+
+            return DrawOrDispatchOverrideType::Replaced; // skip the native deinterleave
+         }
+
+         // (b) Coarse horizon march: capture the packed view normals (t0), skip the native dispatch. Only when
+         // we own the chain this frame — otherwise the native pipeline is left fully intact.
+         if (original_shader_hashes.Contains(kAOCoarseHash, reshade::api::shader_stage::compute))
+         {
+            if (!gd.gtao_active_this_frame)
+               return DrawOrDispatchOverrideType::None;
+            ComPtr<ID3D11ShaderResourceView> srv_n;
+            native_device_context->CSGetShaderResources(0, 1, srv_n.put());
+            if (srv_n)
+               gd.srv_gtao_normals = srv_n;
+            return DrawOrDispatchOverrideType::Replaced; // skip the native coarse march
+         }
+
+         // (c) Bilateral blur: ITS u0 is the game's FINAL r16g16_float AO — run the 4 XeGTAO passes into it and
+         // cancel the native dispatch. The game's apply blit (untouched) then multiplies it into the scene.
+         if (original_shader_hashes.Contains(kAOBlurHash, reshade::api::shader_stage::compute))
+         {
+            if (!gd.gtao_active_this_frame)
+               return DrawOrDispatchOverrideType::None;
+
+            ComPtr<ID3D11UnorderedAccessView> uav_final;
+            native_device_context->CSGetUnorderedAccessViews(0, 1, uav_final.put());
+            if (!uav_final)
+               return DrawOrDispatchOverrideType::None; // no output bound (unreachable in practice — the bilateral blur always binds its u0). With no target of our own there's nothing to write either way, so None and Replaced are equivalent here; return None to not cancel the native blur on a state we can't handle.
+            if (!gd.srv_gtao_depth || !gd.srv_gtao_normals)
+            {
+               // Shouldn't happen (chain order is fixed); write "no AO" so a stale buffer can't apply.
+               const FLOAT ones[4] = {1.f, 1.f, 1.f, 1.f};
+               native_device_context->ClearUnorderedAccessViewFloat(uav_final.get(), ones);
+               return DrawOrDispatchOverrideType::Replaced;
+            }
+
+            const uint32_t w = gd.gtao_w, h = gd.gtao_h;
+            DrawStateStack<DrawStateStackType::Compute> st;
+            st.Cache(native_device_context, device_data.uav_max_count);
+
+            ID3D11Buffer* kcb = gd.cb_gtao.get();
+            native_device_context->CSSetConstantBuffers(11, 1, &kcb);
+            ID3D11SamplerState* smp = device_data.sampler_state_point.get();
+            native_device_context->CSSetSamplers(0, 1, &smp);
+            // cb0 ($Globals: ProjInfo etc.) and cb2 (MinZ_MaxZRatioCS) are read directly by our shaders at the
+            // same b0/b2 slots, INHERITED from the game — bound by the deinterleave/coarse passes earlier in the
+            // same contiguous HBAO+ chain, not rebound here by design (immediate context, fixed pass order, no
+            // ClearState between them). If a future variant reorders the AO passes, capture+rebind explicitly.
+
+            static constexpr std::array<ID3D11UnorderedAccessView*, 5> uav_nulls5 = {};
+            static constexpr std::array<ID3D11ShaderResourceView*, 2> srv_nulls2 = {};
+
+            // 1) Prefilter: game full-res depth -> our R32F mip pyramid (each thread does 2x2 -> 16x16 per group).
+            {
+               native_device_context->CSSetShaderResources(0, 2, srv_nulls2.data());
+               ID3D11ShaderResourceView* srv = gd.srv_gtao_depth.get();
+               ID3D11UnorderedAccessView* uavs[5] = {gd.gtao_depth_mip_uavs[0].get(), gd.gtao_depth_mip_uavs[1].get(),
+                  gd.gtao_depth_mip_uavs[2].get(), gd.gtao_depth_mip_uavs[3].get(), gd.gtao_depth_mip_uavs[4].get()};
+               native_device_context->CSSetUnorderedAccessViews(0, 5, uavs, nullptr);
+               native_device_context->CSSetShaderResources(0, 1, &srv);
+               native_device_context->CSSetShader(device_data.native_compute_shaders[CompileTimeStringHash("BL XeGTAO Prefilter Depths CS")].get(), nullptr, 0);
+               native_device_context->Dispatch((w + 15) / 16, (h + 15) / 16, 1);
+               native_device_context->CSSetUnorderedAccessViews(0, 5, uav_nulls5.data(), nullptr);
+            }
+            // Binding ORDER matters: the UAV must be set BEFORE the SRVs in every pass. Binding an SRV whose
+            // resource is still bound as a CS UAV (from the previous pass) makes the runtime silently NULL the
+            // SRV (the existing UAV wins the hazard) — the whole chain then reads zeros while every write
+            // "succeeds". Setting the new UAV first auto-unbinds the old one, so the SRV bind is clean.
+            // 2) Main pass: pyramid + game view normals -> AO+edges (working0).
+            {
+               native_device_context->CSSetShaderResources(0, 2, srv_nulls2.data());
+               ID3D11ShaderResourceView* srvs[2] = {gd.srv_gtao_depth_mips.get(), gd.srv_gtao_normals.get()};
+               ID3D11UnorderedAccessView* uav = gd.uav_gtao_working[0].get();
+               native_device_context->CSSetUnorderedAccessViews(0, 1, &uav, nullptr);
+               native_device_context->CSSetShaderResources(0, 2, srvs);
+               native_device_context->CSSetShader(device_data.native_compute_shaders[CompileTimeStringHash("BL XeGTAO Main Pass CS")].get(), nullptr, 0);
+               native_device_context->Dispatch((w + 7) / 8, (h + 7) / 8, 1);
+            }
+            // 3) Denoise 1: working0 -> working1 (2 horizontal pixels per thread).
+            {
+               native_device_context->CSSetShaderResources(0, 2, srv_nulls2.data());
+               ID3D11ShaderResourceView* srv = gd.srv_gtao_working[0].get();
+               ID3D11UnorderedAccessView* uav = gd.uav_gtao_working[1].get();
+               native_device_context->CSSetUnorderedAccessViews(0, 1, &uav, nullptr);
+               native_device_context->CSSetShaderResources(0, 1, &srv);
+               native_device_context->CSSetShader(device_data.native_compute_shaders[CompileTimeStringHash("BL XeGTAO Denoise Pass 1 CS")].get(), nullptr, 0);
+               native_device_context->Dispatch((w + 15) / 16, (h + 7) / 8, 1);
+            }
+            // 4) Denoise 2 (final): working1 -> the game's r16g16_float AO target.
+            {
+               native_device_context->CSSetShaderResources(0, 2, srv_nulls2.data());
+               ID3D11ShaderResourceView* srv = gd.srv_gtao_working[1].get();
+               ID3D11UnorderedAccessView* uav = uav_final.get();
+               native_device_context->CSSetUnorderedAccessViews(0, 1, &uav, nullptr);
+               native_device_context->CSSetShaderResources(0, 1, &srv);
+               native_device_context->CSSetShader(device_data.native_compute_shaders[CompileTimeStringHash("BL XeGTAO Denoise Pass 2 CS")].get(), nullptr, 0);
+               native_device_context->Dispatch((w + 15) / 16, (h + 7) / 8, 1);
+            }
+
+            st.Restore(native_device_context);
+            return DrawOrDispatchOverrideType::Replaced; // cancel the native blur
          }
       }
 
@@ -401,7 +747,8 @@ public:
          if (!color_res)
             return DrawOrDispatchOverrideType::None;
 
-         uint4 cinfo{}; DXGI_FORMAT cfmt = DXGI_FORMAT_UNKNOWN;
+         uint4 cinfo{};
+         DXGI_FORMAT cfmt = DXGI_FORMAT_UNKNOWN;
          GetResourceInfo(color_res.get(), cinfo, cfmt);
          uint32_t w = cinfo.x, h = cinfo.y, color_fmt = (uint32_t)cfmt;
          if (w == 0 || h == 0)
@@ -428,7 +775,8 @@ public:
          bool depth_ok = false;
          if (gd.srv_depth)
          {
-            uint4 dinfo{}; DXGI_FORMAT dfmt = DXGI_FORMAT_UNKNOWN;
+            uint4 dinfo{};
+            DXGI_FORMAT dfmt = DXGI_FORMAT_UNKNOWN;
             GetResourceInfo(gd.srv_depth.get(), dinfo, dfmt);
             depth_ok = (dinfo.x == w && dinfo.y == h);
          }
@@ -495,9 +843,14 @@ public:
          // scene color; tex_lin/tex_gam = linear + sRGB copies the linearize CS writes.
          if (!gd.tex_input || gd.smaa_temps_w != w || gd.smaa_temps_h != h)
          {
-            gd.srv_input.reset(); gd.tex_input.reset();
-            gd.uav_lin.reset(); gd.srv_lin.reset(); gd.tex_lin.reset();
-            gd.uav_gam.reset(); gd.srv_gam.reset(); gd.tex_gam.reset();
+            gd.srv_input.reset();
+            gd.tex_input.reset();
+            gd.uav_lin.reset();
+            gd.srv_lin.reset();
+            gd.tex_lin.reset();
+            gd.uav_gam.reset();
+            gd.srv_gam.reset();
+            gd.tex_gam.reset();
             if (CreateDefaultRGBA16FTex(native_device, w, h, D3D11_BIND_SHADER_RESOURCE, gd.tex_input) &&
                 CreateDefaultRGBA16FTex(native_device, w, h, D3D11_BIND_SHADER_RESOURCE | D3D11_BIND_UNORDERED_ACCESS, gd.tex_lin) &&
                 CreateDefaultRGBA16FTex(native_device, w, h, D3D11_BIND_SHADER_RESOURCE | D3D11_BIND_UNORDERED_ACCESS, gd.tex_gam))
@@ -642,6 +995,13 @@ public:
       // (menu/transition/reorder) uses NO predication, not last frame's (possibly wrong-size) depth. Null handled at bind.
       gd.srv_depth.reset();
 
+      // XeGTAO inputs are captured per-frame at the deinterleave/coarse passes; disarm the takeover + drop the
+      // captured SRVs every present so a frame without the AO chain (AO off in-game / transition) can't apply a
+      // stale AO buffer.
+      gd.gtao_active_this_frame = false;
+      gd.srv_gtao_depth.reset();
+      gd.srv_gtao_normals.reset();
+
       device_data.has_drawn_main_post_processing = true;
    }
 
@@ -649,6 +1009,7 @@ public:
    {
       reshade::get_config_value(nullptr, NAME, "SMAAEnable", g_smaa_enable);
       reshade::get_config_value(nullptr, NAME, "RCASSharpness", g_rcas_sharpness);
+      reshade::get_config_value(nullptr, NAME, "XeGTAOEnable", g_gtao_enable);
       // Grade sliders (cb_luma_global_settings_dirty is already true at init -> uploaded on first frame).
       reshade::get_config_value(nullptr, NAME, "Exposure", cb_luma_global_settings.GameSettings.Exposure);
       reshade::get_config_value(nullptr, NAME, "Saturation", cb_luma_global_settings.GameSettings.Saturation);
@@ -657,6 +1018,8 @@ public:
       reshade::get_config_value(nullptr, NAME, "Contrast", cb_luma_global_settings.GameSettings.Contrast);
       reshade::get_config_value(nullptr, NAME, "Dithering", cb_luma_global_settings.GameSettings.Dithering);
       reshade::get_config_value(nullptr, NAME, "FlareOut", cb_luma_global_settings.GameSettings.FlareOut);
+      reshade::get_config_value(nullptr, NAME, "VideoAutoHDREnable", cb_luma_global_settings.GameSettings.VideoAutoHDREnable);
+      reshade::get_config_value(nullptr, NAME, "VideoAutoHDRBoost", cb_luma_global_settings.GameSettings.VideoAutoHDRBoost);
       reshade::get_config_value(nullptr, NAME, "HideUI", g_hide_ui);
       reshade::get_config_value(nullptr, NAME, "FixMovieLeak", g_fix_movie_leak);
    }
@@ -671,7 +1034,7 @@ public:
       if (ImGui::IsItemDeactivatedAfterEdit())
          reshade::set_config_value(nullptr, NAME, "RCASSharpness", g_rcas_sharpness);
       if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
-         ImGui::SetTooltip("RCAS sharpening applied to the SMAA output (0 = off).");
+         ImGui::SetTooltip("Sharpening applied on top of SMAA (0 = off).");
       ImGui::EndDisabled();
 
       // --- HDR grade (read in Luma_BL_Tonemap.hlsl via LumaSettings.GameSettings; HDR tonemap path only) ---
@@ -684,7 +1047,7 @@ public:
          device_data.cb_luma_global_settings_dirty = true;
       }
       if (ImGui::IsItemHovered())
-         ImGui::SetTooltip("Scene-referred exposure multiplier (1 = vanilla).");
+         ImGui::SetTooltip("Overall image brightness (1 = vanilla).");
       if (DrawResetButton(gs.Exposure, default_luma_global_game_settings.Exposure, "Exposure"))
          device_data.cb_luma_global_settings_dirty = true;
 
@@ -694,7 +1057,7 @@ public:
          device_data.cb_luma_global_settings_dirty = true;
       }
       if (ImGui::IsItemHovered())
-         ImGui::SetTooltip("Slope contrast around 18% mid-gray (1 = vanilla).");
+         ImGui::SetTooltip("Overall image contrast, HDR only (1 = vanilla).");
       if (DrawResetButton(gs.Contrast, default_luma_global_game_settings.Contrast, "Contrast"))
          device_data.cb_luma_global_settings_dirty = true;
 
@@ -703,6 +1066,8 @@ public:
          reshade::set_config_value(nullptr, NAME, "Saturation", gs.Saturation);
          device_data.cb_luma_global_settings_dirty = true;
       }
+      if (ImGui::IsItemHovered())
+         ImGui::SetTooltip("Color saturation, HDR only (1 = vanilla).");
       if (DrawResetButton(gs.Saturation, default_luma_global_game_settings.Saturation, "Saturation"))
          device_data.cb_luma_global_settings_dirty = true;
 
@@ -712,9 +1077,27 @@ public:
          device_data.cb_luma_global_settings_dirty = true;
       }
       if (ImGui::IsItemHovered())
-         ImGui::SetTooltip("How soon bright sources fade to neutral white (0 = keep color at any brightness).");
+         ImGui::SetTooltip("How soon bright sources fade to neutral white, HDR only (0 = keep color at any brightness).");
       if (DrawResetButton(gs.HighlightDechroma, default_luma_global_game_settings.HighlightDechroma, "HighlightDechroma"))
          device_data.cb_luma_global_settings_dirty = true;
+
+      // --- Ambient Occlusion: XeGTAO replaces the game's native HBAO+ ---
+      ImGui::SeparatorText("Ambient Occlusion");
+      if (ImGui::Checkbox("XeGTAO Enable", &g_gtao_enable))
+         reshade::set_config_value(nullptr, NAME, "XeGTAOEnable", g_gtao_enable);
+      if (ImGui::IsItemHovered())
+         ImGui::SetTooltip("Replaces the game's HBAO+ with XeGTAO (cleaner, more accurate ambient occlusion).");
+#if DEVELOPMENT || TEST
+      // DEV calibration only (drive cb_gtao, recreated on change at the deinterleave hook). Not persisted.
+      ImGui::BeginDisabled(!g_gtao_enable);
+      ImGui::SliderFloat("GTAO Final Value Power", &g_gtao_final_value_power, 0.3f, 4.5f);                 // midtone-shadow contrast dial
+      ImGui::SliderFloat("GTAO Depth Scale", &g_gtao_depth_scale, 1.f, 200.f);                             // UE3 units -> ~meters; the anti-over-occlusion dial
+      ImGui::SliderFloat("GTAO Radius Override", &g_gtao_radius_override, 0.f, 5.f);                       // 0 = use EFFECT_RADIUS
+#if DEVELOPMENT                                                                                            // shader DebugViewRT blocks are #if DEVELOPMENT — don't draw a dead combo in TEST
+      ImGui::Combo("GTAO Debug View", &g_gtao_debug_view, "Off\0Depth gradient\0Normals\0AO x8\0Edges\0"); // diagnostics through the AO apply
+#endif
+      ImGui::EndDisabled();
+#endif
 
       // --- Post-effect scales + output toggle ---
       ImGui::SeparatorText("Effects");
@@ -724,6 +1107,8 @@ public:
          reshade::set_config_value(nullptr, NAME, "BloomIntensity", gs.BloomIntensity);
          device_data.cb_luma_global_settings_dirty = true;
       }
+      if (ImGui::IsItemHovered())
+         ImGui::SetTooltip("Bloom strength (1 = vanilla, 0 = none).");
       if (DrawResetButton(gs.BloomIntensity, default_luma_global_game_settings.BloomIntensity, "BloomIntensity"))
          device_data.cb_luma_global_settings_dirty = true;
 
@@ -733,9 +1118,30 @@ public:
          device_data.cb_luma_global_settings_dirty = true;
       }
       if (ImGui::IsItemHovered())
-         ImGui::SetTooltip("Additive lens-flare / glare overlay strength (1 = vanilla, 0 = off).");
+         ImGui::SetTooltip("Lens-flare / glare strength (1 = vanilla, 0 = off).");
       if (DrawResetButton(gs.FlareOut, default_luma_global_game_settings.FlareOut, "FlareOut"))
          device_data.cb_luma_global_settings_dirty = true;
+
+      bool video_auto_hdr = gs.VideoAutoHDREnable > 0.5f;
+      if (ImGui::Checkbox("Video AutoHDR", &video_auto_hdr))
+      {
+         gs.VideoAutoHDREnable = video_auto_hdr ? 1.f : 0.f;
+         reshade::set_config_value(nullptr, NAME, "VideoAutoHDREnable", gs.VideoAutoHDREnable);
+         device_data.cb_luma_global_settings_dirty = true;
+      }
+      if (ImGui::IsItemHovered())
+         ImGui::SetTooltip("Adds HDR highlights to pre-rendered videos (HDR only).");
+
+      ImGui::BeginDisabled(!video_auto_hdr);
+      if (ImGui::SliderFloat("Video HDR Boost", &gs.VideoAutoHDRBoost, 0.f, 1.f))
+         device_data.cb_luma_global_settings_dirty = true;
+      if (ImGui::IsItemDeactivatedAfterEdit())
+         reshade::set_config_value(nullptr, NAME, "VideoAutoHDRBoost", gs.VideoAutoHDRBoost);
+      if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
+         ImGui::SetTooltip("Video highlight strength (0 = off).");
+      if (DrawResetButton(gs.VideoAutoHDRBoost, default_luma_global_game_settings.VideoAutoHDRBoost, "VideoAutoHDRBoost"))
+         device_data.cb_luma_global_settings_dirty = true;
+      ImGui::EndDisabled();
 
       bool dithering = gs.Dithering > 0.5f;
       if (ImGui::Checkbox("Dithering", &dithering))
@@ -745,7 +1151,7 @@ public:
          device_data.cb_luma_global_settings_dirty = true;
       }
       if (ImGui::IsItemHovered())
-         ImGui::SetTooltip("Reduces gradient banding.");
+         ImGui::SetTooltip("Reduces gradient banding (HDR output).");
 
       ImGui::SeparatorText("UI");
       if (ImGui::Checkbox("Hide Gameplay UI", &g_hide_ui))
@@ -792,17 +1198,17 @@ public:
 
       ImGui::NewLine();
       ImGui::Text("Credits:"
-         "\n\nMain:"
-         "\nDristoforColumb"
-         "\n\nThird Party:"
-         "\nReShade"
-         "\nImGui"
-         "\nRenoDX (HDR tonemap method)"
-         "\nDICE (HDR tonemapper)"
-         "\nOklab (hue/chroma restoration)"
-         "\nSMAA (Iryoku)"
-         "\nAMD FidelityFX (RCAS)"
-         , "");
+                  "\n\nMain:"
+                  "\nDristoforColumb"
+                  "\n\nThird Party:"
+                  "\nReShade"
+                  "\nImGui"
+                  "\nRenoDX (HDR tonemap method)"
+                  "\nDICE (HDR tonemapper)"
+                  "\nOklab (hue/chroma restoration)"
+                  "\nSMAA (Iryoku)"
+                  "\nAMD FidelityFX (RCAS)",
+         "");
    }
 };
 
@@ -813,7 +1219,7 @@ BOOL APIENTRY DllMain(HMODULE hModule, DWORD ul_reason_for_call, LPVOID lpReserv
       const char* project_name = PROJECT_NAME;
       const char* cleared_project_name = (project_name[0] == '_') ? (project_name + 1) : project_name;
 
-      uint32_t mod_version = 2; // bump: AA-only -> native HDR (invalidates cached settings/shaders)
+      uint32_t mod_version = 3; // clears stale shader-define slots (phantom "Define 13") + invalidates cached settings/shaders
       Globals::SetGlobals(cleared_project_name, "Borderlands GOTY Enhanced Luma HDR + SMAA mod", "", mod_version);
 
       // Native HDR: swapchain -> scRGB fp16; core Display Composition does the paper-white scale + scRGB encode +
@@ -821,7 +1227,7 @@ BOOL APIENTRY DllMain(HMODULE hModule, DWORD ul_reason_for_call, LPVOID lpReserv
       swapchain_format_upgrade_type = TextureFormatUpgradesType::AllowedEnabled;
       swapchain_upgrade_type = SwapchainUpgradeType::scRGB; // r10g10b10a2 backbuffer -> r16g16b16a16_float
       texture_format_upgrades_type = TextureFormatUpgradesType::AllowedEnabled;
-      // Trimmed to a safety minimum (devkit-verified 2026-06-21): the remaster renders its whole post chain in
+      // Trimmed to a safety minimum: the remaster renders its whole post chain in
       // fp16 already, and the only low-precision target (r10g10b10a2 backbuffer) is handled by the upgrade above.
       // The broad r8/b8 set was dead weight (and _srgb->fp16 risks a sampling shift). Keep plausible fp16 intermediates.
       texture_upgrade_formats = {
