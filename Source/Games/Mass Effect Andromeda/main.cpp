@@ -13,6 +13,10 @@
 #define ENABLE_FIDELITY_SK 1 // FSR 3 Native AA as a vendor-neutral alternative to DLAA (selectable in core's "Super Resolution" combo)
 #define GEOMETRY_SHADER_SUPPORT 0
 #define ENABLE_SMAA 1 // replaces the game's FXAA pass (FXAA AA mode) with SMAA
+// The dialogue/cutscene DOF-variant resolve is run-native-then-override via original_draw_dispatch_func,
+// which the core only populates with this enabled — otherwise it is null outside DEVELOPMENT builds and
+// every DOF resolve silently bails to native TAA in Test/Publishing.
+#define ENABLE_POST_DRAW_DISPATCH_CALLBACK 1
 
 #include "..\..\Core\core.hpp"
 #include <d3d11_1.h>  // ID3D11DeviceContext1 (bound-range CB queries)
@@ -34,19 +38,70 @@ static constexpr uint32_t kTAAResolveHashes[] = {
    0x3D06A19E, // variant C
    0x960B6C89,
    0x1986BDD0, // variant D
+   // E family = the same resolve quality ladder minus the t2 mask input / u0 mask output (96% identical
+   // body, tile twins instruction-identical). Dispatched for the MAIN MENU / loading background scene —
+   // hooked so DLAA covers the menu too. I/O contract is a strict subset of A-D (t0/t1/t3/t4 in, u2/u3 out).
+   0x1C0D65CC,
+   0x3DD7FD62, // variant E-A (32x16 / 8x8)
+   0x40918D68,
+   0xCEF1D745, // variant E-B
+   0xCFB58943,
+   0xA1AA9997, // variant E-C
+   0x2F3D250F,
+   0x633550DF, // variant E-D
 };
+// DOF variant of the resolve (dialogue / cutscene): additionally temporally filters the DOF CoC
+// (t5/t6 r16f current+history in -> u4/u5 filtered+history out; u4 is consumed by the DOF-setup CS right
+// after the resolve). We must NOT cancel this dispatch — u4/u5 would go stale and break the bokeh.
+// Instead: run the native dispatch first (it writes u0/u4/u5 with the game's own math — zero quality
+// loss), then run SR and overwrite only its u2/u3 color output.
+static constexpr uint32_t kTAAResolveDofHashes[] = {
+   0x42871661,
+   0xA280FBF8, // variant DOF-A (32x16 / 8x8)
+   0x6514D8F7,
+   0x34C459FC, // variant DOF-B
+   0x631EF4A0,
+   0xEBA90095, // variant DOF-C
+   0x65882783,
+   0x3BEAC6F3, // variant DOF-D
+};
+static bool IsTAAResolveDof(const ShaderHashesList<OneShaderPerPipeline>& hashes)
+{
+   for (uint32_t h : kTAAResolveDofHashes)
+      if (hashes.Contains(h, reshade::api::shader_stage::compute))
+         return true;
+   return false;
+}
 static bool IsTAAResolve(const ShaderHashesList<OneShaderPerPipeline>& hashes)
 {
    for (uint32_t h : kTAAResolveHashes)
       if (hashes.Contains(h, reshade::api::shader_stage::compute))
          return true;
-   return false;
+   return IsTAAResolveDof(hashes);
 }
+#if DEVELOPMENT || TEST
+// First non-sentinel compute hash of a dispatch (diagnostic logging only).
+static uint32_t FirstComputeHash(const ShaderHashesList<OneShaderPerPipeline>& hashes)
+{
+   for (auto h : hashes.compute_shaders)
+      if (h != UINT64_MAX)
+         return (uint32_t)h;
+   return 0;
+}
+#endif
+
+// SR output hand-off mode into the game's resolve target (u2/u3), re-evaluated at every hooked resolve
+// (the game's "Buffer Format" setting swaps the target between rgba16f and r11g11b10_float).
+enum class HandoffMode : int
+{
+   Incompatible = -1, // no safe copy path — bail to native TAA (SR off beats a black screen)
+   DirectCopy = 0,    // CopySubresourceRegion (rgba16f fallback when the copy CS is unavailable)
+   CsCopy = 1,        // CS copy through the game's own typed UAV (format-converting, preferred)
+};
+
 static constexpr uint32_t kFXAAHash = 0x5B81D1F2;    // FXAA PS — replaced with SMAA
 static constexpr uint32_t kGbufferVS_A = 0xC089424D; // gbuffer VS that binds the main camera CB at VS slot 2
 static constexpr uint32_t kGbufferVS_B = 0xFF93953D; // (reliable jitter capture point)
-// FOV-jump epsilon on projection m00/m11 (history reset on aim/zoom/cut).
-static constexpr float kFovEps = 1e-4f;
 // DLSS far_plane stand-in: MEA's projection is reverse-Z INFINITE-far (no finite far). DLSS is insensitive to the
 // exact large value (used only for depth linearization).
 static constexpr float kCamFar = 100000.f;
@@ -55,7 +110,7 @@ static constexpr float kCamFar = 100000.f;
 // file-scope globals so LoadConfigs (pre-device) can populate them. ---
 static bool g_smaa_enable = true;
 static float g_smaa_sharpness = 0.f; // RCAS off by default
-// A reactive/bias mask was evaluated and removed — a dead end for MEA; we pass bias_mask = nullptr.
+// MEA exposes no usable reactivity/bias source for SR, so bias_mask stays nullptr.
 
 struct MassEffectAndromedaGameDeviceData final : public GameDeviceData
 {
@@ -68,7 +123,7 @@ struct MassEffectAndromedaGameDeviceData final : public GameDeviceData
    bool cam_valid_this_frame = false;
    // map_recs caches the CPU map ptr of every large WRITE_NO_OVERWRITE DYNAMIC CB this frame (the camera ring among
    // them), deduped by handle. Camera is read straight from ptr+bound_offset — no GPU readback (zero stall).
-   // map_recs_mutex is MANDATORY (ring is mapped on both the immediate and Frostbite worker threads — verified race).
+   // map_recs_mutex is MANDATORY — the ring is mapped on both the immediate and Frostbite worker threads.
    // Reset each present.
    struct MapRec
    {
@@ -88,11 +143,6 @@ struct MassEffectAndromedaGameDeviceData final : public GameDeviceData
    float cam_near = 0.06f;        // [8].w
    float cam_proj_m00 = 0.f;      // [6].x (FOV discriminant)
    float cam_proj_m11 = 0.f;      // [7].y (FOV discriminant)
-#if DEVELOPMENT || TEST
-   // Only read by the DEV/TEST fov_jump trace in OnDrawOrDispatch — gated so shipping doesn't maintain unread state.
-   float prev_cam_proj_m00 = 0.f;
-   float prev_cam_proj_m11 = 0.f;
-#endif
    // Immediate-context ID3D11DeviceContext1, QI'd once and cached (GetImmediateCtx1). The two call sites are
    // already gated on GetType()==IMMEDIATE; the immediate ctx is unique per device, so this is stable for the
    // device's life. Released in OnDestroyDeviceData (GameDeviceData has no virtual dtor — see that method).
@@ -100,12 +150,16 @@ struct MassEffectAndromedaGameDeviceData final : public GameDeviceData
 
    // --- DLSS output texture (we own it; DLSS writes here, we copy into u2/u3) ---
    ComPtr<ID3D11Texture2D> tex_dlss_output;
+   ComPtr<ID3D11ShaderResourceView> srv_dlss_output; // t0 of the format-converting hand-off CS
    uint32_t dlss_out_w = 0;
    uint32_t dlss_out_h = 0;
    bool first_dlss_frame = true;
+   // u2 hand-off mode, evaluated at every hooked resolve — see HandoffMode.
+   HandoffMode u2_mode = HandoffMode::DirectCopy;
+   bool logged_u2_mode = false; // one-shot: log u2's actual desc + the chosen mode
 
-   // --- Live dev knobs (tunable without rebuild). Default signs are the empirically-tuned ones
-   // (MV flip X+Y, jitter flip Y → stable trail-free; jitter flip X shakes). ---
+   // --- Live dev knobs (tunable without rebuild). Default signs are the stable trail-free set:
+   // MV flip X+Y, jitter flip Y; jitter flip X shakes. ---
    bool mvs_flip_x = true;     // -> MV X scale = -0.5*W
    bool mvs_flip_y = true;     // -> MV Y scale = +0.5*H
    float mvs_scale_mult = 1.f; // 0.25..4
@@ -114,23 +168,16 @@ struct MassEffectAndromedaGameDeviceData final : public GameDeviceData
    float sharpness = -1.f;     // <0 = DLSS default
    bool auto_exposure = true;
    bool mvs_jittered = false;
-   bool diag_skip_history = false; // don't copy DLSS result into u3 (isolate history feedback)
-   bool dev_sim_draw_fail = false; // DEV: force the SR Draw() to "fail" → exercises the finding-#3 recovery-reset latch
-
    // One-shot diagnostics
-   bool logged_sr_diag = false;
+   bool logged_dof_hit = false; // first DOF-variant resolve (run-native-then-override path engaged)
    bool logged_draw_result = false;
    bool logged_capture_fail = false;
-   bool logged_draw_fail = false; // one-shot: first time Draw() returned false (or DEV sim) → #3 latch fired
+   bool logged_draw_fail = false; // one-shot: first time Draw() returned false → recovery-reset latch fired
 #if DEVELOPMENT || TEST
-   bool logged_maps_full = false; // one-shot kMaxMaps cap warning
-   bool logged_u2_desc = false;   // one-shot u2 desc sanity check
-   bool logged_samplers = false;  // one-shot AF/sampler-upgrade verification
-   // Finding #2 VALIDATION: trace SR history-reset events. reset fires only on force/first/res/fov-jump/!cam_valid —
-   // NOT on a same-FOV scene cut/teleport. If a cut produces visible ghosting while NO reset line logs across it,
-   // the bug is confirmed (DLSS accumulated old scene onto new). frames_since_reset shows the gap spanning the cut.
-   bool prev_reset = false;
-   uint32_t frames_since_reset = 0;
+   bool logged_maps_full = false;  // one-shot kMaxMaps cap warning
+   bool logged_samplers = false;   // one-shot AF/sampler-upgrade verification
+   bool logged_probe_hit = false;  // one-shot: camera fallback probe found the per-view CB (logs stage+slot)
+   bool logged_probe_miss = false; // one-shot: no camera at a hooked resolve → bailed to native TAA
    // Outlier TAA-resolve diagnostic: distinct compute hashes with a resolve-like binding (u2+u3+t1) that are NOT
    // in kTAAResolveHashes, logged once each in OnDrawOrDispatch. Mutex: dispatches fire on Frostbite worker
    // threads (same reason as map_recs_mutex).
@@ -160,13 +207,6 @@ struct MassEffectAndromedaGameDeviceData final : public GameDeviceData
    } log_state;
 #endif
 
-   // --- CPU-side profiling (DEV/TEST): per-DLAA-frame CPU time. "probe" = the CPU camera-CB select
-   // (VSGetConstantBuffers1 + read at the bound offset — no GPU sync, ~0 us). "Draw" = CPU-side queuing of the
-   // DLSS dispatch (NOT the DLSS GPU cost). Averages logged every 120 sampled frames. ---
-   double prof_probe_us_sum = 0.0, prof_probe_us_max = 0.0;
-   double prof_draw_us_sum = 0.0, prof_draw_us_max = 0.0;
-   uint32_t prof_samples = 0;
-
    // --- SMAA (replaces the game's FXAA pass in FXAA AA mode) --- (enable/sharpness are file-scope globals)
    uint32_t fxaa_hits_this_frame = 0;
 #if ENABLE_SMAA
@@ -194,8 +234,7 @@ class MassEffectAndromeda final : public Game
    }
 
    // Returns the cached immediate-context ID3D11DeviceContext1 if `ctx` IS the immediate ctx, else nullptr.
-   // QI'd once and cached on gd (do NOT Release the returned ptr — gd owns it). Cheap GetType() immediacy check
-   // replaces the old GetImmediateContext AddRef/Release + per-call QI.
+   // QI'd once and cached on gd (do NOT Release the returned ptr — gd owns it).
    static ID3D11DeviceContext1* GetImmediateCtx1(MassEffectAndromedaGameDeviceData& gd, ID3D11DeviceContext* ctx)
    {
       if (ctx->GetType() != D3D11_DEVICE_CONTEXT_IMMEDIATE)
@@ -275,8 +314,8 @@ class MassEffectAndromeda final : public Game
       cb->Release();
       for (int i = 0; i < gd.map_rec_count; ++i)
       {
-         if (gd.map_recs[i].handle != h || (uint64_t)off + 160u > gd.map_recs[i].size)
-            continue; // need [off .. off+10 float4]
+         if (gd.map_recs[i].handle != h || gd.map_recs[i].data == nullptr || (uint64_t)off + 160u > gd.map_recs[i].size)
+            continue; // need [off .. off+10 float4]; nullptr = banned (seen DISCARD-mapped → pointer unsafe)
          const float* r = reinterpret_cast<const float*>(reinterpret_cast<const uint8_t*>(gd.map_recs[i].data) + off);
          if (expected_w > 0.f && (fabsf(r[1 * 4 + 0] - expected_w) > 1.f || fabsf(r[1 * 4 + 1] - expected_h) > 1.f))
             return false; // [1].xy == res
@@ -306,37 +345,63 @@ class MassEffectAndromeda final : public Game
    static void SelectCameraCPU(ID3D11DeviceContext1* ctx1, MassEffectAndromedaGameDeviceData& gd, const float2& render_res)
    {
       // Fallback probe (used only if the gbuffer capture missed this frame). Guard the whole probe: it reads
-      // gd.map_recs/map_rec_count, which Frostbite worker threads mutate via OnMapBufferRegion (verified race).
+      // gd.map_recs/map_rec_count, which Frostbite worker threads mutate via OnMapBufferRegion.
       std::lock_guard<std::mutex> lock(gd.map_recs_mutex);
       auto try_slot = [&](bool cs, UINT slot) -> bool
       { return TryStoreCamera(ctx1, gd, cs, slot, render_res.x, render_res.y); };
       if (gd.cam_probe_is_compute >= 0 && try_slot(gd.cam_probe_is_compute != 0, gd.cam_probe_slot))
          return;
-      struct
-      {
-         bool cs;
-         UINT slot;
-      } probes[] = {{false, 2}, {true, 2}, {false, 1}, {true, 1}, {false, 3}, {true, 3}};
-      for (auto& p : probes)
-         if (try_slot(p.cs, p.slot))
-         {
-            gd.cam_probe_is_compute = p.cs ? 1 : 0;
-            gd.cam_probe_slot = p.slot;
-            return;
-         }
+      // Slots 2/1/3 first (the observed camera slots), then the whole CB range — frames without a main
+      // gbuffer pass (menus) bind the per-view CB at less common slots, if at all. TryStoreCamera's
+      // validation (layout signature + render-res match) rejects non-camera CBs, so the wide scan is safe.
+      static constexpr UINT kProbeSlots[] = {2, 1, 3, 0, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13};
+      for (UINT slot : kProbeSlots)
+         for (int cs = 0; cs <= 1; ++cs)
+            if (try_slot(cs != 0, slot))
+            {
+               gd.cam_probe_is_compute = cs;
+               gd.cam_probe_slot = slot;
+#if DEVELOPMENT || TEST
+               if (!gd.logged_probe_hit)
+               {
+                  gd.logged_probe_hit = true;
+                  char b[96];
+                  snprintf(b, sizeof(b), "MEA: camera fallback probe hit at %s b%u", cs ? "CS" : "VS", slot);
+                  reshade::log::message(reshade::log::level::info, b);
+               }
+#endif
+               return;
+            }
    }
 
 public: // OnMapBufferRegion is referenced from DllMain (DLL_PROCESS_DETACH unregister), so it must be public.
    // Cache the CPU map ptr of every large (≥64KB) WRITE_NO_OVERWRITE DYNAMIC CB (camera ring among them), deduped
-   // by handle. NO_OVERWRITE only (allocation stays committed → post-Unmap read is safe); WRITE_DISCARD dropped
-   // (driver may recycle → UAF). Fires on Frostbite worker threads → map_recs_mutex.
+   // by handle. NO_OVERWRITE only (allocation stays committed → post-Unmap read is safe). A DISCARD map of a
+   // tracked handle BANS it (data=nullptr, kept in the array): DISCARD hands the driver a new allocation and can
+   // free the old one, so the cached pointer is a use-after-free for the camera probe — and a buffer the game
+   // EVER discard-maps is not the always-NO_OVERWRITE camera ring, so re-caching it later would just re-arm the
+   // hazard (the wide slot probe crashed on exactly this in menus, where UI CBs are DISCARD-cycled every frame).
+   // OnDestroyResource removes the record entirely, which also un-bans a handle the runtime later recycles.
+   // Fires on Frostbite worker threads → map_recs_mutex.
    static void OnMapBufferRegion(reshade::api::device* device, reshade::api::resource resource, uint64_t offset, uint64_t size, reshade::api::map_access access, void** data)
    {
-      if (access != reshade::api::map_access::write_only || data == nullptr || *data == nullptr)
-         return; // NO_OVERWRITE only
       DeviceData& device_data = *device->get_private_data<DeviceData>();
       if (!device_data.game)
          return;
+      if (access == reshade::api::map_access::write_discard)
+      {
+         auto& gd = GetGameDeviceData(device_data);
+         std::lock_guard<std::mutex> lock(gd.map_recs_mutex);
+         for (int i = 0; i < gd.map_rec_count; ++i)
+            if (gd.map_recs[i].handle == resource.handle)
+            {
+               gd.map_recs[i].data = nullptr; // ban — see header comment
+               break;
+            }
+         return;
+      }
+      if (access != reshade::api::map_access::write_only || data == nullptr || *data == nullptr)
+         return; // NO_OVERWRITE only
       ID3D11Buffer* buffer = reinterpret_cast<ID3D11Buffer*>(resource.handle);
       D3D11_BUFFER_DESC bd = {};
       buffer->GetDesc(&bd);
@@ -349,8 +414,11 @@ public: // OnMapBufferRegion is referenced from DllMain (DLL_PROCESS_DETACH unre
       for (int i = 0; i < gd.map_rec_count; ++i)           // dedupe by handle — keep latest pointer
          if (gd.map_recs[i].handle == resource.handle)
          {
-            gd.map_recs[i].data = *data;
-            gd.map_recs[i].size = bd.ByteWidth;
+            if (gd.map_recs[i].data != nullptr) // banned handles stay banned until destroyed
+            {
+               gd.map_recs[i].data = *data;
+               gd.map_recs[i].size = bd.ByteWidth;
+            }
             return;
          }
       if (gd.map_rec_count < MassEffectAndromedaGameDeviceData::kMaxMaps)
@@ -364,6 +432,23 @@ public: // OnMapBufferRegion is referenced from DllMain (DLL_PROCESS_DETACH unre
 #endif
    }
 
+   // Drop the record of a destroyed buffer: its cached map pointer is dead, and the runtime may recycle the
+   // handle for a brand-new buffer (which must not inherit a stale pointer or a DISCARD ban).
+   static void OnDestroyResource(reshade::api::device* device, reshade::api::resource resource)
+   {
+      DeviceData* device_data = device->get_private_data<DeviceData>();
+      if (device_data == nullptr || !device_data->game)
+         return;
+      auto& gd = GetGameDeviceData(*device_data);
+      std::lock_guard<std::mutex> lock(gd.map_recs_mutex);
+      for (int i = 0; i < gd.map_rec_count; ++i)
+         if (gd.map_recs[i].handle == resource.handle)
+         {
+            gd.map_recs[i] = gd.map_recs[--gd.map_rec_count];
+            break;
+         }
+   }
+
    void OnInit(bool async) override
    {
       // DLAA-only: we replace no shaders and upload no Luma CBs → disable all three (-1 = unused).
@@ -375,9 +460,22 @@ public: // OnMapBufferRegion is referenced from DllMain (DLL_PROCESS_DETACH unre
       native_shaders_definitions.emplace(CompileTimeStringHash("MEA Sharpen PS"),
          ShaderDefinition{"Luma_MEA_Sharpen", reshade::api::pipeline_subobject_type::pixel_shader, nullptr, "sharpen_ps"});
 #endif
+#if ENABLE_SR
+      // Format-converting SR output hand-off: the game's "Buffer Format" setting can switch the TAA resolve
+      // target (u2/u3) to r11g11b10_float, where CopySubresourceRegion from our rgba16f output silently
+      // no-ops (black scene, live UI). This CS writes through the game's own typed UAV instead.
+      native_shaders_definitions.emplace(CompileTimeStringHash("MEA SR Output Copy CS"),
+         ShaderDefinition{"Luma_MEA_CopyColor", reshade::api::pipeline_subobject_type::compute_shader, nullptr, "copy_color_cs"});
+      // History (u3) variant: encodes to the native resolve's history format (encoded-domain RGB x512) so
+      // frames where the native resolve runs (SR<->native transitions, dialogue run-native) read honest
+      // history instead of a de-facto reset.
+      native_shaders_definitions.emplace(CompileTimeStringHash("MEA SR History Copy CS"),
+         ShaderDefinition{"Luma_MEA_CopyColor", reshade::api::pipeline_subobject_type::compute_shader, nullptr, "copy_color_history_cs"});
+#endif
       // Cache the camera ring-buffer's CPU map pointer (read at the TAA dispatch by bound offset in
       // SelectCameraCPU) — replaces the per-frame GPU readback stall. Must run in all configs.
       reshade::register_event<reshade::addon_event::map_buffer_region>(OnMapBufferRegion);
+      reshade::register_event<reshade::addon_event::destroy_resource>(OnDestroyResource);
    }
 
    void OnCreateDevice(ID3D11Device* native_device, DeviceData& device_data) override
@@ -393,6 +491,7 @@ public: // OnMapBufferRegion is referenced from DllMain (DLL_PROCESS_DETACH unre
          auto& gd = GetGameDeviceData(device_data);
          gd.imm_ctx1.reset();
          gd.tex_dlss_output.reset();
+         gd.srv_dlss_output.reset();
 #if ENABLE_SMAA
          // SMAA area/search textures + DS states now live in core's device_data.managed_resources (released by core).
          gd.cb_smaa_metrics.reset();
@@ -458,7 +557,7 @@ public: // OnMapBufferRegion is referenced from DllMain (DLL_PROCESS_DETACH unre
                TryGetTex2DSize(rtv_res.get(), w, h);
             }
 
-            // Finding #1: DrawSMAA sizes its edge/blend/DSV intermediates from the FIRST RTV and rebuilds them only
+            // DrawSMAA sizes its edge/blend/DSV intermediates from the FIRST RTV and rebuilds them only
             // on swapchain re-init — not on a Resolution-Scale change. On a size change, drop the 3 core-managed views
             // so DrawSMAA recreates them at the new size.
             if (gd.smaa_core_w != w || gd.smaa_core_h != h)
@@ -471,7 +570,7 @@ public: // OnMapBufferRegion is referenced from DllMain (DLL_PROCESS_DETACH unre
                if (gd.smaa_core_w || gd.smaa_core_h) // skip the first-build transition (0 -> size); only log real resizes
                {
                   char b[160];
-                  snprintf(b, sizeof(b), "MEA SMAA: resized core intermediates %ux%u -> %ux%u (Resolution-Scale change; finding #1 fix engaged).", gd.smaa_core_w, gd.smaa_core_h, w, h);
+                  snprintf(b, sizeof(b), "MEA SMAA: resized core intermediates %ux%u -> %ux%u (Resolution-Scale change).", gd.smaa_core_w, gd.smaa_core_h, w, h);
                   reshade::log::message(reshade::log::level::info, b);
                }
 #endif
@@ -598,13 +697,7 @@ public: // OnMapBufferRegion is referenced from DllMain (DLL_PROCESS_DETACH unre
       // we don't yet hook (a feature variant, or a new GPU tile-size) so it can be verified + added — see the
       // perm-matrix note at kTAAResolveHashes.
       {
-         uint32_t outlier_cs = 0;
-         for (auto h : original_shader_hashes.compute_shaders)
-            if (h != UINT64_MAX)
-            {
-               outlier_cs = (uint32_t)h;
-               break;
-            }
+         const uint32_t outlier_cs = FirstComputeHash(original_shader_hashes);
          if (outlier_cs != 0 && !IsTAAResolve(original_shader_hashes))
          {
             ComPtr<ID3D11UnorderedAccessView> o_u2, o_u3;
@@ -633,6 +726,11 @@ public: // OnMapBufferRegion is referenced from DllMain (DLL_PROCESS_DETACH unre
       // --- TAA resolve dispatch: replace with DLSS. ---
       if (IsTAAResolve(original_shader_hashes))
       {
+         // DOF variant: the native dispatch is manually re-issued below (its u4/u5 CoC outputs feed the DOF
+         // chain); once that happened, every exit from this block must return Replaced, never None — the
+         // fall-through dispatch would run the resolve a second time.
+         const bool dof_variant = IsTAAResolveDof(original_shader_hashes);
+         bool native_ran = false;
          gd.taa_hits_this_frame++;
          gd.taa_hits_total++;
          device_data.taa_detected = true; // game's TAA pass present this frame (feeds core's SR-engaged ✓ indicator)
@@ -640,13 +738,7 @@ public: // OnMapBufferRegion is referenced from DllMain (DLL_PROCESS_DETACH unre
          if (!gd.logged_first_hit)
          {
             gd.logged_first_hit = true;
-            uint32_t matched_cs = 0;
-            for (auto h : original_shader_hashes.compute_shaders)
-               if (h != UINT64_MAX)
-               {
-                  matched_cs = (uint32_t)h;
-                  break;
-               }
+            const uint32_t matched_cs = FirstComputeHash(original_shader_hashes);
             char hit_msg[128];
             snprintf(hit_msg, sizeof(hit_msg), "MEA: TAA resolve compute 0x%08X detected — SR injection point reached (perm-matrix hook).", matched_cs);
             reshade::log::message(reshade::log::level::info, hit_msg);
@@ -654,20 +746,6 @@ public: // OnMapBufferRegion is referenced from DllMain (DLL_PROCESS_DETACH unre
 #endif
 
 #if ENABLE_SR
-#if DEVELOPMENT || TEST
-         if (!gd.logged_sr_diag)
-         {
-            gd.logged_sr_diag = true;
-            char b[192];
-            snprintf(b, sizeof(b), "MEA SR diag: sr_type=%d (DLSS=0,FSR=1,None=-1) immediate=%d out=%.0fx%.0f render=%.0fx%.0f cam_valid=%d jitterClip=%.6f,%.6f",
-               (int)device_data.sr_type,
-               (int)is_immediate,
-               device_data.output_resolution.x, device_data.output_resolution.y,
-               device_data.render_resolution.x, device_data.render_resolution.y,
-               (int)gd.cam_valid_this_frame, gd.cam_jitter_clip_x, gd.cam_jitter_clip_y);
-            reshade::log::message(reshade::log::level::info, b);
-         }
-#endif
          if (device_data.sr_type != SR::Type::None && is_immediate)
          {
             auto* sr_instance_data = device_data.GetSRInstanceData();
@@ -719,22 +797,96 @@ public: // OnMapBufferRegion is referenced from DllMain (DLL_PROCESS_DETACH unre
                   {
                      if (ID3D11DeviceContext1* ctx1 = GetImmediateCtx1(gd, native_device_context))
                      {
-#if DEVELOPMENT || TEST
-                        const auto prof_probe_t0 = std::chrono::steady_clock::now();
-#endif
                         SelectCameraCPU(ctx1, gd, actual_render_res);
-#if DEVELOPMENT || TEST
-                        {
-                           const double us = std::chrono::duration<double, std::micro>(std::chrono::steady_clock::now() - prof_probe_t0).count();
-                           gd.prof_probe_us_sum += us;
-                           if (us > gd.prof_probe_us_max)
-                              gd.prof_probe_us_max = us;
-                        }
-#endif
                      }
                   }
+                  if (!gd.cam_valid_this_frame)
+                  {
+                     // No camera this frame -> no jitter info. Running SR with jitter=0 while the scene IS
+                     // jittered leaves the jitter uncompensated -> visible per-frame camera shake (menus /
+                     // dialogue frames without a main gbuffer pass). Bail to the native resolve — it
+                     // de-jitters itself. Must stay BEFORE the DOF-variant manual dispatch below, so None
+                     // still means "the native dispatch runs exactly once, by the fall-through".
+#if DEVELOPMENT || TEST
+                     if (!gd.logged_probe_miss)
+                     {
+                        gd.logged_probe_miss = true;
+                        reshade::log::message(reshade::log::level::info,
+                           "MEA: no camera at hooked resolve (gbuffer capture + wide probe both missed) — native TAA for these frames.");
+                     }
+#endif
+                     device_data.force_reset_sr = true; // don't blend across the gap when SR re-engages
+                     return DrawOrDispatchOverrideType::None;
+                  }
 
-                  // Settings.
+                  // Pick the u2 hand-off mode BEFORE running SR (re-evaluated when the resolve target changes).
+                  // Preferred path is the copy CS: its typed store converts formats — the game's "Buffer Format"
+                  // setting swaps u2/u3 between rgba16f and r11g11b10_float, where a plain CopySubresourceRegion
+                  // silently no-ops → black scene with live UI — and u3 gets the native enc*512 history layout.
+                  // Fallbacks: rgba16f → raw direct copy (CS missing); otherwise bail to native TAA (SR off
+                  // beats a black screen).
+                  // Evaluated every hooked dispatch (GetDesc is a cached-CPU-struct read): the transient pool can
+                  // recycle a pointer for a differently-formatted texture, so a pointer key would go stale.
+                  {
+                     HandoffMode mode = HandoffMode::Incompatible;
+                     D3D11_TEXTURE2D_DESC ud = {};
+                     ComPtr<ID3D11Texture2D> u2_tex;
+                     if (SUCCEEDED(res_u2->QueryInterface(__uuidof(ID3D11Texture2D), reinterpret_cast<void**>(u2_tex.put()))))
+                     {
+                        u2_tex->GetDesc(&ud);
+                        const bool dims_ok = ud.Width == out_w && ud.Height == out_h;
+                        const bool fmt_rgba16f = ud.Format == DXGI_FORMAT_R16G16B16A16_FLOAT || ud.Format == DXGI_FORMAT_R16G16B16A16_TYPELESS;
+                        const bool cs_ready =
+                           device_data.native_compute_shaders[CompileTimeStringHash("MEA SR Output Copy CS")].get() != nullptr &&
+                           device_data.native_compute_shaders[CompileTimeStringHash("MEA SR History Copy CS")].get() != nullptr;
+                        if (dims_ok && cs_ready)
+                           mode = HandoffMode::CsCopy;
+                        else if (dims_ok && fmt_rgba16f)
+                           mode = HandoffMode::DirectCopy; // copy CS unavailable — a raw copy still beats no SR at all
+                     }
+                     if (mode != gd.u2_mode || !gd.logged_u2_mode)
+                     {
+                        gd.logged_u2_mode = true;
+                        char b[192];
+                        snprintf(b, sizeof(b), "MEA SR hand-off: u2 fmt=%d %ux%u mips=%u vs SR out rgba16f %ux%u -> mode=%s",
+                           (int)ud.Format, ud.Width, ud.Height, ud.MipLevels, out_w, out_h,
+                           mode == HandoffMode::DirectCopy ? "direct-copy" : (mode == HandoffMode::CsCopy ? "cs-copy" : "INCOMPATIBLE (native TAA)"));
+                        reshade::log::message(mode == HandoffMode::Incompatible ? reshade::log::level::warning : reshade::log::level::info, b);
+                     }
+                     gd.u2_mode = mode;
+                  }
+                  if (gd.u2_mode == HandoffMode::Incompatible)
+                  {
+                     // No safe hand-off — let the native resolve run (vanilla TAA) rather than black-screen.
+                     device_data.force_reset_sr = true; // don't blend across the gap if SR later recovers
+                     return DrawOrDispatchOverrideType::None;
+                  }
+
+                  if (dof_variant)
+                  {
+                     if (original_draw_dispatch_func == nullptr)
+                     {
+                        device_data.force_reset_sr = true;
+                        return DrawOrDispatchOverrideType::None; // can't re-issue manually — let the native dispatch run itself
+                     }
+                     // Run the game's own resolve first: it writes u0 (mask) + u4/u5 (temporally filtered DOF
+                     // CoC) with native math — zero quality loss. Its u2/u3 color output is overwritten by our
+                     // SR copy below; the SR inputs (t0/t1/t3) are not mutated by it and stay bound across the
+                     // dispatch.
+                     (*original_draw_dispatch_func)();
+                     native_ran = true;
+#if DEVELOPMENT || TEST
+                     if (!gd.logged_dof_hit)
+                     {
+                        gd.logged_dof_hit = true;
+                        const uint32_t matched_cs = FirstComputeHash(original_shader_hashes);
+                        char b[160];
+                        snprintf(b, sizeof(b), "MEA: DOF-variant resolve 0x%08X — run-native-then-override (u4/u5 CoC preserved).", matched_cs);
+                        reshade::log::message(reshade::log::level::info, b);
+                     }
+#endif
+                  }
+
                   SR::SettingsData settings_data;
                   settings_data.output_width = out_w;
                   settings_data.output_height = out_h;
@@ -754,39 +906,25 @@ public: // OnMapBufferRegion is referenced from DllMain (DLL_PROCESS_DETACH unre
                   const bool res_changed = (gd.dlss_out_w != out_w || gd.dlss_out_h != out_h);
                   if (!gd.tex_dlss_output || res_changed)
                   {
+                     gd.srv_dlss_output.reset();
                      if (CreateDefaultRGBA16FTex(native_device, out_w, out_h, D3D11_BIND_SHADER_RESOURCE | D3D11_BIND_UNORDERED_ACCESS, gd.tex_dlss_output))
                      {
-                        gd.dlss_out_w = out_w;
-                        gd.dlss_out_h = out_h;
+                        if (SUCCEEDED(native_device->CreateShaderResourceView(gd.tex_dlss_output.get(), nullptr, gd.srv_dlss_output.put())))
+                        {
+                           gd.dlss_out_w = out_w;
+                           gd.dlss_out_h = out_h;
+                        }
+                        else
+                        {
+                           gd.tex_dlss_output.reset(); // keep tex+SRV atomic — the CS hand-off needs both
+                        }
                      }
                   }
-
                   if (gd.tex_dlss_output)
                   {
                      // Reset history only on genuine discontinuities, not gradual FOV changes — resetting every ramp
                      // frame starves the upscaler's accumulation; smooth FOV is left to its own history rejection.
-                     const bool reset = device_data.force_reset_sr || gd.first_dlss_frame ||
-                                        res_changed || !gd.cam_valid_this_frame;
-#if DEVELOPMENT || TEST
-                     const bool fov_jump = fabsf(gd.cam_proj_m00 - gd.prev_cam_proj_m00) > kFovEps ||
-                                           fabsf(gd.cam_proj_m11 - gd.prev_cam_proj_m11) > kFovEps;
-                     // Finding #2 validation trace: log every RESET (rising edge) with which condition fired and how
-                     // many DLAA frames elapsed since the previous reset. Trigger a fast-travel / same-FOV camera cut:
-                     // if no RESET logs across it (frames_since_reset keeps climbing) AND you see ghosting → bug real.
-                     if (reset && !gd.prev_reset)
-                     {
-                        char b[208];
-                        snprintf(b, sizeof(b), "MEA RESET f=%llu after %u frames | force=%d first=%d res=%d fovJump=%d !camValid=%d (m00 %.5f->%.5f m11 %.5f->%.5f)",
-                           (unsigned long long)cb_luma_global_settings.FrameIndex, gd.frames_since_reset,
-                           (int)device_data.force_reset_sr, (int)gd.first_dlss_frame, (int)res_changed, (int)fov_jump, (int)!gd.cam_valid_this_frame,
-                           gd.prev_cam_proj_m00, gd.cam_proj_m00, gd.prev_cam_proj_m11, gd.cam_proj_m11);
-                        reshade::log::message(reshade::log::level::info, b);
-                        gd.frames_since_reset = 0;
-                     }
-                     else if (!reset)
-                        gd.frames_since_reset++;
-                     gd.prev_reset = reset;
-#endif
+                     const bool reset = device_data.force_reset_sr || gd.first_dlss_frame || res_changed;
                      device_data.force_reset_sr = false;
 
                      SR::SuperResolutionImpl::DrawData draw_data;
@@ -802,40 +940,14 @@ public: // OnMapBufferRegion is referenced from DllMain (DLL_PROCESS_DETACH unre
                      // FSR consumes vert FOV (DLSS ignores) and HARD-ASSERTS on ≤0 → fall back to ~60° when m11==0
                      // (first SR frames, pre-capture; that frame is a reset anyway).
                      draw_data.vert_fov = gd.cam_proj_m11 > 0.f ? 2.f * atanf(1.f / gd.cam_proj_m11) : 1.047f;
-                     // Jitter changes every frame and is only refreshed on a successful camera probe. On a
-                     // capture-miss frame (cam_valid=0, which also forces reset above) feed 0 rather than the
-                     // previous frame's stale offset — the honest "no jitter info" seed for a reset frame.
-                     const bool cam_ok = gd.cam_valid_this_frame;
-                     draw_data.jitter_x = cam_ok ? (gd.jitter_flip_x ? 1.f : -1.f) * gd.cam_jitter_clip_x * 0.5f * rw : 0.f;
-                     draw_data.jitter_y = cam_ok ? (gd.jitter_flip_y ? 1.f : -1.f) * gd.cam_jitter_clip_y * 0.5f * rh : 0.f;
+                     // Jitter is guaranteed fresh here — the capture-miss case bailed to the native resolve above.
+                     draw_data.jitter_x = (gd.jitter_flip_x ? 1.f : -1.f) * gd.cam_jitter_clip_x * 0.5f * rw;
+                     draw_data.jitter_y = (gd.jitter_flip_y ? 1.f : -1.f) * gd.cam_jitter_clip_y * 0.5f * rh;
                      draw_data.frame_index = cb_luma_global_settings.FrameIndex;
                      draw_data.user_sharpness = gd.sharpness;
-                     draw_data.bias_mask = nullptr; // no reactive/bias mask — dead end for MEA (see note at top)
+                     draw_data.bias_mask = nullptr; // no usable reactivity/bias source in MEA (see note at top)
 
-#if DEVELOPMENT || TEST
-                     const auto prof_draw_t0 = std::chrono::steady_clock::now();
-#endif
-                     const bool ok = gd.dev_sim_draw_fail ? false : sr_implementations[device_data.sr_type]->Draw(sr_instance_data, native_device_context, draw_data);
-#if DEVELOPMENT || TEST
-                     {
-                        const double us = std::chrono::duration<double, std::micro>(std::chrono::steady_clock::now() - prof_draw_t0).count();
-                        gd.prof_draw_us_sum += us;
-                        if (us > gd.prof_draw_us_max)
-                           gd.prof_draw_us_max = us;
-                        if (++gd.prof_samples >= 120)
-                        {
-                           char pb[224];
-                           snprintf(pb, sizeof(pb),
-                              "MEA PROF (avg/max over %u DLAA frames): probe(CPU cam select)=%.0f/%.0f us | Draw(CPU queue)=%.0f/%.0f us",
-                              gd.prof_samples, gd.prof_probe_us_sum / gd.prof_samples, gd.prof_probe_us_max,
-                              gd.prof_draw_us_sum / gd.prof_samples, gd.prof_draw_us_max);
-                           reshade::log::message(reshade::log::level::info, pb);
-                           gd.prof_probe_us_sum = gd.prof_draw_us_sum = 0.0;
-                           gd.prof_probe_us_max = gd.prof_draw_us_max = 0.0;
-                           gd.prof_samples = 0;
-                        }
-                     }
-#endif
+                     const bool ok = sr_implementations[device_data.sr_type]->Draw(sr_instance_data, native_device_context, draw_data);
 #if DEVELOPMENT || TEST
                      if (!gd.logged_draw_result)
                      {
@@ -850,34 +962,48 @@ public: // OnMapBufferRegion is referenced from DllMain (DLL_PROCESS_DETACH unre
 #endif
                      if (ok)
                      {
-#if DEVELOPMENT || TEST
-                        // Hardening: CopySubresourceRegion(mip0) silently no-ops if u2's mip0 desc ever diverges from
-                        // our RGBA16F output (debug-layer-only error). One-time check → warn (not a hard assert: a
-                        // message box would break Frostbite input).
-                        if (!gd.logged_u2_desc)
+                        if (gd.u2_mode == HandoffMode::CsCopy && gd.srv_dlss_output)
                         {
-                           gd.logged_u2_desc = true;
-                           ComPtr<ID3D11Texture2D> u2_tex;
-                           if (SUCCEEDED(res_u2->QueryInterface(__uuidof(ID3D11Texture2D), reinterpret_cast<void**>(u2_tex.put()))))
+                           // Hand-off CS (preferred path): writes through the game's own typed UAVs (u2/u3 are
+                           // r11g11b10_float under the alternate "Buffer Format"; the typed store converts, and
+                           // writability is proven by the native resolve storing through these very views).
+                           // Both CS are guaranteed by the u2_mode gate above.
+                           auto* copy_cs = device_data.native_compute_shaders[CompileTimeStringHash("MEA SR Output Copy CS")].get();
+                           DrawStateStack<DrawStateStackType::Compute> st;
+                           st.Cache(native_device_context, device_data.uav_max_count);
+                           native_device_context->CSSetShader(copy_cs, nullptr, 0);
+                           // UAV first, then SRV (an SRV whose resource is still UAV-bound gets silently NULLed). Null the
+                           // FULL range: besides the game's own u2/u3 bindings, the SR backend (NGX/FFX doesn't restore
+                           // compute state) may have left tex_dlss_output on any UAV slot, which would silently null our
+                           // t0 SRV of it below.
+                           ID3D11UnorderedAccessView* null_uavs[D3D11_1_UAV_SLOT_COUNT] = {};
+                           native_device_context->CSSetUnorderedAccessViews(0, device_data.uav_max_count, null_uavs, nullptr);
+                           ID3D11UnorderedAccessView* uav = uav_resolved.get();
+                           native_device_context->CSSetUnorderedAccessViews(0, 1, &uav, nullptr);
+                           ID3D11ShaderResourceView* srv = gd.srv_dlss_output.get();
+                           native_device_context->CSSetShaderResources(0, 1, &srv);
+                           native_device_context->Dispatch((out_w + 7) / 8, (out_h + 7) / 8, 1);
+                           if (uav_history)
                            {
-                              D3D11_TEXTURE2D_DESC ud = {};
-                              u2_tex->GetDesc(&ud);
-                              const bool ok2 = (ud.Format == DXGI_FORMAT_R16G16B16A16_FLOAT || ud.Format == DXGI_FORMAT_R16G16B16A16_TYPELESS) && ud.Width == out_w && ud.Height == out_h;
-                              if (!ok2)
-                                 reshade::log::message(reshade::log::level::warning, "MEA: u2 desc != RGBA16F/output-res — CopySubresourceRegion(mip0) may silently no-op.");
+                              // u3 goes through the history variant: the native resolve stores history as
+                              // encoded-domain RGB x512, not linear — see copy_color_history_cs.
+                              auto* hist_cs = device_data.native_compute_shaders[CompileTimeStringHash("MEA SR History Copy CS")].get();
+                              native_device_context->CSSetShader(hist_cs, nullptr, 0);
+                              ID3D11UnorderedAccessView* uav_h = uav_history.get();
+                              native_device_context->CSSetUnorderedAccessViews(0, 1, &uav_h, nullptr);
+                              native_device_context->Dispatch((out_w + 7) / 8, (out_h + 7) / 8, 1);
                            }
+                           st.Restore(native_device_context);
                         }
-#endif
-                        // Copy mip0 via CopySubresourceRegion, NOT CopyResource (u2 can be a 12-mip bloom-source at
-                        // Motion Blur OFF; CopyResource needs identical mip count → silent fail → black).
-                        native_device_context->CopySubresourceRegion(res_u2.get(), 0, 0, 0, 0, gd.tex_dlss_output.get(), 0, nullptr);
-                        if (!gd.diag_skip_history && res_u3)
-                           native_device_context->CopySubresourceRegion(res_u3.get(), 0, 0, 0, 0, gd.tex_dlss_output.get(), 0, nullptr);
+                        else
+                        {
+                           // Copy mip0 via CopySubresourceRegion, NOT CopyResource (u2 can be a 12-mip bloom-source at
+                           // Motion Blur OFF; CopyResource needs identical mip count → silent fail → black).
+                           native_device_context->CopySubresourceRegion(res_u2.get(), 0, 0, 0, 0, gd.tex_dlss_output.get(), 0, nullptr);
+                           if (res_u3)
+                              native_device_context->CopySubresourceRegion(res_u3.get(), 0, 0, 0, 0, gd.tex_dlss_output.get(), 0, nullptr);
+                        }
 
-#if DEVELOPMENT || TEST
-                        gd.prev_cam_proj_m00 = gd.cam_proj_m00;
-                        gd.prev_cam_proj_m11 = gd.cam_proj_m11;
-#endif
                         gd.first_dlss_frame = false;
                         gd.dlss_ran_this_frame = true;
                         device_data.has_drawn_sr = true; // feeds core's SR-engaged ✓ indicator (copied to has_drawn_sr_imgui)
@@ -886,7 +1012,7 @@ public: // OnMapBufferRegion is referenced from DllMain (DLL_PROCESS_DETACH unre
                      }
                      else
                      {
-                        // Finding #3: Draw() failed → native TAA runs this frame (advances the game's own history);
+                        // Draw() failed → native TAA runs this frame (advances the game's own history);
                         // re-arm force_reset_sr so SR recovery doesn't blend across the gap → ghosting.
                         device_data.force_reset_sr = true;
 #if DEVELOPMENT || TEST
@@ -894,9 +1020,7 @@ public: // OnMapBufferRegion is referenced from DllMain (DLL_PROCESS_DETACH unre
                         {
                            gd.logged_draw_fail = true;
                            reshade::log::message(reshade::log::level::warning,
-                              gd.dev_sim_draw_fail
-                                 ? "MEA: SR Draw FAIL (DEV sim) — native TAA this frame, force_reset_sr re-armed; expect 'MEA RESET … force=1' on recovery."
-                                 : "MEA: SR Draw FAIL (real) — native TAA this frame, force_reset_sr re-armed; history resets on SR recovery.");
+                              "MEA: SR Draw FAIL — native TAA this frame, force_reset_sr re-armed; history resets on SR recovery.");
                         }
 #endif
                      }
@@ -905,7 +1029,9 @@ public: // OnMapBufferRegion is referenced from DllMain (DLL_PROCESS_DETACH unre
             }
          }
 #endif // ENABLE_SR
-       // Fall through (SR off / not ready): let the native TAA run.
+         if (native_ran)
+            return DrawOrDispatchOverrideType::Replaced; // native already issued manually — don't dispatch twice
+         // Fall through (SR off / not ready): let the native TAA run.
       }
 
       return DrawOrDispatchOverrideType::None;
@@ -921,9 +1047,9 @@ public: // OnMapBufferRegion is referenced from DllMain (DLL_PROCESS_DETACH unre
       if (enable_samplers_upgrade && !custom_texture_mip_lod_bias_offset)
       {
          // Hold s_mutex_samplers EXCLUSIVELY while writing the offset (core reads it as a std::map key under
-         // shared_lock on Frostbite worker threads — core.hpp:8072/8081 — and writes it under unique_lock —
-         // core.hpp:14068; a shared_lock here would race those). Also skip the DLSS bias while SR is suppressed
-         // (loading/menus) so we don't over-sharpen those frames.
+         // shared_lock on Frostbite worker threads and writes it under unique_lock; a shared_lock here would
+         // race those). Also skip the DLSS bias while SR is suppressed (loading/menus) so we don't over-sharpen
+         // those frames.
          std::unique_lock lock_samplers(s_mutex_samplers);
          const bool dlaa_ran = gd.dlss_ran_this_frame && !device_data.sr_suppressed; // precise: DLSS actually drew this frame
          device_data.texture_mip_lod_bias_offset = dlaa_ran
@@ -1023,17 +1149,17 @@ public: // OnMapBufferRegion is referenced from DllMain (DLL_PROCESS_DETACH unre
    // in core's "Super Resolution" section above.
    void DrawImGuiSettings(DeviceData& device_data) override
    {
-      ImGui::SeparatorText("FXAA mode");
-      if (ImGui::Checkbox("SMAA", &g_smaa_enable))
+      ImGui::SeparatorText("Anti-Aliasing");
+      if (ImGui::Checkbox("SMAA Enable", &g_smaa_enable))
          reshade::set_config_value(nullptr, NAME, "SMAAEnable", g_smaa_enable);
       if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
-         ImGui::SetTooltip("Replaces the game's FXAA with SMAA.\nOnly active when in-game Anti-Aliasing is set to FXAA.");
+         ImGui::SetTooltip("Replaces the game's FXAA with SMAA (only active when in-game Anti-Aliasing is set to FXAA).");
       ImGui::BeginDisabled(!g_smaa_enable);
-      ImGui::SliderFloat("SMAA sharpness", &g_smaa_sharpness, 0.f, 1.f); // updates live; persist on release (N2)
+      ImGui::SliderFloat("RCAS Sharpness", &g_smaa_sharpness, 0.f, 1.f); // updates live; persist on release
       if (ImGui::IsItemDeactivatedAfterEdit())
          reshade::set_config_value(nullptr, NAME, "SMAASharpness", g_smaa_sharpness);
       if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
-         ImGui::SetTooltip("RCAS sharpening applied to the SMAA output (0 = off).");
+         ImGui::SetTooltip("Sharpening applied on top of SMAA (0 = off).");
       ImGui::EndDisabled();
    }
 
@@ -1069,12 +1195,6 @@ public: // OnMapBufferRegion is referenced from DllMain (DLL_PROCESS_DETACH unre
       ImGui::SeparatorText("DLSS");
       ImGui::SliderFloat("Sharpness (inert: DoSharpening flag not set)", &d.sharpness, -1.0f, 1.0f);
       ImGui::Checkbox("Auto exposure", &d.auto_exposure);
-
-      ImGui::SeparatorText("Diagnostics");
-      ImGui::Checkbox("Skip u3 history copy", &d.diag_skip_history);
-      ImGui::Checkbox("Simulate Draw fail (#3 recovery-reset test)", &d.dev_sim_draw_fail);
-      if (ImGui::IsItemHovered())
-         ImGui::SetTooltip("Forces the SR Draw() to fail every frame → native TAA runs + force_reset_sr re-arms.\nToggle ON a few seconds, then OFF: the recovery frame logs 'MEA RESET … force=1'.");
    }
 #endif // DEVELOPMENT
 
@@ -1140,12 +1260,20 @@ BOOL APIENTRY DllMain(HMODULE hModule, DWORD ul_reason_for_call, LPVOID lpReserv
       enable_samplers_upgrade = true; // boot-time only
       samplers_upgrade_mode = 4;
 
+      // Default DLSS preset: J (Transformer v1, FP16, log-domain internals). On current DLLs "Default"
+      // resolves to L/M — Transformer v2, FP8, inferring directly in linear space — which hue-crushes
+      // MEA's 40k+ single-channel emissive peaks into green garbage frames (J/K render them clean; L is
+      // meant for Ultra Performance upscaling anyway, not DLAA). Only a boot default: the user's saved
+      // "DLSSRenderPreset" config is loaded after this and overrides it.
+      dlss_render_preset = 10; // NVSDK_NGX_DLSS_Hint_Render_Preset_J
+
       game = new MassEffectAndromeda();
    }
    else if (ul_reason_for_call == DLL_PROCESS_DETACH)
    {
-      // We registered this in OnInit; unregister so a reload doesn't double-register / dangle.
+      // We registered these in OnInit; unregister so a reload doesn't double-register / dangle.
       reshade::unregister_event<reshade::addon_event::map_buffer_region>(MassEffectAndromeda::OnMapBufferRegion);
+      reshade::unregister_event<reshade::addon_event::destroy_resource>(MassEffectAndromeda::OnDestroyResource);
    }
 
    CoreMain(hModule, ul_reason_for_call, lpReserved);
