@@ -1,0 +1,41 @@
+// ---- Created with 3Dmigoto v1.3.16 on Tue Jul 14 22:11:10 2026
+Texture2D<float4> t1 : register(t1);
+
+Texture2D<float4> t0 : register(t0);
+
+SamplerState s0_s : register(s0);
+
+cbuffer cb3 : register(b3)
+{
+  float4 cb3[1];
+}
+
+// 3Dmigoto declarations
+#define cmp -
+#include "./common.hlsl"
+
+void main(
+  float4 v0 : SV_POSITION0,
+  float2 v1 : TEXCOORD0,
+  uint v2 : SV_IsFrontFace0,
+  out float4 o0 : SV_Target0)
+{
+  float4 r0,r1;
+  uint4 bitmask, uiDest;
+  float4 fDest;
+
+  r0.xy = min(cb3[0].zw, v1.xy);
+  r1.xyz = t0.SampleLevel(s0_s, r0.xy, 0).xyz * GS.Bloom; //bloom
+  r0.xyz = t1.SampleLevel(s0_s, r0.xy, 0).xyz; //godrays
+  o0.xyz = max(r1.xyz, r0.xyz);
+  // o0.xyz = r1.xyz + r0.xyz;
+  // {
+  //   float y = GetLuminance(o0.xyz, CS_BT709);
+  //   float y1 = y;
+  //   y1 = Neutwo(y1, 0.055);
+  //   y1 *= 1.25;
+  //   o0.xyz *= DivideSafe(y1, y, 0);
+  // }
+  o0.w = 1;
+  return;
+}

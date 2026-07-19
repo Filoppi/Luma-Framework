@@ -1,0 +1,52 @@
+// ---- Created with 3Dmigoto v1.3.16 on Wed Jul 15 00:22:42 2026
+Texture2D<float4> t0 : register(t0);
+
+SamplerState s0_s : register(s0);
+
+cbuffer cb2 : register(b2)
+{
+  float4 cb2[53];
+}
+
+cbuffer cb3 : register(b3)
+{
+  float4 cb3[1];
+}
+
+cbuffer cb0 : register(b0)
+{
+  float4 cb0[26];
+}
+
+// 3Dmigoto declarations
+#define cmp -
+#include "./common.hlsl"
+
+void main(
+  float4 v0 : SV_POSITION0,
+  float4 v1 : TEXCOORD0,
+  float4 v2 : TEXCOORD1,
+  uint v3 : SV_IsFrontFace0,
+  out float4 o0 : SV_Target0)
+{
+  float4 r0;
+  uint4 bitmask, uiDest;
+  float4 fDest;
+  o0.w = 1;
+
+  r0.xy = min(cb2[22].zw, v1.zw);
+  r0.xyz = t0.Sample(s0_s, r0.xy).xyz;
+  
+  // some EV thing
+  r0.xyz = r0.xyz / cb0[25].xxx;
+  r0.w = -0.5 + cb3[0].x;
+  r0.w = 4 * r0.w;
+  r0.w = exp2(r0.w);
+  r0.xyz = r0.xyz * r0.www;
+  r0.xyz = cb0[25].xxx * r0.xyz;
+
+  // if (HDR_ENABLED) r0.xyz = HDRTonemap(r0.xyz, HDR_PEAK);
+
+  o0.xyz = r0.xyz;
+  return;
+}
