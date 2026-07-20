@@ -15,7 +15,7 @@ Texture2D<float4> SourceBuffer1 : register(t1);
 // 3Dmigoto declarations
 #define cmp -
 #include "./common.hlsl"
-#include "./Includes/RCAS.hlsl"
+// #include "./Includes/RCAS.hlsl"
 
 void main(
   float4 v0 : SV_POSITION0,

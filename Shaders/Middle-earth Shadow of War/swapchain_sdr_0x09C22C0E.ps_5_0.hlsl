@@ -5,17 +5,39 @@ cbuffer CBuffer_Data : register(b0)
   float2 TexCoordScale0 : packoffset(c0);
   float2 MaxTexCoord0 : packoffset(c0.z);
   float2 Gamma : packoffset(c1);
+  float2 RenderResolution : packoffset(c1.z);
+  float2 SwapchainResolution : packoffset(c2);
+  float2 idk1 : packoffset(c2.z);
+
+  /*
+  1
+  1
+  0.999857
+  0.999745
+
+  1
+  6.25
+  960
+  540
+
+  3840
+  2160
+  0
+  0
+  */
 }
 
 SamplerState TextureSampler_s : register(s0);
 Texture2D<float4> SourceBuffer0 : register(t0);
 Texture2D<float4> SourceBuffer1 : register(t1);
 
+Texture2D<float2> Dummy; //TODO: take in MVs for dynamic RCAS?
+
 
 // 3Dmigoto declarations
 #define cmp -
 #include "./common.hlsl"
-#include "./Includes/RCAS.hlsl"
+#include "../Includes/RCAS.hlsl"
 
 float3 GameGamma(float3 x) {
   float3 r0, r1, r2;
@@ -40,16 +62,24 @@ void main(
   uint4 bitmask, uiDest;
   float4 fDest;
 
-  // texcoords
+  // texcoords (in subnative res, color smaller top left)
   r0.xy = TexCoordScale0.xy * v1.xy;
   r0.xy = min(MaxTexCoord0.xy, r0.xy);
 
   //// GAME ////
-  float3 game = SourceBuffer0.SampleLevel(TextureSampler_s, r0.xy, 0).xyz;
-  game = max(game, 0);
 
-  #if RCAS_ENABLED == 1
-    game = RCAS(game, SourceBuffer0, TextureSampler_s, r0.xy, GS.RCAS, GamePaperWhiteNits / ITU_WhiteLevelNits);
+  #if RCAS_ENABLED == 0
+    float3 game = SourceBuffer0.SampleLevel(TextureSampler_s, r0.xy, 0).xyz;
+  #else
+    float3 game = RCAS(
+      r0.xy * RenderResolution,
+      int2(0,0),
+      int2(RenderResolution),
+      GS.RCAS,
+      SourceBuffer0,
+      Dummy,
+      GamePaperWhiteNits / ITU_WhiteLevelNits
+    ).xyz;
     game = max(game, 0);
   #endif
 
