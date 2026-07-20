@@ -285,6 +285,49 @@ namespace Website
    }
 }
 
+#if DEVELOPMENT
+namespace JitterHistory
+{
+   //list
+   static std::vector<float2> history;
+   static bool is_scan = false;
+   
+   static void OnSRDraw(float2 jitter)
+   {
+      // looped?
+      for (const auto& j : history)
+      {
+         if (j.x == jitter.x && j.y == jitter.y)
+         {
+            is_scan = false;
+            return;
+         }
+      }
+
+      // add new
+      history.push_back(jitter);
+   }
+
+   static void DrawImGuiSettings()
+   {
+      // toggle
+      ImGui::PushID("JitterHistory: Scan");
+      auto a = ImGui::Checkbox("Scan", &is_scan);
+      ImGui::PopID();
+      if (a)
+         if (is_scan)
+            history.clear();
+      
+      // list
+      ImGui::Text("Count: %d", static_cast<int>(history.size()));
+      for (const auto& jitter : history)
+      {
+         ImGui::Text("(%f, %f)", jitter.x, jitter.y);
+      }
+   }
+}
+#endif
+
 class MiddleEarthShadowOfWar final : public Game
 {
 public:
@@ -297,7 +340,8 @@ public:
    {
       // log
       message(reshade::log::level::info, "OnLoad()");
-      
+
+      // Register reading CB for jitter
       reshade::register_event<reshade::addon_event::update_buffer_region>(OnUpdateBufferRegion);
    }
 
@@ -451,6 +495,9 @@ public:
          // Jitters are in range [-1, 1].
          draw_data.jitter_x = g_jitter_x * -0.5f;
          draw_data.jitter_y = g_jitter_y * 0.5f;
+#if DEVELOPMENT
+         JitterHistory::OnSRDraw({draw_data.jitter_x, draw_data.jitter_y});
+#endif
 
          draw_data.render_width = device_data.render_resolution.x;
          draw_data.render_height = device_data.render_resolution.y;
@@ -695,6 +742,11 @@ public:
 
          ShaderDefines::UIToggleCheckmark(FIRE_RETUNED, "Enable Retuning", "Reduces fire texture clipping.");
       }
+
+#if DEVELOPMENT
+      // SECTION: Jitter History
+      if (ImGui::CollapsingHeader("(DEVELOPMENT) Jitter History")) JitterHistory::DrawImGuiSettings();
+#endif
       
       if (DEVELOPMENT) ImGui::Separator(); ////////////////////////////////////////////////////////////////////////////
    }
