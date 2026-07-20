@@ -619,11 +619,11 @@ public:
          ImGui::PopStyleColor();
          
          ImGui::PushID("Peak Brightness: WhiteClip");
-         if (ImGui::SliderFloat("Clip", &cb_luma_global_settings.GameSettings.WhiteClip, 0.f, 4.f, "%.3f"))
+         if (ImGui::SliderFloat("White Clip", &cb_luma_global_settings.GameSettings.WhiteClip, 0.f, 4.f, "%.3f"))
             reshade::set_config_value(runtime, NAME, "WhiteClip", cb_luma_global_settings.GameSettings.WhiteClip);
          ImGui::PopID();
          if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
-            ImGui::SetTooltip("Increase to make rolloff compression straighter, where the highlights becomes more clipped.");
+            ImGui::SetTooltip("Increase to make rolloff compression start later, leading highlights becoming more clipped.");
          DrawResetButton(cb_luma_global_settings.GameSettings.WhiteClip, default_luma_global_game_settings.WhiteClip, "WhiteClip", runtime);
 
          ImGui::PushID("Peak Brightness: BlowoutCorrection");
@@ -631,9 +631,11 @@ public:
             reshade::set_config_value(runtime, NAME, "BlowoutCorrection", cb_luma_global_settings.GameSettings.BlowoutCorrection);
          ImGui::PopID();
          if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
-            ImGui::SetTooltip("Correct the hues of new highlights using the results from SDR.\nToo high will look unnatural.");
+            ImGui::SetTooltip("By extending/straighting the rolloff curve to HDR, we lose the blowout originally intended by the SDR short curve.\nSo, increase to correct the hues of the new HDR highlights using the results from SDR.");
          DrawResetButton(cb_luma_global_settings.GameSettings.BlowoutCorrection, default_luma_global_game_settings.BlowoutCorrection, "BlowoutCorrection", runtime);
 
+         if (ImGui::Button("Extended Tonemap (Desmos)"))
+            Website::OpenWebsite("https://www.desmos.com/calculator/stnfdhk9t1");
       }
 
       // SECTION: SR
@@ -646,7 +648,6 @@ public:
             ImGui::PopStyleColor();
 
             ImGui::Bullet(); ImGui::SameLine(); ImGui::TextWrapped("Vanilla TAA is pending a fix.\nIt'll artefact to black for extremely bright highlights.");
-
          }
          else
          {
@@ -655,7 +656,7 @@ public:
             ImGui::PopStyleColor();
          
             ImGui::Bullet(); ImGui::SameLine(); ImGui::TextWrapped("Requires TAA!");
-            ImGui::Bullet(); ImGui::SameLine(); ImGui::TextWrapped("Unfortunately, only 100%% internal/render resolution is supported.");
+            ImGui::Bullet(); ImGui::SameLine(); ImGui::TextWrapped("Only 100%% internal/render resolution is supported.");
 
             ImGui::NewLine();
 
@@ -664,11 +665,11 @@ public:
             ImGui::PopStyleColor();
 
             ImGui::PushID("SR: copy_resource"); 
-            if (ImGui::Checkbox("Copy Resource Fix", &sr_copy_resource))
+            if (ImGui::Checkbox("Enable Fix", &sr_copy_resource))
                reshade::set_config_value(runtime, NAME, "sr_copy_resource", sr_copy_resource);
             ImGui::PopID();
             if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
-               ImGui::SetTooltip("If Bloom and other transparency are missing, enable this.");
+               ImGui::SetTooltip("For some reason (Motion Blur + Depth of Field?) bloom and other transparency effects may go missing after Super Resolution draws.\nEnable this to copy the output back to the input, somehow fixing the issue.");
             DrawResetButton(sr_copy_resource, false, "sr_copy_resource", runtime);
          }
 
@@ -694,54 +695,53 @@ public:
       if (ImGui::CollapsingHeader("Miscellaneous"))
       {
          ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.75f, 1.f, 1.f, 1.f));
-         ImGui::TextWrapped("[Various FX sliders & toggles.]");
+         ImGui::TextWrapped("[Various sliders & toggles for FXs.]");
          ImGui::PopStyleColor();
 
-         ImGui::PushID("Miscellaneous: GodRays");
-         if (ImGui::SliderFloat("GodRays", &cb_luma_global_settings.GameSettings.GodRays, 0.f, 2.f, "%.3f"))
-            reshade::set_config_value(runtime, NAME, "GodRays", cb_luma_global_settings.GameSettings.GodRays);
-         ImGui::PopID();
-         if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
-            ImGui::SetTooltip("Final god rays multiplier.");
-         DrawResetButton(cb_luma_global_settings.GameSettings.GodRays, default_luma_global_game_settings.GodRays, "GodRays", runtime);
-         
-         ImGui::PushID("Miscellaneous: Bloom");
-         if (ImGui::SliderFloat("Bloom", &cb_luma_global_settings.GameSettings.Bloom, 0.f, 2.f, "%.3f"))
-            reshade::set_config_value(runtime, NAME, "Bloom", cb_luma_global_settings.GameSettings.Bloom);
-         ImGui::PopID();
-         if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
-            ImGui::SetTooltip("Final bloom multiplier.");
-         DrawResetButton(cb_luma_global_settings.GameSettings.Bloom, default_luma_global_game_settings.Bloom, "Bloom", runtime);
-
          ImGui::PushID("Miscellaneous: RCAS");
-         if (ImGui::SliderFloat("RCAS", &cb_luma_global_settings.GameSettings.RCAS, 0.f, 1.f, "%.3f"))
+         if (ImGui::SliderFloat("Sharpening", &cb_luma_global_settings.GameSettings.RCAS, 0.f, 1.f, "%.3f"))
             reshade::set_config_value(runtime, NAME, "RCAS", cb_luma_global_settings.GameSettings.RCAS);
          ImGui::PopID();
          if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
-            ImGui::SetTooltip("Robust Contrast Adaptive Sharpening on scene color.");
+            ImGui::SetTooltip("Newly inserted Robust Contrast Adaptive Sharpening on scene color.");
          DrawResetButton(cb_luma_global_settings.GameSettings.RCAS, default_luma_global_game_settings.RCAS, "RCAS", runtime);
          ShaderDefines::Set(RCAS_ENABLED, cb_luma_global_settings.GameSettings.RCAS > 0.f); //bruh
+
+         ImGui::PushID("Miscellaneous: GodRays");
+         if (ImGui::SliderFloat("God Rays Strength", &cb_luma_global_settings.GameSettings.GodRays, 0.f, 2.f, "%.3f"))
+            reshade::set_config_value(runtime, NAME, "GodRays", cb_luma_global_settings.GameSettings.GodRays);
+         ImGui::PopID();
+         if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
+            ImGui::SetTooltip("Multiplier on God Rays results before compositing.");
+         DrawResetButton(cb_luma_global_settings.GameSettings.GodRays, default_luma_global_game_settings.GodRays, "GodRays", runtime);
+         
+         ImGui::PushID("Miscellaneous: Bloom");
+         if (ImGui::SliderFloat("Bloom Strength", &cb_luma_global_settings.GameSettings.Bloom, 0.f, 2.f, "%.3f"))
+            reshade::set_config_value(runtime, NAME, "Bloom", cb_luma_global_settings.GameSettings.Bloom);
+         ImGui::PopID();
+         if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
+            ImGui::SetTooltip("Multiplier on Bloom results before compositing.");
+         DrawResetButton(cb_luma_global_settings.GameSettings.Bloom, default_luma_global_game_settings.Bloom, "Bloom", runtime);
 
          // TODO: AO
          
          ImGui::PushID("Miscellaneous: UIToggle is_allowed");
-         ImGui::Checkbox("UI", &is_ui);
+         ImGui::Checkbox("Draw UI", &is_ui);
          if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
-            ImGui::SetTooltip("Can skip drawing the UI (everything after tonemap shader).");
+            ImGui::SetTooltip("If off all shaders after scene color gets tonemapped (UI shaders) are discarded.");
          ImGui::PopID();
       }
 
       // SECTION: Retuned Fire 
-      if (ImGui::CollapsingHeader("Retuned Fire"))
+      if (ImGui::CollapsingHeader("Fire Sprite Shaders Retuning"))
       {
          ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.75f, 1.f, 1.f, 1.f));
-         ImGui::TextWrapped("[Alleviates clipping for fire texture sprites.]");
+         ImGui::TextWrapped("[Reduce clipping for fire shaders.]");
          ImGui::PopStyleColor();
 
-         ImGui::Bullet(); ImGui::SameLine(); ImGui::TextWrapped("This changes its style, becoming more lava-ish orange.");
          ImGui::Bullet(); ImGui::SameLine(); ImGui::TextWrapped("If off, shaders will intentionally break, so just ignore the warning. Thanks!");
 
-         ShaderDefines::UIToggleCheckmark(FIRE_RETUNED, "Enable Retuning", "Reduces fire texture clipping.");
+         ShaderDefines::UIToggleCheckmark(FIRE_RETUNED, "Enable Retuning (Read Tooltips)", "\"Pick your poison...\"\n\nThe devs allowed their artists to tune the brightness curve of their fire sprites.\nHowever, they're boosted so high that the brightness -> color look up is clipped!\nIt is rather apparent for HDR, though not as much for SDR.\n\nEnabling this will reduces the clipping, but also makes them more orange.\nUnintended, but more preferable?");
       }
 
 #if DEVELOPMENT
