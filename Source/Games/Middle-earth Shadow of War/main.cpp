@@ -17,9 +17,18 @@ namespace
    const ShaderHashesList shader_hashes_photomode_exposure = {.pixel_shaders = {0xF4316866}};
    const ShaderHashesList shader_hashes_swapchain = {.pixel_shaders = {0x68EABB8D, 0x09C22C0E}};
 
+   // Hashes for new Shader Defines
+   constexpr uint32_t GAMMA_CORRECT_CUSTOM = char_ptr_crc32("GAMMA_CORRECT_CUSTOM");
+   constexpr uint32_t TEST_USER_PEAK = char_ptr_crc32("TEST_USER_PEAK");
+   constexpr uint32_t FIRE_RETUNED = char_ptr_crc32("FIRE_RETUNED");
+   constexpr uint32_t RCAS_ENABLED = char_ptr_crc32("RCAS_ENABLED");
+
    // Jitter from TAA cb
    float g_jitter_x;
    float g_jitter_y;
+
+   // A copy of device_data.sr_type
+   SR::Type sr_type_copy = SR::Type::None;
    
    bool is_ui = true; // User toggle for UI skip draw
    bool sr_copy_resource = false; // User toggle to exec CopyResource() to fix missing bloom
@@ -155,61 +164,9 @@ namespace DisplayMode
    }
 }
 
-// Constant Buffer variables, grouped here to allow easier editing.
-namespace CB
-{
-   static void OnInit()
-   {
-      // Set Defaults
-      default_luma_global_game_settings.WhiteClip = cb_luma_global_settings.GameSettings.WhiteClip = 1.;
-      default_luma_global_game_settings.BlowoutCorrection = cb_luma_global_settings.GameSettings.BlowoutCorrection = 0.3;
-      default_luma_global_game_settings.GodRays = cb_luma_global_settings.GameSettings.GodRays = 1.;
-      default_luma_global_game_settings.Bloom = cb_luma_global_settings.GameSettings.Bloom = 1.;
-      default_luma_global_game_settings.RCAS = cb_luma_global_settings.GameSettings.RCAS = 0.;
-   }
-
-   static void OnLoadConfigs(reshade::api::effect_runtime* runtime)
-   {
-      // Load configs
-      reshade::get_config_value(runtime, NAME, "WhiteClip", cb_luma_global_settings.GameSettings.WhiteClip);
-      reshade::get_config_value(runtime, NAME, "BlowoutCorrection", cb_luma_global_settings.GameSettings.BlowoutCorrection);
-      reshade::get_config_value(runtime, NAME, "GodRays", cb_luma_global_settings.GameSettings.GodRays);
-      reshade::get_config_value(runtime, NAME, "Bloom", cb_luma_global_settings.GameSettings.Bloom);
-      reshade::get_config_value(runtime, NAME, "RCAS", cb_luma_global_settings.GameSettings.RCAS);
-   }
-}
-
-// Shader Defines, with helpers to draw ImGui for them
+// Shader Defines helpers to draw ImGui
 namespace ShaderDefines
 {
-   // Hashes for new defines
-   constexpr uint32_t GAMMA_CORRECT_CUSTOM = char_ptr_crc32("GAMMA_CORRECT_CUSTOM");
-   constexpr uint32_t TEST_USER_PEAK = char_ptr_crc32("TEST_USER_PEAK");
-   constexpr uint32_t FIRE_RETUNED = char_ptr_crc32("FIRE_RETUNED");
-   constexpr uint32_t RCAS_ENABLED = char_ptr_crc32("RCAS_ENABLED");
-
-   // Append new & change defaults
-   void OnInit()
-   {
-      // New
-      static const std::vector<ShaderDefineData> game_shader_defines_data = {
-         {"GAMMA_CORRECTION_RANGE_TYPE", '0', true, !DEVELOPMENT, "0 - Full range.\n1 - 0-1 only.", 1},
-         {"TEST_USER_PEAK", '0', true, false, "Show white rectangles for peak test.", 1},
-         {"GAMMA_CORRECT_CUSTOM", '1', true, false, "Correct gamma decode, lowering shadows to match SDR.", 1},
-         {"FIRE_RETUNED", '1', true, false, "Retuned fire shader to reduce clipping.", 1},
-         {"RCAS_ENABLED", '0', true, false, "Robust Contrast Adaptive Sharpening.", 1},
-      };
-      shader_defines_data.append_range(game_shader_defines_data);
-
-      // Change defaults
-      GetShaderDefineData(POST_PROCESS_SPACE_TYPE_HASH).SetDefaultValue('1'); // linear
-      GetShaderDefineData(GAMMA_CORRECTION_TYPE_HASH).SetDefaultValue('0'); // don't use built in gamma correction
-      GetShaderDefineData(UI_DRAW_TYPE_HASH).SetDefaultValue('2'); // Direct (inverse scene brightness draws)
-
-      // Force
-      auto_recompile_defines = true;
-   }
-   
    static char InvertCharBool(char b)
    {
       return b == '0' ? '1' : '0'; 
@@ -347,11 +304,30 @@ public:
       // log
       message(reshade::log::level::info, "OnInit()");
 
-      // Shader Defines append new & change defaults
-      ShaderDefines::OnInit();
+      // Shader Defines: append new
+      static const std::vector<ShaderDefineData> game_shader_defines_data = {
+         {"GAMMA_CORRECTION_RANGE_TYPE", '0', true, !DEVELOPMENT, "0 - Full range.\n1 - 0-1 only.", 1},
+         {"TEST_USER_PEAK", '0', true, false, "Show white rectangles for peak test.", 1},
+         {"GAMMA_CORRECT_CUSTOM", '1', true, false, "Correct gamma decode, lowering shadows to match SDR.", 1},
+         {"FIRE_RETUNED", '1', true, false, "Retuned fire shader to reduce clipping.", 1},
+         {"RCAS_ENABLED", '0', true, false, "Robust Contrast Adaptive Sharpening.", 1},
+      };
+      shader_defines_data.append_range(game_shader_defines_data);
+
+      // Shader Defines: change defaults
+      GetShaderDefineData(POST_PROCESS_SPACE_TYPE_HASH).SetDefaultValue('1'); // linear
+      GetShaderDefineData(GAMMA_CORRECTION_TYPE_HASH).SetDefaultValue('0'); // don't use built in gamma correction
+      GetShaderDefineData(UI_DRAW_TYPE_HASH).SetDefaultValue('2'); // Direct (inverse scene brightness draws)
+
+      // Force
+      auto_recompile_defines = true;
 
       // CB init default values
-      CB::OnInit();
+      default_luma_global_game_settings.WhiteClip = cb_luma_global_settings.GameSettings.WhiteClip = 1.;
+      default_luma_global_game_settings.BlowoutCorrection = cb_luma_global_settings.GameSettings.BlowoutCorrection = 0.3;
+      default_luma_global_game_settings.GodRays = cb_luma_global_settings.GameSettings.GodRays = 1.;
+      default_luma_global_game_settings.Bloom = cb_luma_global_settings.GameSettings.Bloom = 1.;
+      default_luma_global_game_settings.RCAS = cb_luma_global_settings.GameSettings.RCAS = 0.;
 
       // UI Buffer Indirect Upgrades
       {
@@ -382,7 +358,10 @@ public:
 
    static bool OnUpdateBufferRegion(reshade::api::device* device, const void* data, reshade::api::resource resource, uint64_t offset, uint64_t size)
    {
-      // Find TAA jitter offset
+      // RETURN: no SR
+      if (sr_type_copy == SR::Type::None) return false;
+      
+      // Find TAA jitter
       auto native_resource = (ID3D11Resource*)resource.handle;
       ComPtr<ID3D11Buffer> buffer;
       auto hr = native_resource->QueryInterface(buffer.put());
@@ -407,8 +386,8 @@ public:
       auto& game_device_data = GetGameDeviceData(device_data);
       auto& managed_resources = game_device_data.managed_resources;
 
-      // Motion Vectors
-      if (original_shader_hashes.Contains(shader_hashes_linearize_depth_and_generate_mvs))
+      // Depth & Motion Vectors (SR)
+      if (device_data.sr_type != SR::Type::None && original_shader_hashes.Contains(shader_hashes_linearize_depth_and_generate_mvs))
       {
          // Take depth
          ComPtr<ID3D11ShaderResourceView> srv;
@@ -417,76 +396,74 @@ public:
          return DrawOrDispatchOverrideType::None;
       }
 
-      // TAA
-      if (original_shader_hashes.Contains(shader_hashes_TAA))
+      // TODO AO
+
+      // TAA (SR)
+      if (device_data.sr_type != SR::Type::None && original_shader_hashes.Contains(shader_hashes_TAA))
       {
-         if (device_data.sr_type != SR::Type::None)
-         {
-            // DLSS requires an immediate context for execution!
-            ASSERT_ONCE(native_device_context->GetType() == D3D11_DEVICE_CONTEXT_IMMEDIATE);
+         // DLSS requires an immediate context for execution!
+         ASSERT_ONCE(native_device_context->GetType() == D3D11_DEVICE_CONTEXT_IMMEDIATE);
 
-            // Settings
-            auto* sr_instance_data = device_data.GetSRInstanceData();
-            ASSERT_ONCE(sr_instance_data);
+         // Settings
+         auto* sr_instance_data = device_data.GetSRInstanceData();
+         ASSERT_ONCE(sr_instance_data);
 
-            SR::SettingsData settings_data;
-            settings_data.output_width = device_data.output_resolution.x;
-            settings_data.output_height = device_data.output_resolution.y;
-            settings_data.render_width = device_data.render_resolution.x;
-            settings_data.render_height = device_data.render_resolution.y;
-            settings_data.dynamic_resolution = false;
-            settings_data.hdr = true;
-            settings_data.inverted_depth = true;
-            settings_data.mvs_jittered = false;
+         SR::SettingsData settings_data;
+         settings_data.output_width = device_data.output_resolution.x;
+         settings_data.output_height = device_data.output_resolution.y;
+         settings_data.render_width = device_data.render_resolution.x;
+         settings_data.render_height = device_data.render_resolution.y;
+         settings_data.dynamic_resolution = false;
+         settings_data.hdr = true;
+         settings_data.inverted_depth = true;
+         settings_data.mvs_jittered = false;
 
-            // MVs are in UV space so we need to scale them to screen space for DLSS.
-            settings_data.mvs_x_scale = -device_data.render_resolution.x;
-            settings_data.mvs_y_scale = -device_data.render_resolution.y;
+         // MVs are in UV space so we need to scale them to screen space for DLSS.
+         settings_data.mvs_x_scale = -device_data.render_resolution.x;
+         settings_data.mvs_y_scale = -device_data.render_resolution.y;
 
-            settings_data.render_preset = dlss_render_preset;
-            settings_data.auto_exposure = true;
+         settings_data.render_preset = dlss_render_preset;
+         settings_data.auto_exposure = true;
 
-            sr_implementations[device_data.sr_type]->UpdateSettings(sr_instance_data, native_device_context, settings_data);
+         sr_implementations[device_data.sr_type]->UpdateSettings(sr_instance_data, native_device_context, settings_data);
 
-            // Get resources
-            std::array<ID3D11ShaderResourceView*, 2> srvs;
-            native_device_context->PSGetShaderResources(0, srvs.size(), srvs.data());
+         // Get resources
+         std::array<ID3D11ShaderResourceView*, 2> srvs;
+         native_device_context->PSGetShaderResources(0, srvs.size(), srvs.data());
 
-            ComPtr<ID3D11Resource> resource_mvs;
-            srvs[0]->GetResource(resource_mvs.put());
-            ComPtr<ID3D11Resource> resource_scene;
-            srvs[1]->GetResource(resource_scene.put());
+         ComPtr<ID3D11Resource> resource_mvs;
+         srvs[0]->GetResource(resource_mvs.put());
+         ComPtr<ID3D11Resource> resource_scene;
+         srvs[1]->GetResource(resource_scene.put());
 
-            ComPtr<ID3D11RenderTargetView> rtv;
-            native_device_context->OMGetRenderTargets(1, rtv.put(), nullptr);
-            ComPtr<ID3D11Resource> resource_rt;
-            rtv->GetResource(resource_rt.put());
+         ComPtr<ID3D11RenderTargetView> rtv;
+         native_device_context->OMGetRenderTargets(1, rtv.put(), nullptr);
+         ComPtr<ID3D11Resource> resource_rt;
+         rtv->GetResource(resource_rt.put());
 
-            SR::SuperResolutionImpl::DrawData draw_data;
-            draw_data.source_color = resource_scene.get();
-            draw_data.output_color = resource_rt.get();
-            draw_data.motion_vectors = resource_mvs.get();
-            draw_data.depth_buffer = managed_resources.resources["depth"_h].get();
+         SR::SuperResolutionImpl::DrawData draw_data;
+         draw_data.source_color = resource_scene.get();
+         draw_data.output_color = resource_rt.get();
+         draw_data.motion_vectors = resource_mvs.get();
+         draw_data.depth_buffer = managed_resources.resources["depth"_h].get();
 
-            // Jitters are in range [-1, 1].
-            draw_data.jitter_x = g_jitter_x * -0.5f;
-            draw_data.jitter_y = g_jitter_y * 0.5f;
+         // Jitters are in range [-1, 1].
+         draw_data.jitter_x = g_jitter_x * -0.5f;
+         draw_data.jitter_y = g_jitter_y * 0.5f;
 
-            draw_data.render_width = device_data.render_resolution.x;
-            draw_data.render_height = device_data.render_resolution.y;
+         draw_data.render_width = device_data.render_resolution.x;
+         draw_data.render_height = device_data.render_resolution.y;
 
-            // DRAW
-            device_data.has_drawn_sr = sr_implementations[device_data.sr_type]->Draw(sr_instance_data, native_device_context, draw_data);
+         // DRAW
+         device_data.has_drawn_sr = sr_implementations[device_data.sr_type]->Draw(sr_instance_data, native_device_context, draw_data);
 
-            // Copy back to input, fixing missing transparency FXs.
-            if (sr_copy_resource) native_device_context->CopyResource(resource_scene.get(), resource_rt.get());
+         // Copy back to input, fixing missing transparency FXs.
+         if (sr_copy_resource) native_device_context->CopyResource(resource_scene.get(), resource_rt.get());
 
-            // Reset pointers
-            ResetCOMArray(srvs);
+         // Reset pointers
+         ResetCOMArray(srvs);
 
-            return DrawOrDispatchOverrideType::Replaced;
-         }
-         return DrawOrDispatchOverrideType::None;
+         return DrawOrDispatchOverrideType::Replaced;
       }
 
       // Tonemap
@@ -516,11 +493,12 @@ public:
    {
       auto& game_device_data = GetGameDeviceData(device_data);
 
-      // game_device_data reset state tracking
+      // game_device_data reset pipeline state tracking
       game_device_data.ResetDrawnState();
 
       // force_reset_sr
       if (!device_data.has_drawn_sr) device_data.force_reset_sr = true;
+      sr_type_copy = device_data.sr_type;
 
       // texture_mip_lod_bias_offset
       if (!custom_texture_mip_lod_bias_offset)
@@ -543,7 +521,11 @@ public:
       reshade::api::effect_runtime* runtime = nullptr;
       
       // CB load user
-      CB::OnLoadConfigs(runtime);
+      reshade::get_config_value(runtime, NAME, "WhiteClip", cb_luma_global_settings.GameSettings.WhiteClip);
+      reshade::get_config_value(runtime, NAME, "BlowoutCorrection", cb_luma_global_settings.GameSettings.BlowoutCorrection);
+      reshade::get_config_value(runtime, NAME, "GodRays", cb_luma_global_settings.GameSettings.GodRays);
+      reshade::get_config_value(runtime, NAME, "Bloom", cb_luma_global_settings.GameSettings.Bloom);
+      reshade::get_config_value(runtime, NAME, "RCAS", cb_luma_global_settings.GameSettings.RCAS);
 
       // SRUser
       reshade::get_config_value(runtime, NAME, "sr_copy_resource", sr_copy_resource);
@@ -564,7 +546,7 @@ public:
          ImGui::TextWrapped("[Windows' gamma decode in HDR is weaker than in SDR, causing washed out shadows.]");
          ImGui::PopStyleColor();
          
-         ShaderDefines::UIToggleCheckmark(ShaderDefines::GAMMA_CORRECT_CUSTOM, "Enable Correction", "sRGB -> 2.2");
+         ShaderDefines::UIToggleCheckmark(GAMMA_CORRECT_CUSTOM, "Enable Correction", "sRGB -> 2.2");
          
          if (ImGui::Button("Further Explanation & Test (Google Slides)"))
             Website::OpenWebsite("https://docs.google.com/presentation/d/e/2PACX-1vSXeLHlbm6repcS7fels1-SXYGRmzziRrnuJ8nDO8J5rsWV3dT1-nVyCKp0Tj_stwx-9qlCI-N6rYIT/pub?start=false&loop=false&slide=id.g3e007eafba8_0_0");
@@ -578,7 +560,7 @@ public:
          ImGui::PopStyleColor();
          
          ImGui::Bullet(); ImGui::SameLine(); ImGui::TextWrapped("(Use default Luma sliders above.)");
-         ShaderDefines::UIToggleCheckmark(ShaderDefines::TEST_USER_PEAK, "Test Pattern (Read Tooltip)", "3 rectangles inside a big one.\n- Left should disappear.\n- Middle should be barely visible.\n- Right should be easy to see.");
+         ShaderDefines::UIToggleCheckmark(TEST_USER_PEAK, "Test Pattern (Read Tooltip)", "3 rectangles inside a big one.\n- Left should disappear.\n- Middle should be barely visible.\n- Right should be easy to see.");
 
          ImGui::NewLine();
 
@@ -687,7 +669,7 @@ public:
          if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
             ImGui::SetTooltip("Robust Contrast Adaptive Sharpening on scene color.");
          DrawResetButton(cb_luma_global_settings.GameSettings.RCAS, default_luma_global_game_settings.RCAS, "RCAS", runtime);
-         ShaderDefines::Set(ShaderDefines::RCAS_ENABLED, cb_luma_global_settings.GameSettings.RCAS > 0.f); //bruh
+         ShaderDefines::Set(RCAS_ENABLED, cb_luma_global_settings.GameSettings.RCAS > 0.f); //bruh
 
          // TODO: AO
          
@@ -708,7 +690,7 @@ public:
          ImGui::Bullet(); ImGui::SameLine(); ImGui::TextWrapped("This changes its style, becoming more lava-ish orange.");
          ImGui::Bullet(); ImGui::SameLine(); ImGui::TextWrapped("If off, shaders will intentionally break, so just ignore the warning. Thanks!");
 
-         ShaderDefines::UIToggleCheckmark(ShaderDefines::FIRE_RETUNED, "Enable Retuning", "Reduces fire texture clipping.");
+         ShaderDefines::UIToggleCheckmark(FIRE_RETUNED, "Enable Retuning", "Reduces fire texture clipping.");
       }
       
       if (DEVELOPMENT) ImGui::Separator(); ////////////////////////////////////////////////////////////////////////////
@@ -727,7 +709,7 @@ public:
    void OnDisplayModeChanged()
    {
       // FORCED: Gamma Correct
-      ShaderDefines::Set(ShaderDefines::GAMMA_CORRECT_CUSTOM, DisplayMode::IsHDR());
+      ShaderDefines::Set(GAMMA_CORRECT_CUSTOM, DisplayMode::IsHDR());
    }
 };
 
