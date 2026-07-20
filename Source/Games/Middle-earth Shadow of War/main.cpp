@@ -605,21 +605,21 @@ public:
       }
 
       // SECTION: SR
-      ImGui::PushID("Super Resolution Header Tab"); //conflicts if not pushed
-      bool show_sr_settings = ImGui::CollapsingHeader("Super Resolution");
-      ImGui::PopID();
-      if (show_sr_settings)
+      if (ImGui::CollapsingHeader("Temporal Anti-Aliasing"))
       {
          if (device_data.sr_type == SR::Type::None)
          {
-            ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.5f, 0.5f, 0.5f, 1.f));
-            ImGui::TextWrapped("Inactive...");
+            ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.75f * 0.5, 1.f * 0.5, 1.f * 0.5, 1.f));
+            ImGui::TextWrapped("[Super Resolution: Disabled]");
             ImGui::PopStyleColor();
+
+            ImGui::Bullet(); ImGui::SameLine(); ImGui::TextWrapped("Vanilla TAA is pending a fix.\nIt'll artefact to black for extremely bright highlights.");
+
          }
          else
          {
             ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.75f, 1.f, 1.f, 1.f));
-            ImGui::TextWrapped("[In-game Graphics Settings]");
+            ImGui::TextWrapped("[Super Resolution: Enabled]");
             ImGui::PopStyleColor();
          
             ImGui::Bullet(); ImGui::SameLine(); ImGui::TextWrapped("Requires TAA!");
@@ -628,7 +628,7 @@ public:
             ImGui::NewLine();
 
             ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.75f, 1.f, 1.f, 1.f));
-            ImGui::TextWrapped("[Bloom & Other FX Missing Fix]");
+            ImGui::TextWrapped("[Super Resolution: Bloom & Transparency Missing Fix]");
             ImGui::PopStyleColor();
 
             ImGui::PushID("SR: copy_resource"); 
@@ -654,7 +654,7 @@ public:
          }
          ImGui::PopID();
          if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
-            ImGui::SetTooltip("Upgrade texture samplers to retain detail at a distance. Unnoticeable?\nMay change more than just texture detail.\nWill costs some performance.");
+            ImGui::SetTooltip("Upgrade texture samplers to retain detail at a distance, though unnoticeable?\nMay change more than just texture detail.\nWill costs some performance.");
          DrawResetButton(sr_user_allow_upgraded_samplers, false, "sr_user_allow_upgraded_samplers", runtime);
       }
 
