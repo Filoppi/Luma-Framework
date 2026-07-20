@@ -594,7 +594,7 @@ public:
       {
          if (device_data.sr_type == SR::Type::None)
          {
-            ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.75f * 0.5, 1.f * 0.5, 1.f * 0.5, 1.f));
+            ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.75f, 0.75f, 0.75f, 1.f));
             ImGui::TextWrapped("[Super Resolution: Disabled]");
             ImGui::PopStyleColor();
 
