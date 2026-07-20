@@ -697,6 +697,7 @@ public:
          ImGui::TextWrapped("[Various FX sliders & toggles.]");
          ImGui::PopStyleColor();
 
+         ImGui::PushID("Miscellaneous: GodRays");
          if (ImGui::SliderFloat("GodRays", &cb_luma_global_settings.GameSettings.GodRays, 0.f, 2.f, "%.3f"))
             reshade::set_config_value(runtime, NAME, "GodRays", cb_luma_global_settings.GameSettings.GodRays);
          ImGui::PopID();
