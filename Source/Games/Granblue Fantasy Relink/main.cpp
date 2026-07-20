@@ -1437,8 +1437,14 @@ BOOL APIENTRY DllMain(HMODULE hModule, DWORD ul_reason_for_call, LPVOID lpReserv
       shader_hashes_Bloom.pixel_shaders.emplace(std::stoul("1C5F92B9", nullptr, 16));
       shader_hashes_UIBackgroundDownscale.pixel_shaders.emplace(std::stoul("C4013554", nullptr, 16));
 
-      swapchain_format_upgrade_type = TextureFormatUpgradesType::AllowedEnabled;
-      swapchain_upgrade_type = SwapchainUpgradeType::scRGB;
+      // Keep the game's native R8G8B8A8_UNORM SDR back buffer unchanged so
+      // third-party overlays are not rendered as gamma-encoded colors into a linear scRGB target.
+      swapchain_format_upgrade_type = TextureFormatUpgradesType::None;
+      swapchain_upgrade_type = SwapchainUpgradeType::None;
+
+      // The shared display-composition shader outputs linear scRGB and currently only supports
+      // R16G16B16A16_FLOAT/R10G10B10A2_UNORM targets, so do not run it on the native UNORM buffer.
+      force_disable_display_composition = true;
       texture_format_upgrades_type = TextureFormatUpgradesType::AllowedEnabled;
 
       texture_upgrade_formats = {
