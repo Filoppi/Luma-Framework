@@ -2,6 +2,8 @@
 
 #define ENABLE_NGX 1
 
+#define DISABLE_AUTO_DEBUGGER 1
+
 #include "..\..\Core\core.hpp"
 
 // TODO: Fix this globaly? Define NOMINMAX before including windows.h.
