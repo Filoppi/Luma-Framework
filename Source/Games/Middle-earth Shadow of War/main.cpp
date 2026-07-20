@@ -4,8 +4,13 @@
 
 #include "..\..\Core\core.hpp"
 
+// TODO: Fix this globaly? Define NOMINMAX before including windows.h.
+#undef min
+#undef max
+
 namespace
 {
+   // Shader Hashes
    const ShaderHashesList shader_hashes_linearize_depth_and_generate_mvs = {.compute_shaders = {0x0E095BB1}};
    const ShaderHashesList shader_hashes_TAA = {.pixel_shaders = {0x8D06D556}};
    const ShaderHashesList shader_hashes_tonemap = {.pixel_shaders = {0xA4592384, 0xFD32C367}};
@@ -15,34 +20,18 @@ namespace
    // Jitter from TAA cb
    float g_jitter_x;
    float g_jitter_y;
-
-   // User toggle for UI
-   bool is_ui = true;
-
-   // Various settings for SR related
-   namespace SRUser
-   {
-      static bool copy_resource_def = false; 
-      static bool copy_resource = copy_resource_def;
-
-      static bool allow_upgraded_samplers_def = false; 
-      static bool allow_upgraded_samplers = allow_upgraded_samplers_def;
-
-      static void OnLoadConfigs(reshade::api::effect_runtime* runtime)
-      {
-         reshade::get_config_value(runtime, NAME, "copy_resource", copy_resource);
-         reshade::get_config_value(runtime, NAME, "allow_upgraded_samplers", allow_upgraded_samplers);
-         ignore_upgraded_samplers = !allow_upgraded_samplers;
-      }
-   }
+   
+   bool is_ui = true; // User toggle for UI skip draw
+   bool sr_copy_resource = false; // User toggle to exec CopyResource() to fix missing bloom
+   bool sr_user_allow_upgraded_samplers = false; // Let user control ignore_upgraded_samplers
 }
 
 struct GameDeviceDataMiddleEarthShadowOfWar final : GameDeviceData
 {
    bool drawn_tonemap = false;
    bool drawn_swapchain = false;
-
-   void OnPresent()
+   
+   void ResetDrawnState()
    {
       drawn_tonemap = false;
       drawn_swapchain = false;
@@ -56,7 +45,7 @@ namespace DisplayMode
    static bool is_first = true;
    constexpr auto flag_file = "Luma_AlwaysHDRLaunch";
    
-   // Stolen from core
+   // Change to HDR and set brightness settings //TODO: Make ChangeDisplayMode() publicly available from core.hpp
    void ChangeDisplayModeHDR(reshade::api::effect_runtime* runtime, bool enable_hdr_on_display = true, IDXGISwapChain3* swapchain = nullptr)
    {
       DisplayModeType display_mode = DisplayModeType::HDR;
@@ -103,7 +92,8 @@ namespace DisplayMode
          }
       }
    };
-   
+
+   // Forces user to launch in SDR mode for proper HDR upgrades.
    static void OnInitSwapchain(reshade::api::swapchain* swapchain)
    {
       // gatekeep: is_first
@@ -165,6 +155,7 @@ namespace DisplayMode
    }
 }
 
+// Constant Buffer variables, grouped here to allow easier editing.
 namespace CB
 {
    static void OnInit()
@@ -188,14 +179,16 @@ namespace CB
    }
 }
 
-// Helpers to change Shader Defines by UI
-namespace ShaderDefineInfo
+// Shader Defines, with helpers to draw ImGui for them
+namespace ShaderDefines
 {
+   // Hashes for new defines
    constexpr uint32_t GAMMA_CORRECT_CUSTOM = char_ptr_crc32("GAMMA_CORRECT_CUSTOM");
    constexpr uint32_t TEST_USER_PEAK = char_ptr_crc32("TEST_USER_PEAK");
    constexpr uint32_t FIRE_RETUNED = char_ptr_crc32("FIRE_RETUNED");
    constexpr uint32_t RCAS_ENABLED = char_ptr_crc32("RCAS_ENABLED");
 
+   // Append new & change defaults
    void OnInit()
    {
       // New
@@ -354,10 +347,10 @@ public:
       // log
       message(reshade::log::level::info, "OnInit()");
 
-      // Shader Defines
-      ShaderDefineInfo::OnInit();
+      // Shader Defines append new & change defaults
+      ShaderDefines::OnInit();
 
-      // CB
+      // CB init default values
       CB::OnInit();
 
       // UI Buffer Indirect Upgrades
@@ -373,14 +366,17 @@ public:
          auto_texture_format_upgrade_shader_hashes[0xFD32C367] = std::pair{std::vector<uint8_t>{0}, std::vector<uint8_t>()}; // tonemap SDR
       }
 
-      // cb
+      // cb inject indices
       luma_settings_cbuffer_index = 13;
       luma_data_cbuffer_index = 12;
    }
 
    void OnInitSwapchain(reshade::api::swapchain* swapchain)
    {
-      // DisplayMode
+      // log
+      message(reshade::log::level::info, "OnInitSwapchain()");
+      
+      // DisplayMode force restart into SDR mode
       DisplayMode::OnInitSwapchain(swapchain);
    }
 
@@ -483,7 +479,7 @@ public:
             device_data.has_drawn_sr = sr_implementations[device_data.sr_type]->Draw(sr_instance_data, native_device_context, draw_data);
 
             // Copy back to input, fixing missing transparency FXs.
-            if (SRUser::copy_resource) native_device_context->CopyResource(resource_scene.get(), resource_rt.get());
+            if (sr_copy_resource) native_device_context->CopyResource(resource_scene.get(), resource_rt.get());
 
             // Reset pointers
             ResetCOMArray(srvs);
@@ -520,11 +516,8 @@ public:
    {
       auto& game_device_data = GetGameDeviceData(device_data);
 
-      // game_device_data
-      game_device_data.OnPresent();
-
-      // // DetectPhotoMode
-      // DetectPhotoMode::OnPresent();
+      // game_device_data reset state tracking
+      game_device_data.ResetDrawnState();
 
       // force_reset_sr
       if (!device_data.has_drawn_sr) device_data.force_reset_sr = true;
@@ -533,7 +526,7 @@ public:
       if (!custom_texture_mip_lod_bias_offset)
       {
          std::shared_lock shared_lock_samplers(s_mutex_samplers);
-         if (device_data.sr_type != SR::Type::None && !device_data.sr_suppressed && !SRUser::allow_upgraded_samplers)
+         if (device_data.sr_type != SR::Type::None && !device_data.sr_suppressed && !sr_user_allow_upgraded_samplers)
          {
             device_data.texture_mip_lod_bias_offset = SR::GetMipLODBias(device_data.render_resolution.y, device_data.output_resolution.y); // This results in -1 at output res
          }
@@ -549,11 +542,13 @@ public:
       message(reshade::log::level::info, "LoadConfigs()");
       reshade::api::effect_runtime* runtime = nullptr;
       
-      // CB
+      // CB load user
       CB::OnLoadConfigs(runtime);
 
       // SRUser
-      SRUser::OnLoadConfigs(runtime);
+      reshade::get_config_value(runtime, NAME, "sr_copy_resource", sr_copy_resource);
+      reshade::get_config_value(runtime, NAME, "sr_user_allow_upgraded_samplers", sr_user_allow_upgraded_samplers);
+      ignore_upgraded_samplers = !sr_user_allow_upgraded_samplers;
    }
 
    void DrawImGuiSettings(DeviceData& device_data) override
@@ -569,7 +564,7 @@ public:
          ImGui::TextWrapped("[Windows' gamma decode in HDR is weaker than in SDR, causing washed out shadows.]");
          ImGui::PopStyleColor();
          
-         ShaderDefineInfo::UIToggleCheckmark(ShaderDefineInfo::GAMMA_CORRECT_CUSTOM, "Enable Correction", "sRGB -> 2.2");
+         ShaderDefines::UIToggleCheckmark(ShaderDefines::GAMMA_CORRECT_CUSTOM, "Enable Correction", "sRGB -> 2.2");
          
          if (ImGui::Button("Further Explanation & Test (Google Slides)"))
             Website::OpenWebsite("https://docs.google.com/presentation/d/e/2PACX-1vSXeLHlbm6repcS7fels1-SXYGRmzziRrnuJ8nDO8J5rsWV3dT1-nVyCKp0Tj_stwx-9qlCI-N6rYIT/pub?start=false&loop=false&slide=id.g3e007eafba8_0_0");
@@ -583,7 +578,7 @@ public:
          ImGui::PopStyleColor();
          
          ImGui::Bullet(); ImGui::SameLine(); ImGui::TextWrapped("(Use default Luma sliders above.)");
-         ShaderDefineInfo::UIToggleCheckmark(ShaderDefineInfo::TEST_USER_PEAK, "Test Pattern (Read Tooltip)", "3 rectangles inside a big one.\n- Left should disappear.\n- Middle should be barely visible.\n- Right should be easy to see.");
+         ShaderDefines::UIToggleCheckmark(ShaderDefines::TEST_USER_PEAK, "Test Pattern (Read Tooltip)", "3 rectangles inside a big one.\n- Left should disappear.\n- Middle should be barely visible.\n- Right should be easy to see.");
 
          ImGui::NewLine();
 
@@ -637,12 +632,12 @@ public:
             ImGui::PopStyleColor();
 
             ImGui::PushID("SR: copy_resource"); 
-            if (ImGui::Checkbox("Copy Resource Fix", &SRUser::copy_resource))
-               reshade::set_config_value(runtime, NAME, "copy_resource", SRUser::copy_resource);
+            if (ImGui::Checkbox("Copy Resource Fix", &sr_copy_resource))
+               reshade::set_config_value(runtime, NAME, "sr_copy_resource", sr_copy_resource);
             ImGui::PopID();
             if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
                ImGui::SetTooltip("If Bloom and other transparency are missing, enable this.");
-            DrawResetButton(SRUser::copy_resource, SRUser::copy_resource_def, "copy_resource", runtime);
+            DrawResetButton(sr_copy_resource, false, "sr_copy_resource", runtime);
          }
 
          ImGui::NewLine();
@@ -651,16 +646,16 @@ public:
          ImGui::TextWrapped("[Higher Quality Textures Sampling]");
          ImGui::PopStyleColor();
 
-         ImGui::PushID("SR: allow_upgraded_samplers"); 
-         if (ImGui::Checkbox("Allow Sampler Upgrades (Read Tooltip)", &SRUser::allow_upgraded_samplers))
+         ImGui::PushID("SR: sr_user_allow_upgraded_samplers"); 
+         if (ImGui::Checkbox("Allow Sampler Upgrades (Read Tooltip)", &sr_user_allow_upgraded_samplers))
          {
-            reshade::set_config_value(runtime, NAME, "allow_upgraded_samplers", SRUser::allow_upgraded_samplers);
-            ignore_upgraded_samplers = !SRUser::allow_upgraded_samplers;
+            reshade::set_config_value(runtime, NAME, "sr_user_allow_upgraded_samplers", sr_user_allow_upgraded_samplers);
+            ignore_upgraded_samplers = !sr_user_allow_upgraded_samplers;
          }
          ImGui::PopID();
          if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
             ImGui::SetTooltip("Upgrade texture samplers to retain detail at a distance. Unnoticeable?\nMay change more than just texture detail.\nWill costs some performance.");
-         DrawResetButton(SRUser::allow_upgraded_samplers, SRUser::allow_upgraded_samplers_def, "allow_upgraded_samplers", runtime);
+         DrawResetButton(sr_user_allow_upgraded_samplers, false, "sr_user_allow_upgraded_samplers", runtime);
       }
 
       // SECTION: Miscellaneous
@@ -692,7 +687,7 @@ public:
          if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
             ImGui::SetTooltip("Robust Contrast Adaptive Sharpening on scene color.");
          DrawResetButton(cb_luma_global_settings.GameSettings.RCAS, default_luma_global_game_settings.RCAS, "RCAS", runtime);
-         ShaderDefineInfo::Set(ShaderDefineInfo::RCAS_ENABLED, cb_luma_global_settings.GameSettings.RCAS > 0.f); //bruh
+         ShaderDefines::Set(ShaderDefines::RCAS_ENABLED, cb_luma_global_settings.GameSettings.RCAS > 0.f); //bruh
 
          // TODO: AO
          
@@ -713,7 +708,7 @@ public:
          ImGui::Bullet(); ImGui::SameLine(); ImGui::TextWrapped("This changes its style, becoming more lava-ish orange.");
          ImGui::Bullet(); ImGui::SameLine(); ImGui::TextWrapped("If off, shaders will intentionally break, so just ignore the warning. Thanks!");
 
-         ShaderDefineInfo::UIToggleCheckmark(ShaderDefineInfo::FIRE_RETUNED, "Enable Retuning", "Reduces fire texture clipping.");
+         ShaderDefines::UIToggleCheckmark(ShaderDefines::FIRE_RETUNED, "Enable Retuning", "Reduces fire texture clipping.");
       }
       
       if (DEVELOPMENT) ImGui::Separator(); ////////////////////////////////////////////////////////////////////////////
@@ -732,7 +727,7 @@ public:
    void OnDisplayModeChanged()
    {
       // FORCED: Gamma Correct
-      ShaderDefineInfo::Set(ShaderDefineInfo::GAMMA_CORRECT_CUSTOM, DisplayMode::IsHDR());
+      ShaderDefines::Set(ShaderDefines::GAMMA_CORRECT_CUSTOM, DisplayMode::IsHDR());
    }
 };
 
