@@ -306,7 +306,6 @@ public:
 
       // Shader Defines: append new
       static const std::vector<ShaderDefineData> game_shader_defines_data = {
-         {"GAMMA_CORRECTION_RANGE_TYPE", '0', true, !DEVELOPMENT, "0 - Full range.\n1 - 0-1 only.", 1},
          {"TEST_USER_PEAK", '0', true, false, "Show white rectangles for peak test.", 1},
          {"GAMMA_CORRECT_CUSTOM", '1', true, false, "Correct gamma decode, lowering shadows to match SDR.", 1},
          {"FIRE_RETUNED", '1', true, false, "Retuned fire shader to reduce clipping.", 1},
@@ -498,13 +497,15 @@ public:
 
       // force_reset_sr
       if (!device_data.has_drawn_sr) device_data.force_reset_sr = true;
+
+      // save to sr_type_copy
       sr_type_copy = device_data.sr_type;
 
       // texture_mip_lod_bias_offset
       if (!custom_texture_mip_lod_bias_offset)
       {
          std::shared_lock shared_lock_samplers(s_mutex_samplers);
-         if (device_data.sr_type != SR::Type::None && !device_data.sr_suppressed && !sr_user_allow_upgraded_samplers)
+         if (device_data.sr_type != SR::Type::None && !device_data.sr_suppressed && !ignore_upgraded_samplers)
          {
             device_data.texture_mip_lod_bias_offset = SR::GetMipLODBias(device_data.render_resolution.y, device_data.output_resolution.y); // This results in -1 at output res
          }
