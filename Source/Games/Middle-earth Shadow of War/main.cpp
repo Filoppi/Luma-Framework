@@ -33,9 +33,12 @@ namespace
 
    // A copy of device_data.sr_type
    SR::Type sr_type_copy = SR::Type::None;
+
+   // User toggle for UI skip draw
+   bool is_ui = true; 
    
-   bool is_ui = true; // User toggle for UI skip draw
-   bool sr_user_allow_upgraded_samplers = true; // Let user control ignore_upgraded_samplers
+   bool sr_copy_resource = false; // Bloom missing fix by copying output back to input.
+   bool sr_user_allow_upgraded_samplers = true; // Let user control ignore_upgraded_samplers.
    float sr_user_mip_bias_offset = 0.f; // Let user control mip bias offset, where 0 is SR recommended.
 }
 
@@ -520,7 +523,10 @@ public:
          // DRAW
          device_data.has_drawn_sr = sr_implementations[device_data.sr_type]->Draw(sr_instance_data, native_device_context, draw_data);
 
-         return DrawOrDispatchOverrideType::Replaced;
+         // For missing bloom and other transparent FXs... somehow
+         if (device_data.has_drawn_sr && sr_copy_resource) native_device_context->CopyResource(draw_data.source_color, draw_data.output_color);
+
+         return device_data.has_drawn_sr ? DrawOrDispatchOverrideType::Replaced : DrawOrDispatchOverrideType::None;
       }
 
       // Tonemap
@@ -585,9 +591,11 @@ public:
       reshade::get_config_value(runtime, NAME, "Bloom", cb_luma_global_settings.GameSettings.Bloom);
       reshade::get_config_value(runtime, NAME, "RCAS", cb_luma_global_settings.GameSettings.RCAS);
 
-      // SRUser
+      // SR User settings
+      reshade::get_config_value(runtime, NAME, "sr_copy_resource", sr_copy_resource);
       reshade::get_config_value(runtime, NAME, "sr_user_allow_upgraded_samplers", sr_user_allow_upgraded_samplers);
       ignore_upgraded_samplers = !sr_user_allow_upgraded_samplers;
+      reshade::get_config_value(runtime, NAME, "sr_user_mip_bias_offset", sr_user_mip_bias_offset);
    }
 
    void DrawImGuiSettings(DeviceData& device_data) override
@@ -668,6 +676,20 @@ public:
             if (ImGui::Button("Force Reset")) device_data.force_reset_sr = true;
             if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
                ImGui::SetTooltip("Force clearing of history so that aggregation begins anew.");
+            
+            ImGui::NewLine();
+
+            ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.75f, 1.f, 1.f, 1.f));
+            ImGui::TextWrapped("[Super Resolution: Bloom & Transparency Missing Fix]");
+            ImGui::PopStyleColor();
+
+            ImGui::PushID("SR: copy_resource"); 
+            if (ImGui::Checkbox("Enable Fix", &sr_copy_resource))
+               reshade::set_config_value(runtime, NAME, "sr_copy_resource", sr_copy_resource);
+            ImGui::PopID();
+            if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
+               ImGui::SetTooltip("For some reason (Motion Blur + Depth of Field?) bloom and other transparency effects may go missing after Super Resolution draws.\nEnable this to copy the output back to the input, somehow fixing the issue.");
+            DrawResetButton(sr_copy_resource, false, "sr_copy_resource", runtime);
          }
 
          ImGui::NewLine();
