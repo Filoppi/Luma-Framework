@@ -316,10 +316,10 @@ namespace Website
 namespace JitterHistory
 {
    //list
-   static std::vector<float2> history;
+   static std::vector<float4> history;
    static bool is_scan = false;
    
-   static void OnSRDraw(float2 jitter)
+   static void AddNewToHistory(float2 jitter, float2 jitter_raw)
    {
       // looped?
       for (const auto& j : history)
@@ -332,7 +332,7 @@ namespace JitterHistory
       }
 
       // add new
-      history.push_back(jitter);
+      history.push_back(float4{jitter.x, jitter.y, jitter_raw.x, jitter_raw.y});
    }
 
    static void DrawImGuiSettings()
@@ -347,9 +347,10 @@ namespace JitterHistory
       
       // list
       ImGui::Text("Count: %d", static_cast<int>(history.size()));
+      ImGui::Text("(Effective) | (Raw from CB)", static_cast<int>(history.size()));
       for (const auto& jitter : history)
       {
-         ImGui::Text("(%f, %f)", jitter.x, jitter.y);
+         ImGui::Text("(%f, %f) | (%f, %f)", jitter.x, jitter.y, jitter.z, jitter.w);
       }
    }
 }
@@ -543,7 +544,7 @@ public:
          draw_data.jitter_x = g_jitter_x * -0.5f;
          draw_data.jitter_y = g_jitter_y * 0.5f;
 #if DEVELOPMENT
-         JitterHistory::OnSRDraw({draw_data.jitter_x, draw_data.jitter_y});
+         JitterHistory::AddNewToHistory({draw_data.jitter_x, draw_data.jitter_y}, {g_jitter_x, g_jitter_y});
 #endif
 
          // DrawData: resolution
