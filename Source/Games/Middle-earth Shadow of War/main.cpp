@@ -664,7 +664,6 @@ public:
          
             ImGui::Bullet(); ImGui::SameLine(); ImGui::TextWrapped("Requires TAA!");
             ImGui::Bullet(); ImGui::SameLine(); ImGui::TextWrapped("Only 100%% internal/render resolution is supported.");
-            ImGui::Bullet(); ImGui::SameLine(); ImGui::TextWrapped("In Photo Mode, there is no motion vector data. Expect smearing.");
             
             if (ImGui::Button("Force Reset")) device_data.force_reset_sr = true;
             if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
