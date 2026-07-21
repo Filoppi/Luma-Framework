@@ -35,7 +35,8 @@ namespace
    SR::Type sr_type_copy = SR::Type::None;
    
    bool is_ui = true; // User toggle for UI skip draw
-   bool sr_user_allow_upgraded_samplers = false; // Let user control ignore_upgraded_samplers
+   bool sr_user_allow_upgraded_samplers = true; // Let user control ignore_upgraded_samplers
+   float sr_user_mip_bias_offset = 0.f; // Let user control mip bias offset, where 0 is SR recommended.
 }
 
 struct GameDeviceDataMiddleEarthShadowOfWar final : GameDeviceData
@@ -562,14 +563,11 @@ public:
       if (!custom_texture_mip_lod_bias_offset)
       {
          std::shared_lock shared_lock_samplers(s_mutex_samplers);
+         
          if (device_data.sr_type != SR::Type::None && !device_data.sr_suppressed && !ignore_upgraded_samplers)
-         {
-            device_data.texture_mip_lod_bias_offset = SR::GetMipLODBias(device_data.render_resolution.y, device_data.output_resolution.y); // This results in -1 at output res
-         }
+            device_data.texture_mip_lod_bias_offset = sr_user_mip_bias_offset < 0 ? sr_user_mip_bias_offset : SR::GetMipLODBias(device_data.render_resolution.y, device_data.output_resolution.y);
          else
-         {
             device_data.texture_mip_lod_bias_offset = 0.0f;
-         }
       }
    }
 
@@ -680,15 +678,26 @@ public:
          ImGui::PopStyleColor();
 
          ImGui::PushID("SR: sr_user_allow_upgraded_samplers"); 
-         if (ImGui::Checkbox("Allow Sampler Upgrades (Read Tooltip)", &sr_user_allow_upgraded_samplers))
+         if (ImGui::Checkbox("Allow Sampler Upgrades", &sr_user_allow_upgraded_samplers))
          {
             reshade::set_config_value(runtime, NAME, "sr_user_allow_upgraded_samplers", sr_user_allow_upgraded_samplers);
             ignore_upgraded_samplers = !sr_user_allow_upgraded_samplers;
          }
          ImGui::PopID();
          if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
-            ImGui::SetTooltip("Upgrade texture samplers to retain detail at a distance, though unnoticeable?\nMay change more than just texture detail.\nWill costs some performance.");
-         DrawResetButton(sr_user_allow_upgraded_samplers, false, "sr_user_allow_upgraded_samplers", runtime);
+            ImGui::SetTooltip("Upgrade texture samplers to retain detail at a distance\nMay change more than just texture detail.\nMay also cost some performance.");
+         DrawResetButton(sr_user_allow_upgraded_samplers, true, "sr_user_allow_upgraded_samplers", runtime);
+
+         //sr_user_mip_bias_offset slider
+         if (ignore_upgraded_samplers) ImGui::BeginDisabled();
+         ImGui::PushID("SR: sr_user_mip_bias_offset");
+         if (ImGui::SliderFloat("Mip LOD Bias Offset", &sr_user_mip_bias_offset, 0.f, -10.f, "%.3f"))
+            reshade::set_config_value(runtime, NAME, "sr_user_mip_bias_offset", sr_user_mip_bias_offset);
+         ImGui::PopID();
+         if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
+            ImGui::SetTooltip("Negative bias offset increases texture detail at a distance.\n\nSet 0 for Super Resolution recommendation.\nOtherwise, you can override.");
+         if (ignore_upgraded_samplers) ImGui::EndDisabled();
+         ImGui::Bullet(); ImGui::SameLine(); ImGui::TextWrapped("Effective: %.3f", device_data.texture_mip_lod_bias_offset);
       }
 
       // SECTION: Miscellaneous
