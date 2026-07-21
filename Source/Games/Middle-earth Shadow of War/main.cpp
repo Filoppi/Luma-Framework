@@ -638,7 +638,7 @@ public:
             reshade::set_config_value(runtime, NAME, "BlowoutCorrection", cb_luma_global_settings.GameSettings.BlowoutCorrection);
          ImGui::PopID();
          if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
-            ImGui::SetTooltip("By extending/straighting the rolloff curve to HDR, we lose the blowout originally intended by the SDR short curve.\nSo, increase to correct the hues of the new HDR highlights using the results from SDR.");
+            ImGui::SetTooltip("By extending/straighting the rolloff curve to HDR, we lose the blowout originally intended by the SDR low curve.\nSo, increase to correct the hues of the new HDR highlights using the results from SDR.");
          DrawResetButton(cb_luma_global_settings.GameSettings.BlowoutCorrection, default_luma_global_game_settings.BlowoutCorrection, "BlowoutCorrection", runtime);
 
          if (ImGui::Button("Extended Tonemap (Desmos)"))
