@@ -57,12 +57,6 @@ float3 ClampByMaxChannel(float3 x, float p) {
   if (m > p) x *= p / m;
   return x;
 }
-float DivideSafe(float numerator, float denominator, float defaultValue) {
-  return denominator != 0.0f ? numerator / denominator : defaultValue;
-}
-float3 DivideSafe(float3 numerator, float3 denominator, float3 defaultValue) {
-  return denominator != 0.0f ? numerator / denominator : defaultValue;
-}
 bool FloatEquals(float a, float b, float epsilon) {
   return abs(a - b) <= epsilon;
 }
@@ -177,110 +171,9 @@ float Neupow(float x, float peak, float clip, float power) {
   float denominator_pow = xx * ((cc - pp)) + (cc * pp);
   return numerator / pow(denominator_pow, rcp(power));
 }
-/////////////////////////////////////////////////////////////////////////////////////////
-float ReinhardSimple(float x, float peak = 1.0)
-{
-  return x / ((abs(x) / peak) + 1.0);
-}
-float3 ReinhardSimple(float3 x, float peak = 1.0)
-{
-  return x / ((abs(x) / peak) + 1.0);
-}
-float ReinhardExtended(float color, float white_max = 1000.f / 203.f, float peak = 1.f) {
-  return ReinhardSimple(color, peak) * (1.f + (peak * color) / (white_max * white_max));
-}
-float3 ReinhardExtended(float3 color, float white_max = 1000.f / 203.f, float peak = 1.f) {
-  return ReinhardSimple(color, peak) * (1.f + (peak * color) / (white_max * white_max));
-}
-float ComputeReinhardScale(float channel_max = 1.f, float channel_min = 0.f, float gray_in = MidGray, float gray_out = MidGray) {
-  return (channel_max * (channel_min * gray_out + channel_min - gray_out))
-        / (gray_in * (gray_out - channel_max));
-}
-float3 ReinhardPiecewise(float3 x, float x_max = 1.f, float shoulder = 0.18f) {
-    const float x_min = 0.f;
-    float exposure = ComputeReinhardScale(x_max, x_min, shoulder, shoulder);
-    float3 tonemapped = mad(x, exposure, x_min) / mad(x, exposure / x_max, 1.f - x_min);
-    return lerp(x, tonemapped, step(shoulder, x));
-}
-float ReinhardPiecewise(float x, float x_max = 1.f, float shoulder = 0.18f) {
-    const float x_min = 0.f;
-    float exposure = ComputeReinhardScale(x_max, x_min, shoulder, shoulder);
-    float tonemapped = mad(x, exposure, x_min) / mad(x, exposure / x_max, 1.f - x_min);
-    return lerp(x, tonemapped, step(shoulder, x));
-}
-////////////////////////////////////////////////////////////////////////////////////////
-/// Piecewise linear + exponential compression to a target value starting from a specified number.
-/// https://www.ea.com/frostbite/news/high-dynamic-range-color-grading-and-display-in-frostbite
-#define EXPONENTIALROLLOFF_GENERATOR(T)                                                 \
-  T ExponentialRollOff(T input, float rolloff_start = 0.20f, float output_max = 1.0f) { \
-    T rolloff_size = output_max - rolloff_start;                                        \
-    T overage = -max((T)0, input - rolloff_start);                                      \
-    T rolloff_value = (T)1.0f - exp(overage / rolloff_size);                            \
-    T new_overage = mad(rolloff_size, rolloff_value, overage);                          \
-    return input + new_overage;                                                         \
-  }
-#define EXPONENTIALROLLOFF_CLIP_GENERATOR(T)                                         \
-  T ExponentialRollOff(T input, float rolloff_start, float output_max, float clip) { \
-    T rolloff_size = output_max - rolloff_start;                                     \
-    T overage = -max((T)0, input - rolloff_start);                                   \
-    T clip_size = rolloff_start - clip;                                              \
-    T rolloff_value = (T)1.0f - exp(overage / rolloff_size);                         \
-    T clip_value = (T)1.0f - exp(clip_size / rolloff_size);                          \
-    T new_overage = mad(rolloff_size, rolloff_value / clip_value, overage);          \
-    return input + new_overage;                                                      \
-  }
-EXPONENTIALROLLOFF_GENERATOR(float)
-EXPONENTIALROLLOFF_GENERATOR(float3)
-EXPONENTIALROLLOFF_CLIP_GENERATOR(float)
-EXPONENTIALROLLOFF_CLIP_GENERATOR(float3)
-#undef EXPONENTIALROLLOFF_GENERATOR
-#undef EXPONENTIALROLLOFF_CLIP_GENERATOR
-//////////////////////////////////////////////////////////////////////////////////////
-// Uchimura 2018, "Practical HDR and Wide Color Techniques in Gran Turismo SPORT"
-// https://www.desmos.com/calculator/gslcdxvipg
-// http://cdn2.gran-turismo.com/data/www/pdi_publications/PracticalHDRandWCGinGTS.pdf
-#define GTTONEMAP_GENERATOR(T)                \
-  T GTTonemap(T x,                            \
-              float P = 1.f,                  \
-              float a = 1.f,                  \
-              float m = 0.22f,                \
-              float l = 0.4f,                 \
-              float c = 1.33f,                \
-              float b = 0.f) {                \
-    float l0 = ((P - m) * l) / a;             \
-    float L0 = m - (m / a);                   \
-    float L1 = m + (1.0f - m) / a;            \
-                                              \
-    T S0 = m + l0;                            \
-    T S1 = m + a * l0;                        \
-    T C2 = (a * P) / (P - S1);                \
-    T CP = -C2 / P;                           \
-                                              \
-    T w0 = 1.0f - smoothstep(0.0f, m, x);     \
-    T w2 = step(m + l0, x);                   \
-    T w1 = 1.0f - w0 - w2;                    \
-                                              \
-    T T_ = m * pow(x / m, c) + b;             \
-    T S_ = P - (P - S1) * exp(CP * (x - S0)); \
-    T L_ = m + a * (x - m);                   \
-                                              \
-    return T_ * w0 + L_ * w1 + S_ * w2;       \
-  }
-GTTONEMAP_GENERATOR(float)
-GTTONEMAP_GENERATOR(float3)
-#undef GTTONEMAP_GENERATOR
-float3 GTTonemapToe(float3 x, float m = 100/203, float c = 1.027) {
-  m = max(m, 0.0001f);
-  float3 w0 = 1.0f - smoothstep(0.0f, m, x);
-  float3 T_ = m * pow(x / m, c);
-  return T_ * w0 + x * (1.0f - w0);
-}
 ////////////////////////////////////////////////////////////////////////////////////////
 float3 HDRTonemap(float3 x, float peak, float start = 0.18) {
   x = Neupow(x, peak, 1 * GS.WhiteClip);
-  // x = ExponentialRollOff(x, start, peak);
-  // x = ReinhardExtended(x, 10, peak);
-  // x = ReinhardPiecewise(x, peak, start);
   return x;
 }
 ////////////////////////////////////////////////////////////////////////////////////////

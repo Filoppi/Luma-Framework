@@ -47,7 +47,7 @@ void main(
 
   r0.xy = t0.Sample(s0_s, w1.xy).xy;
   r1.xyzw = t3.Sample(s0_s, w1.xy).xyzw;
-  o0 = r1; return;// debug
+  // o0 = r1; return;// debug
   
   r0.z = dot(r0.xy, r0.xy);
   r0.z = sqrt(r0.z);

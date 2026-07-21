@@ -36,17 +36,17 @@ void main(
 
   r0.xy = min(cb2[22].zw, v1.zw);
   r0.xyz = t0.Sample(s0_s, r0.xy).xyz;
+
+  r0.xyz = r0.xyz / cb0[25].xxx; //useless for HDR
   
-  // some EV thing
-  r0.xyz = r0.xyz / cb0[25].xxx;
+  // convert slider 0-1 to exposure multiplier
   r0.w = -0.5 + cb3[0].x;
   r0.w = 4 * r0.w;
   r0.w = exp2(r0.w);
   r0.xyz = r0.xyz * r0.www;
-  r0.xyz = cb0[25].xxx * r0.xyz;
 
-  // if (HDR_ENABLED) r0.xyz = HDRTonemap(r0.xyz, HDR_PEAK);
-
+  r0.xyz = cb0[25].xxx * r0.xyz; //useless for HDR
+  
   o0.xyz = r0.xyz;
   return;
 }

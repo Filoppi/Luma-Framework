@@ -39,7 +39,7 @@ Texture2D<float2> Dummy; //TODO: take in MVs for dynamic RCAS?
 #include "./common.hlsl"
 #include "../Includes/RCAS.hlsl"
 
-float3 GameGamma(float3 x) {
+float3 InGameGammaSlider(float3 x) {
   float3 r0, r1, r2;
   r0.xyz = x;
   r0.xyz = log2(r0.xyz);
@@ -85,11 +85,11 @@ void main(
 
   if (!HDR_ENABLED)
   {
-    game = sRGB_Decode(game); //decode gamma slider
+    game = gamma_sRGB_to_linear(game); //decode gamma slider
   } else {
     #if GAMMA_CORRECT_CUSTOM == 1
-      game.xyz = sRGB_Encode(game.xyz);
-      game.xyz = game.xyz < 1 ? pow(game.xyz, 2.2) : sRGB_Decode(game.xyz);
+      game.xyz = linear_to_sRGB_gamma(game.xyz);
+      game.xyz = game.xyz < 1 ? pow(game.xyz, 2.2) : gamma_sRGB_to_linear(game.xyz);
     #endif
 
     game *= HDR_INTSCALING;
@@ -101,22 +101,22 @@ void main(
   ui.w = min(ui.w, 1);
 
   float3 uiBack = ui.xyz;
-  ui.xyz = sRGB_Decode(ui.xyz);
+  ui.xyz = gamma_sRGB_to_linear(ui.xyz);
 
   if (HDR_ENABLED) {
     #if GAMMA_CORRECT_CUSTOM == 1
       ui.xyz = ui.xyz < 1 ? pow(uiBack, 2.2) : ui.xyz;
     #endif
   } else {
-    ui.xyz = GameGamma(ui.xyz);
-    ui.xyz = sRGB_Decode(ui.xyz);
+    ui.xyz = InGameGammaSlider(ui.xyz);
+    ui.xyz = gamma_sRGB_to_linear(ui.xyz);
   }
 
   //// COMBINE ////
-  ui.xyz = sRGB_Encode(ui.xyz); // TODO: or 2.2? prob doesnt matter
-  game = sRGB_Encode(game);
+  ui.xyz = linear_to_sRGB_gamma(ui.xyz); // TODO: or 2.2? prob doesnt matter
+  game = linear_to_sRGB_gamma(game);
   float3 x = game * (1 - ui.w) + ui.xyz; //in gamma space
-  x = sRGB_Decode(x);
+  x = gamma_sRGB_to_linear(x);
   if (HDR_ENABLED) x = min(HDR_PEAK * HDR_INTSCALING, x); //peak clamp
 
   //// TEST_USER_PEAK ////

@@ -39,10 +39,10 @@ void main(
   uint4 bitmask, uiDest;
   float4 fDest;
 
-  o0.xyzw = t1.Sample(s0_s, w1.xy).xyzw;
-  return;
-
-  discard;
+//   o0.xyzw = t1.Sample(s0_s, w1.xy).xyzw;
+//   return;
+// 
+//   discard;
 
   r0.yz = -cb0[32].wz + w1.xy;
   r1.xy = cb0[32].zw + w1.xy;
@@ -95,9 +95,6 @@ void main(
   r9.y = r4.x;
   r3.xyzw = r1.zzzz ? r9.xyzw : r3.xyzw;
   r4.xyzw = t1.Sample(s0_s, w1.xy).xyzw;
-      // o0 = r4; r4.w = 10; return;
-
-
 
   r1.z = cmp(r3.y < 10000000);
   if (r1.z != 0) {

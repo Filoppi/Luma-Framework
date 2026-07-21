@@ -53,8 +53,8 @@ void main(
 //   game = max(game, 0);
 // 
 //   #if GAMMA_CORRECT_CUSTOM == 1
-//     game.xyz = sRGB_Encode(game.xyz);
-//     game.xyz = game.xyz < 1 ? pow(game.xyz, 2.2) : sRGB_Decode(game.xyz);
+//     game.xyz = linear_to_sRGB_gamma(game.xyz);
+//     game.xyz = game.xyz < 1 ? pow(game.xyz, 2.2) : gamma_sRGB_to_linear(game.xyz);
 //   #endif
 // 
 //   game *= HDR_INTSCALING;
@@ -64,9 +64,9 @@ void main(
 //   ui.w = saturate(ui.w);
 //   ui.w = pow(ui.w, 2.2);
 //   #if GAMMA_CORRECT_CUSTOM == 0
-//     ui.xyz = sRGB_Decode(ui.xyz);
+//     ui.xyz = gamma_sRGB_to_linear(ui.xyz);
 //   #else
-//     ui.xyz = ui.xyz < 1 ? pow(ui.xyz, 2.2) : sRGB_Decode(ui.xyz);
+//     ui.xyz = ui.xyz < 1 ? pow(ui.xyz, 2.2) : gamma_sRGB_to_linear(ui.xyz);
 //   #endif
 //   ui = max(ui, 0);
 // 

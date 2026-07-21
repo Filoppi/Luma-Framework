@@ -41,11 +41,11 @@ float3 RenoDX_Contrast(float3 x, float contrast, float mid_gray = 0.18f) {
 // https://www.desmos.com/calculator/stnfdhk9t1
 float Rolloff(float x, float contrast, float invPeak, float invExposure) {
   x = pow(x, contrast);
-  return DivideSafe(x, x * invPeak + invExposure, 0);
+  return safeDivision(x, x * invPeak + invExposure, 0);
 }
 float3 Rolloff(float3 x, float contrast, float invPeak, float invExposure) {
   x = pow(x, contrast);
-  return DivideSafe(x, x * invPeak + invExposure, 0);
+  return safeDivision(x, x * invPeak + invExposure, 0);
 }
 
 float RolloffLocalMax(float contrast, float invPeak, float invExposure) {
@@ -235,7 +235,7 @@ void main(
 //   r2.xyz = cmp(r0.xyz < float3(0.00313080009,0.00313080009,0.00313080009));
 //   r0.xyz = float3(12.9200001,12.9200001,12.9200001) * r0.xyz;
 //   r0.xyz = r2.xyz ? r0.xyz : r1.xyz;
-//   // o0.xyz = sRGB_Encode(r0.xyz);
+//   // o0.xyz = linear_to_sRGB_gamma(r0.xyz);
 // 
 //   o0.xyz = r0.xyz;
 //   o0.w = 1;

@@ -44,10 +44,10 @@ void main(
   // Scale to scene paper white 
   if (HDR_ENABLED) {
     o0.xyz = saturate(o0.xyz); // original unorm clamp
-    o0.xyz = sRGB_Decode(o0.xyz);
+    o0.xyz = gamma_sRGB_to_linear(o0.xyz);
     // o0.xyz = pow(o0.xyz, 2.2);
     o0.xyz *= HDR_INTSCALING;
-    o0.xyz = sRGB_Encode(o0.xyz);
+    o0.xyz = linear_to_sRGB_gamma(o0.xyz);
   }
   return;
 }

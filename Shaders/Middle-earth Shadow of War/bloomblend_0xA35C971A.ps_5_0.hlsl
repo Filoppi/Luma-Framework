@@ -28,14 +28,6 @@ void main(
   r1.xyz = t0.SampleLevel(s0_s, r0.xy, 0).xyz * GS.Bloom; //bloom
   r0.xyz = t1.SampleLevel(s0_s, r0.xy, 0).xyz; //godrays
   o0.xyz = max(r1.xyz, r0.xyz);
-  // o0.xyz = r1.xyz + r0.xyz;
-  // {
-  //   float y = GetLuminance(o0.xyz, CS_BT709);
-  //   float y1 = y;
-  //   y1 = Neutwo(y1, 0.055);
-  //   y1 *= 1.25;
-  //   o0.xyz *= DivideSafe(y1, y, 0);
-  // }
   o0.w = 1;
   return;
 }

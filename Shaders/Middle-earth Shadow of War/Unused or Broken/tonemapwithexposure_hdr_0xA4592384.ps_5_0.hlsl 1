@@ -37,16 +37,16 @@ float3 PerceptualLerp(float3 colorA, float3 colorB, float alpha, float gamma = 2
 }
 
 // https://www.desmos.com/calculator/stnfdhk9t1
-float Rolloff(float x, float invPeak, float invExposure) {return DivideSafe(x, x * invPeak + invExposure, 0);}
-float3 Rolloff(float3 x, float invPeak, float invExposure) {return DivideSafe(x, x * invPeak + invExposure, 0);}
+float Rolloff(float x, float invPeak, float invExposure) {return safeDivision(x, x * invPeak + invExposure, 0);}
+float3 Rolloff(float3 x, float invPeak, float invExposure) {return safeDivision(x, x * invPeak + invExposure, 0);}
 
 float RolloffComplete(float x, float contrast, float invPeak, float invExposure) {
   x = pow(x, contrast);
-  return DivideSafe(x, x * invPeak + invExposure, 0);
+  return safeDivision(x, x * invPeak + invExposure, 0);
 }
 float3 RolloffComplete(float3 x, float contrast, float invPeak, float invExposure) {
   x = pow(x, contrast);
-  return DivideSafe(x, x * invPeak + invExposure, 0);
+  return safeDivision(x, x * invPeak + invExposure, 0);
 }
 
 void main(
@@ -106,7 +106,7 @@ void main(
 //     r0.xyz *= (80.f / 500.f);
 //   #else
 //     // replacement
-//     r0.xyz *= DivideSafe(1, r1.x, 0) * (80.f / 500.f);
+//     r0.xyz *= safeDivision(1, r1.x, 0) * (80.f / 500.f);
 //     // r0.xyz *= (Rolloff(0.18, max(r0.w, 0.0), r1.x) / 0.18) * (80.f / 500.f);
 //     r0.xyz = Neupow(r0.xyz, HDR_PEAK, 2 * GS.WhiteClip);
 //   #endif
@@ -115,7 +115,7 @@ void main(
 //   // r0.w = t1.Load(1).x; //useless
 //   r1.x = t1.Load(2).x;
 //   r0.xyz = pow(r0.xyz, cb3[0].x);
-//   r0.xyz *= DivideSafe(1, r1.x, 0);
+//   r0.xyz *= safeDivision(1, r1.x, 0);
 //   r0.xyz = pow(r0.xyz, 1/cb3[0].x);
 //   {
 //     float3 o = r0.xyz;
@@ -133,7 +133,7 @@ void main(
   // pow and Reinhard
   // r0.w = t1.Load(1).x; //useless
   r1.x = t1.Load(2).x;
-  r0.xyz *= DivideSafe(1, pow(r1.x, 0.6), 0);
+  r0.xyz *= safeDivision(1, pow(r1.x, 0.6), 0);
   r0.xyz = pow(r0.xyz, pow(cb3[0].x, 0.6));
   r0.xyz *= (80.f / 500.f);
   r0.xyz = HDRTonemap(r0.xyz, HDR_PEAK);
