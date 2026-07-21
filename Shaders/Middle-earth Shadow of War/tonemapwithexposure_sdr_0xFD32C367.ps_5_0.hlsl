@@ -20,24 +20,6 @@ cbuffer cb3 : register(b3)
 #include "./common.hlsl"
 #include "../Includes/ColorGradingLUT.hlsl"
 
-float3 PerceptualLerp(float3 colorA, float3 colorB, float alpha, float gamma = 2.2)
-{
-	float luminanceA = GetLuminance(colorA.rgb);
-	float luminanceB = GetLuminance(colorB.rgb);
-	float gammaLuminanceA = pow(max(luminanceA, 0.f), 1.0 / gamma); // Linear->Gamma
-	float gammaLuminanceB = pow(max(luminanceB, 0.f), 1.0 / gamma); // Linear->Gamma
-	float targetLuminance = pow(lerp(gammaLuminanceA, gammaLuminanceB, alpha), gamma); // Blend in gamma space
-
-	float3 colorLerped = lerp(colorA, colorB, alpha);
-	float sourceLuminance = GetLuminance(colorLerped.rgb);
-	if (sourceLuminance != 0.f) colorLerped.rgb *= max(targetLuminance / sourceLuminance, 0.f); // If any of the two luminance is negative, clip to black
-	return colorLerped;
-}
-
-float3 RenoDX_Contrast(float3 x, float contrast, float mid_gray = 0.18f) {
-  return pow(max(0, x / mid_gray), contrast) * mid_gray;
-}
-
 // https://www.desmos.com/calculator/stnfdhk9t1
 float Rolloff(float x, float contrast, float invPeak, float invExposure) {
   x = pow(x, contrast);
@@ -57,22 +39,31 @@ float RolloffLocalMax(float contrast, float invPeak, float invExposure) {
 float RolloffSlope(float x, float contrast, float invPeak, float invExposure) {
   return (invExposure * contrast * pow(x, contrast - 1)) / pow((invPeak * pow(x, contrast) + invExposure), 2); //1st derivative @ x
 }
-float3 RolloffExt(float3 x, float contrast, float invPeak, float invExposure) {
+float3 RolloffSDRAndHDR(float3 x, float contrast, float invPeak, float invExposure) {
   float3 xBack = x;
 
+  // sdr
+  float3 sdr = Rolloff(x, contrast, invPeak, invExposure);
+  if (!HDR_ENABLED) return sdr;
+
   // extend
-  float thres = RolloffLocalMax(contrast, invPeak, invExposure);
-  float3 lower = Rolloff(x, contrast, invPeak, invExposure);
-  float3 higher = RolloffSlope(max(thres, 0.000001), contrast, invPeak, invExposure) * (x - thres) + Rolloff(thres, contrast, invPeak, invExposure);
-  x = x < thres ? lower : higher;
+  float thres;
+  if (invPeak >= 0) { 
+    thres = RolloffLocalMax(contrast, invPeak, invExposure);
+    thres = max(thres, 0.000001); //just in case of undef
+  } else {
+    thres = 1; // local max is unsolvable, so fallback 1
+  }
+  float3 higher = RolloffSlope(thres, contrast, invPeak, invExposure) * (x - thres) + Rolloff(thres, contrast, invPeak, invExposure);
+
+  x = x < thres ? sdr : higher;
 
   // HDR per channel
   x = Neupow(x, HDR_PEAK, 2.2 * GS.WhiteClip);
-  // x = ExponentialRollOff(x, thres, HDR_PEAK, 100 / GS.WhiteClip);
 
   // correct HDR perchannel;
   {
-    float3 sdr = lower;
+    sdr = Neupow(sdr, 2.2, 3.3); // essentially an upgraded saturate(), really only useful for invPeak < 0
     sdr = UCS_Encode(sdr);
     x = UCS_Encode(x);
     x = RestoreHueAndChrominanceUcs(x, sdr, GS.BlowoutCorrection, 0, 0);
@@ -111,11 +102,7 @@ void main(
   float contrast = cb3[0].x;
   float invPeak = t1.Load(1).x; //aka white clip
   float invExposure = t1.Load(2).x;
-  if (HDR_ENABLED) {
-    r0.xyz = RolloffExt(r0.xyz, contrast, invPeak, invExposure);
-  } else {
-    r0.xyz = Rolloff(r0.xyz, contrast, invPeak, invExposure);
-  }
+  r0.xyz = RolloffSDRAndHDR(r0.xyz, contrast, invPeak, invExposure);
 
   // r0.xyz = t1.Load(1).x - DVS1; //debug identify invPeak
   // r0.xyz = t1.Load(2).x - DVS1; //debug identify invExposure
@@ -128,8 +115,7 @@ void main(
   r0.xyz = r0.xyz / r0.www; //to 1
   
   r0.xyz = pow(r0.xyz, cb3[0].y); //global saturation
-  // only use white path in SDR! this is also disabled in original HDR
-  if (!HDR_ENABLED) { 
+  if (!HDR_ENABLED) { //only use white path in SDR! this is also disabled in original HDR
     r1.xyz = float3(1,1,1) + -r0.xyz; //SDR centric
     r1.w = -cb3[0].w * cb3[1].x + r0.w;
     r1.w = max(0, r1.w);
@@ -143,7 +129,7 @@ void main(
   r0.xyz = max(float3(0,0,0), r0.xyz);
   if (!HDR_ENABLED) r0.xyz = min(cb3[1].xxx, r0.xyz);
 
-  // Modded sRGB Encode
+  // modified sRGB Encode
   if (!HDR_ENABLED) {
     r0.xyz = log2(r0.xyz);
     r0.xyz = cb3[1].yyy * r0.xyz; //user settings
