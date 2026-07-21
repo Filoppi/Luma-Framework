@@ -14,7 +14,9 @@ namespace
 {
    // Shader Hashes
    const ShaderHashesList shader_hashes_linearize_depth_and_generate_mvs = {.compute_shaders = {0x0E095BB1}};
-   const ShaderHashesList shader_hashes_TAA = {.pixel_shaders = {0x8D06D556}};
+   constexpr uint32_t shader_hash_TAA = 0x8D06D556;
+   constexpr uint32_t shader_hash_TAA_no_velocity = 0x75F11673;
+   const ShaderHashesList shader_hashes_TAA = {.pixel_shaders = {shader_hash_TAA, shader_hash_TAA_no_velocity}};
    const ShaderHashesList shader_hashes_tonemap = {.pixel_shaders = {0xA4592384, 0xFD32C367}};
    const ShaderHashesList shader_hashes_photomode_exposure = {.pixel_shaders = {0xF4316866}};
    const ShaderHashesList shader_hashes_swapchain = {.pixel_shaders = {0x68EABB8D, 0x09C22C0E}};
@@ -33,7 +35,6 @@ namespace
    SR::Type sr_type_copy = SR::Type::None;
    
    bool is_ui = true; // User toggle for UI skip draw
-   bool sr_copy_resource = false; // User toggle to exec CopyResource() to fix missing bloom
    bool sr_user_allow_upgraded_samplers = false; // Let user control ignore_upgraded_samplers
 }
 
@@ -434,12 +435,19 @@ public:
       auto& managed_resources = game_device_data.managed_resources;
 
       // Depth & Motion Vectors (SR)
+      static bool get_mvs_from_uav_token = false;
       if (device_data.sr_type != SR::Type::None && original_shader_hashes.Contains(shader_hashes_linearize_depth_and_generate_mvs))
       {
-         // Take depth
+         // Take depth (SRV 1)
          ComPtr<ID3D11ShaderResourceView> srv;
          native_device_context->CSGetShaderResources(1, 1, srv.put());
          srv->GetResource(managed_resources.resources["depth"_h].put());
+
+         // Take motion vectors (UAV 1) //TODO: also hitting UAV is prob worse perf than the SRV array later, but this is might be the only way to account for photomode.
+         ComPtr<ID3D11UnorderedAccessView> uav;
+         native_device_context->CSGetUnorderedAccessViews(1, 1, uav.put());
+         uav->GetResource(managed_resources.resources["motion_vectors"_h].put());
+         
          return DrawOrDispatchOverrideType::None;
       }
 
@@ -451,7 +459,11 @@ public:
          // DLSS requires an immediate context for execution!
          ASSERT_ONCE(native_device_context->GetType() == D3D11_DEVICE_CONTEXT_IMMEDIATE);
 
-         // Settings
+         // With vel or without vel?
+         const bool is_has_vel = original_shader_hashes.pixel_shaders[0] == shader_hash_TAA;
+         if (!is_has_vel) get_mvs_from_uav_token = true;
+
+         // SettingsData
          auto* sr_instance_data = device_data.GetSRInstanceData();
          ASSERT_ONCE(sr_instance_data);
 
@@ -474,44 +486,38 @@ public:
 
          sr_implementations[device_data.sr_type]->UpdateSettings(sr_instance_data, native_device_context, settings_data);
 
-         // Get resources
-         std::array<ID3D11ShaderResourceView*, 2> srvs;
-         native_device_context->PSGetShaderResources(0, srvs.size(), srvs.data());
-
-         ComPtr<ID3D11Resource> resource_mvs;
-         srvs[0]->GetResource(resource_mvs.put());
+         // Get color SRV
+         ID3D11ShaderResourceView* srv_scene = nullptr;
+         native_device_context->PSGetShaderResources(is_has_vel ? 1 : 0, 1, &srv_scene);
          ComPtr<ID3D11Resource> resource_scene;
-         srvs[1]->GetResource(resource_scene.put());
+         srv_scene->GetResource(resource_scene.put());
 
+         // Get output RTV
          ComPtr<ID3D11RenderTargetView> rtv;
          native_device_context->OMGetRenderTargets(1, rtv.put(), nullptr);
          ComPtr<ID3D11Resource> resource_rt;
          rtv->GetResource(resource_rt.put());
 
+         // DrawData: resources
          SR::SuperResolutionImpl::DrawData draw_data;
          draw_data.source_color = resource_scene.get();
          draw_data.output_color = resource_rt.get();
-         draw_data.motion_vectors = resource_mvs.get();
+         draw_data.motion_vectors = managed_resources.resources["motion_vectors"_h].get();
          draw_data.depth_buffer = managed_resources.resources["depth"_h].get();
 
-         // Jitters are in range [-1, 1].
+         // DrawData: Jitters are in range [-1, 1].
          draw_data.jitter_x = g_jitter_x * -0.5f;
          draw_data.jitter_y = g_jitter_y * 0.5f;
 #if DEVELOPMENT
          JitterHistory::OnSRDraw({draw_data.jitter_x, draw_data.jitter_y});
 #endif
 
+         // DrawData: resolution
          draw_data.render_width = device_data.render_resolution.x;
          draw_data.render_height = device_data.render_resolution.y;
 
          // DRAW
          device_data.has_drawn_sr = sr_implementations[device_data.sr_type]->Draw(sr_instance_data, native_device_context, draw_data);
-
-         // Copy back to input, fixing missing transparency FXs.
-         if (sr_copy_resource) native_device_context->CopyResource(resource_scene.get(), resource_rt.get());
-
-         // Reset pointers
-         ResetCOMArray(srvs);
 
          return DrawOrDispatchOverrideType::Replaced;
       }
@@ -582,7 +588,6 @@ public:
       reshade::get_config_value(runtime, NAME, "RCAS", cb_luma_global_settings.GameSettings.RCAS);
 
       // SRUser
-      reshade::get_config_value(runtime, NAME, "sr_copy_resource", sr_copy_resource);
       reshade::get_config_value(runtime, NAME, "sr_user_allow_upgraded_samplers", sr_user_allow_upgraded_samplers);
       ignore_upgraded_samplers = !sr_user_allow_upgraded_samplers;
    }
@@ -661,20 +666,11 @@ public:
          
             ImGui::Bullet(); ImGui::SameLine(); ImGui::TextWrapped("Requires TAA!");
             ImGui::Bullet(); ImGui::SameLine(); ImGui::TextWrapped("Only 100%% internal/render resolution is supported.");
-
-            ImGui::NewLine();
-
-            ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.75f, 1.f, 1.f, 1.f));
-            ImGui::TextWrapped("[Super Resolution: Bloom & Transparency Missing Fix]");
-            ImGui::PopStyleColor();
-
-            ImGui::PushID("SR: copy_resource"); 
-            if (ImGui::Checkbox("Enable Fix", &sr_copy_resource))
-               reshade::set_config_value(runtime, NAME, "sr_copy_resource", sr_copy_resource);
-            ImGui::PopID();
+            ImGui::Bullet(); ImGui::SameLine(); ImGui::TextWrapped("In Photo Mode, there is no motion vector data. Expect smearing.");
+            
+            if (ImGui::Button("Force Reset")) device_data.force_reset_sr = true;
             if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
-               ImGui::SetTooltip("For some reason (Motion Blur + Depth of Field?) bloom and other transparency effects may go missing after Super Resolution draws.\nEnable this to copy the output back to the input, somehow fixing the issue.");
-            DrawResetButton(sr_copy_resource, false, "sr_copy_resource", runtime);
+               ImGui::SetTooltip("Force clearing of history so that aggregation begins anew.");
          }
 
          ImGui::NewLine();
