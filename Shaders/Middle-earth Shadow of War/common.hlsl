@@ -2,8 +2,8 @@
 // #include "./Includes/HermiteSpline_portable.hlsl"
 #include "./Includes/ictcp_portable.hlsl"
 
-#define FIRE_PEAK 1.26
-#define FIRE_BOOST 2.6
+#define FIRE_PEAK GS.RetunedFirePeak /* 1.26 */
+#define FIRE_BOOST GS.RetunedFireBoost /* 2.6 */
 
 /////////////////////////////////////////////////////////////////////////////////////////
 // rect is top left (x,y), bottom right (x,y)
@@ -177,17 +177,17 @@ float3 HDRTonemap(float3 x, float peak, float start = 0.18) {
   return x;
 }
 ////////////////////////////////////////////////////////////////////////////////////////
-float FireTonemap(float x, float clip = FIRE_PEAK, float output_max = 1.0f) {
+float FireTonemap(float x, float clip, float output_max = 1.0f) {
   x = min(x, clip);
   x = Neutwo(x, output_max, clip);
   return x;
 }
-float2 FireTonemap(float2 x, float clip = FIRE_PEAK, float output_max = 1.0f) {
+float2 FireTonemap(float2 x, float clip, float output_max = 1.0f) {
   x = min(x, clip);
   x = Neutwo(x, output_max, clip);
   return x;
 }
-float3 FireTonemap(float3 x, float clip = FIRE_PEAK, float output_max = 1.0f) {
+float3 FireTonemap(float3 x, float clip, float output_max = 1.0f) {
   x = min(x, clip);
   x = Neutwo(x, output_max, clip);
   return x;

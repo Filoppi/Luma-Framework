@@ -11,6 +11,8 @@ namespace CB
    {
       float WhiteClip;
       float BlowoutCorrection;
+      float RetunedFirePeak;
+      float RetunedFireBoost;
       float GodRays;
       float Bloom;
       float RCAS;

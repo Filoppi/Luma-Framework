@@ -370,6 +370,8 @@ public:
       // CB init default values
       default_luma_global_game_settings.WhiteClip = cb_luma_global_settings.GameSettings.WhiteClip = 1.;
       default_luma_global_game_settings.BlowoutCorrection = cb_luma_global_settings.GameSettings.BlowoutCorrection = 0.3;
+      default_luma_global_game_settings.RetunedFirePeak = cb_luma_global_settings.GameSettings.RetunedFirePeak = 1.26;
+      default_luma_global_game_settings.RetunedFireBoost = cb_luma_global_settings.GameSettings.RetunedFireBoost = 2.6;
       default_luma_global_game_settings.GodRays = cb_luma_global_settings.GameSettings.GodRays = 1.;
       default_luma_global_game_settings.Bloom = cb_luma_global_settings.GameSettings.Bloom = 1.;
       default_luma_global_game_settings.RCAS = cb_luma_global_settings.GameSettings.RCAS = 0.;
@@ -573,6 +575,8 @@ public:
       // CB load user
       reshade::get_config_value(runtime, NAME, "WhiteClip", cb_luma_global_settings.GameSettings.WhiteClip);
       reshade::get_config_value(runtime, NAME, "BlowoutCorrection", cb_luma_global_settings.GameSettings.BlowoutCorrection);
+      reshade::get_config_value(runtime, NAME, "RetunedFirePeak", cb_luma_global_settings.GameSettings.RetunedFirePeak);
+      reshade::get_config_value(runtime, NAME, "RetunedFireBoost", cb_luma_global_settings.GameSettings.RetunedFireBoost);
       reshade::get_config_value(runtime, NAME, "GodRays", cb_luma_global_settings.GameSettings.GodRays);
       reshade::get_config_value(runtime, NAME, "Bloom", cb_luma_global_settings.GameSettings.Bloom);
       reshade::get_config_value(runtime, NAME, "RCAS", cb_luma_global_settings.GameSettings.RCAS);
@@ -741,7 +745,27 @@ public:
 
          ImGui::Bullet(); ImGui::SameLine(); ImGui::TextWrapped("If off, shaders will intentionally break, so just ignore the warning. Thanks!");
 
-         ShaderDefines::UIToggleCheckmark(FIRE_RETUNED, "Enable Retuning (Read Tooltips)", "\"Pick your poison...\"\n\nThe devs allowed their artists to tune the brightness curve of their fire sprites.\nHowever, they're boosted so high that the brightness -> color look up is clipped!\nIt is rather apparent for HDR, though not as much for SDR.\n\nEnabling this will reduces the clipping, but also makes them more orange.\nUnintended, but more preferable?");
+         bool is_on = ShaderDefines::UIToggleCheckmark(FIRE_RETUNED, "Enable Retuning (Read Tooltips)", "\"Pick your poison...\"\n\nThe devs allowed their artists to tune the brightness curve of their fire sprites.\nHowever, they're boosted so high that the brightness -> color look up is clipped!\nIt is rather apparent for HDR, though not as much for SDR.\n\nEnabling this will reduces the clipping, but also makes them more orange.\nUnintended, but more preferable?");
+
+         if (!is_on) ImGui::BeginDisabled();
+
+         ImGui::PushID("Retuned Fire: RetunedFirePeak");
+         if (ImGui::SliderFloat("Reduction Strength", &cb_luma_global_settings.GameSettings.RetunedFirePeak, 1.01f, 2.f, "%.3f"))
+            reshade::set_config_value(runtime, NAME, "RetunedFirePeak", cb_luma_global_settings.GameSettings.RetunedFirePeak);
+         ImGui::PopID();
+         if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
+            ImGui::SetTooltip("Increase to further reduce the clipping of fire sprites, but also make them more orange.");
+         DrawResetButton(cb_luma_global_settings.GameSettings.RetunedFirePeak, default_luma_global_game_settings.RetunedFirePeak, "RetunedFirePeak", runtime);
+
+         ImGui::PushID("Retuned Fire: RetunedFireBoost");
+         if (ImGui::SliderFloat("Brightness Makeup", &cb_luma_global_settings.GameSettings.RetunedFireBoost, 1.f, 4.f, "%.3f"))
+            reshade::set_config_value(runtime, NAME, "RetunedFireBoost", cb_luma_global_settings.GameSettings.RetunedFireBoost);
+         ImGui::PopID();
+         if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
+            ImGui::SetTooltip("After reduction, we need a boost in brightness to makeup loss.");
+         DrawResetButton(cb_luma_global_settings.GameSettings.RetunedFireBoost, default_luma_global_game_settings.RetunedFireBoost, "RetunedFireBoost", runtime);
+         
+         if (!is_on) ImGui::EndDisabled();
       }
 
 #if DEVELOPMENT
