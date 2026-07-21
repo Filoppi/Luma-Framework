@@ -35,7 +35,29 @@ namespace
    SR::Type sr_type_copy = SR::Type::None;
 
    // User toggle for UI skip draw
-   bool is_ui = true; 
+   bool is_ui = true;
+
+   // SR dummy black motion vector resource
+   ComPtr<ID3D11Texture2D> sr_dummy_black_mvs_texture;
+   ComPtr<ID3D11Resource> sr_dummy_black_mvs_resource;
+   void CreateDummyBlackMVSResource(ID3D11Device* device)
+   {
+      if (!sr_dummy_black_mvs_texture)
+      {
+         D3D11_TEXTURE2D_DESC desc = {};
+         desc.Width = 1;
+         desc.Height = 1;
+         desc.MipLevels = 1;
+         desc.ArraySize = 1;
+         desc.Format = DXGI_FORMAT_R8G8_SNORM;
+         desc.SampleDesc.Count = 1;
+         desc.Usage = D3D11_USAGE_DEFAULT;
+         desc.BindFlags = D3D11_BIND_SHADER_RESOURCE;
+
+         device->CreateTexture2D(&desc, nullptr, sr_dummy_black_mvs_texture.put());
+         sr_dummy_black_mvs_texture->QueryInterface(sr_dummy_black_mvs_resource.put());
+      }
+   }
    
    bool sr_copy_resource = false; // Bloom missing fix by copying output back to input.
    bool sr_user_allow_upgraded_samplers = true; // Let user control ignore_upgraded_samplers.
@@ -446,11 +468,6 @@ public:
          ComPtr<ID3D11ShaderResourceView> srv;
          native_device_context->CSGetShaderResources(1, 1, srv.put());
          srv->GetResource(managed_resources.resources["depth"_h].put());
-
-         // Take motion vectors (UAV 1) //TODO: also hitting UAV is prob worse perf than the SRV array later, but this is might be the only way to account for photomode.
-         ComPtr<ID3D11UnorderedAccessView> uav;
-         native_device_context->CSGetUnorderedAccessViews(1, 1, uav.put());
-         uav->GetResource(managed_resources.resources["motion_vectors"_h].put());
          
          return DrawOrDispatchOverrideType::None;
       }
@@ -490,13 +507,25 @@ public:
 
          sr_implementations[device_data.sr_type]->UpdateSettings(sr_instance_data, native_device_context, settings_data);
 
-         // Get color SRV
-         ID3D11ShaderResourceView* srv_scene = nullptr;
-         native_device_context->PSGetShaderResources(is_has_vel ? 1 : 0, 1, &srv_scene);
+         // Get SRVs
+         std::array<ID3D11ShaderResourceView*, 2> srvs;
+         native_device_context->PSGetShaderResources(0, srvs.size(), srvs.data());
+         
          ComPtr<ID3D11Resource> resource_scene;
-         srv_scene->GetResource(resource_scene.put());
+         ComPtr<ID3D11Resource> resource_mvs;
+         if (is_has_vel)
+         {
+            srvs[0]->GetResource(resource_mvs.put());
+            srvs[1]->GetResource(resource_scene.put());
+         }
+         else
+         {
+            srvs[0]->GetResource(resource_scene.put());
+            CreateDummyBlackMVSResource(native_device);
+         }
+         ResetCOMArray(srvs);
 
-         // Get output RTV
+         // Get RTV
          ComPtr<ID3D11RenderTargetView> rtv;
          native_device_context->OMGetRenderTargets(1, rtv.put(), nullptr);
          ComPtr<ID3D11Resource> resource_rt;
@@ -506,7 +535,7 @@ public:
          SR::SuperResolutionImpl::DrawData draw_data;
          draw_data.source_color = resource_scene.get();
          draw_data.output_color = resource_rt.get();
-         draw_data.motion_vectors = managed_resources.resources["motion_vectors"_h].get();
+         draw_data.motion_vectors = is_has_vel ? resource_mvs.get() : sr_dummy_black_mvs_resource.get();
          draw_data.depth_buffer = managed_resources.resources["depth"_h].get();
 
          // DrawData: Jitters are in range [-1, 1].
@@ -525,7 +554,7 @@ public:
 
          // For missing bloom and other transparent FXs... somehow
          if (device_data.has_drawn_sr && sr_copy_resource) native_device_context->CopyResource(draw_data.source_color, draw_data.output_color);
-
+         
          return device_data.has_drawn_sr ? DrawOrDispatchOverrideType::Replaced : DrawOrDispatchOverrideType::None;
       }
 
@@ -672,6 +701,7 @@ public:
          
             ImGui::Bullet(); ImGui::SameLine(); ImGui::TextWrapped("Requires TAA!");
             ImGui::Bullet(); ImGui::SameLine(); ImGui::TextWrapped("Only 100%% internal/render resolution is supported.");
+            ImGui::Bullet(); ImGui::SameLine(); ImGui::TextWrapped("Photo Mode works, but doesn't have motion data, so camera movement smears.");
             
             if (ImGui::Button("Force Reset")) device_data.force_reset_sr = true;
             if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
