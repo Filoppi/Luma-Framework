@@ -537,6 +537,7 @@ public:
          draw_data.output_color = resource_rt.get();
          draw_data.motion_vectors = is_has_vel ? resource_mvs.get() : sr_dummy_black_mvs_resource.get();
          draw_data.depth_buffer = managed_resources.resources["depth"_h].get();
+         draw_data.reset = !device_data.has_drawn_sr;
 
          // DrawData: Jitters are in range [-1, 1].
          draw_data.jitter_x = g_jitter_x * -0.5f;
