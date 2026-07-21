@@ -23,11 +23,13 @@ cbuffer cb3 : register(b3)
 // https://www.desmos.com/calculator/stnfdhk9t1
 float Rolloff(float x, float contrast, float invPeak, float invExposure) {
   x = pow(x, contrast);
-  return safeDivision(x, x * invPeak + invExposure, 0);
+  // return safeDivision(x, x * invPeak + invExposure, 0);
+  return x / max(9.99999975e-006, x * invPeak + invExposure);
 }
 float3 Rolloff(float3 x, float contrast, float invPeak, float invExposure) {
   x = pow(x, contrast);
-  return safeDivision(x, x * invPeak + invExposure, 0);
+  // return safeDivision(x, x * invPeak + invExposure, 0);
+  return x / max(9.99999975e-006, x * invPeak + invExposure);
 }
 
 float RolloffLocalMax(float contrast, float invPeak, float invExposure) {
@@ -50,7 +52,7 @@ float3 RolloffSDRAndHDR(float3 x, float contrast, float invPeak, float invExposu
   float thres;
   if (invPeak >= 0) { 
     thres = RolloffLocalMax(contrast, invPeak, invExposure);
-    thres = max(thres, 0.000001); //just in case of undef
+    thres = max(thres, 9.99999975e-006); //just in case of undef
   } else {
     thres = 1; // local max is unsolvable, so fallback 1
   }
@@ -92,6 +94,7 @@ void main(
   r0.xy = v1.xy / v1.ww;
   r0.xy = min(cb2[22].zw, r0.xy);
   r0.xyz = t0.Sample(s0_s, r0.xy).xyz;
+  r0.xyz = max(r0.xyz, 0); //NEEDED! rare cases, like in map
 
   // idk mask
   r1.xyz = (int3)r0.xyz & int3(0x7f800000,0x7f800000,0x7f800000);
@@ -108,8 +111,7 @@ void main(
   // r0.xyz = t1.Load(2).x - DVS1; //debug identify invExposure
 
   // max channel saturation / white path
-  r0.w = max(r0.y, r0.z);
-  r0.w = max(r0.x, r0.w);
+  r0.w = max3(r0.x, r0.y, r0.z);
 
   r0.w = max(9.99999975e-006, r0.w); 
   r0.xyz = r0.xyz / r0.www; //to 1

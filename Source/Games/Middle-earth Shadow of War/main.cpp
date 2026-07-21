@@ -693,7 +693,7 @@ public:
             ImGui::TextWrapped("[Super Resolution: Disabled]");
             ImGui::PopStyleColor();
 
-            ImGui::Bullet(); ImGui::SameLine(); ImGui::TextWrapped("Vanilla TAA is pending a fix.\nIt'll artefact to black for extremely bright highlights.");
+            ImGui::Bullet(); ImGui::SameLine(); ImGui::TextWrapped("Enable above for more...");
          }
          else
          {
