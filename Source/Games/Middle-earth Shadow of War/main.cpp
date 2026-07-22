@@ -388,6 +388,8 @@ public:
       shader_defines_data.append_range(game_shader_defines_data);
 
       // Shader Defines: change defaults
+      GetShaderDefineData(DEVELOPMENT_HASH).SetDefaultValue(DEVELOPMENT ? '1' : '0'); //TODO: idk why i have to force it for PUBLISHING builds 
+      GetShaderDefineData(DEVELOPMENT_HASH).SetValue(DEVELOPMENT ? '1' : '0'); //TODO: idk why i have to force it for PUBLISHING builds 
       GetShaderDefineData(POST_PROCESS_SPACE_TYPE_HASH).SetDefaultValue('1'); // linear
       GetShaderDefineData(GAMMA_CORRECTION_TYPE_HASH).SetDefaultValue('0'); // don't use built in gamma correction
       GetShaderDefineData(UI_DRAW_TYPE_HASH).SetDefaultValue('2'); // Direct (inverse scene brightness draws)
