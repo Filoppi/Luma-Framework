@@ -1,14 +1,30 @@
+///////////////////////////////////////////////////////////////////////
+// Of course, before any of this, create a new project for your game!
+// - Copy "Templates\VisualStudio\Luma-Template.zip" into "%USERPROFILE%\Documents\Visual Studio [current version]\Templates\ProjectTemplates" (and restart Visual Studio).
+// - Right click "Games" in the solution explorer, Add -> New Project... -> Template (Luma Template Project for new games)
+// - Make sure the location is "Source\Games"!
+///////////////////////////////////////////////////////////////////////
+
 // Specify a define with the name of the game here (GAME_*).
 // This is optional but can be used to hardcode custom (per game) behaviours in the core library,
 // or other reasons. We can't automate it through the project define system (based on the project name) because
 // we need these defines to be upper case and space free.
 #define GAME_TEMPLATE 1
 
-// Define all the global "core" defines before including its files:
-// Enable these to be able to use DLSS's or FSR's code
+//// Define all the global "core" defines before including its files: ////
+// Enable these to use DLSS and/or FSR.
+// If using, add these to the Project Properties: (w/o quotation marks)
+// C/C++ -> All Options -> Additional Include Directories -> "..\..\External\FidelityFX;..\..\External\NGX;" 
+// Linker -> All Options -> Additional Dependencies -> "nvsdk_ngx_d.lib;ffx_backend_dx11_x64.lib;ffx_fsr3_x64.lib;ffx_frameinterpolation_x64.lib;ffx_fsr3upscaler_x64.lib;ffx_opticalflow_x64.lib;"
+// Linker -> All Options -> Additional Library Directories -> "..\..\External\NGX\libs;..\..\External\FidelityFX\libs;"
 #define ENABLE_NGX 0
 #define ENABLE_FIDELITY_SK 0
+
+// Enable support for Geometry Shaders (GS), rather rare.
 #define GEOMETRY_SHADER_SUPPORT 0
+
+// Enable to stop "You can now attach the debugger" popup.
+#define DISABLE_AUTO_DEBUGGER 0
 
 // Instead of "manually" including the "core" library, we simply include its main code file (which is a header).
 // The library in itself is standalone, as in, it compiles fine and could directly be used as a template addon etc if built as dll but,
@@ -29,7 +45,7 @@ struct TemplateGameDeviceData final : public GameDeviceData
    bool has_drawn_tonemap = false;
 };
 
-class TemplateGame final : public Game
+class TemplateGame final : public Game // Go view "Source/Core/includes/game.h" for all the overridable virtual functions
 {
    // Optional helper to hide ugly casts
    static TemplateGameDeviceData& GetGameDeviceData(DeviceData& device_data)
@@ -42,7 +58,7 @@ public:
    void OnInit(bool async) override
    {
       // You can add shader defines that will end up in the advanced settings for users to modify here.
-		// These will be defined in the shaders, so they can be used to do static branches in them.
+      // These will be defined in the shaders, so they can be used to do static branches in them.
       // Ideally they should also be defined in the game's Settings.hlsl file.
       std::vector<ShaderDefineData> game_shader_defines_data = {
          {"TONEMAP_TYPE", /*default value*/ '1', true, false, /*tooltip*/ "0 - Vanilla SDR\n1 - Luma HDR (Vanilla+)", /*max value*/ 1},
@@ -66,12 +82,18 @@ public:
 
       // Init the game settings here, you could also load them from ini in "LoadConfigs()".
       // These can be defined in a header shared between shaders and c++, and are sent to the GPU every time they change.
-      // It should be in "Shaders/Game/Includes/GameCBuffers.hlsl", you can either add that to your Visual Studio project as forced include as some projects do,
-      // or manually add it to the project files and include that at the top (before anything else, as the game cb settings struct needs to be defined), or make a copy of it in c++ (making sure it's mirrored to hlsl),
-      // and define "LUMA_GAME_CB_STRUCTS" to avoid it being re-defined.
-      // Set "device_data.cb_luma_global_settings_dirty" to true when you change them (if you care for them being re-uploaded to the GPU).
-      cb_luma_global_settings.GameSettings.GameSetting01 = 0.5f;
-      cb_luma_global_settings.GameSettings.GameSetting02 = 33;
+      //
+      // It should be in "Shaders/Game/Includes/GameCBuffers.hlsl".
+      //
+      // To include it, the easiest way is adding as Forced Include within the Project Properties.
+      // C/C++ -> All Options -> Forced Include File --> "../../../Shaders/$(ProjectName)/Includes/GameCBuffers.hlsl;" (w/o quotation marks)
+      //
+      // Otherwise, manually add it to the project files and include that at the top (before anything else, as the game cb settings struct needs to be defined),
+      // or make a copy of it in c++ (making sure it's mirrored to hlsl), and define "LUMA_GAME_CB_STRUCTS" to avoid it being re-defined.
+      //
+      // Set "device_data.cb_luma_global_settings_dirty" to true if you changed values and need a re-upload to the GPU before OnPresent() (i.e. during OnDrawOrDispatch()).
+      default_luma_global_game_settings.GameSetting01 = cb_luma_global_settings.GameSettings.GameSetting01 = 0.5f;
+      default_luma_global_game_settings.GameSetting02 = cb_luma_global_settings.GameSettings.GameSetting02 = 33;
    }
 
    // This needs to be overridden with your own "GameDeviceData" sub-class (destruction is automatically handled)
@@ -103,6 +125,35 @@ public:
 
       game_device_data.has_drawn_tonemap = false;
       device_data.has_drawn_main_post_processing = true;
+   }
+
+   void LoadConfigs() override
+   {
+      reshade::api::effect_runtime* runtime = nullptr;
+
+      // ReShade.ini is ready here, so load its values.
+      reshade::get_config_value(runtime, NAME, "GameSetting01", cb_luma_global_settings.GameSettings.GameSetting01);
+      reshade::get_config_value(runtime, NAME, "GameSetting02", cb_luma_global_settings.GameSettings.GameSetting02);
+   }
+
+   void DrawImGuiSettings(DeviceData& device_data) override
+   {
+      reshade::api::effect_runtime* runtime = nullptr;
+      
+      // Draw whatever ImGui to let users modify settings.
+      if (ImGui::SliderFloat("Game Setting #01", &cb_luma_global_settings.GameSettings.GameSetting01, 0.f, 1.f, "%.3f"))
+         reshade::set_config_value(runtime, NAME, "GameSetting01", cb_luma_global_settings.GameSettings.GameSetting01);
+      if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
+         ImGui::SetTooltip("Hi! This changes Game Setting #01.");
+      DrawResetButton(cb_luma_global_settings.GameSettings.GameSetting01, default_luma_global_game_settings.GameSetting01, "GameSetting01", runtime);
+
+      uint GameSetting02_min = 0;
+      uint GameSetting02_max = 50;
+      if (ImGui::SliderScalar("Game Setting #02", ImGuiDataType_U32, &cb_luma_global_settings.GameSettings.GameSetting02,  &GameSetting02_min, &GameSetting02_max, "%u"))
+         reshade::set_config_value(runtime, NAME, "GameSetting02", cb_luma_global_settings.GameSettings.GameSetting02);
+      if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
+         ImGui::SetTooltip("Hi! This changes Game Setting #02.");
+      DrawResetButton(cb_luma_global_settings.GameSettings.GameSetting02, default_luma_global_game_settings.GameSetting02, "GameSetting02", runtime);
    }
 
    void PrintImGuiAbout() override
