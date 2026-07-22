@@ -400,8 +400,8 @@ public:
       // CB init default values
       default_luma_global_game_settings.WhiteClip = cb_luma_global_settings.GameSettings.WhiteClip = 1.;
       default_luma_global_game_settings.BlowoutCorrection = cb_luma_global_settings.GameSettings.BlowoutCorrection = 0.3;
-      default_luma_global_game_settings.RetunedFirePeak = cb_luma_global_settings.GameSettings.RetunedFirePeak = 1.26;
-      default_luma_global_game_settings.RetunedFireBoost = cb_luma_global_settings.GameSettings.RetunedFireBoost = 2.6;
+      default_luma_global_game_settings.RetunedFirePeak = cb_luma_global_settings.GameSettings.RetunedFirePeak = 1.2;
+      default_luma_global_game_settings.RetunedFireBoost = cb_luma_global_settings.GameSettings.RetunedFireBoost = 2.2;
       default_luma_global_game_settings.GodRays = cb_luma_global_settings.GameSettings.GodRays = 1.;
       default_luma_global_game_settings.Bloom = cb_luma_global_settings.GameSettings.Bloom = 1.;
       default_luma_global_game_settings.RCAS = cb_luma_global_settings.GameSettings.RCAS = 0.;
