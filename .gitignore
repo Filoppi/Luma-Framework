@@ -40,6 +40,10 @@
 *.vcxproj.user
 Source/Games/**/vcpkg_installed/**
 
+# JetBrains
+.idea/
+*.DotSettings.user
+
 # Compiled, Disassembled and Dumped Shaders
 *.cso
 **/Dump*/**.asm
