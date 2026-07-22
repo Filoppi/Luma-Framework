@@ -1,6 +1,7 @@
 #define MIDDLE_EARTH_SHADOW_OF_WAR 1
 
 #define ENABLE_NGX 1
+#define ENABLE_FIDELITY_SK 1
 
 #define DISABLE_AUTO_DEBUGGER 1
 
@@ -539,7 +540,6 @@ public:
          draw_data.output_color = resource_rt.get();
          draw_data.motion_vectors = is_has_vel ? resource_mvs.get() : sr_dummy_black_mvs_resource.get();
          draw_data.depth_buffer = managed_resources.resources["depth"_h].get();
-         draw_data.reset = !device_data.has_drawn_sr;
 
          // DrawData: Jitters are in range [-1, 1].
          draw_data.jitter_x = g_jitter_x * -0.5f;
@@ -551,6 +551,11 @@ public:
          // DrawData: resolution
          draw_data.render_width = device_data.render_resolution.x;
          draw_data.render_height = device_data.render_resolution.y;
+         
+         // DrawData: Misc.
+         constexpr float fov_rad = 60.f * (3.14f / 180.f);
+         draw_data.vert_fov = device_data.sr_type == SR::Type::FSR ? fov_rad : 0.f; //FSR fails w/o fov
+         draw_data.reset = !device_data.has_drawn_sr;
 
          // DRAW
          device_data.has_drawn_sr = sr_implementations[device_data.sr_type]->Draw(sr_instance_data, native_device_context, draw_data);
