@@ -1,6 +1,9 @@
 #pragma once
 
 #include "shared.h"
+#include "ConstantBufferCache.hpp"
+
+#include <array>
 
 // Quantum Break's SR hook is assembled from several stable Remedy passes:
 // - 0xA43343D6 "Depth Linearization" reads clip/device depth from PS SRV0 and writes linear depth to RTV0.
@@ -73,9 +76,9 @@ namespace QuantumBreakUpscaling
    // Byte offsets into QB's cb_update_1 cbuffer for the SR inputs that are not available from textures.
    constexpr uint32_t cb_update_1_inv_near_offset = 47u * 16u;
    constexpr uint32_t cb_update_1_view_to_clip_offset = 10u * 16u;
-   constexpr uint32_t cb_update_1_tess_view_to_clip_11_offset = 112u * 16u + 12u;
+   constexpr uint32_t cb_update_1_tess_view_to_clip_11_offset = (112u * 16u) + 12u;
    constexpr uint32_t cb_update_1_jitter_offset = 121u * 16u;
-   constexpr uint32_t cb_update_1_min_size = cb_update_1_jitter_offset + sizeof(float) * 2u;
+   constexpr uint32_t cb_update_1_min_size = cb_update_1_jitter_offset + (sizeof(float) * 2u);
    // The temporal resolve samples current color with g_vSSAAJitterOffset[0], directly added to UVs.
    // Logged scene frames repeat a 4-sample raw UV pattern:
    //   ( 0.00014648, -0.00008681), (-0.00014648,  0.00008681),
@@ -84,7 +87,7 @@ namespace QuantumBreakUpscaling
    // this becomes roughly (0.375, 0.125), (-0.375, -0.125),
    // (0.125, -0.375), (-0.125, 0.375) render pixels after the SR Y flip.
    constexpr uint32_t ssaa_jitter_offset = 12u * 16u;
-   constexpr uint32_t ssaa_min_size = ssaa_jitter_offset + sizeof(float) * 2u;
+   constexpr uint32_t ssaa_min_size = ssaa_jitter_offset + (sizeof(float) * 2u);
 
    struct Data
    {
@@ -97,8 +100,8 @@ namespace QuantumBreakUpscaling
       // sr_clip_depth is captured from 0xA43343D6 PS SRV0, the pre-linearized clip/device depth.
       com_ptr<ID3D11Resource> sr_clip_depth;
       com_ptr<ID3D11Resource> sr_motion_vectors;
-      com_ptr<ID3D11Buffer> cb_update_1_readback;
-      com_ptr<ID3D11Buffer> ssaa_readback;
+      // Mirrors CPU uploads so current game constants can be read without waiting for the GPU.
+      ConstantBufferCache constant_buffer_cache;
       // Conversion scratch texture: game gamma color -> DLSS linear input.
       com_ptr<ID3D11Texture2D> sr_linear_input_color;
       com_ptr<ID3D11ShaderResourceView> sr_linear_input_color_srv;
@@ -287,20 +290,20 @@ namespace QuantumBreakUpscaling
       // so keep the largest depth seen this frame to avoid replacing the main depth with downscaled copies.
       com_ptr<ID3D11ShaderResourceView> clip_depth_srv;
       native_device_context->PSGetShaderResources(0, 1, &clip_depth_srv);
-      if (!clip_depth_srv.get())
+      if (clip_depth_srv.get() == nullptr)
       {
          return;
       }
 
       com_ptr<ID3D11Resource> clip_depth_resource;
       clip_depth_srv->GetResource(&clip_depth_resource);
-      if (!clip_depth_resource.get())
+      if (clip_depth_resource.get() == nullptr)
       {
          return;
       }
 
       com_ptr<ID3D11Texture2D> clip_depth_texture;
-      if (FAILED(clip_depth_resource->QueryInterface(&clip_depth_texture)) || !clip_depth_texture.get())
+      if (FAILED(clip_depth_resource->QueryInterface(&clip_depth_texture)) || clip_depth_texture.get() == nullptr)
       {
          return;
       }
@@ -316,7 +319,7 @@ namespace QuantumBreakUpscaling
       const uint64_t previous_area = data.has_sr_clip_depth_desc
                                         ? (static_cast<uint64_t>(data.sr_clip_depth_desc.Width) * static_cast<uint64_t>(data.sr_clip_depth_desc.Height))
                                         : 0ull;
-      if (!data.sr_clip_depth.get() || current_area > previous_area)
+      if (data.sr_clip_depth.get() == nullptr || current_area > previous_area)
       {
          data.sr_clip_depth = clip_depth_resource;
          data.sr_clip_depth_desc = clip_depth_desc;
@@ -334,7 +337,7 @@ namespace QuantumBreakUpscaling
       // The history reprojection pass has the motion-vector resource bound as CS SRV 0.
       com_ptr<ID3D11ShaderResourceView> motion_vectors_srv;
       native_device_context->CSGetShaderResources(0, 1, &motion_vectors_srv);
-      if (motion_vectors_srv.get())
+      if (motion_vectors_srv.get() != nullptr)
       {
          data.sr_motion_vectors = nullptr;
          motion_vectors_srv->GetResource(&data.sr_motion_vectors);
@@ -346,76 +349,28 @@ namespace QuantumBreakUpscaling
    }
 
 #if ENABLE_SR
-   inline bool MapPixelShaderConstantBufferForReadback(
-      ID3D11Device* native_device,
-      ID3D11DeviceContext* native_device_context,
-      UINT slot,
-      uint32_t min_size,
-      com_ptr<ID3D11Buffer>& readback_buffer,
-      D3D11_MAPPED_SUBRESOURCE& mapped)
-   {
-      // Constant buffers are GPU-only, so copy them into a staging buffer before CPU-side parsing.
-      com_ptr<ID3D11Buffer> constant_buffer;
-      native_device_context->PSGetConstantBuffers(slot, 1, &constant_buffer);
-      if (!constant_buffer.get())
-      {
-         return false;
-      }
-
-      D3D11_BUFFER_DESC source_desc = {};
-      constant_buffer->GetDesc(&source_desc);
-      if (source_desc.ByteWidth < min_size)
-      {
-         return false;
-      }
-
-      bool needs_recreate = !readback_buffer.get();
-      if (!needs_recreate)
-      {
-         D3D11_BUFFER_DESC readback_desc = {};
-         readback_buffer->GetDesc(&readback_desc);
-         needs_recreate = readback_desc.ByteWidth != source_desc.ByteWidth;
-      }
-
-      if (needs_recreate)
-      {
-         D3D11_BUFFER_DESC readback_desc = source_desc;
-         readback_desc.BindFlags = 0;
-         readback_desc.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
-         readback_desc.Usage = D3D11_USAGE_STAGING;
-         readback_desc.MiscFlags = 0;
-         readback_desc.StructureByteStride = 0;
-
-         readback_buffer = nullptr;
-         HRESULT hr = native_device->CreateBuffer(&readback_desc, nullptr, &readback_buffer);
-         if (FAILED(hr) || !readback_buffer.get())
-         {
-            return false;
-         }
-      }
-
-      native_device_context->CopyResource(readback_buffer.get(), constant_buffer.get());
-
-      HRESULT hr = native_device_context->Map(readback_buffer.get(), 0, D3D11_MAP_READ, 0, &mapped);
-      return SUCCEEDED(hr) && mapped.pData != nullptr;
-   }
-
-   inline bool CaptureCBUpdate1Data(ID3D11Device* native_device, ID3D11DeviceContext* native_device_context, Data& data)
+   inline bool CaptureCBUpdate1Data(ID3D11Device* native_device, ID3D11DeviceContext* native_device_context, Data& data, ID3D11Buffer* constant_buffer)
    {
       // cb_update_1 supplies fallback jitter, projection scale, and near plane for SR.
       data.sr_cb_jitter_x = 0.f;
       data.sr_cb_jitter_y = 0.f;
-      D3D11_MAPPED_SUBRESOURCE mapped = {};
-      if (!MapPixelShaderConstantBufferForReadback(native_device, native_device_context, 0, cb_update_1_min_size, data.cb_update_1_readback, mapped))
+      std::array<uint8_t, cb_update_1_min_size> buffer_data;
+      if (!data.constant_buffer_cache.Read(
+             native_device,
+             native_device_context,
+             constant_buffer,
+             ConstantBufferCache::ReadbackSlot::FrameData,
+             buffer_data.data(),
+             cb_update_1_min_size))
       {
          return false;
       }
 
-      const auto* base = static_cast<const uint8_t*>(mapped.pData);
+      const auto* base = buffer_data.data();
       ReadCBufferFloat2(base, cb_update_1_jitter_offset, data.sr_cb_jitter_x, data.sr_cb_jitter_y);
       const float inv_near = ReadCBufferValue<float>(base, cb_update_1_inv_near_offset);
       const float projection_scale_x = ReadCBufferValue<float>(base, cb_update_1_view_to_clip_offset);
-      const float projection_scale_y = ReadCBufferValue<float>(base, cb_update_1_view_to_clip_offset + sizeof(float) * 5u);
+      const float projection_scale_y = ReadCBufferValue<float>(base, cb_update_1_view_to_clip_offset + (sizeof(float) * 5u));
       const float tess_view_to_clip_11 = ReadCBufferValue<float>(base, cb_update_1_tess_view_to_clip_11_offset);
       if (std::isfinite(inv_near) && inv_near > 0.f)
       {
@@ -439,11 +394,10 @@ namespace QuantumBreakUpscaling
          data.sr_vertical_fov = vertical_fov;
       }
 
-      native_device_context->Unmap(data.cb_update_1_readback.get(), 0);
       return true;
    }
 
-   inline bool CaptureSSAAData(ID3D11Device* native_device, ID3D11DeviceContext* native_device_context, Data& data)
+   inline bool CaptureSSAAData(ID3D11Device* native_device, ID3D11DeviceContext* native_device_context, Data& data, ID3D11Buffer* constant_buffer)
    {
       // Prefer the temporal resolve's SSAA jitter over cb_update_1. It is the exact UV offset
       // used for the current color/depth sample, and the captured values identify QB's 4-sample pattern.
@@ -451,20 +405,24 @@ namespace QuantumBreakUpscaling
       data.sr_jitter_x = 0.f;
       data.sr_jitter_y = 0.f;
 
-      D3D11_MAPPED_SUBRESOURCE mapped = {};
-      if (!MapPixelShaderConstantBufferForReadback(native_device, native_device_context, 1, ssaa_min_size, data.ssaa_readback, mapped))
+      std::array<uint8_t, ssaa_min_size> buffer_data;
+      if (!data.constant_buffer_cache.Read(
+             native_device,
+             native_device_context,
+             constant_buffer,
+             ConstantBufferCache::ReadbackSlot::TemporalAA,
+             buffer_data.data(),
+             ssaa_min_size))
       {
          return false;
       }
 
-      const auto* base = static_cast<const uint8_t*>(mapped.pData);
+      const auto* base = buffer_data.data();
       ReadCBufferFloat2(base, ssaa_jitter_offset, data.sr_jitter_x, data.sr_jitter_y);
       data.sr_jitter_x = std::isfinite(data.sr_jitter_x) ? data.sr_jitter_x : 0.f;
       data.sr_jitter_y = std::isfinite(data.sr_jitter_y) ? data.sr_jitter_y : 0.f;
 
       data.has_ssaa_data = true;
-
-      native_device_context->Unmap(data.ssaa_readback.get(), 0);
       return true;
    }
 
@@ -475,7 +433,7 @@ namespace QuantumBreakUpscaling
       bool recreated_output_texture = false;
 
       auto* sr_instance_data = device_data.GetSRInstanceData();
-      if (!sr_instance_data)
+      if (sr_instance_data == nullptr)
       {
          return false;
       }
@@ -487,18 +445,18 @@ namespace QuantumBreakUpscaling
       D3D11_TEXTURE2D_DESC sr_output_desc = output_desc;
       sr_output_desc.BindFlags |= D3D11_BIND_UNORDERED_ACCESS | D3D11_BIND_SHADER_RESOURCE;
 
-      if (device_data.sr_output_color.get())
+      if (device_data.sr_output_color.get() != nullptr)
       {
          D3D11_TEXTURE2D_DESC prev_desc = {};
          device_data.sr_output_color->GetDesc(&prev_desc);
          data.output_changed = prev_desc.Width != sr_output_desc.Width || prev_desc.Height != sr_output_desc.Height || prev_desc.Format != sr_output_desc.Format;
       }
 
-      if (!device_data.sr_output_color.get() || data.output_changed)
+      if (device_data.sr_output_color.get() == nullptr || data.output_changed)
       {
          device_data.sr_output_color = nullptr;
-         HRESULT hr = native_device->CreateTexture2D(&sr_output_desc, nullptr, &device_data.sr_output_color);
-         if (FAILED(hr) || !device_data.sr_output_color.get())
+         const HRESULT hr = native_device->CreateTexture2D(&sr_output_desc, nullptr, &device_data.sr_output_color);
+         if (FAILED(hr) || device_data.sr_output_color.get() == nullptr)
          {
             return false;
          }
@@ -506,11 +464,11 @@ namespace QuantumBreakUpscaling
          recreated_output_texture = true;
       }
 
-      if (!data.sr_output_color_srv.get() || data.output_changed || recreated_output_texture)
+      if (data.sr_output_color_srv.get() == nullptr || data.output_changed || recreated_output_texture)
       {
          data.sr_output_color_srv = nullptr;
-         HRESULT hr = native_device->CreateShaderResourceView(device_data.sr_output_color.get(), nullptr, &data.sr_output_color_srv);
-         if (FAILED(hr) || !data.sr_output_color_srv.get())
+         const HRESULT hr = native_device->CreateShaderResourceView(device_data.sr_output_color.get(), nullptr, &data.sr_output_color_srv);
+         if (FAILED(hr) || data.sr_output_color_srv.get() == nullptr)
          {
             return false;
          }
@@ -562,7 +520,7 @@ namespace QuantumBreakUpscaling
       desc.SampleDesc.Count = 1u;
       desc.SampleDesc.Quality = 0u;
 
-      bool recreate_texture = !texture.get();
+      bool recreate_texture = texture.get() == nullptr;
       if (!recreate_texture)
       {
          D3D11_TEXTURE2D_DESC previous_desc = {};
@@ -576,26 +534,26 @@ namespace QuantumBreakUpscaling
          srv = nullptr;
          rtv = nullptr;
 
-         HRESULT hr = native_device->CreateTexture2D(&desc, nullptr, &texture);
-         if (FAILED(hr) || !texture.get())
+         const HRESULT hr = native_device->CreateTexture2D(&desc, nullptr, &texture);
+         if (FAILED(hr) || texture.get() == nullptr)
          {
             return false;
          }
       }
 
-      if (!srv.get())
+      if (srv.get() == nullptr)
       {
-         HRESULT hr = native_device->CreateShaderResourceView(texture.get(), nullptr, &srv);
-         if (FAILED(hr) || !srv.get())
+         const HRESULT hr = native_device->CreateShaderResourceView(texture.get(), nullptr, &srv);
+         if (FAILED(hr) || srv.get() == nullptr)
          {
             return false;
          }
       }
 
-      if (!rtv.get())
+      if (rtv.get() == nullptr)
       {
-         HRESULT hr = native_device->CreateRenderTargetView(texture.get(), nullptr, &rtv);
-         if (FAILED(hr) || !rtv.get())
+         const HRESULT hr = native_device->CreateRenderTargetView(texture.get(), nullptr, &rtv);
+         if (FAILED(hr) || rtv.get() == nullptr)
          {
             return false;
          }
@@ -609,9 +567,9 @@ namespace QuantumBreakUpscaling
       // Shared fullscreen draw for gamma->linear and linear->gamma SR color conversion.
       const auto vs_it = device_data.native_vertex_shaders.find(CompileTimeStringHash("Copy VS"));
       const auto ps_it = device_data.native_pixel_shaders.find(pixel_shader_hash);
-      if (vs_it == device_data.native_vertex_shaders.end() || !vs_it->second.get() ||
-          ps_it == device_data.native_pixel_shaders.end() || !ps_it->second.get() ||
-          !source_srv || !target_rtv || width == 0u || height == 0u)
+      if (vs_it == device_data.native_vertex_shaders.end() || vs_it->second.get() == nullptr ||
+          ps_it == device_data.native_pixel_shaders.end() || ps_it->second.get() == nullptr ||
+          source_srv == nullptr || target_rtv == nullptr || width == 0u || height == 0u)
       {
          return false;
       }
@@ -644,6 +602,14 @@ namespace QuantumBreakUpscaling
       result.requested = IsRequested(device_data);
 
 #if ENABLE_SR
+      if (result.requested)
+      {
+         data.constant_buffer_cache.Activate();
+      }
+      else
+      {
+         data.constant_buffer_cache.Deactivate();
+      }
       data.used_cached_clip_depth = false;
       // Switching into DLSS is equivalent to a fresh scene start for DLSS history purposes.
       if (data.previous_sr_type != device_data.sr_type)
@@ -653,10 +619,10 @@ namespace QuantumBreakUpscaling
       }
 
       com_ptr<ID3D11ShaderResourceView> ps_shader_resources[3];
-      com_ptr<ID3D11RenderTargetView> render_target_views[D3D11_SIMULTANEOUS_RENDER_TARGET_COUNT];
-      com_ptr<ID3D11DepthStencilView> depth_stencil_view;
+      com_ptr<ID3D11RenderTargetView> render_target_view;
+      com_ptr<ID3D11Buffer> temporal_constant_buffers[2];
       const bool immediate_context = native_device_context->GetType() == D3D11_DEVICE_CONTEXT_IMMEDIATE;
-      const bool has_main_temporal_resolve_bindings = [&]()
+      const bool has_main_temporal_resolve_bindings = result.requested && [&]()
       {
          if (!immediate_context)
          {
@@ -665,18 +631,20 @@ namespace QuantumBreakUpscaling
 
          // UI/menu-only resolves can hit the same shader without the scene color/depth/RTV bindings SR needs.
          native_device_context->PSGetShaderResources(0, ARRAYSIZE(ps_shader_resources), reinterpret_cast<ID3D11ShaderResourceView**>(ps_shader_resources));
-         native_device_context->OMGetRenderTargets(D3D11_SIMULTANEOUS_RENDER_TARGET_COUNT, &render_target_views[0], &depth_stencil_view);
-         return ps_shader_resources[0].get() && ps_shader_resources[2].get() && render_target_views[0].get();
+         native_device_context->OMGetRenderTargets(1, &render_target_view, nullptr);
+         return ps_shader_resources[0].get() != nullptr && ps_shader_resources[2].get() != nullptr && render_target_view.get() != nullptr;
       }();
 
       bool captured_cb_update_1 = false;
       bool captured_ssaa = false;
-      if (has_main_temporal_resolve_bindings)
+      if (result.requested && has_main_temporal_resolve_bindings)
       {
          // These constant buffers distinguish the real scene temporal resolve from transition variants
          // that use the same shader/resources but do not carry valid scene camera/jitter state.
-         captured_cb_update_1 = CaptureCBUpdate1Data(native_device, native_device_context, data);
-         captured_ssaa = CaptureSSAAData(native_device, native_device_context, data);
+         data.constant_buffer_cache.BindToCurrentThread();
+         native_device_context->PSGetConstantBuffers(0, ARRAYSIZE(temporal_constant_buffers), reinterpret_cast<ID3D11Buffer**>(temporal_constant_buffers));
+         captured_cb_update_1 = CaptureCBUpdate1Data(native_device, native_device_context, data, temporal_constant_buffers[0].get());
+         captured_ssaa = CaptureSSAAData(native_device, native_device_context, data, temporal_constant_buffers[1].get());
       }
 
       if (result.requested && has_main_temporal_resolve_bindings && !captured_cb_update_1 && !captured_ssaa)
@@ -703,9 +671,9 @@ namespace QuantumBreakUpscaling
          return result;
       }
 
-      if (result.requested && immediate_context && data.sr_motion_vectors.get() && has_main_temporal_resolve_bindings)
+      if (result.requested && immediate_context && data.sr_motion_vectors.get() != nullptr && has_main_temporal_resolve_bindings)
       {
-         if (ps_shader_resources[0].get() && ps_shader_resources[2].get() && render_target_views[0].get())
+         if (ps_shader_resources[0].get() != nullptr && ps_shader_resources[2].get() != nullptr && render_target_view.get() != nullptr)
          {
             com_ptr<ID3D11Resource> source_color_resource;
             ps_shader_resources[2]->GetResource(&source_color_resource);
@@ -718,19 +686,19 @@ namespace QuantumBreakUpscaling
 
             // The temporal resolve RTV is the final SR output target size.
             com_ptr<ID3D11Resource> output_resource;
-            render_target_views[0]->GetResource(&output_resource);
+            render_target_view->GetResource(&output_resource);
 
             com_ptr<ID3D11Texture2D> source_color_texture;
             com_ptr<ID3D11Texture2D> output_texture;
             com_ptr<ID3D11Texture2D> temporal_resolve_depth_texture;
             com_ptr<ID3D11Texture2D> motion_vectors_texture;
 
-            const HRESULT source_hr = source_color_resource.get() ? source_color_resource->QueryInterface(&source_color_texture) : E_FAIL;
-            const HRESULT output_hr = output_resource.get() ? output_resource->QueryInterface(&output_texture) : E_FAIL;
-            const HRESULT temporal_depth_hr = temporal_resolve_depth_resource.get() ? temporal_resolve_depth_resource->QueryInterface(&temporal_resolve_depth_texture) : E_FAIL;
-            const HRESULT motion_vectors_hr = data.sr_motion_vectors.get() ? data.sr_motion_vectors->QueryInterface(&motion_vectors_texture) : E_FAIL;
+            const HRESULT source_hr = source_color_resource.get() != nullptr ? source_color_resource->QueryInterface(&source_color_texture) : E_FAIL;
+            const HRESULT output_hr = output_resource.get() != nullptr ? output_resource->QueryInterface(&output_texture) : E_FAIL;
+            const HRESULT temporal_depth_hr = temporal_resolve_depth_resource.get() != nullptr ? temporal_resolve_depth_resource->QueryInterface(&temporal_resolve_depth_texture) : E_FAIL;
+            const HRESULT motion_vectors_hr = data.sr_motion_vectors.get() != nullptr ? data.sr_motion_vectors->QueryInterface(&motion_vectors_texture) : E_FAIL;
 
-            if (SUCCEEDED(source_hr) && SUCCEEDED(output_hr) && SUCCEEDED(temporal_depth_hr) && SUCCEEDED(motion_vectors_hr) && source_color_texture.get() && output_texture.get() && temporal_resolve_depth_texture.get() && motion_vectors_texture.get())
+            if (SUCCEEDED(source_hr) && SUCCEEDED(output_hr) && SUCCEEDED(temporal_depth_hr) && SUCCEEDED(motion_vectors_hr) && source_color_texture.get() != nullptr && output_texture.get() != nullptr && temporal_resolve_depth_texture.get() != nullptr && motion_vectors_texture.get() != nullptr)
             {
                // Descs drive DLSS settings, conversion texture allocation, and history reset decisions.
                D3D11_TEXTURE2D_DESC source_desc = {};
@@ -750,7 +718,7 @@ namespace QuantumBreakUpscaling
                // The depth-linearization pass can also produce half/quarter-res linear-depth copies.
                // Only use the cached clip-depth input if it matches the main color and MV size for this SR draw;
                // otherwise keep the temporal resolve PS SRV0 fallback, which is also named g_tClipDepth.
-               if (data.sr_clip_depth.get() && data.has_sr_clip_depth_desc &&
+               if (data.sr_clip_depth.get() != nullptr && data.has_sr_clip_depth_desc &&
                    data.sr_clip_depth_desc.Width == source_desc.Width &&
                    data.sr_clip_depth_desc.Height == source_desc.Height &&
                    data.sr_clip_depth_desc.Width == motion_vectors_desc.Width &&
@@ -765,7 +733,7 @@ namespace QuantumBreakUpscaling
                if (output_ready)
                {
                   auto* sr_instance_data = device_data.GetSRInstanceData();
-                  if (sr_instance_data)
+                  if (sr_instance_data != nullptr)
                   {
                      // Use the smallest SR input texture so color, depth, and motion vectors all cover the full render area.
                      const uint32_t input_width = (std::min)(source_desc.Width, (std::min)(depth_desc.Width, motion_vectors_desc.Width));
@@ -964,6 +932,7 @@ namespace QuantumBreakUpscaling
    inline void CleanResources(DeviceData& device_data, Data& data)
    {
 #if ENABLE_SR
+      data.constant_buffer_cache.ReleaseResources();
       // Drop all transient SR resources so the next valid scene frame rebuilds them and resets DLSS history.
       // If DLSS is currently selected, the rebuild is also treated as a fresh scene warmup.
       device_data.force_reset_sr = true;
@@ -1054,7 +1023,7 @@ namespace QuantumBreakUpscaling
          }
 
          const float field_column_width = (std::max)(420.f,
-            ImGui::CalcTextSize("Had Scene Temporal Resolve Last Frame:").x + ImGui::GetStyle().CellPadding.x * 2.f + 48.f);
+            ImGui::CalcTextSize("Had Scene Temporal Resolve Last Frame:").x + (ImGui::GetStyle().CellPadding.x * 2.f) + 48.f);
          ImGui::TableSetupColumn("Field", ImGuiTableColumnFlags_WidthFixed, field_column_width);
          ImGui::TableSetupColumn("Value", ImGuiTableColumnFlags_WidthStretch);
          return true;
@@ -1078,6 +1047,12 @@ namespace QuantumBreakUpscaling
       {
          table_row_label(label);
          ImGui::Text("%u", value);
+      };
+
+      auto table_row_uint64 = [&](const char* label, uint64_t value)
+      {
+         table_row_label(label);
+         ImGui::Text("%llu", static_cast<unsigned long long>(value));
       };
 
       auto table_row_float = [&](const char* label, float value)
@@ -1119,6 +1094,8 @@ namespace QuantumBreakUpscaling
             table_row_float("Last SR Pixel Jitter Y:", data.sr_render_pixel_jitter_y);
             table_row_float("Active MV Scale Multiplier:", Settings::mv_scale);
             table_row_float("Active Jitter Scale Multiplier:", Settings::jitter_scale);
+            table_row_uint64("CBuffer Upload Cache Hits:", data.constant_buffer_cache.CacheHitCount());
+            table_row_uint64("CBuffer GPU Readbacks:", data.constant_buffer_cache.GpuReadbackCount());
             ImGui::EndTable();
          }
       }

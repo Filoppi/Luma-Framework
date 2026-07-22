@@ -7,6 +7,7 @@ These notes describe the current Quantum Break SR/DLSS integration in Luma.
 Relevant files:
 
 - `Source/Games/Quantum Break/main.cpp`
+- `Source/Games/Quantum Break/ConstantBufferCache.hpp`
 - `Source/Games/Quantum Break/Upscaling.hpp`
 - `Source/Games/Quantum Break/Quantum Break.vcxproj`
 - `Shaders/Quantum Break/Luma_QB_PreSRDecode.hlsl`
@@ -70,7 +71,7 @@ Temporal resolve pass:
 - Falls back to temporal resolve `PS SRV slot 0`, named `g_tClipDepth` in the shader dump, if the explicit depth cache is missing or mismatched.
 - Captures source color from `PS SRV slot 2`.
 - Captures final resolve RTV from `OM RTV slot 0`.
-- Reads only the SR-required values from `cb_update_1` and the temporal resolve `ssaa` cbuffer through staging readback.
+- Reads only the SR-required values from `cb_update_1` and the temporal resolve `ssaa` cbuffer through the write-through upload cache, with staging readback retained as the safety path.
 - Runs SR before executing the original temporal resolve draw.
 
 MSAA-specific depth path:
@@ -216,6 +217,41 @@ Important resolution naming quirk:
 
 The temporal resolve shader samples current color/depth with `g_vSSAAJitterOffset[0]` added directly to UVs, so this remains the most authoritative jitter source until proven otherwise.
 
+### CPU Readback Avoidance
+
+`ConstantBufferCache.hpp` owns the cbuffer capture mechanism. `Upscaling.hpp` keeps the Quantum Break-specific byte offsets and decoding, while `main.cpp` owns the ReShade event registration and forwards relevant writes to the cache.
+
+The previous path copied `PS CB0` and `PS CB1` to D3D11 staging buffers and mapped them during every valid temporal resolve. Mapping immediately after `CopyResource` can block the render thread until the GPU reaches the copy. The current path avoids that synchronization when the game updated the same buffers through a CPU-visible operation:
+
+1. A valid scene temporal resolve binds the current thread as the cache owner and identifies the exact `ID3D11Buffer*` resources in `PS CB0` and `PS CB1`.
+2. The first read of each resource uses the original `CopyResource` + `Map` path and stores the full cbuffer contents in a CPU snapshot.
+3. Later `map_buffer_region`/`unmap_buffer_region` and `update_buffer_region` events mirror the game's actual writes into that snapshot.
+4. The next temporal resolve copies only the required prefix from the snapshot into local data and decodes the current jitter/camera values.
+
+This is write-through caching, not a frame-based cache. Values are reused only after observing writes to the same resource identity, so constantly changing jitter and camera data remain current.
+
+The callback path is deliberately narrow:
+
+- Capture is active only while SR is requested.
+- The valid scene temporal resolve establishes the render-thread ID.
+- Buffer callbacks reject inactive capture, a mismatched thread, null handles, and non-write maps before looking up device state.
+- A fixed atomic list of 16 tracked resource identities provides the cheap callback filter. Capacity overflow does not evict a live entry; additional resources continue through staging readback.
+- The byte snapshots and their map are accessed only by the bound render thread, so this path does not use a mutex.
+- If the temporal resolve is ever observed on another thread, upload caching is disabled and reads continue through staging readback.
+
+Fallback and invalidation rules:
+
+- A resource's first read uses staging readback because no CPU snapshot exists yet.
+- A GPU-side `copy_resource` or `copy_buffer_region` cannot be mirrored from CPU data. The destination resource is permanently marked for staging readback.
+- Invalid or out-of-range partial updates invalidate the snapshot instead of retaining questionable data.
+- Resource destruction clears its atomic tracked identity. Owner-thread cleanup erases the corresponding snapshot; off-thread destruction leaves an unreachable entry for later owner-thread cleanup.
+- Disabling capture immediately clears every tracked identity, including when called off-thread. This prevents snapshots from before SR was disabled from being reused after it is enabled again.
+- Releasing SR resources also releases the reusable staging buffers.
+
+The two staging resources are separated by `ReadbackSlot::FrameData` and `ReadbackSlot::TemporalAA`, matching `cb_update_1` and `ssaa`. They are recreated only when the source cbuffer byte width changes.
+
+ReShade cbuffer events are registered after a successful addon load and unregistered during process detach. Device teardown clears `device_data.game` before deleting the game data because releasing cached D3D resources may re-enter the resource-destruction callback.
+
 ## Jitter Units
 
 Raw jitter source priority:
@@ -359,6 +395,8 @@ In development/test builds, collapsible SR debug sections show:
 - SR render-pixel jitter sent to DLSS/FSR
 - MV scale multiplier
 - jitter scale multiplier
+- cbuffer upload-cache hits
+- cbuffer GPU readbacks
 
 User tuning controls:
 
@@ -375,6 +413,7 @@ Validated in this work:
 - Raw QB jitter is converted to SR render-pixel units before being sent to DLSS/FSR; the preferred SSAA jitter path uses full UV-to-pixel scaling, not raw cbuffer values or half-amplitude projection conversion.
 - DLSS selected before loading a save no longer hangs on the AA-off path after the transition guard and DLSS warmup.
 - The Luma core `CreateRenderTargetView` assert observed during debugging was a secondary symptom of device removal, so no core workaround is kept.
+- The cbuffer path now mirrors observed CPU writes and retains staging readback for first use and unsafe update paths. Both `Development-Release|x64` and `Publishing-Release|x64` compile successfully.
 
 Remaining validation/follow-up work:
 
@@ -384,6 +423,7 @@ Remaining validation/follow-up work:
 - Derive far plane if a reliable source is found.
 - Validate color stability with the gamma->linear->SR->gamma path across gameplay, menus, cutscenes, and resolution changes.
 - Replace the conservative `120`-resolve DLSS warmup with a tighter state-based stability check if a reliable signal is found.
+- Profile the cbuffer cache in gameplay. After first-use readbacks, upload-cache hits should dominate unless Quantum Break updates these resources through GPU copies or another unmirrorable path.
 
 Most useful runtime checks:
 
@@ -392,3 +432,4 @@ Most useful runtime checks:
 3. Confirm the cached clip-depth path stays selected with MSAA off; MSAA reconstruction/resolve hashes should not appear in that mode.
 4. Test DLSS selected before save load with Anti Aliasing off.
 5. Test camera cuts, pause/menu transitions, loading, and resolution changes.
+6. Compare `CBuffer Upload Cache Hits` and `CBuffer GPU Readbacks`; repeated readbacks identify a fallback path that needs investigation rather than data that should be cached across frames.
