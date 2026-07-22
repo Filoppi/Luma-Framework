@@ -60,7 +60,7 @@ namespace
    }
    
    bool sr_copy_resource = false; // Bloom missing fix by copying output back to input.
-   bool sr_user_allow_upgraded_samplers = true; // Let user control ignore_upgraded_samplers.
+   bool sr_user_allow_upgraded_samplers = true; // Let user control ignore_upgraded_samplers. //TODO: Find and only enable when it is safe in pipeline for upgrade.
    float sr_user_mip_bias_offset = 0.f; // Let user control mip bias offset, where 0 is SR recommended.
 }
 
@@ -600,8 +600,9 @@ public:
       {
          std::shared_lock shared_lock_samplers(s_mutex_samplers);
          
-         if (device_data.sr_type != SR::Type::None && !device_data.sr_suppressed && !ignore_upgraded_samplers)
-            device_data.texture_mip_lod_bias_offset = sr_user_mip_bias_offset < 0 ? sr_user_mip_bias_offset : SR::GetMipLODBias(device_data.render_resolution.y, device_data.output_resolution.y);
+         if (!ignore_upgraded_samplers)
+            device_data.texture_mip_lod_bias_offset = sr_user_mip_bias_offset == 0 && device_data.sr_type != SR::Type::None ? //if SR on and not overriden, use SR's recommended
+               SR::GetMipLODBias(device_data.render_resolution.y, device_data.output_resolution.y) : sr_user_mip_bias_offset;
          else
             device_data.texture_mip_lod_bias_offset = 0.0f;
       }
@@ -624,7 +625,7 @@ public:
       // SR User settings
       reshade::get_config_value(runtime, NAME, "sr_copy_resource", sr_copy_resource);
       reshade::get_config_value(runtime, NAME, "sr_user_allow_upgraded_samplers", sr_user_allow_upgraded_samplers);
-      ignore_upgraded_samplers = !sr_user_allow_upgraded_samplers;
+      ignore_upgraded_samplers = !sr_user_allow_upgraded_samplers; //TODO: Find and only enable when it is safe in pipeline for upgrade.
       reshade::get_config_value(runtime, NAME, "sr_user_mip_bias_offset", sr_user_mip_bias_offset);
    }
 
@@ -715,7 +716,7 @@ public:
             ImGui::PopStyleColor();
 
             ImGui::PushID("SR: copy_resource"); 
-            if (ImGui::Checkbox("Enable Fix", &sr_copy_resource))
+            if (ImGui::Checkbox("Enable Fix (Read Tooltip)", &sr_copy_resource))
                reshade::set_config_value(runtime, NAME, "sr_copy_resource", sr_copy_resource);
             ImGui::PopID();
             if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
@@ -730,16 +731,14 @@ public:
          ImGui::PopStyleColor();
 
          ImGui::PushID("SR: sr_user_allow_upgraded_samplers"); 
-         if (ImGui::Checkbox("Allow Sampler Upgrades", &sr_user_allow_upgraded_samplers))
-         {
+         if (ImGui::Checkbox("Enable Upgrade (Read Tooltip)", &sr_user_allow_upgraded_samplers))
             reshade::set_config_value(runtime, NAME, "sr_user_allow_upgraded_samplers", sr_user_allow_upgraded_samplers);
-            ignore_upgraded_samplers = !sr_user_allow_upgraded_samplers;
-         }
          ImGui::PopID();
          if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
-            ImGui::SetTooltip("Upgrade texture samplers to retain detail at a distance\nMay change more than just texture detail.\nMay also cost some performance.");
-         DrawResetButton(sr_user_allow_upgraded_samplers, true, "sr_user_allow_upgraded_samplers", runtime);
-
+            ImGui::SetTooltip("Upgrade texture samplers to retain detail at a distance\n\nShould be on, but it's weird in this game:\n- Increased LOD, but texture color gets darker.\n- Broken metallic armor in rain.\n- Maybe more that idk of.\n\nUse at your own risk...");
+         DrawResetButton(sr_user_allow_upgraded_samplers, false, "sr_user_allow_upgraded_samplers", runtime);
+         ignore_upgraded_samplers = !sr_user_allow_upgraded_samplers; //TODO: Find and only enable when it is safe in pipeline for upgrade.
+         
          //sr_user_mip_bias_offset slider
          if (ignore_upgraded_samplers) ImGui::BeginDisabled();
          ImGui::PushID("SR: sr_user_mip_bias_offset");
@@ -747,7 +746,7 @@ public:
             reshade::set_config_value(runtime, NAME, "sr_user_mip_bias_offset", sr_user_mip_bias_offset);
          ImGui::PopID();
          if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
-            ImGui::SetTooltip("Negative bias offset increases texture detail at a distance.\n\nSet 0 for Super Resolution recommendation.\nOtherwise, you can override.");
+            ImGui::SetTooltip("Negative offset increases detail.\nSet 0 for Super Resolution recommendation.");
          if (ignore_upgraded_samplers) ImGui::EndDisabled();
          ImGui::Bullet(); ImGui::SameLine(); ImGui::TextWrapped("Effective: %.3f", device_data.texture_mip_lod_bias_offset);
       }
