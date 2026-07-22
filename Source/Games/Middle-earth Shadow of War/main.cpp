@@ -445,7 +445,6 @@ public:
          D3D11_BUFFER_DESC desc;
          buffer->GetDesc(&desc);
 
-         // This alone should be reliable? Needs testing!
          if (desc.BindFlags == D3D11_BIND_CONSTANT_BUFFER && desc.ByteWidth == 544)
          {
             // cb0[31].xy in PS TAA 0x8D06D556.
