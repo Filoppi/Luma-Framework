@@ -59,29 +59,29 @@ struct GBFRHookGlobals
    std::atomic<uintptr_t> ui_render_ctx{0};
 };
 
-// New binary (PR #149, v2.0.2) RVAs — default build
+// Current binary (v2.0.3) RVAs — default build
 constexpr size_t kVSSetConstantBuffers1_VTableIndex = 119;
-constexpr uintptr_t kInitializeDX11RenderingPipeline_RVA = 0x007F9E10;
+constexpr uintptr_t kInitializeDX11RenderingPipeline_RVA = 0x007F3480;
 constexpr uintptr_t kUpdateScreenResolution_RVA = 0x005F7960;
-constexpr uintptr_t kDispatchRenderPassViewport_RVA = 0x022D0500; // GBFR_DispatchRenderPassViewport
+constexpr uintptr_t kDispatchRenderPassViewport_RVA = 0x022CAB70; // GBFR_DispatchRenderPassViewport
 constexpr uintptr_t kUIRenderOrchestrator_RVA = 0x03222A10;       // sub_143222A10 — UI pipeline entry
-constexpr uintptr_t kOutputWidth_RVA = 0x06B84090;                // g_outputWidth  — 1920 (0x0780)
-constexpr uintptr_t kOutputHeight_RVA = 0x06B84094;               // g_outputHeight — 1080 (0x0438)
-constexpr uintptr_t kRenderWidth_RVA = 0x06B84088;                // g_renderWidth  — 1920
-constexpr uintptr_t kRenderHeight_RVA = 0x06B8408C;               // g_renderHeight — 1080
-constexpr uintptr_t kCameraIndex_RVA = 0x07021320;                // CameraIndex (new table-based mechanism)
-constexpr uintptr_t kCameraTable_RVA = 0x054BF400;                // CameraTable (array of camera pointers)
+constexpr uintptr_t kOutputWidth_RVA = 0x06B81060;                // g_outputWidth  — 1920 (0x0780)
+constexpr uintptr_t kOutputHeight_RVA = 0x06B81064;               // g_outputHeight — 1080 (0x0438)
+constexpr uintptr_t kRenderWidth_RVA = 0x06B81058;                // g_renderWidth  — 1920
+constexpr uintptr_t kRenderHeight_RVA = 0x06B8105C;               // g_renderHeight — 1080
+constexpr uintptr_t kCameraIndex_RVA = 0x0701E2E0;                // CameraIndex (new table-based mechanism)
+constexpr uintptr_t kCameraTable_RVA = 0x054BB3A0;                // CameraTable (array of camera pointers)
 constexpr uintptr_t kCameraProjectionDataOffset = 0x60;
 constexpr uintptr_t kProjectionJitterXOffset = 0x940;
 constexpr uintptr_t kProjectionJitterYOffset = 0x944;
-constexpr uintptr_t kTAASettingsGlobal_RVA = 0x07032DE0;
-constexpr uintptr_t kJitterPhaseCounter_RVA = 0x0703F470;
-constexpr uintptr_t kJitterPhaseMask_CL_RVA = 0x02165876;   // JitterWrite + 0x3B
-constexpr uintptr_t kJitterPhaseMask_EAX_RVA = 0x0216587C;   // JitterWrite + 0x41
-constexpr uintptr_t kJitterWrite_RVA = 0x0216582D;
-constexpr uintptr_t kTemporalAntiAliasingComponent_Init_RVA = 0x02165260;
+constexpr uintptr_t kTAASettingsGlobal_RVA = 0x0702FDA0;
+constexpr uintptr_t kJitterPhaseCounter_RVA = 0x0703C430;
+constexpr uintptr_t kJitterPhaseMask_CL_RVA = 0x0215FDB8;   // JitterWrite - 0x25
+constexpr uintptr_t kJitterPhaseMask_EAX_RVA = 0x0215FDBE;   // JitterWrite - 0x1F
+constexpr uintptr_t kJitterWrite_RVA = 0x0215FDDD;
+constexpr uintptr_t kTemporalAntiAliasingComponent_Init_RVA = 0x0215F810;
 constexpr uintptr_t kTAAJitterTableOffset = 0x28;
-constexpr uintptr_t kTAAJitterPhaseIndexOffset = 0x24; // this->jitter_phase_index; written by Trans at same time as camera write (mov [rsi+24h], cl @ 0x141A9EB77)
+constexpr uintptr_t kTAAJitterPhaseIndexOffset = 0x24; // this->jitter_phase_index; written by Trans at same time as camera write (mov [rsi+24h], cl @ 0x14215FDB9)
 constexpr size_t kTAAJitterTableCount = 64;
 
 // Old binary (v1.3.2) RVAs — used when V1_3_2 is defined
