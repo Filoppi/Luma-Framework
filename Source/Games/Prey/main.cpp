@@ -1414,7 +1414,7 @@ public:
                draw_data.exposure = device_data.sr_exposure.get();
                draw_data.pre_exposure = dlss_pre_exposure;
                draw_data.jitter_x = projection_jitters.x * static_cast<float>(render_width_dlss) * -0.5f;
-               draw_data.jitter_y = projection_jitters.y * static_cast<float>(render_height_dlss) * -0.5f;
+               draw_data.jitter_y = projection_jitters.y * static_cast<float>(render_height_dlss) * 0.5f;
                draw_data.reset = reset_dlss;
                draw_data.render_width = render_width_dlss;
                draw_data.render_height = render_height_dlss;
