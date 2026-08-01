@@ -23,6 +23,12 @@ struct GameDeviceDataPrey final : public GameDeviceData
    com_ptr<ID3D11RenderTargetView> sr_motion_vectors_rtv;
 #endif // ENABLE_SR
 
+   // Exposure
+   com_ptr<ID3D11Buffer> exposure_buffer_gpu; // SR (doesn't need "ENABLE_SR)
+   com_ptr<ID3D11Buffer> exposure_buffers_cpu[2]; // SR (doesn't need "ENABLE_SR)
+   com_ptr<ID3D11RenderTargetView> exposure_buffer_rtv; // SR (doesn't need "ENABLE_SR)
+   size_t exposure_buffers_cpu_index = 0;
+
    // GTAO
    com_ptr<ID3D11Texture2D> gtao_edges_texture;
    UINT gtao_edges_texture_width = 0;
@@ -158,6 +164,7 @@ namespace
 
    // Dev or User settings:
 #if DEVELOPMENT
+   float sr_custom_exposure = 0.f; // Ignored at 0
    float sr_custom_pre_exposure = 0.f; // Ignored at 0
    int force_taa_jitter_phases = 0; // Ignored if 0 (automatic mode), set to 1 to basically disable jitters
    bool disable_taa_jitters = false;
@@ -171,6 +178,7 @@ namespace
    constexpr uint32_t AUTO_HDR_VIDEOS_HASH = char_ptr_crc32("AUTO_HDR_VIDEOS");
 
    constexpr uint32_t SSAO_TYPE_HASH = char_ptr_crc32("SSAO_TYPE");
+   constexpr uint32_t SR_RELATIVE_PRE_EXPOSURE_HASH = char_ptr_crc32("SR_RELATIVE_PRE_EXPOSURE"); // "DEVELOPMENT" only
    constexpr uint32_t FORCE_MOTION_VECTORS_JITTERED_HASH = char_ptr_crc32("FORCE_MOTION_VECTORS_JITTERED"); // "DEVELOPMENT" only
 
 #if DEVELOPMENT
@@ -273,6 +281,7 @@ public:
       GetShaderDefineData(EARLY_DISPLAY_ENCODING_HASH).SetDefaultValue('1'); // Gamma correction happens within LUT sampling in Prey, turning this setting off will have unexpected results (it's not meant to be changed, the off mode is not implemented)
       GetShaderDefineData(UI_DRAW_TYPE_HASH).SetDefaultValue('1');
 
+      native_shaders_definitions.emplace(CompileTimeStringHash("Draw Final Exposure"), ShaderDefinition{ "Luma_DrawFinalExposure", reshade::api::pipeline_subobject_type::pixel_shader }); // SR (doesn't need "ENABLE_SR)
       native_shaders_definitions.emplace(CompileTimeStringHash("Perfect Perspective"), ShaderDefinition{ "Luma_PerfectPerspective", reshade::api::pipeline_subobject_type::pixel_shader });
    }
 
@@ -464,6 +473,171 @@ public:
       if (game_device_data.has_drawn_composed_gbuffers && !game_device_data.has_drawn_tonemapping && original_shader_hashes.Contains(shader_hashes_HDRPostProcessHDRFinalScene))
       {
          game_device_data.has_drawn_tonemapping = true;
+
+         // Update the DLSS pre-exposure to take the opposite value of our exposure (basically our brightness) to avoid DLSS causing additional lag when the exposure changes.
+         // This way, DLSS will divide the linear buffer by this value, which would have previously been multiplied in given that TAA runs after the scene exposure is factored in (even in HDR, and it shouldn't! But moving it is too hard).
+         // For this particular case, we don't use the native DLSS exposure texture, but we rely on pre-exposure itself, as it has a different temporal behaviour,
+         // if we changed the DLSS exposure texture every frame to follow the scene exposure, DLSS would act weird (mostly likely just ignore it, as it uses that as a hint of the exposure the tonemapper would use after TAA),
+         // while with pre-exposure it works as expected (except it kinda lags behind a bit, because it doesn't store a pre-exposure value attached to every frame, and simply uses the last provided one).
+         if (device_data.sr_type != SR::Type::None && !device_data.sr_suppressed && device_data.taa_detected && device_data.cloned_pipeline_count != 0 && device_data.native_pixel_shaders[CompileTimeStringHash("Draw Final Exposure")])
+         {
+            bool texture_recreated = false;
+            // Create pre-exposure buffers once
+            if (!game_device_data.exposure_buffer_gpu.get())
+            {
+               texture_recreated = true;
+
+               D3D11_BUFFER_DESC exposure_buffer_desc;
+               exposure_buffer_desc.ByteWidth = 4; // 1x float32
+               exposure_buffer_desc.Usage = D3D11_USAGE_DEFAULT;
+               exposure_buffer_desc.BindFlags = D3D11_BIND_RENDER_TARGET;
+               exposure_buffer_desc.CPUAccessFlags = 0;
+               exposure_buffer_desc.MiscFlags = 0;
+               exposure_buffer_desc.StructureByteStride = sizeof(float);
+
+               D3D11_SUBRESOURCE_DATA exposure_buffer_data;
+               exposure_buffer_data.pSysMem = &device_data.sr_scene_pre_exposure; // This needs to be "static" data in case the texture initialization was somehow delayed and read the data after the stack destroyed it (I think?)
+               exposure_buffer_data.SysMemPitch = 0;
+               exposure_buffer_data.SysMemSlicePitch = 0;
+
+               game_device_data.exposure_buffer_gpu = nullptr;
+               HRESULT hr = native_device->CreateBuffer(&exposure_buffer_desc, &exposure_buffer_data, &game_device_data.exposure_buffer_gpu);
+               ASSERT_ONCE(SUCCEEDED(hr));
+
+               exposure_buffer_desc.Usage = D3D11_USAGE_STAGING;
+               exposure_buffer_desc.BindFlags = 0;
+               exposure_buffer_desc.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
+
+               // Create a "ring" buffer so we avoid avoid butchering the frame rate to map this texture immediately after a copy resource from the dynamic resource (shader memory writes will directly go into our mapped data, with a delay)
+               game_device_data.exposure_buffers_cpu[0] = nullptr;
+               hr = native_device->CreateBuffer(&exposure_buffer_desc, &exposure_buffer_data, &game_device_data.exposure_buffers_cpu[0]);
+               ASSERT_ONCE(SUCCEEDED(hr));
+               game_device_data.exposure_buffers_cpu[1] = nullptr;
+               hr = native_device->CreateBuffer(&exposure_buffer_desc, &exposure_buffer_data, &game_device_data.exposure_buffers_cpu[1]);
+
+               D3D11_RENDER_TARGET_VIEW_DESC exposure_buffer_rtv_desc;
+               exposure_buffer_rtv_desc.Format = DXGI_FORMAT::DXGI_FORMAT_R32_FLOAT; // NOTE: this would probably be fine as FP16 too
+               exposure_buffer_rtv_desc.ViewDimension = D3D11_RTV_DIMENSION::D3D11_RTV_DIMENSION_BUFFER;
+               exposure_buffer_rtv_desc.Buffer.FirstElement = 0;
+               exposure_buffer_rtv_desc.Buffer.NumElements = 1;
+
+               game_device_data.exposure_buffer_rtv = nullptr;
+               hr = native_device->CreateRenderTargetView(game_device_data.exposure_buffer_gpu.get(), &exposure_buffer_rtv_desc, &game_device_data.exposure_buffer_rtv);
+               ASSERT_ONCE(SUCCEEDED(hr));
+            }
+
+#if DEVELOPMENT || TEST
+            // Make sure the exposure texture is 1x1 in size because we assumed so in code (we swapped its sampling with a load of texel 0)
+            D3D11_TEXTURE2D_DESC ps_texture_2d_desc = {};
+            com_ptr<ID3D11ShaderResourceView> ps_srv;
+            native_device_context->PSGetShaderResources(1, 1, &ps_srv);
+            if (ps_srv)
+            {
+               com_ptr<ID3D11Resource> ps_resource;
+               ps_srv->GetResource(&ps_resource);
+               if (ps_resource)
+               {
+                  com_ptr<ID3D11Texture2D> ps_texture_2d;
+                  ps_resource->QueryInterface(&ps_texture_2d);
+                  if (ps_texture_2d)
+                  {
+                     ps_texture_2d->GetDesc(&ps_texture_2d_desc);
+                  }
+               }
+            }
+            ASSERT_ONCE(ps_texture_2d_desc.Width == 1 && ps_texture_2d_desc.Height == 1);
+#endif
+
+            // Cache original state
+            com_ptr<ID3D11RenderTargetView> rtv;
+            native_device_context->OMGetRenderTargets(1, &rtv, nullptr);
+            com_ptr<ID3D11PixelShader> ps;
+            native_device_context->PSGetShader(&ps, nullptr, 0);
+
+            bool has_sunshafts = original_shader_hashes.Contains(shader_hashes_HDRPostProcessHDRFinalScene_Sunshafts); // These shaders use a different cbuffer layout
+            SetLumaConstantBuffers(native_device_context, cmd_list_data, device_data, stages, LumaConstantBufferType::LumaData, has_sunshafts);
+
+            // Draw the exposure
+            native_device_context->PSSetShader(device_data.native_pixel_shaders[CompileTimeStringHash("Draw Final Exposure")].get(), nullptr, 0);
+            ID3D11RenderTargetView* render_target_view_const = game_device_data.exposure_buffer_rtv.get();
+            native_device_context->OMSetRenderTargets(1, &render_target_view_const, nullptr);
+            native_device_context->Draw(3, 0);
+
+#if DEVELOPMENT
+            const std::shared_lock lock_trace(s_mutex_trace);
+            if (trace_running)
+            {
+               const std::unique_lock lock_trace_2(cmd_list_data.mutex_trace);
+               TraceDrawCallData trace_draw_call_data;
+               trace_draw_call_data.type = TraceDrawCallData::TraceDrawCallType::Custom;
+               trace_draw_call_data.command_list = native_device_context;
+               trace_draw_call_data.custom_name = "Super Resolution Draw Exposure"; // TODO: rename ~all text with DLSS in the name to "SR"
+               // Re-use the RTV data for simplicity
+               GetResourceInfo(game_device_data.exposure_buffer_gpu.get(), trace_draw_call_data.rt_size[0], trace_draw_call_data.rt_format[0], &trace_draw_call_data.rt_type_name[0], &trace_draw_call_data.rt_hash[0]);
+               cmd_list_data.trace_draw_calls_data.insert(cmd_list_data.trace_draw_calls_data.end() - 1, trace_draw_call_data);
+            }
+#endif
+
+            // Copy it back as CPU buffer and read+store it
+            native_device_context->CopyResource(game_device_data.exposure_buffers_cpu[game_device_data.exposure_buffers_cpu_index].get(), game_device_data.exposure_buffer_gpu.get());
+
+            game_device_data.exposure_buffers_cpu_index = (game_device_data.exposure_buffers_cpu_index + 1) % 2; // Ping Point between 0 and 1
+
+            float scene_exposure = device_data.sr_scene_pre_exposure; // 1 by default
+            // Read back from the previous frame "ring buffer" (it's fine!). In the first frame this would have a value of 1.
+            // Note: this is possibly some frames behind, but has no performance hit and it's fine as it is for the use we make of it
+            D3D11_MAPPED_SUBRESOURCE mapped_exposure;
+            // We use the "D3D11_MAP_FLAG_DO_NOT_WAIT" flag just for extra safety, the exposure being wrong if preferable to a frame rate dip. It'd throw an error anyway
+            HRESULT hr = texture_recreated ? -1 : native_device_context->Map(game_device_data.exposure_buffers_cpu[game_device_data.exposure_buffers_cpu_index].get(), 0, D3D11_MAP_READ, D3D11_MAP_FLAG_DO_NOT_WAIT, &mapped_exposure);
+            // TODO: in case this assert failed often enough, make ~4 buffers and read the more recent one that isn't write locked
+            ASSERT_ONCE(texture_recreated || SUCCEEDED(hr)); // It seems like this rarely happens with a ring buffer as we always wait one whole frame, though if necessary, we could increase the ring buffer and read the oldest texture that is available
+            if (SUCCEEDED(hr))
+            {
+               // Depending on "SR_RELATIVE_PRE_EXPOSURE" this is either the relative exposure (compared to the average expected exposure value) or raw final exposure
+               scene_exposure = *((float*)mapped_exposure.pData);
+               if (std::isinf(scene_exposure) || std::isnan(scene_exposure) || scene_exposure <= 0.f)
+               {
+                  scene_exposure = 1.f;
+               }
+               native_device_context->Unmap(game_device_data.exposure_buffers_cpu[game_device_data.exposure_buffers_cpu_index].get(), 0);
+               mapped_exposure = {}; // Null just for clarity
+            }
+
+            // Force an exposure of 1 if we are resetting DLSS, as the value from the previous frame might not be correct anymore
+            bool reset_dlss = device_data.force_reset_sr || !device_data.has_drawn_main_post_processing_previous || (game_device_data.has_drawn_motion_blur_previous && !game_device_data.has_drawn_motion_blur);
+            if (reset_dlss)
+            {
+               scene_exposure = 1.f;
+            }
+
+            device_data.sr_scene_pre_exposure = scene_exposure;
+#if DEVELOPMENT || TEST
+            bool sr_relative_pre_exposure = GetShaderDefineCompiledNumericalValue(SR_RELATIVE_PRE_EXPOSURE_HASH) >= 1;
+#else
+            bool sr_relative_pre_exposure;
+            {
+               const std::shared_lock lock(s_mutex_shader_defines);
+               sr_relative_pre_exposure = code_shaders_defines.contains("SR_RELATIVE_PRE_EXPOSURE") && code_shaders_defines["SR_RELATIVE_PRE_EXPOSURE"] >= 1;
+            }
+#endif
+            if (sr_relative_pre_exposure)
+            {
+               // With this design, the pre-exposure is set to the relative exposure and the exposure texture is set to 1 (see the shader for more).
+               device_data.sr_scene_exposure = 1.f;
+            }
+            else
+            {
+               // With this design, we set the DLSS pre-exposure and exposure to the same value, so, given that the exposure was already multiplied in despite it shouldn't have it been so,
+               // DLSS will divide out the exposure through the pre-exposure parameter and then re-acknowledge it through the exposure texture, basically making DLSS act as if it was done before exposure/tonemapping.
+               // This might not work that well if our exposure here is some frames late, as it wouldn't match the one already baked in the texture.
+               device_data.sr_scene_exposure = scene_exposure;
+            }
+
+            // Restore original state
+            native_device_context->PSSetShader(ps.get(), nullptr, 0);
+            render_target_view_const = rtv.get();
+            native_device_context->OMSetRenderTargets(1, &render_target_view_const, nullptr);
+         }
       }
 
       // Motion Blur
@@ -1028,7 +1202,6 @@ public:
             settings_data.mvs_x_scale = static_cast<float>(dlss_render_resolution[0]);
             settings_data.mvs_y_scale = static_cast<float>(dlss_render_resolution[1]);
             settings_data.render_preset = dlss_render_preset;
-            settings_data.auto_exposure = true;
             sr_implementations[device_data.sr_type]->UpdateSettings(sr_instance_data, native_device_context, settings_data);
 
 #if TEST_SR // Verify that DLSS/FSR never alter the pipeline state (it doesn't, not in the "SR::UpdateSettings()"
@@ -1101,6 +1274,46 @@ public:
                com_ptr<ID3D11Texture2D> object_velocity_buffer;
                hr = object_velocity_buffer_temp->QueryInterface(&object_velocity_buffer);
                ASSERT_ONCE(SUCCEEDED(hr));
+
+               // Generate "fake" exposure texture
+               bool exposure_changed = false;
+               float sr_scene_exposure = device_data.sr_scene_exposure;
+#if DEVELOPMENT
+               if (sr_custom_exposure > 0.f)
+               {
+                  sr_scene_exposure = sr_custom_exposure;
+               }
+#endif // DEVELOPMENT
+               exposure_changed = sr_scene_exposure != device_data.sr_exposure_texture_value;
+               device_data.sr_exposure_texture_value = sr_scene_exposure;
+               // TODO: optimize this for the "SR_RELATIVE_PRE_EXPOSURE" false case! Avoid re-creating the texture every frame the exposure changes and instead make it dynamic and re-write it from the CPU? Or simply make our exposure calculation shader write to a texture directly
+               // (though in that case it wouldn't have the same delay as the CPU side pre-exposure buffer readback)
+               if (!device_data.sr_exposure.get() || exposure_changed)
+               {
+                  D3D11_TEXTURE2D_DESC exposure_texture_desc; // DLSS fails if we pass in a 1D texture so we have to make a 2D one
+                  exposure_texture_desc.Width = 1;
+                  exposure_texture_desc.Height = 1;
+                  exposure_texture_desc.MipLevels = 1;
+                  exposure_texture_desc.ArraySize = 1;
+                  exposure_texture_desc.Format = DXGI_FORMAT::DXGI_FORMAT_R32_FLOAT; // FP32 just so it's easier to initialize data for it
+                  exposure_texture_desc.SampleDesc.Count = 1;
+                  exposure_texture_desc.SampleDesc.Quality = 0;
+                  exposure_texture_desc.Usage = D3D11_USAGE_IMMUTABLE;
+                  exposure_texture_desc.BindFlags = D3D11_BIND_SHADER_RESOURCE;
+                  exposure_texture_desc.CPUAccessFlags = 0;
+                  exposure_texture_desc.MiscFlags = 0;
+
+                  // It's best to force an exposure of 1 given that DLSS runs after the auto exposure is applied (in tonemapping).
+                  // Theoretically knowing the average exposure of the frame would still be beneficial to it (somehow) so maybe we could simply let the auto exposure in,
+                  D3D11_SUBRESOURCE_DATA exposure_texture_data;
+                  exposure_texture_data.pSysMem = &sr_scene_exposure; // This needs to be "static" data in case the texture initialization was somehow delayed and read the data after the stack destroyed it
+                  exposure_texture_data.SysMemPitch = 32;
+                  exposure_texture_data.SysMemSlicePitch = 32;
+
+                  device_data.sr_exposure = nullptr; // Make sure we discard the previous one
+                  hr = native_device->CreateTexture2D(&exposure_texture_desc, &exposure_texture_data, &device_data.sr_exposure);
+                  assert(SUCCEEDED(hr));
+               }
 
                // Generate motion vectors from the objects velocity buffer and the camera movement.
                // For the most past, these look great, especially with rotational camera movement. When there's location camera movement, thin lines do break a bit,
@@ -1198,6 +1411,7 @@ public:
                draw_data.output_color = device_data.sr_output_color.get();
                draw_data.motion_vectors = game_device_data.sr_motion_vectors.get();
                draw_data.depth_buffer = depth_buffer.get();
+               draw_data.exposure = device_data.sr_exposure.get();
                draw_data.pre_exposure = dlss_pre_exposure;
                draw_data.jitter_x = projection_jitters.x * static_cast<float>(render_width_dlss) * -0.5f;
                draw_data.jitter_y = projection_jitters.y * static_cast<float>(render_height_dlss) * 0.5f;
@@ -1329,6 +1543,7 @@ public:
             device_data.sr_render_resolution_scale = 1.f;
             game_device_data.prey_drs_detected = false;
          }
+         device_data.sr_scene_exposure = 1.f;
          device_data.sr_scene_pre_exposure = 1.f;
       }
       game_device_data.has_drawn_ssao = false;
@@ -1994,6 +2209,7 @@ public:
    {
 #if ENABLE_SR
       ImGui::NewLine();
+      ImGui::SliderFloat("SR Custom Exposure", &sr_custom_exposure, 0.0, 10.0);
       ImGui::SliderFloat("SR Custom Pre-Exposure", &sr_custom_pre_exposure, 0.0, 10.0);
 #endif // ENABLE_SR
 
@@ -2158,6 +2374,11 @@ public:
       auto& game_device_data = GetGameDeviceData(device_data);
       game_device_data.sr_motion_vectors = nullptr;
       game_device_data.sr_motion_vectors_rtv = nullptr;
+      game_device_data.exposure_buffer_gpu = nullptr;
+      game_device_data.exposure_buffers_cpu[0] = nullptr;
+      game_device_data.exposure_buffers_cpu[1] = nullptr;
+      game_device_data.exposure_buffers_cpu_index = 0;
+      game_device_data.exposure_buffer_rtv = nullptr;
    }
 
    float GetTonemapUIBackgroundAmount(const DeviceData& device_data) const override { return tonemap_ui_background ? tonemap_ui_background_amount : 0.f; }
@@ -2234,6 +2455,7 @@ BOOL APIENTRY DllMain(HMODULE hModule, DWORD ul_reason_for_call, LPVOID lpReserv
          {"EXPAND_COLOR_GAMUT", '1', true, false, "Makes the original tonemapper work in a wider color gamut (HDR BT.2020), resulting in more saturated colors.\nDisable for a more vanilla like experience", 1},
          {"ENABLE_LUT_EXTRAPOLATION", '1', true, false, "LUT Extrapolation should be the best looking and most accurate SDR to HDR LUT adaptation mode,\nbut you can always turn it off for the its simpler fallback", 1},
      #if DEVELOPMENT || TEST
+         {"SR_RELATIVE_PRE_EXPOSURE", '1', true, false},
          {"ENABLE_LINEAR_COLOR_GRADING_LUT", '1', true, false, "Whether (SDR) LUTs are stored in linear or gamma space"},
          {"FORCE_NEUTRAL_COLOR_GRADING_LUT_TYPE", '0', true, false, "Can force a neutral LUT in different ways (color grading is still applied)"},
          {"DRAW_LUT", '0', true, (DEVELOPMENT || TEST) ? false : true},
