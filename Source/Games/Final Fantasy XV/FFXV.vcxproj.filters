@@ -3,9 +3,9 @@
   <ItemGroup>
     <ClCompile Include="main.cpp" />
     <ClCompile Include="..\..\Core\unity_build.cpp" />
-    <ClCompile Include="includes\dlss_helpers.cpp" />
   </ItemGroup>
   <ItemGroup>
     <ClInclude Include="includes\cbuffers.h" />
+    <ClInclude Include="includes\dither_detect.hpp" />
   </ItemGroup>
 </Project>

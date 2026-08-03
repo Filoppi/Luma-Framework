@@ -11,27 +11,26 @@ bool ResolveGBFRAddresses()
 
    // Hook/function targets (code addresses)
    g_resolved_addresses.initialize_dx11_rendering_pipeline = reinterpret_cast<void*>(base + kInitializeDX11RenderingPipeline_RVA);
-   g_resolved_addresses.dispatch_render_pass_viewport = reinterpret_cast<void*>(base + kDispatchRenderPassViewport_RVA);
-   g_resolved_addresses.ui_render_orchestrator = reinterpret_cast<void*>(base + kUIRenderOrchestrator_RVA);
    g_resolved_addresses.jitter_write_site = reinterpret_cast<void*>(base + kJitterWrite_RVA);
 #ifdef PATCH_JITTER_TABLE_INIT
    g_resolved_addresses.temporal_aa_component_init = reinterpret_cast<void*>(base + kTemporalAntiAliasingComponent_Init_RVA);
 #endif
 
    // Data addresses
-   g_resolved_addresses.output_width = base + kOutputWidth_RVA;
-   g_resolved_addresses.output_height = base + kOutputHeight_RVA;
    g_resolved_addresses.render_width = base + kRenderWidth_RVA;
    g_resolved_addresses.render_height = base + kRenderHeight_RVA;
    g_resolved_addresses.camera_index = base + kCameraIndex_RVA;
    g_resolved_addresses.camera_table = base + kCameraTable_RVA;
    g_resolved_addresses.taa_settings_global = base + kTAASettingsGlobal_RVA;
+#ifdef V2_0_3
+   g_resolved_addresses.taa_running_flag = base + kTAARunningFlag_RVA;
+   g_resolved_addresses.taa_render_scale_flag_ptr = base + kTAARenderScaleFlagPointer_RVA;
+#endif
    g_resolved_addresses.jitter_phase_counter = base + kJitterPhaseCounter_RVA;
-   g_resolved_addresses.jitter_phase_mask_cl_imm = base + kJitterPhaseMask_CL_RVA;
-   g_resolved_addresses.jitter_phase_mask_eax_imm = base + kJitterPhaseMask_EAX_RVA;
 #ifdef V1_3_2
    g_resolved_addresses.camera_global = base + kCameraGlobal_RVA;
 #endif
+   g_resolved_addresses.taa_reset_flag = base + kTAAResetFlag_RVA;
 
    return true;
 }
@@ -78,15 +77,29 @@ bool TryReadCameraJitter(float2& out_jitter)
 
 void OnJitterWrite(safetyhook::Context& ctx)
 {
+#ifdef V2_0_3
+   // v2.0.3: Jitter stored in TAA component table at [rcx + 8*(phase&0x3F) + 0x28]
+   // ctx.rcx = TemporalAntiAliasingComponent*, phase counter is global
+   const uint8_t phase = *reinterpret_cast<const uint8_t*>(g_resolved_addresses.jitter_phase_counter);
+   const uintptr_t jit_addr = ctx.rcx + 8 * (phase & 0x3F) + 0x28;
+   g_hook_globals.table_jitter_x_bits.store(
+      *reinterpret_cast<const uint32_t*>(jit_addr), std::memory_order_release);
+   g_hook_globals.table_jitter_y_bits.store(
+      *reinterpret_cast<const uint32_t*>(jit_addr + 4), std::memory_order_release);
+#else
+   // v2.0.2/v1.3.2: Jitter written to camera projection, captured from registers
    g_hook_globals.table_jitter_x_bits.store(static_cast<uint32_t>(ctx.rcx), std::memory_order_release);
    g_hook_globals.table_jitter_y_bits.store(static_cast<uint32_t>(ctx.rax), std::memory_order_release);
+#endif
    g_hook_globals.table_jitter_valid.store(true, std::memory_order_release);
 #ifdef PATCH_JITTER_TABLE_INIT
-   // ctx.rsi = TemporalAntiAliasingComponent* (this); jitter_phase_index at +0x24 is written by
-   // 'mov [rsi+24h], cl' at 0x141A9EB77, four instructions before this hook fires at kJitterWrite_RVA.
-   // This is definitively the index used to look up the table entry that was just written to the camera.
-   const auto phase = *reinterpret_cast<const uint8_t*>(ctx.rsi + kTAAJitterPhaseIndexOffset);
-   g_hook_globals.cached_jitter_phase_idx.store(phase, std::memory_order_release);
+   // Capture phase index for the init hook — source differs per version.
+#ifdef V2_0_3
+   const uint8_t phase_idx = *reinterpret_cast<const uint8_t*>(g_resolved_addresses.jitter_phase_counter);
+#else
+   const uint8_t phase_idx = *reinterpret_cast<const uint8_t*>(ctx.rsi + kTAAJitterPhaseIndexOffset);
+#endif
+   g_hook_globals.cached_jitter_phase_idx.store(phase_idx, std::memory_order_release);
 #endif
 }
 
@@ -112,11 +125,8 @@ constexpr std::array<float2, JITTER_PHASES> precomputed_jitters = []()
 
 bool TryReadTableJitterFromCounter(float2& out_jitter)
 {
-   // Use the phase index cached by OnJitterWrite rather than g_frame_counter.
-   // g_frame_counter is incremented by GBFR_CameraProjectionData_BulkUpdate_Caller on the
-   // game-logic thread (lock inc @ 0x14019F6AA) one frame ahead of the render thread, causing
-   // an off-by-one. cached_jitter_phase_idx is captured from ctx.rsi+0x24 at the exact
-   // moment the camera write fires — always in sync regardless of TAA component lifecycle.
+   // Use phase index cached by OnJitterWrite to avoid off-by-one from g_frame_counter
+   // (incremented on game-logic thread one frame ahead of render thread).
    if (!g_hook_globals.table_jitter_valid.load(std::memory_order_acquire))
       return false;
    const uint8_t phase_idx = g_hook_globals.cached_jitter_phase_idx.load(std::memory_order_acquire);
@@ -135,6 +145,8 @@ static void __fastcall Hooked_TemporalAntiAliasingComponentInit(void* self)
 
 void PatchJitterPhases()
 {
+   // No-op when PATCH_JITTER_TABLE_INIT is defined — the init hook handles phase control.
+   // When disabled, patches phase mask bytes in the game's jitter write function.
    static_assert((JITTER_PHASES & (JITTER_PHASES - 1)) == 0, "JITTER_PHASES must be a power of 2");
    static_assert(JITTER_PHASES >= 1 && JITTER_PHASES <= 64, "JITTER_PHASES must be between 1 and 64");
 
@@ -164,6 +176,34 @@ bool IsTAARunningThisFrame()
    static std::atomic<bool> s_last_taa_running{false};
 
    const bool last_known = s_last_taa_running.load(std::memory_order_acquire);
+
+#ifdef V2_0_3
+   // v2.0.3: qword_147371338 (RVA 0x7371338) is a POINTER to the TAA running flag byte.
+   // Verified in TemporalAntiAliasingComponent::trans (RVA 0x215F9C0):
+   //   mov rax, cs:qword_147371338  (RVA 0x7371338) — load pointer
+   //   cmp byte ptr [rax], 0        — read byte at target address
+   //   cmp byte ptr [rax], 1        — if not 1, skip render scale adjustment
+   // Requires double-dereference: load pointer, then read byte.
+   const uintptr_t pointer_addr = g_resolved_addresses.taa_running_flag;
+   if (pointer_addr == 0)
+      return last_known;
+
+   __try
+   {
+      const uintptr_t target_addr = *reinterpret_cast<const uintptr_t*>(pointer_addr);
+      const bool taa_running = (*reinterpret_cast<const uint8_t*>(target_addr) & 1) != 0;
+      s_last_taa_running.store(taa_running, std::memory_order_release);
+      return taa_running;
+   }
+   __except (EXCEPTION_EXECUTE_HANDLER)
+   {
+      return last_known;
+   }
+#else
+   // v2.0.2/v1.3.2: TAA running flag at offset 0x65 from settings object pointer.
+   // Verified in 1.3.2 TemporalAntiAliasingComponent::trans (RVA 0x1A9E9D7):
+   //   mov rax, cs:g_taa_settings_obj
+   //   test byte ptr [rax+65h], 1
    const uintptr_t settings_ptr_addr = g_resolved_addresses.taa_settings_global;
    if (settings_ptr_addr == 0)
       return last_known;
@@ -174,7 +214,7 @@ bool IsTAARunningThisFrame()
       if (settings_obj == 0)
          return last_known;
 
-      const bool taa_running = (*reinterpret_cast<const uint8_t*>(settings_obj + 22) & 1) != 0;
+      const bool taa_running = (*reinterpret_cast<const uint8_t*>(settings_obj + 0x65) & 1) != 0;
       s_last_taa_running.store(taa_running, std::memory_order_release);
       return taa_running;
    }
@@ -182,12 +222,57 @@ bool IsTAARunningThisFrame()
    {
       return last_known;
    }
+#endif
+}
+
+bool TryGetSettingsObject(uintptr_t& out_settings_obj)
+{
+#ifdef V2_0_3
+   // v2.0.3: kTAASettingsGlobal_RVA is a 16-byte xmmword buffer, not a pointer.
+   // No settings object to dereference.
+   out_settings_obj = 0;
+   return false;
+#else
+   // v2.0.2/v1.3.2: kTAASettingsGlobal_RVA is a pointer-to-struct.
+   const uintptr_t settings_ptr_addr = g_resolved_addresses.taa_settings_global;
+   if (settings_ptr_addr == 0)
+   {
+      out_settings_obj = 0;
+      return false;
+   }
+
+   __try
+   {
+      out_settings_obj = *reinterpret_cast<const uintptr_t*>(settings_ptr_addr);
+      return out_settings_obj != 0;
+   }
+   __except (EXCEPTION_EXECUTE_HANDLER)
+   {
+      out_settings_obj = 0;
+      return false;
+   }
+#endif
 }
 
 void* GetVTableFunction(void* obj, size_t index)
 {
    void** vtable = *reinterpret_cast<void***>(obj);
    return vtable[index];
+}
+
+bool TryReadTAAResetFlag()
+{
+   const uintptr_t addr = g_resolved_addresses.taa_reset_flag;
+   if (addr == 0)
+      return false;
+   __try
+   {
+      return (*reinterpret_cast<const uint8_t*>(addr) & 1) != 0;
+   }
+   __except (EXCEPTION_EXECUTE_HANDLER)
+   {
+      return false;
+   }
 }
 
 // GBFR_InitializeDX11RenderingPipeline is called every frame from a single caller.
@@ -204,6 +289,8 @@ static char __fastcall Hooked_InitializeDX11RenderingPipeline(int screen_width, 
 {
    int render_w = screen_width;
    int render_h = screen_height;
+   uintptr_t render_w_addr = 0;
+   uintptr_t render_h_addr = 0;
 
    DeviceData* device_data = g_device_data_ptr.load(std::memory_order_acquire);
    if (device_data && screen_width > 0 && screen_height > 0)
@@ -224,68 +311,23 @@ static char __fastcall Hooked_InitializeDX11RenderingPipeline(int screen_width, 
       render_w = static_cast<int>((std::max)(1u, render_dims[0]));
       render_h = static_cast<int>((std::max)(1u, render_dims[1]));
 
-      // Keep g_renderWidth/g_renderHeight in sync with the args we pass to the trampoline.
-      // CreateRenderTargets initialises these from g_outputWidth/g_outputHeight (always output
-      // dims) and never applies a scale, so without this write the frame graph sees
-      // render == output and skips the temporal upscale path every frame.
-      if (g_resolved_addresses.render_width != 0 && g_resolved_addresses.render_height != 0)
-      {
-         *reinterpret_cast<int*>(g_resolved_addresses.render_width) = render_w;
-         *reinterpret_cast<int*>(g_resolved_addresses.render_height) = render_h;
-      }
+      // Resolve these now, but write them after the trampoline below. Pre-writing the
+      // globals can hide a hot render-scale change from the game's size cache.
+      render_w_addr = g_resolved_addresses.render_width;
+      render_h_addr = g_resolved_addresses.render_height;
    }
 
    // Pass render dims to the game — g_outputWidth/g_outputHeight are not touched.
-   return g_rt_creation_hook.unsafe_call<char>(render_w, render_h);
-}
+   const char result = g_rt_creation_hook.unsafe_call<char>(render_w, render_h);
 
-// Not hooked. Hooked_InitializeDX11RenderingPipeline runs every frame and receives
-// screen_width/screen_height directly from g_outputWidth/g_outputHeight, so it always
-// has the current output dims without needing to intercept the resolution-change path.
-__int64 __fastcall Hooked_UpdateScreenResolution(__int64 a1)
-{
-   return g_update_screen_resolution_hook.unsafe_call<__int64>(a1);
-}
-
-// Called every frame by the UI render orchestrator (sub_143222A10).
-// Records a1 (the UI state object pointer) so Hooked_DispatchRenderPassViewport can
-// identify which GBFR_DispatchRenderPassViewport calls originate from the UI pipeline.
-void OnUIRenderOrchestratorEntry(safetyhook::Context& ctx)
-{
-   g_hook_globals.ui_render_ctx.store(ctx.rcx, std::memory_order_relaxed);
-}
-
-// GBFR_DispatchRenderPassViewport is the single chokepoint for all RSSetViewports calls.
-// When DLSS render-scale is active, all render targets are sized at render dims (e.g.
-// 2880x1620 at 75%), including UI composition targets that should be at full output dims
-// (3840x2160) so the UI fills the screen.
-//
-// Detection: the UI render orchestrator (sub_143222A10) always passes the same state object
-// pointer as rcx through to GBFR_DispatchRenderPassViewport. We track that pointer via
-// OnUIRenderOrchestratorEntry and override passDesc width/height to output dims when:
-//   - rcx == the recorded UI state object (this call originates from the UI pipeline), AND
-//   - the current dims match render dims (the RT was created at render scale, not output).
-//
-// Blur/convolution intermediates at other dimensions (e.g. 1920x1080) pass through unchanged.
-__int64 __fastcall Hooked_DispatchRenderPassViewport(__int64 render_ctx, __int64 pass_desc_ptr)
-{
-   const uintptr_t ui_ctx = g_hook_globals.ui_render_ctx.load(std::memory_order_relaxed);
-   if (ui_ctx != 0 && render_ctx == static_cast<__int64>(ui_ctx))
+   // Keep the frame graph globals in sync after the game has observed the new size.
+   if (render_w_addr != 0 && render_h_addr != 0)
    {
-      DeviceData* device_data = g_device_data_ptr.load(std::memory_order_acquire);
-      if (device_data)
-      {
-         int* dims = reinterpret_cast<int*>(pass_desc_ptr + 0x50);
-         const int render_w = static_cast<int>(device_data->render_resolution.x);
-         const int render_h = static_cast<int>(device_data->render_resolution.y);
-         if (dims[0] == render_w && dims[1] == render_h)
-         {
-            dims[0] = static_cast<int>(device_data->output_resolution.x);
-            dims[1] = static_cast<int>(device_data->output_resolution.y);
-         }
-      }
+      *reinterpret_cast<int*>(render_w_addr) = render_w;
+      *reinterpret_cast<int*>(render_h_addr) = render_h;
    }
-   return g_dispatch_viewport_hook.unsafe_call<__int64>(render_ctx, pass_desc_ptr);
+
+   return result;
 }
 
 void PatchSceneBufferInHook(
@@ -370,26 +412,3 @@ void PatchSceneBufferInHook(
    compute_state_stack.Restore(pContext);
 }
 
-void STDMETHODCALLTYPE Hooked_VSSetConstantBuffers1_Immediate(
-   ID3D11DeviceContext1* pContext,
-   UINT StartSlot,
-   UINT NumBuffers,
-   ID3D11Buffer* const* ppConstantBuffers,
-   const UINT* pFirstConstant,
-   const UINT* pNumConstants)
-{
-   g_VSSetConstantBuffers1_hook_immediate.unsafe_call<void>(
-      pContext, StartSlot, NumBuffers, ppConstantBuffers, pFirstConstant, pNumConstants);
-}
-
-void STDMETHODCALLTYPE Hooked_VSSetConstantBuffers1_Deferred(
-   ID3D11DeviceContext1* pContext,
-   UINT StartSlot,
-   UINT NumBuffers,
-   ID3D11Buffer* const* ppConstantBuffers,
-   const UINT* pFirstConstant,
-   const UINT* pNumConstants)
-{
-   g_VSSetConstantBuffers1_hook_deferred.unsafe_call<void>(
-      pContext, StartSlot, NumBuffers, ppConstantBuffers, pFirstConstant, pNumConstants);
-}

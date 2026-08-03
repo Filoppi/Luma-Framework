@@ -1,4 +1,5 @@
 #include "shared.h"
+#include "ConstantBufferCache.hpp"
 #include "Upscaling.hpp"
 
 namespace
@@ -183,7 +184,7 @@ namespace
             DrawFloatSetting(setting, value, runtime);
          }
 
-         if (setting.tooltip && ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
+         if (setting.tooltip != nullptr && ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
          {
             ImGui::SetTooltip("%s", setting.tooltip);
          }
@@ -211,7 +212,7 @@ namespace
       void ApplyUltrawidePatches()
       {
          HMODULE module_handle = GetModuleHandle(nullptr);
-         if (!module_handle)
+         if (module_handle == nullptr)
          {
             assert(false);
             return;
@@ -240,7 +241,7 @@ namespace
          const int hardcoded_res_height = 1440;
          const char hardcoded_res_str[] = "3440 x 1440";
 
-         std::vector<std::byte*> hardcoded_res_width_addresses = System::ScanMemoryForPattern(base, section_size, reinterpret_cast<const std::byte*>(&hardcoded_res_width), sizeof(hardcoded_res_width));
+         const std::vector<std::byte*> hardcoded_res_width_addresses = System::ScanMemoryForPattern(base, section_size, reinterpret_cast<const std::byte*>(&hardcoded_res_width), sizeof(hardcoded_res_width));
          assert(!hardcoded_res_width_addresses.empty());
          for (std::byte* hardcoded_res_width_address : hardcoded_res_width_addresses)
          {
@@ -312,6 +313,8 @@ struct GameDeviceDataQuantumBreak final : public GameDeviceData
 
 class QuantumBreakGame final : public Game
 {
+   inline static bool cbuffer_events_registered_ = false;
+
    static GameDeviceDataQuantumBreak& GetGameDeviceData(DeviceData& device_data)
    {
       return *static_cast<GameDeviceDataQuantumBreak*>(device_data.game);
@@ -322,7 +325,167 @@ class QuantumBreakGame final : public Game
       return *static_cast<const GameDeviceDataQuantumBreak*>(device_data.game);
    }
 
+   static QuantumBreakUpscaling::ConstantBufferCache* TryGetConstantBufferCache(reshade::api::device* device)
+   {
+      if (device == nullptr)
+      {
+         return nullptr;
+      }
+
+      DeviceData* device_data = device->get_private_data<DeviceData>();
+      if (device_data == nullptr || device_data->game == nullptr)
+      {
+         return nullptr;
+      }
+
+      auto& game_device_data = *static_cast<GameDeviceDataQuantumBreak*>(device_data->game);
+      return &game_device_data.upscaling.constant_buffer_cache;
+   }
+
 public:
+   // These callbacks are emitted for buffers throughout the entire game. Keep cheap checks here,
+   // before looking up per-device state, so unrelated work and shadow-rendering threads return early.
+   static void OnMapBufferRegion(reshade::api::device* device, reshade::api::resource resource, uint64_t offset, uint64_t size, reshade::api::map_access access, void** mapped_data)
+   {
+      (void)offset;
+      (void)size;
+      if (resource.handle == 0u || mapped_data == nullptr || *mapped_data == nullptr || !QuantumBreakUpscaling::ConstantBufferCache::IsWriteAccess(access) || !QuantumBreakUpscaling::ConstantBufferCache::IsCaptureThread())
+      {
+         return;
+      }
+
+      if (auto* cache = TryGetConstantBufferCache(device))
+      {
+         cache->RecordMap(reinterpret_cast<ID3D11Buffer*>(resource.handle), *mapped_data);
+      }
+   }
+
+   // Unmap marks the point where a CPU write is complete and safe to copy into the snapshot.
+   static void OnUnmapBufferRegion(reshade::api::device* device, reshade::api::resource resource)
+   {
+      if (resource.handle == 0u || !QuantumBreakUpscaling::ConstantBufferCache::IsCaptureThread())
+      {
+         return;
+      }
+
+      if (auto* cache = TryGetConstantBufferCache(device))
+      {
+         cache->RecordUnmap(reinterpret_cast<ID3D11Buffer*>(resource.handle));
+      }
+   }
+
+   // Unlike Map, an Update call already supplies the bytes being written.
+   // ReShade expects false when an add-on only observes the update instead of replacing it.
+   static bool OnUpdateBufferRegion(reshade::api::device* device, const void* source_data, reshade::api::resource resource, uint64_t offset, uint64_t size)
+   {
+      if (resource.handle == 0u || source_data == nullptr || !QuantumBreakUpscaling::ConstantBufferCache::IsCaptureThread())
+      {
+         return false;
+      }
+
+      if (auto* cache = TryGetConstantBufferCache(device))
+      {
+         cache->RecordUpdate(
+            reinterpret_cast<ID3D11Buffer*>(resource.handle),
+            source_data,
+            offset,
+            size);
+      }
+      return false;
+   }
+
+   static bool OnCopyResource(reshade::api::command_list* command_list, reshade::api::resource source, reshade::api::resource destination)
+   {
+      (void)source;
+      if (command_list == nullptr || destination.handle == 0u || !QuantumBreakUpscaling::ConstantBufferCache::IsCaptureThread())
+      {
+         return false;
+      }
+
+      if (auto* cache = TryGetConstantBufferCache(command_list->get_device()))
+      {
+         // A GPU copy has no CPU-visible source bytes, so this resource must use safe readback.
+         cache->RequireGpuReadback(reinterpret_cast<ID3D11Buffer*>(destination.handle));
+      }
+      return false;
+   }
+
+   static bool OnCopyBufferRegion(reshade::api::command_list* command_list, reshade::api::resource source, uint64_t source_offset, reshade::api::resource destination, uint64_t destination_offset, uint64_t size)
+   {
+      (void)source;
+      (void)source_offset;
+      (void)destination_offset;
+      (void)size;
+      if (command_list == nullptr || destination.handle == 0u || !QuantumBreakUpscaling::ConstantBufferCache::IsCaptureThread())
+      {
+         return false;
+      }
+
+      if (auto* cache = TryGetConstantBufferCache(command_list->get_device()))
+      {
+         cache->RequireGpuReadback(reinterpret_cast<ID3D11Buffer*>(destination.handle));
+      }
+      return false;
+   }
+
+   static void OnDestroyResource(reshade::api::device* device, reshade::api::resource resource)
+   {
+      if (resource.handle == 0u)
+      {
+         return;
+      }
+
+      if (auto* cache = TryGetConstantBufferCache(device))
+      {
+         cache->Forget(reinterpret_cast<ID3D11Buffer*>(resource.handle));
+      }
+   }
+
+   static void RegisterCBufferEvents()
+   {
+#if ENABLE_SR
+      if (cbuffer_events_registered_)
+      {
+         return;
+      }
+
+      reshade::register_event<reshade::addon_event::map_buffer_region>(OnMapBufferRegion);
+      reshade::register_event<reshade::addon_event::unmap_buffer_region>(OnUnmapBufferRegion);
+      reshade::register_event<reshade::addon_event::update_buffer_region>(OnUpdateBufferRegion);
+      reshade::register_event<reshade::addon_event::copy_resource>(OnCopyResource);
+      reshade::register_event<reshade::addon_event::copy_buffer_region>(OnCopyBufferRegion);
+      reshade::register_event<reshade::addon_event::destroy_resource>(OnDestroyResource);
+      cbuffer_events_registered_ = true;
+#endif
+   }
+
+   static void UnregisterCBufferEvents()
+   {
+#if ENABLE_SR
+      if (!cbuffer_events_registered_)
+      {
+         return;
+      }
+
+      reshade::unregister_event<reshade::addon_event::map_buffer_region>(OnMapBufferRegion);
+      reshade::unregister_event<reshade::addon_event::unmap_buffer_region>(OnUnmapBufferRegion);
+      reshade::unregister_event<reshade::addon_event::update_buffer_region>(OnUpdateBufferRegion);
+      reshade::unregister_event<reshade::addon_event::copy_resource>(OnCopyResource);
+      reshade::unregister_event<reshade::addon_event::copy_buffer_region>(OnCopyBufferRegion);
+      reshade::unregister_event<reshade::addon_event::destroy_resource>(OnDestroyResource);
+      cbuffer_events_registered_ = false;
+#endif
+   }
+
+   void OnLoad(std::filesystem::path& file_path, bool failed) override
+   {
+      (void)file_path;
+      if (!failed)
+      {
+         RegisterCBufferEvents();
+      }
+   }
+
    void OnInit(bool async) override
    {
       (void)async;
@@ -350,13 +513,25 @@ public:
       device_data.game = new GameDeviceDataQuantumBreak;
    }
 
+   void OnDestroyDeviceData(DeviceData& device_data) override
+   {
+      auto* game_device_data = static_cast<GameDeviceDataQuantumBreak*>(device_data.game);
+      // Resource releases during destruction may re-enter OnDestroyResource.
+      device_data.game = nullptr;
+      delete game_device_data;
+      QuantumBreakUpscaling::ConstantBufferCache::ResetCaptureThread();
+   }
+
    DrawOrDispatchOverrideType OnDrawOrDispatch(ID3D11Device* native_device, ID3D11DeviceContext* native_device_context, CommandListData& cmd_list_data, DeviceData& device_data, reshade::api::shader_stage stages, const ShaderHashesList<OneShaderPerPipeline>& original_shader_hashes, bool is_custom_pass, bool& updated_cbuffers, std::function<void()>* original_draw_dispatch_func) override
    {
       auto& game_device_data = GetGameDeviceData(device_data);
 
       if (QuantumBreakUpscaling::IsDepthLinearizationPass(original_shader_hashes))
       {
-         QuantumBreakUpscaling::CaptureClipDepthFromLinearizationPass(native_device_context, game_device_data.upscaling);
+         if (QuantumBreakUpscaling::IsRequested(device_data))
+         {
+            QuantumBreakUpscaling::CaptureClipDepthFromLinearizationPass(native_device_context, game_device_data.upscaling);
+         }
 
          return DrawOrDispatchOverrideType::None;
       }
@@ -365,7 +540,10 @@ public:
       {
          game_device_data.saw_history_reprojection_pass = true;
          device_data.taa_detected = true;
-         QuantumBreakUpscaling::CaptureMotionVectors(native_device_context, game_device_data.upscaling);
+         if (QuantumBreakUpscaling::IsRequested(device_data))
+         {
+            QuantumBreakUpscaling::CaptureMotionVectors(native_device_context, game_device_data.upscaling);
+         }
 
          return DrawOrDispatchOverrideType::None;
       }
@@ -391,18 +569,19 @@ public:
       QuantumBreakUpscaling::SetSRTypeForTemporalResolve(device_data, sr_result.succeeded);
       QuantumBreakUpscaling::ForceResetIfRequestedAndFailed(device_data, sr_result);
 
-      if (original_draw_dispatch_func && *original_draw_dispatch_func)
+      if (original_draw_dispatch_func != nullptr && *original_draw_dispatch_func)
       {
          // Post-draw callback path lets us bind the SR result and then execute QB's original resolve draw once.
          com_ptr<ID3D11ShaderResourceView> original_ps_srv_2;
-         native_device_context->PSGetShaderResources(2, 1, &original_ps_srv_2);
+         if (sr_result.succeeded)
+         {
+            native_device_context->PSGetShaderResources(2, 1, &original_ps_srv_2);
+         }
 
-         com_ptr<ID3D11Buffer> original_luma_settings_cb;
-         com_ptr<ID3D11Buffer> original_luma_data_cb;
+         com_ptr<ID3D11Buffer> original_luma_cbuffers[2];
          if (is_custom_pass)
          {
-            native_device_context->PSGetConstantBuffers(luma_settings_cbuffer_index, 1, &original_luma_settings_cb);
-            native_device_context->PSGetConstantBuffers(luma_data_cbuffer_index, 1, &original_luma_data_cb);
+            native_device_context->PSGetConstantBuffers(luma_data_cbuffer_index, ARRAYSIZE(original_luma_cbuffers), reinterpret_cast<ID3D11Buffer**>(original_luma_cbuffers));
 
             SetLumaConstantBuffers(native_device_context, cmd_list_data, device_data, stages, LumaConstantBufferType::LumaSettings);
             SetLumaConstantBuffers(native_device_context, cmd_list_data, device_data, stages, LumaConstantBufferType::LumaData);
@@ -413,15 +592,19 @@ public:
 
          (*original_draw_dispatch_func)();
 
-         ID3D11ShaderResourceView* original_ps_srv_2_ptr = original_ps_srv_2.get();
-         native_device_context->PSSetShaderResources(2, 1, &original_ps_srv_2_ptr);
+         if (sr_result.succeeded)
+         {
+            ID3D11ShaderResourceView* original_ps_srv_2_ptr = original_ps_srv_2.get();
+            native_device_context->PSSetShaderResources(2, 1, &original_ps_srv_2_ptr);
+         }
 
          if (is_custom_pass)
          {
-            ID3D11Buffer* original_luma_settings_cb_ptr = original_luma_settings_cb.get();
-            ID3D11Buffer* original_luma_data_cb_ptr = original_luma_data_cb.get();
-            native_device_context->PSSetConstantBuffers(luma_settings_cbuffer_index, 1, &original_luma_settings_cb_ptr);
-            native_device_context->PSSetConstantBuffers(luma_data_cbuffer_index, 1, &original_luma_data_cb_ptr);
+            ID3D11Buffer* original_luma_cbuffer_ptrs[] = {
+               original_luma_cbuffers[0].get(),
+               original_luma_cbuffers[1].get(),
+            };
+            native_device_context->PSSetConstantBuffers(luma_data_cbuffer_index, ARRAYSIZE(original_luma_cbuffer_ptrs), original_luma_cbuffer_ptrs);
          }
 
          return DrawOrDispatchOverrideType::Replaced;
@@ -570,6 +753,10 @@ BOOL APIENTRY DllMain(HMODULE hModule, DWORD ul_reason_for_call, LPVOID lpReserv
       RuntimeConfig::ConfigureSwapchainAndFormatUpgrades();
 
       game = new QuantumBreakGame();
+   }
+   else if (ul_reason_for_call == DLL_PROCESS_DETACH)
+   {
+      QuantumBreakGame::UnregisterCBufferEvents();
    }
 
    CoreMain(hModule, ul_reason_for_call, lpReserved);

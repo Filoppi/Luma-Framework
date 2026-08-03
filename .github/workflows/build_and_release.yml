@@ -8,8 +8,8 @@ on:
 
 jobs:
   build:
-    runs-on: windows-2022
-    # runs-on: windows-2025-vs2026
+    # runs-on: windows-2022
+    runs-on: windows-2025-vs2026
     strategy:
       matrix:
         config: [Development-Debug, Development-Release, Test-Release, Publishing-Release]
@@ -20,7 +20,7 @@ jobs:
       with:
         submodules: recursive
         fetch-depth: 0
-
+        
     - name: Setup MSBuild
       uses: microsoft/setup-msbuild@v1.1.2
 
@@ -43,8 +43,8 @@ jobs:
     # This requires the git directory to be added to the PATH Windows environment variables, to properly set up versioning information
     - name: Build ReShade.sln Release
       run: |
-        msbuild "Source\External\reshade\ReShade.sln" /p:Configuration="Release" /p:Platform="64-bit"
-        msbuild "Source\External\reshade\ReShade.sln" /p:Configuration="Release" /p:Platform="32-bit"
+        msbuild "Source\External\reshade\ReShade.sln" /p:Configuration="Release" /p:Platform="64-bit" /p:PlatformToolset=v145
+        msbuild "Source\External\reshade\ReShade.sln" /p:Configuration="Release" /p:Platform="32-bit" /p:PlatformToolset=v145
       continue-on-error: true
       
     - name: Build Luma.sln ${{ matrix.config }}-${{ matrix.platform }}
