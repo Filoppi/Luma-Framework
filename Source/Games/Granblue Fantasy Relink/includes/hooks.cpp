@@ -289,6 +289,8 @@ static char __fastcall Hooked_InitializeDX11RenderingPipeline(int screen_width, 
 {
    int render_w = screen_width;
    int render_h = screen_height;
+   uintptr_t render_w_addr = 0;
+   uintptr_t render_h_addr = 0;
 
    DeviceData* device_data = g_device_data_ptr.load(std::memory_order_acquire);
    if (device_data && screen_width > 0 && screen_height > 0)
@@ -309,18 +311,23 @@ static char __fastcall Hooked_InitializeDX11RenderingPipeline(int screen_width, 
       render_w = static_cast<int>((std::max)(1u, render_dims[0]));
       render_h = static_cast<int>((std::max)(1u, render_dims[1]));
 
-      // Keep g_renderWidth/g_renderHeight in sync with the args we pass to the trampoline.
-      // TAA component reads these at +0x6B81058/+0x6B8105C to decide whether to run
-      // the temporal upscale path. Without this write, render == output and TUPDrawPass skips.
-      if (g_resolved_addresses.render_width != 0 && g_resolved_addresses.render_height != 0)
-      {
-         *reinterpret_cast<int*>(g_resolved_addresses.render_width) = render_w;
-         *reinterpret_cast<int*>(g_resolved_addresses.render_height) = render_h;
-      }
+      // Resolve these now, but write them after the trampoline below. Pre-writing the
+      // globals can hide a hot render-scale change from the game's size cache.
+      render_w_addr = g_resolved_addresses.render_width;
+      render_h_addr = g_resolved_addresses.render_height;
    }
 
    // Pass render dims to the game — g_outputWidth/g_outputHeight are not touched.
-   return g_rt_creation_hook.unsafe_call<char>(render_w, render_h);
+   const char result = g_rt_creation_hook.unsafe_call<char>(render_w, render_h);
+
+   // Keep the frame graph globals in sync after the game has observed the new size.
+   if (render_w_addr != 0 && render_h_addr != 0)
+   {
+      *reinterpret_cast<int*>(render_w_addr) = render_w;
+      *reinterpret_cast<int*>(render_h_addr) = render_h;
+   }
+
+   return result;
 }
 
 void PatchSceneBufferInHook(
@@ -404,5 +411,4 @@ void PatchSceneBufferInHook(
 
    compute_state_stack.Restore(pContext);
 }
-
 

@@ -37,6 +37,8 @@ struct GameDeviceDataGBFR final : public GameDeviceData, public GBFRUpscaleState
    std::atomic<bool> taa_running_cached = false;
    UIScaleState ui_scale;
    std::atomic<ID3D11DeviceContext*> tonemap_detected_context = nullptr;
+   bool sr_settings_valid = false;
+   SR::SettingsData last_sr_settings_data = {};
 
 #if TEST || DEVELOPMENT
    bool taa_detected_this_frame = false;
