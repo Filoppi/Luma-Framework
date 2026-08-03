@@ -14,7 +14,6 @@
 struct alignas(16) F4_luma_cb_data
 {
     float2 inv_renderer_resolution;
-    float aspect_ratio;
     uint frame_index;
 };
 
@@ -43,20 +42,20 @@ namespace
 
     void create_constant_buffer(ID3D11Device* device, UINT size, ID3D11Buffer** cb)
     {
-	    D3D11_BUFFER_DESC desc = {};
-	    desc.ByteWidth = size;
-	    desc.Usage = D3D11_USAGE_DYNAMIC;
-	    desc.BindFlags = D3D11_BIND_CONSTANT_BUFFER;
-	    desc.CPUAccessFlags = D3D11_CPU_ACCESS_WRITE;
-	    ensure(device->CreateBuffer(&desc, nullptr, cb), >= 0);
+        D3D11_BUFFER_DESC desc = {};
+        desc.ByteWidth = size;
+        desc.Usage = D3D11_USAGE_DYNAMIC;
+        desc.BindFlags = D3D11_BIND_CONSTANT_BUFFER;
+        desc.CPUAccessFlags = D3D11_CPU_ACCESS_WRITE;
+        ensure(device->CreateBuffer(&desc, nullptr, cb), >= 0);
     }
 
     void update_constant_buffer(ID3D11DeviceContext* ctx, ID3D11Buffer* cb, const void* data, size_t size)
     {
-	    D3D11_MAPPED_SUBRESOURCE mapped_subresource;
-	    ensure(ctx->Map(cb, 0, D3D11_MAP_WRITE_DISCARD, 0, &mapped_subresource), >= 0);
-	    std::memcpy(mapped_subresource.pData, data, size);
-	    ctx->Unmap(cb, 0);
+        D3D11_MAPPED_SUBRESOURCE mapped_subresource;
+        ensure(ctx->Map(cb, 0, D3D11_MAP_WRITE_DISCARD, 0, &mapped_subresource), >= 0);
+        std::memcpy(mapped_subresource.pData, data, size);
+        ctx->Unmap(cb, 0);
     }
 }
 
@@ -196,7 +195,6 @@ public:
                 }
 
                 g_f4_luma_cb_data.inv_renderer_resolution = float2(1.0f / device_data.render_resolution.x, 1.0f / device_data.render_resolution.y);
-                g_f4_luma_cb_data.aspect_ratio = device_data.render_resolution.x / device_data.render_resolution.y;
                 g_f4_luma_cb_data.frame_index = cb_luma_global_settings.FrameIndex;
                 update_constant_buffer(native_device_context, game_device_data.f4_luma_cb.get(), &g_f4_luma_cb_data, sizeof(g_f4_luma_cb_data));
 
@@ -262,7 +260,6 @@ public:
                 }
 
                 g_f4_luma_cb_data.inv_renderer_resolution = float2(1.0f / device_data.render_resolution.x, 1.0f / device_data.render_resolution.y);
-                g_f4_luma_cb_data.aspect_ratio = device_data.render_resolution.x / device_data.render_resolution.y;
                 g_f4_luma_cb_data.frame_index = cb_luma_global_settings.FrameIndex;
                 update_constant_buffer(native_device_context, game_device_data.f4_luma_cb.get(), &g_f4_luma_cb_data, sizeof(g_f4_luma_cb_data));
 
@@ -493,6 +490,7 @@ public:
                 if (resource == game_device_data.resource_ssao)
                 {
                     native_device_context->PSSetShaderResources(9, 1, &game_device_data.srv_xe_gtao_denoise_pass2);
+                    has_drawn_ssao = false; // Optmization.
                 }
             }
         }
@@ -503,8 +501,6 @@ public:
     void OnPresent(ID3D11Device* native_device, DeviceData& device_data) override
     {
         auto& game_device_data = GetGameDeviceData(device_data);
-
-        has_drawn_ssao = false;
 
         if (!custom_texture_mip_lod_bias_offset)
         {
@@ -566,9 +562,9 @@ BOOL APIENTRY DllMain(HMODULE hModule, DWORD ul_reason_for_call, LPVOID lpReserv
         forced_shader_names.emplace(0x0307C239, "SSAO main");
         forced_shader_names.emplace(0xE151AD86, "SSAO denoise x");
         forced_shader_names.emplace(0x7E8F370A, "SSAO denoise y");
-        forced_shader_names.emplace(0xEDF0538E, "Everything?");
-        forced_shader_names.emplace(0xC3B3F9E6, "Everything?");
-        forced_shader_names.emplace(0xBDFB307C, "Everything?");
+        forced_shader_names.emplace(0xEDF0538E, "Lightning");
+        forced_shader_names.emplace(0xC3B3F9E6, "Lightning");
+        forced_shader_names.emplace(0xBDFB307C, "Lightning");
         forced_shader_names.emplace(0x63EE533F, "Motion Blur");
         forced_shader_names.emplace(0x80802E60, "Tonemap");
         forced_shader_names.emplace(0x61CC29E6, "TAA");
