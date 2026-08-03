@@ -1,9 +1,0 @@
-{
-  "$schema": "https://raw.githubusercontent.com/microsoft/vcpkg-tool/main/docs/vcpkg.schema.json",
-  "name": "bioshock-luma",
-  "version-string": "1.0.0",
-  "description": "BioShock Series Luma mod",
-  "dependencies": [
-      { "name": "minhook" }
-    ]
-}
