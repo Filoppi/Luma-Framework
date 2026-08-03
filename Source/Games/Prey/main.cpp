@@ -2473,6 +2473,7 @@ BOOL APIENTRY DllMain(HMODULE hModule, DWORD ul_reason_for_call, LPVOID lpReserv
          {"FORCE_MOTION_VECTORS_JITTERED", force_motion_vectors_jittered ? '1' : '0', true, false, "Forces Motion Vectors generation to include the jitters from the previous frame too, as DLSS needs\nEnabling this forces the native TAA to work as when we have DLSS enabled, making it look a little bit better (less shimmery)", 1},
      #endif
          {"ENABLE_POST_PROCESS", '1', true, false, "Allows you to disable all Post Processing (at once)", 1},
+         {"ENABLE_OBJECT_HIGHLIGHTING", '1', true, false, "Allows you to disable object highlighting", 1},
          {"ENABLE_CAMERA_MOTION_BLUR", '0', true, false, "Camera Motion Blur can look pretty botched in Prey, and can mess with DLSS/TAA, it's turned off by default in Luma (in the config files)", 1},
          {"ENABLE_COLOR_GRADING_LUT", '1', true, false, "Allows you to disable Color Grading\nDon't disable it unless you know what you are doing", 1},
          {"POST_TAA_SHARPENING_TYPE", '2', true, false, "0 - None (disabled, soft)\n1 - Vanilla (basic sharpening)\n2 - RCAS (AMD improved sharpening, default preset)\n3 - RCAS (AMD improved sharpening, strong preset)"},

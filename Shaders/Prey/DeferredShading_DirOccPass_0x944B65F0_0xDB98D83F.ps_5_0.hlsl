@@ -375,7 +375,7 @@ void main(float4 WPos : SV_Position0, float4 inBaseTC : TEXCOORD0, out float4 ou
 	float3 vNormalVS = normalize( mul( CV_ViewMatr, float4(vNormal, 0) ).xyz ) * float3(1, -1, -1);
 
 #if _RT_SAMPLE0 // LUMA FT: fixed depth's UV not being clamped. Note that "r_ssdoHalfRes" "3" isn't supported here (it can't be enabled in Prey), because that uses a quarter resolution depth buffer. We could check the texture size to determine it but it's not worth it as it's not exposed to the official settings nor seemengly enebleable through config.
-	CV_HPosClamp.xy = CV_HPosScale.xy - (CV_ScreenSize.zw * 2.0); 
+	CV_HPosClamp.xy = CV_HPosScale.xy - (CV_ScreenSize.zw * 2.0); // LUMA Garamond: FIXME! CV_HPosClamp is a CB value.
 #endif
 
 	float4 sh2 = 0;
