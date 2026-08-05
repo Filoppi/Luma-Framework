@@ -30,7 +30,7 @@ cbuffer cb0 : register(b0)
 //
 
 #ifndef EFFECT_RADIUS
-#define EFFECT_RADIUS 1.2
+#define EFFECT_RADIUS 1.0
 #endif
 
 #ifndef EFFECT_FALLOFF_RANGE

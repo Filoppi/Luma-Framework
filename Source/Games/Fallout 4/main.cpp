@@ -62,6 +62,7 @@ namespace
 struct GameDeviceDataFallout4 final : GameDeviceData
 {
     ComPtr<ID3D11Texture2D> tex_dlss_output;
+    ComPtr<ID3D11ShaderResourceView> srv_dlss_output;
     ComPtr<ID3D11Buffer> cb_taa;
 
     // XeGTAO
@@ -126,10 +127,12 @@ public:
         shader_defines_data.append_range(game_shader_defines_data);
 
         // XeGTAO
-        native_shaders_definitions.emplace(CompileTimeStringHash("F4 XeGTAO Prefilter Depths CS"), ShaderDefinition{ "Luma_F4_XeGTAO", reshade::api::pipeline_subobject_type::compute_shader, nullptr, "prefilter_depths16x16_cs" });
-        native_shaders_definitions.emplace(CompileTimeStringHash("F4 XeGTAO Main CS"), ShaderDefinition{ "Luma_F4_XeGTAO", reshade::api::pipeline_subobject_type::compute_shader, nullptr, "main_pass_cs" });
-        native_shaders_definitions.emplace(CompileTimeStringHash("F4 XeGTAO Denoise Pass 1 CS"), ShaderDefinition{ "Luma_F4_XeGTAO", reshade::api::pipeline_subobject_type::compute_shader, nullptr, "denoise_pass_cs", {{ "XE_GTAO_FINAL_APPLY", "0" }}});
-        native_shaders_definitions.emplace(CompileTimeStringHash("F4 XeGTAO Denoise Pass 2 CS"), ShaderDefinition{ "Luma_F4_XeGTAO", reshade::api::pipeline_subobject_type::compute_shader, nullptr, "denoise_pass_cs", {{ "XE_GTAO_FINAL_APPLY", "1" }}});
+        native_shaders_definitions.emplace("F4 XeGTAO Prefilter Depths CS"_h, ShaderDefinition{ "Luma_F4_XeGTAO", reshade::api::pipeline_subobject_type::compute_shader, nullptr, "prefilter_depths16x16_cs" });
+        native_shaders_definitions.emplace("F4 XeGTAO Main CS"_h, ShaderDefinition{ "Luma_F4_XeGTAO", reshade::api::pipeline_subobject_type::compute_shader, nullptr, "main_pass_cs" });
+        native_shaders_definitions.emplace("F4 XeGTAO Denoise Pass 1 CS"_h, ShaderDefinition{ "Luma_F4_XeGTAO", reshade::api::pipeline_subobject_type::compute_shader, nullptr, "denoise_pass_cs", {{ "XE_GTAO_FINAL_APPLY", "0" }}});
+        native_shaders_definitions.emplace("F4 XeGTAO Denoise Pass 2 CS"_h, ShaderDefinition{ "Luma_F4_XeGTAO", reshade::api::pipeline_subobject_type::compute_shader, nullptr, "denoise_pass_cs", {{ "XE_GTAO_FINAL_APPLY", "1" }}});
+
+        native_shaders_definitions.emplace("F4 Copy PS"_h, ShaderDefinition{ "Luma_F4_Copy_PS", reshade::api::pipeline_subobject_type::pixel_shader });
     }
 
     void OnCreateDevice(ID3D11Device* native_device, DeviceData& device_data) override
@@ -390,6 +393,9 @@ public:
                 // Get the TAA CB. We need to track it later on map/unmap.
                 native_device_context->PSGetConstantBuffers(2, 1, game_device_data.cb_taa.put());
 
+                // DLSS pass
+                //
+
                 // DLSS requires an immediate context for execution!
                 ASSERT_ONCE(native_device_context->GetType() == D3D11_DEVICE_CONTEXT_IMMEDIATE);
 
@@ -435,18 +441,22 @@ public:
                 std::array<ID3D11RenderTargetView*, 2> rtvs;
                 native_device_context->OMGetRenderTargets(rtvs.size(), rtvs.data(), nullptr);
 
-                // RTV1 should be the current frame and the backbuffer.
-                ComPtr<ID3D11Resource> resource_output;
-                rtvs[1]->GetResource(resource_output.put());
-
                 // Create the output resource for DLSS.
                 [[unlikely]] if (!game_device_data.tex_dlss_output)
                 {
+                    // RTV1 should be the current frame.
+                    // Get current frame resource's texture description.
+                    ComPtr<ID3D11Resource> resource_output;
+                    rtvs[1]->GetResource(resource_output.put());
                     ensure(resource_output->QueryInterface(game_device_data.tex_dlss_output.put()), >= 0);
                     D3D11_TEXTURE2D_DESC tex_desc;
                     game_device_data.tex_dlss_output->GetDesc(&tex_desc);
+                    
+                    // Create DLSS output.
+                    tex_desc.Format = DXGI_FORMAT_R16G16B16A16_FLOAT;
                     tex_desc.BindFlags = D3D11_BIND_SHADER_RESOURCE | D3D11_BIND_UNORDERED_ACCESS;
                     ensure(native_device->CreateTexture2D(&tex_desc, nullptr, game_device_data.tex_dlss_output.put()), >= 0);
+                    ensure(native_device->CreateShaderResourceView(game_device_data.tex_dlss_output.get(), nullptr, game_device_data.srv_dlss_output.put()), >= 0);
                 }
 
                 SR::SuperResolutionImpl::DrawData draw_data;
@@ -464,8 +474,21 @@ public:
 
                 sr_implementations[device_data.sr_type]->Draw(sr_instance_data, native_device_context, draw_data);
 
-                // Copy DLSS output to the original TAA's current frame and the backbuffer.
-                native_device_context->CopyResource(resource_output.get(), game_device_data.tex_dlss_output.get());
+                //
+
+                // Copy pass
+                //
+                // We have to copy trough a shader cause the original current frame output will be differnt resource sometimes.
+                //
+
+                // Bindings.
+                native_device_context->OMSetRenderTargets(1, &rtvs[1], nullptr);
+                native_device_context->PSSetShader(device_data.native_pixel_shaders.at("F4 Copy PS"_h).get(), nullptr, 0);
+                native_device_context->PSSetShaderResources(0, 1, &game_device_data.srv_dlss_output);
+
+                (*original_draw_dispatch_func)();
+
+                //
 
                 ResetCOMArray(rtvs);
 
