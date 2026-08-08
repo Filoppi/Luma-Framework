@@ -113,6 +113,8 @@ Project("{8BC9CEB8-8B4A-11D0-8D11-00A0C91BC942}") = "Heaven Burns Red", "Source\
 EndProject
 Project("{8BC9CEB8-8B4A-11D0-8D11-00A0C91BC942}") = "Borderlands GOTY Enhanced", "Source\Games\Borderlands GOTY Enhanced\Borderlands GOTY Enhanced.vcxproj", "{B0DE12A4-5C7A-4E91-9F3B-08891303C0DE}"
 EndProject
+Project("{8BC9CEB8-8B4A-11D0-8D11-00A0C91BC942}") = "Mass Effect Legendary Edition", "Source\Games\Mass Effect Legendary Edition\Mass Effect Legendary Edition.vcxproj", "{7D3E1C92-5A64-4B18-9F2A-1E8C4D6B0A37}"
+EndProject
 Project("{8BC9CEB8-8B4A-11D0-8D11-00A0C91BC942}") = "Middle-earth Shadow of War", "Source\Games\Middle-earth Shadow of War\Middle-earth Shadow of War.vcxproj", "{17FBB4FD-8E4E-4E61-AC32-BBEBA09B8D18}"
 EndProject
 Global
@@ -791,6 +793,18 @@ Global
 		{7FC545FF-0D9A-4F33-B0D2-7AF72239FBD4}.Test-Release|Win32.ActiveCfg = Test-Release|x64
 		{7FC545FF-0D9A-4F33-B0D2-7AF72239FBD4}.Test-Release|x64.ActiveCfg = Test-Release|x64
 		{7FC545FF-0D9A-4F33-B0D2-7AF72239FBD4}.Test-Release|x64.Build.0 = Test-Release|x64
+		{7D3E1C92-5A64-4B18-9F2A-1E8C4D6B0A37}.Development-Debug|Win32.ActiveCfg = Development-Debug|x64
+		{7D3E1C92-5A64-4B18-9F2A-1E8C4D6B0A37}.Development-Debug|x64.ActiveCfg = Development-Debug|x64
+		{7D3E1C92-5A64-4B18-9F2A-1E8C4D6B0A37}.Development-Debug|x64.Build.0 = Development-Debug|x64
+		{7D3E1C92-5A64-4B18-9F2A-1E8C4D6B0A37}.Development-Release|Win32.ActiveCfg = Development-Release|x64
+		{7D3E1C92-5A64-4B18-9F2A-1E8C4D6B0A37}.Development-Release|x64.ActiveCfg = Development-Release|x64
+		{7D3E1C92-5A64-4B18-9F2A-1E8C4D6B0A37}.Development-Release|x64.Build.0 = Development-Release|x64
+		{7D3E1C92-5A64-4B18-9F2A-1E8C4D6B0A37}.Publishing-Release|Win32.ActiveCfg = Publishing-Release|x64
+		{7D3E1C92-5A64-4B18-9F2A-1E8C4D6B0A37}.Publishing-Release|x64.ActiveCfg = Publishing-Release|x64
+		{7D3E1C92-5A64-4B18-9F2A-1E8C4D6B0A37}.Publishing-Release|x64.Build.0 = Publishing-Release|x64
+		{7D3E1C92-5A64-4B18-9F2A-1E8C4D6B0A37}.Test-Release|Win32.ActiveCfg = Test-Release|x64
+		{7D3E1C92-5A64-4B18-9F2A-1E8C4D6B0A37}.Test-Release|x64.ActiveCfg = Test-Release|x64
+		{7D3E1C92-5A64-4B18-9F2A-1E8C4D6B0A37}.Test-Release|x64.Build.0 = Test-Release|x64
 		{73FD1D51-5863-4617-B48A-F1C31AF79793}.Development-Debug|Win32.ActiveCfg = Development-Debug|x64
 		{73FD1D51-5863-4617-B48A-F1C31AF79793}.Development-Debug|Win32.Build.0 = Development-Debug|x64
 		{73FD1D51-5863-4617-B48A-F1C31AF79793}.Development-Debug|x64.ActiveCfg = Development-Debug|x64
@@ -902,6 +916,7 @@ Global
 		{5A0992EF-93A2-4565-86C1-11610EC27193} = {02EA681E-C7D8-13C7-8484-4AC65E1B71E8}
 		{7FC545FF-0D9A-4F33-B0D2-7AF72239FBD4} = {02EA681E-C7D8-13C7-8484-4AC65E1B71E8}
 		{73FD1D51-5863-4617-B48A-F1C31AF79793} = {02EA681E-C7D8-13C7-8484-4AC65E1B71E8}
+		{7D3E1C92-5A64-4B18-9F2A-1E8C4D6B0A37} = {02EA681E-C7D8-13C7-8484-4AC65E1B71E8}
 		{1180032D-8EEB-4A60-B120-E838393947DF} = {02EA681E-C7D8-13C7-8484-4AC65E1B71E8}
 		{B0DE12A4-5C7A-4E91-9F3B-08891303C0DE} = {02EA681E-C7D8-13C7-8484-4AC65E1B71E8}
 		{17FBB4FD-8E4E-4E61-AC32-BBEBA09B8D18} = {02EA681E-C7D8-13C7-8484-4AC65E1B71E8}
