@@ -19,10 +19,6 @@ namespace CB
         float Exposure;
         float TonemapperRolloffStart;
         float TonemapperMaxExpected;
-        
-        float PerChannelLuminanceReductionEmulateStrength;
-        float PerChannelLuminanceReductionEmulatePeak;
-        float PerChannelLuminanceReductionEmulateMakeup;
 
         float Bloom;
         float LensFlare;

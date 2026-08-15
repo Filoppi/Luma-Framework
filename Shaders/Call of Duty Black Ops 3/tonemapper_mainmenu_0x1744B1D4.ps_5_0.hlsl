@@ -145,6 +145,7 @@ void main(
   float4 fDest;
 
   o1.x = 0;
+  o0.w = 1;
 
   //warm lut min
   LUT_WarmMinimum(codeTexture1);
@@ -228,6 +229,11 @@ void main(
 
     o1.x = r0.x * 1.15999997 + -0.159999996;
   #endif
-  
+
+  //Gamma Encode for SR
+  #if CUSTOM_SDR > 0 && CUSTOM_SR == 1
+    o0 = pow(o0, 1/2.2); 
+  #endif
+
   return;
 }

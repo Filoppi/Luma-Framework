@@ -1,4 +1,4 @@
-// ---- Created with 3Dmigoto v1.3.16 on Wed Dec 03 14:15:36 2025
+// ---- Created with 3Dmigoto v1.3.16 on Wed Jun 17 21:38:23 2026
 
 cbuffer PerSceneConsts : register(b1)
 {
@@ -103,6 +103,9 @@ Texture2D<float4> floatZSampler : register(t0);
 // 3Dmigoto declarations
 #define cmp -
 
+#if CUSTOM_SR == 0
+  LET_THIS_BREAK;
+#endif
 
 void main(
   float4 v0 : SV_POSITION0,
@@ -121,12 +124,14 @@ void main(
   r0.x = r0.y ? r0.x : r0.z;
   r0.x = max(9.99999994e-009, r0.x);
   r0.x = rcp(r0.x);
+
   r0.yz = -subpixelOffset.xy + v0.xy;
   r0.yz = renderTargetSize.zw * r0.yz;
   r0.yz = r0.yz * float2(2,-2) + float2(-1,1);
   r1.xy = motionVectorConstants.curFrameHalfNearPlaneSize.xy * r0.yz;
   r1.z = 1;
   r0.xyz = r1.xyz * r0.xxx;
+  
   r1.xyz = motionVectorConstants.curFrameCamToOffMatrix._m10_m11_m12 * r0.yyy;
   r0.xyw = r0.xxx * motionVectorConstants.curFrameCamToOffMatrix._m00_m01_m02 + r1.xyz;
   r0.xyz = r0.zzz * motionVectorConstants.curFrameCamToOffMatrix._m20_m21_m22 + r0.xyw;
@@ -136,15 +141,19 @@ void main(
   r0.xyw = r0.xxx * motionVectorConstants.prevFrameOffToClpMatrixFull._m00_m01_m03 + r1.xyz;
   r0.xyz = r0.zzz * motionVectorConstants.prevFrameOffToClpMatrixFull._m20_m21_m23 + r0.xyw;
   r0.xyz = motionVectorConstants.prevFrameOffToClpMatrixFull._m30_m31_m33 + r0.xyz;
+  
   r0.xy = r0.xy / r0.zz;
   r0.xy = r0.xy * float2(0.5,-0.5) + float2(0.5,0.5);
   r0.xy = v0.xy * renderTargetSize.zw + -r0.xy;
   r0.xy = renderTargetSize.xy * r0.xy;
+
+
   r0.zw = float2(0.100000001,0.100000001) * abs(r0.xy);
-  r0.zw = min(float2(1,1), r0.zw);
+  // r0.zw = min(float2(1,1), r0.zw);
   r1.xy = float2(-10,-10) + abs(r0.xy);
   r0.xy = cmp(r0.xy >= float2(0,0));
-  r1.xy = saturate(float2(0.0333333351,0.0333333351) * r1.xy);
+  // r1.xy = saturate(float2(0.0333333351,0.0333333351) * r1.xy);
+  r1.xy = max(0, (float2(0.0333333351,0.0333333351) * r1.xy));
   r0.zw = -r1.xy + r0.zw;
   r0.zw = r0.zw * float2(0.5,0.5) + r1.xy;
   o0.xy = r0.xy ? r0.zw : -r0.zw;

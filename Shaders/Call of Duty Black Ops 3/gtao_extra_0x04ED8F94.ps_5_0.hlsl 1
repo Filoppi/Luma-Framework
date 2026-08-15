@@ -1,0 +1,563 @@
+cbuffer cb8_buf : register(b8)
+{
+    float2 cb8_m0 : packoffset(c0);
+    float2 cb8_m1 : packoffset(c0.z);
+};
+
+cbuffer cb1_buf : register(b1)
+{
+    uint4 cb1_m[74] : packoffset(c0);
+};
+
+SamplerState s0 : register(s0);
+Texture2D<float4> t1 : register(t1); //normal and gloss
+Texture2D<float4> t2 : register(t2); //depth
+
+static float4 gl_FragCoord;
+static float SV_TARGET;
+
+struct SPIRV_Cross_Input
+{
+    float4 gl_FragCoord : SV_Position;
+    float2 TEXCOORD : TEXCOORD0; //unused
+};
+
+struct SPIRV_Cross_Output
+{
+    float SV_TARGET : SV_Target0;
+};
+
+uint spvBitfieldInsert(uint Base, uint Insert, uint Offset, uint Count)
+{
+    uint Mask = Count == 32 ? 0xffffffff : (((1u << Count) - 1) << (Offset & 31));
+    return (Base & ~Mask) | ((Insert << Offset) & Mask);
+}
+
+uint2 spvBitfieldInsert(uint2 Base, uint2 Insert, uint Offset, uint Count)
+{
+    uint Mask = Count == 32 ? 0xffffffff : (((1u << Count) - 1) << (Offset & 31));
+    return (Base & ~Mask) | ((Insert << Offset) & Mask);
+}
+
+uint3 spvBitfieldInsert(uint3 Base, uint3 Insert, uint Offset, uint Count)
+{
+    uint Mask = Count == 32 ? 0xffffffff : (((1u << Count) - 1) << (Offset & 31));
+    return (Base & ~Mask) | ((Insert << Offset) & Mask);
+}
+
+uint4 spvBitfieldInsert(uint4 Base, uint4 Insert, uint Offset, uint Count)
+{
+    uint Mask = Count == 32 ? 0xffffffff : (((1u << Count) - 1) << (Offset & 31));
+    return (Base & ~Mask) | ((Insert << Offset) & Mask);
+}
+
+int cvt_f32_i32(float v)
+{
+    return isnan(v) ? 0 : ((v < (-2147483648.0f)) ? int(0x80000000) : ((v > 2147483520.0f) ? 2147483647 : int(v)));
+}
+
+uint cvt_f32_u32(float v)
+{
+    return (v > 4294967040.0f) ? 4294967295u : uint(max(v, 0.0f));
+}
+
+float dp2_f32(float2 a, float2 b)
+{
+    precise float _104 = a.x * b.x;
+    return mad(a.y, b.y, _104);
+}
+
+float dp3_f32(float3 a, float3 b)
+{
+    precise float _89 = a.x * b.x;
+    return mad(a.z, b.z, mad(a.y, b.y, _89));
+}
+
+#include "./Includes/Common.hlsl"
+
+void frag_main()
+{
+    // coords
+    int _136 = cvt_f32_i32(gl_FragCoord.x);
+    int _137 = cvt_f32_i32(gl_FragCoord.y);
+    uint _139 = uint(_136);
+    uint _140 = uint(_137);
+
+    // depth load
+    float4 _143 = t2.Load(int3(uint2(_139, _140), 0u));
+    float _144 = _143.x;
+
+    // depth sky ignore
+    if (_144 >= 65504.0f)
+    {
+        SV_TARGET = 1.0f;
+        return;
+    }
+
+    // world space normals
+    float4 _154 = t1.Load(int3(uint2(uint(_136 << int(1u)), uint(_137 << int(1u))), 0u));
+    uint _159 = cvt_f32_u32(mad(_154.w, 3.0f, 0.5f));
+    float _162 = mad(_154.x, 2.0f, -1.0f) * 0.85000002384185791015625f;
+    float _163 = mad(_154.y, 2.0f, -1.0f) * 0.85000002384185791015625f;
+
+    // view space normals
+    float2 _164 = float2(_162, _163);
+    float _165 = dp2_f32(_164, _164);
+    float _168 = sqrt(2.0f - _165);
+    bool _173 = (_159 & 2u) != 0u;
+    bool _174 = (_159 & 1u) != 0u;
+    float _175 = _173 ? (-1.0f) : 1.0f;
+    float _176 = _174 ? (-1.0f) : 1.0f;
+    float _178 = (_173 != _174) ? (-1.0f) : 1.0f;
+    float _181 = _178 * 1.0f;
+    float _184 = (_168 * _162) * 0.40824830532073974609375f;
+    float _185 = (_168 * _163) * 0.707106769084930419921875f;
+    float _186 = (1.0f - _165) * 0.57735025882720947265625f;
+    float _196 = mad(_186, _175, ((_175 * (-1.0f)) * _185) + ((_175 * 1.0f) * _184));
+    float _197 = mad(_186, _176, ((_176 * (-2.0f)) * _184) + ((_176 * 0.0f) * _185));
+    float _198 = mad(_178, _186, (_181 * _184) + (_181 * _185));
+    float _234 = mad(asfloat(cb1_m[6u].x), _198, (asfloat(cb1_m[5u].x) * _197) + (_196 * asfloat(cb1_m[4u].x))); //world to view matrix
+    float _235 = mad(asfloat(cb1_m[6u].y), _198, (_196 * asfloat(cb1_m[4u].y)) + (asfloat(cb1_m[5u].y) * _197));
+    float _236 = mad(asfloat(cb1_m[6u].z), _198, (_196 * asfloat(cb1_m[4u].z)) + (asfloat(cb1_m[5u].z) * _197));
+
+    // dither
+    float _253 = mad(float(spvBitfieldInsert(spvBitfieldInsert(0u, _139, 2u, 2u) + spvBitfieldInsert(0u, _140, 2u, 2u), _139, 0u, 2u) & 15u), 0.0625f, cb8_m1.x);
+    float _260 = asfloat(cb1_m[44u].z);
+    float _261 = asfloat(cb1_m[44u].w);
+    float _262 = gl_FragCoord.x * _260;
+    float _263 = gl_FragCoord.y * _261;
+    float _266 = 100.0f / _144;
+    float _273 = min(_260 * 100.0f, _266 * cb8_m0.x); // renderTargetSize.zw
+    float _274 = min(_266 * cb8_m0.y, _261 * 100.0f); 
+    float _279 = asfloat(cb1_m[73u].x); // viewSpaceScaleBias
+    float _280 = asfloat(cb1_m[73u].y);
+    float _283 = asfloat(cb1_m[73u].z);
+    float _284 = asfloat(cb1_m[73u].w);
+    float _289 = _144 * mad(_262, _279, -_283);
+    float _290 = _144 * mad(_263, _280, -_284);
+    float3 _294 = float3(-_289, -_290, -_144);
+    float _296 = rsqrt(dp3_f32(_294, _294));
+    float _297 = _289 * _296;
+    float _298 = -_297;
+    float _299 = _296 * _290;
+    float _300 = -_299;
+    float _301 = _144 * _296;
+    float _302 = -_301;
+    float _303 = _144 * 0.0024999999441206455230712890625f;
+    float _304 = _236 + 1.0f;
+    float _305 = frac(mad(float(uint((_136 - _137) & 3)), 0.25f, cb8_m1.y)) * 0.25f;
+
+    // GTAO slice=
+    float _307;
+    _307 = 0.0f;
+    float _308;
+    uint _311;
+    uint _310 = 0u;
+
+    const int sliceCount = 6;
+    const float sliceCountInv = 1.0f / float(sliceCount);
+    for (;;)
+    {
+        int _314 = int(_310);
+        if (_314 >= sliceCount) break;
+
+        const float wth = 0.52359998226165771484375f /* * DVS1 */;
+        float _321 = (float(_314) * wth) + (_253 * wth);
+        float _322 = sin(_321);
+        float _323 = cos(_321);
+
+        float _328;
+        _328 = -1.0f;
+        uint _326;
+        float _329;
+        uint _331;
+        uint _325 = 3276275712u;
+        uint _330 = 0u;
+        // GTAO steps per slice
+        for (;;)
+        {
+            int _334 = int(_330);
+            if (_334 >= 4) break;
+
+            float _340 = _305 + (float(_334) * 0.25f);
+            float _341 = _340 * _340;
+            float _346 = _262 + ((_273 * _341) * _323);
+            float _347 = _263 + (_322 * (_274 * _341));
+            float4 _353 = t2.SampleLevel(s0, float2(_346, _347), _341 * 5.0f); // depth
+            float _354 = _353.x;
+            float3 _366 = float3((_354 * mad(_279, _346, -_283)) - _289, (_354 * mad(_280, _347, -_284)) - _290, _354 + mad(_303, _304, -_144));
+            float _367 = dp3_f32(_366, _366);
+            float _368 = rsqrt(_367);
+            float _370 = dp3_f32(_366, float3(_298, _300, _302));
+            float _375 = asfloat((asint(_367) >> int(1u)) + 532487669);
+            float _378 = clamp(mad(_375, 0.0333333350718021392822265625f, -0.3333333432674407958984375f), 0.0f, 1.0f);
+            float _385 = (_368 * _370) + (mad(clamp(mad(_354, 0.006666666828095912933349609375f, -0.3333333432674407958984375f), 0.0f, 1.0f), clamp(mad(_375, 0.006666666828095912933349609375f, -0.3333333432674407958984375f), 0.0f, 1.0f) - _378, _378) * (-2.0f));
+            float _387 = dp3_f32(_366, float3(_234, _235, _236));
+            bool _389 = _385 > _328;
+            _326 = _389 ? asuint(_387) : _325;
+            float _390 = max(_385, _328);
+            _329 = mad(min(clamp(mad((_389 ? _387 : asfloat(_325)) - _387, 0.100000001490116119384765625f, -1.0f), 0.0f, 1.0f), 0.367879450321197509765625f), mad(_368, _370, -_390), _390);
+            
+            _331 = _330 + 1u; // ++
+
+            _325 = _326;
+            _328 = _329;
+            _330 = _331;
+            continue;
+        }
+        
+        float _403;
+        _403 = -1.0f;
+        uint _401;
+        float _404;
+        uint _406;
+        uint _400 = 3276275712u;
+        uint _405 = 0u;
+        // GTAO steps per slice
+        for (;;)
+        {
+            int _409 = int(_405);
+            if (_409 >= 4) break;
+
+            float _415 = _305 + (float(_409) * 0.25f);
+            float _416 = _415 * _415;
+            float _421 = _262 - (_323 * (_273 * _416));
+            float _422 = _263 - (_322 * (_274 * _416));
+            float4 _427 = t2.SampleLevel(s0, float2(_421, _422), _416 * 5.0f); // depth
+            float _428 = _427.x;
+            float3 _440 = float3((_428 * mad(_279, _421, -_283)) - _289, (_428 * mad(_280, _422, -_284)) - _290, _428 + mad(_303, _304, -_144));
+            float _441 = dp3_f32(_440, _440);
+            float _442 = rsqrt(_441);
+            float _444 = dp3_f32(_440, float3(_298, _300, _302));
+            float _449 = asfloat((asint(_441) >> int(1u)) + 532487669);
+            float _452 = clamp(mad(_449, 0.0333333350718021392822265625f, -0.3333333432674407958984375f), 0.0f, 1.0f);
+            float _459 = (_442 * _444) + (mad(clamp(mad(_428, 0.006666666828095912933349609375f, -0.3333333432674407958984375f), 0.0f, 1.0f), clamp(mad(_449, 0.006666666828095912933349609375f, -0.3333333432674407958984375f), 0.0f, 1.0f) - _452, _452) * (-2.0f));
+            float _461 = dp3_f32(_440, float3(_234, _235, _236));
+            bool _463 = _459 > _403;
+            _401 = _463 ? asuint(_461) : _400;
+            float _464 = max(_459, _403);
+            _404 = mad(min(clamp(mad((_463 ? _461 : asfloat(_400)) - _461, 0.100000001490116119384765625f, -1.0f), 0.0f, 1.0f), 0.367879450321197509765625f), mad(_442, _444, -_464), _464);
+
+            _406 = _405 + 1u; // ++
+
+            _400 = _401;
+            _403 = _404;
+            _405 = _406;
+            continue;
+        }
+        float _473 = _279 * _323;
+        float _474 = _280 * _322;
+        float2 _475 = float2(_473, _474);
+        float _477 = rsqrt(dp2_f32(_475, _475));
+        float _478 = _473 * _477;
+        float _479 = _477 * _474;
+        float _486 = (_301 * _478) + (_299 * (-0.0f));
+        float _487 = (_301 * _479) - (_297 * (-0.0f));
+        float _488 = (_297 * _478) + (_299 * _479);
+        float _492 = _297 * _487;
+        float _495 = _299 * _486;
+        float _496 = (_299 * _488) + (_301 * _487);
+        float _498 = (_301 * _486) + (_297 * _488);
+        float _502 = dp3_f32(float3(_234, _235, _236), float3(-_496, _498, _492 - _495));
+        float3 _508 = float3(mad(_496, _502, _234), mad(-_502, _498, _235), mad(_502, _495 - _492, _236));
+        float _514 = (dp3_f32(float3(_486, _487, -_488), _508) >= 0.0f) ? (-1.0f) : 1.0f;
+        float _518 = clamp(rsqrt(dp3_f32(_508, _508)) * dp3_f32(_508, float3(_298, _300, _302)), 0.0f, 1.0f);
+        float _525 = mad(_518, -0.15658299624919891357421875f, 1.57079994678497314453125f) * asfloat((asint(1.0f - _518) >> int(1u)) + 532487669);
+        float _527 = abs(_328);
+        float _528 = mad(_527, -0.15658299624919891357421875f, 1.57079994678497314453125f);
+        float _533 = asfloat((asint(1.0f - _527) >> int(1u)) + 532487669);
+        float _539 = abs(_403);
+        float _540 = mad(_539, -0.15658299624919891357421875f, 1.57079994678497314453125f);
+        float _545 = asfloat((asint(1.0f - _539) >> int(1u)) + 532487669);
+        float _554 = mad(_525, _514, clamp(-mad(_525, _514, (_328 >= 0.0f) ? (_528 * _533) : mad(-_528, _533, 3.1415998935699462890625f)), -1.57079994678497314453125f, 1.57079994678497314453125f));
+        float _558 = mad(_525, _514, clamp(mad(-_525, _514, (_403 >= 0.0f) ? (_540 * _545) : mad(-_540, _545, 3.1415998935699462890625f)), -1.57079994678497314453125f, 1.57079994678497314453125f));
+        float _565 = _514 * asfloat((asint(mad(-_518, _518, 1.0f)) >> int(1u)) + 532487669);
+        float _566 = _554 + _554;
+        float _567 = _558 + _558;
+        _308 = _307 + ((((mad(_567, _565, _518) - cos(mad(-_525, _514, _567))) * 0.25f) + ((mad(_566, _565, _518) - cos(mad(-_525, _514, _566))) * 0.25f)) / mad(_525 * _514, _565, _518));
+
+        _311 = _310 + 1u; // ++
+
+        _307 = _308;
+        _310 = _311;
+        continue;
+    }
+    float _583 = _307 * sliceCountInv;
+    SV_TARGET = max(_583, _583 * mad(_583, mad(_307, 0.1583333313465118408203125f, -1.9500000476837158203125f), 2.0f));
+}
+
+SPIRV_Cross_Output main(SPIRV_Cross_Input stage_input)
+{
+    gl_FragCoord = stage_input.gl_FragCoord;
+    gl_FragCoord.w = 1.0 / gl_FragCoord.w;
+    frag_main();
+    SPIRV_Cross_Output stage_output;
+    stage_output.SV_TARGET = SV_TARGET;
+    return stage_output;
+}
+
+
+// // ---- Created with 3Dmigoto v1.3.16 on Thu Jul 23 10:15:46 2026
+// 
+// cbuffer PostFxCBuffer : register(b8)
+// {
+//   float4 postFxControl0 : packoffset(c0); //3.6844, 6.55021, 0, 0
+// }
+// 
+// cbuffer PerSceneConsts : register(b1)
+// {
+//   row_major float4x4 viewMatrix : packoffset(c4);
+//   float4 renderTargetSize : packoffset(c44);
+//   float4 viewSpaceScaleBias : packoffset(c73);
+// }
+// 
+// SamplerState pointSampler_s : register(s0);
+// Texture2D<float4> GBufferNormalAndGloss : register(t1);
+// Texture2D<float4> depthTex : register(t2);
+// 
+// 
+// // 3Dmigoto declarations
+// #define cmp -
+//   #include "./Includes/Common.hlsl"
+// 
+// // TODO: FAILED DECOMP
+// void main(
+//   float4 v0 : SV_POSITION0,
+//   float2 v1 : TEXCOORD0,
+//   out float o0 : SV_TARGET0)
+// {
+//   float4 r0,r1,r2,r3,r4,r5,r6,r7,r8,r9;
+//   uint4 bitmask, uiDest;
+//   float4 fDest;
+// 
+// 
+//   r0.xy = (int2)v0.xy;
+//   r0.zw = float2(0,0);
+//   r1.z = depthTex.Load(r0.xyz).x; //depth value (prefiltered by 2 cs passes)
+// 
+//   // sky cutoff
+//   r0.z = cmp(r1.z >= 65504);
+//   if (r0.z != 0) {
+//     o0.x = 1;
+//     return;
+//   }
+// 
+//   r2.xy = (uint2)r0.xy << int2(1,1);
+//   r2.zw = float2(0,0);
+//   r2.xyz = GBufferNormalAndGloss.Load(r2.xyz).xyw; //TODO: not xyz?
+// 
+//   r0.z = r2.z * 3 + 0.5;
+//   r0.z = (uint)r0.z;
+//   r2.xy = r2.xy * float2(2,2) + float2(-1,-1); //denormalize: -1 to 1
+//   r2.xy = float2(0.850000024,0.850000024) * r2.xy;
+//   r0.w = dot(r2.xy, r2.xy);
+//   r3.zw = float2(2,1) + -r0.ww;
+//   r0.w = sqrt(r3.z);
+//   r3.xy = r2.xy * r0.ww;
+//   r2.xyzw = (int4)r0.zzzz & int4(2,1,2,1);
+//   r2.xyzw = r2.zwxy ? float4(-1,-1,1.40129846e-045,1.40129846e-045) : float4(1,1,0,0);
+//   o0 = r2.z; return;
+// 
+//   r0.z = (int)r2.w ^ (int)r2.z;
+//   r2.z = r0.z ? -1 : 1;
+//   r4.xyz = float3(-1,0,1) * r2.xyz;
+//   r5.xyz = float3(1,-2,1) * r2.xyz;
+//   r3.xyz = float3(0.408248305,0.707106769,0.577350259) * r3.xyw;
+//   r4.xyz = r4.xyz * r3.yyy;
+//   r3.xyw = r5.xyz * r3.xxx + r4.xyz;
+//   r2.xyz = r2.xyz * r3.zzz + r3.xyw;
+//   r3.xyz = viewMatrix._m10_m11_m12 * r2.yyy;
+//   r2.xyw = r2.xxx * viewMatrix._m00_m01_m02 + r3.xyz;
+//   r2.xyz = r2.zzz * viewMatrix._m20_m21_m22 + r2.xyw;
+//
+//   bitmask.z = ((~(-1 << 2)) << 2) & 0xffffffff;  r0.z = (((uint)r0.y << 2) & bitmask.z) | ((uint)0 & ~bitmask.z);
+//   bitmask.w = ((~(-1 << 2)) << 2) & 0xffffffff;  r0.w = (((uint)r0.x << 2) & bitmask.w) | ((uint)0 & ~bitmask.w);
+//   r0.z = (int)r0.w + (int)r0.z;
+//   bitmask.z = ((~(-1 << 2)) << 0) & 0xffffffff;  r0.z = (((uint)r0.x << 0) & bitmask.z) | ((uint)r0.z & ~bitmask.z);
+//   r0.z = (int)r0.z & 15;
+//   r0.z = (uint)r0.z;
+//   r0.x = (int)-r0.y + (int)r0.x;
+//   r0.x = (int)r0.x & 3;
+//   r0.x = (uint)r0.x;
+//   r3.xy = float2(0.0625,0.25) * r0.zx;
+//   r0.xy = postFxControl0.zw + r3.xy; //Temporal jitter offsets (ang, radial)
+//   r0.y = frac(r0.y);
+//   r0.zw = renderTargetSize.zw * v0.xy;
+//   r3.xy = float2(100,100) * renderTargetSize.zw;
+//   r2.w = 100 / r1.z;
+//   r3.zw = postFxControl0.xy * r2.ww; //World-space AO sample radius
+//   r3.xy = min(r3.xy, r3.zw);
+//   r3.zw = viewSpaceScaleBias.xy * r0.zw + -viewSpaceScaleBias.zw;
+//   r1.xy = r3.zw * r1.zz;
+//   r2.w = dot(-r1.xyz, -r1.xyz);
+//   r2.w = rsqrt(r2.w);
+//   r4.xyz = r2.www * -r1.xyz;
+//   r2.w = 0.00249999994 * r1.z;
+//   r3.z = 1 + r2.z;
+//   r1.w = -r2.w * r3.z + r1.z;
+//   r0.y = 0.25 * r0.y;
+//   r5.z = 0;
+//   r1.z = 0;
+//   r2.w = 0;
+//
+//   while (true) {
+//     r3.z = cmp((int)r2.w >= 6);
+//     if (r3.z != 0) break;
+//     r3.z = (int)r2.w;
+//     r3.z = 0.523599982 * r3.z;
+//     r3.z = r0.x * 0.523599982 + r3.z;
+//     sincos(r3.z, r6.x, r7.x);
+//     r7.xz = r7.xx;
+//     r7.yw = r6.xx;
+//     r3.zw = float2(-1,-200);
+//     r4.w = 0;
+//
+//     while (true) {
+//       r6.x = cmp((int)r4.w >= 4);
+//       if (r6.x != 0) break;
+//       r6.x = (int)r4.w;
+//       r6.x = r6.x * 0.25 + r0.y;
+//       r6.x = r6.x * r6.x;
+//       r6.yz = r6.xx * r3.xy;
+//       r6.yz = r6.yz * r7.xy + r0.zw;
+//       r6.x = 5 * r6.x;
+//       r8.z = depthTex.SampleLevel(pointSampler_s, r6.yz, r6.x).x;
+//       r6.xy = viewSpaceScaleBias.xy * r6.yz + -viewSpaceScaleBias.zw;
+//       r8.xy = r8.zz * r6.xy;
+//       r6.xyz = r8.xyz + -r1.xyw;
+//       r6.w = dot(r6.xyz, r6.xyz);
+//       r8.x = rsqrt(r6.w);
+//       r8.y = dot(r6.xyz, r4.xyz);
+//       r8.w = r8.x * r8.y;
+//       r6.w = (uint)r6.w >> 1;
+//       r6.w = (int)r6.w + 0x1fbd1df5;
+//       r9.xy = saturate(r6.ww * float2(0.0333333351,0.00666666683) + float2(-0.333333343,-0.333333343));
+//       r6.w = saturate(r8.z * 0.00666666683 + -0.333333343);
+//       r8.z = r9.y + -r9.x;
+//       r6.w = r6.w * r8.z + r9.x;
+//       r6.w = -r6.w * 2 + r8.w;
+//       r6.x = dot(r6.xyz, r2.xyz);
+//       r6.y = cmp(r3.z < r6.w);
+//       r3.w = r6.y ? r6.x : r3.w;
+//       r6.y = max(r6.w, r3.z);
+//       r6.x = r3.w + -r6.x;
+//       r6.x = saturate(r6.x * 0.100000001 + -1);
+//       r6.x = min(0.36787945, r6.x);
+//       r6.z = r8.x * r8.y + -r6.y;
+//       r3.z = r6.x * r6.z + r6.y;
+//       r4.w = (int)r4.w + 1;
+//     }
+//     r3.w = -1;
+//     r4.w = -200;
+//     r6.x = 0;
+//
+//     while (true) {
+//       r6.y = cmp((int)r6.x >= 4);
+//       if (r6.y != 0) break;
+//       r6.y = (int)r6.x;
+//       r6.y = r6.y * 0.25 + r0.y;
+//       r6.y = r6.y * r6.y;
+//       r6.zw = r6.yy * r3.xy;
+//       r6.zw = r6.zw * -r7.zw + r0.zw;
+//       r6.y = 5 * r6.y;
+//       r8.z = depthTex.SampleLevel(pointSampler_s, r6.zw, r6.y).x;
+//       r6.yz = viewSpaceScaleBias.xy * r6.zw + -viewSpaceScaleBias.zw;
+//       r8.xy = r8.zz * r6.yz;
+//       r6.yzw = r8.xyz + -r1.xyw;
+//       r7.x = dot(r6.yzw, r6.yzw);
+//       r7.y = rsqrt(r7.x);
+//       r8.x = dot(r6.yzw, r4.xyz);
+//       r8.y = r8.x * r7.y;
+//       r7.x = (uint)r7.x >> 1;
+//       r7.x = (int)r7.x + 0x1fbd1df5;
+//       r9.xy = saturate(r7.xx * float2(0.0333333351,0.00666666683) + float2(-0.333333343,-0.333333343));
+//       r7.x = saturate(r8.z * 0.00666666683 + -0.333333343);
+//       r8.z = r9.y + -r9.x;
+//       r7.x = r7.x * r8.z + r9.x;
+//       r7.x = -r7.x * 2 + r8.y;
+//       r6.y = dot(r6.yzw, r2.xyz);
+//       r6.z = cmp(r3.w < r7.x);
+//       r4.w = r6.z ? r6.y : r4.w;
+//       r6.z = max(r7.x, r3.w);
+//       r6.y = r4.w + -r6.y;
+//       r6.y = saturate(r6.y * 0.100000001 + -1);
+//       r6.y = min(0.36787945, r6.y);
+//       r6.w = r7.y * r8.x + -r6.z;
+//       r3.w = r6.y * r6.w + r6.z;
+//       r6.x = (int)r6.x + 1;
+//     }
+//     r6.xy = viewSpaceScaleBias.xy * r7.zw;
+//     r4.w = dot(r6.xy, r6.xy);
+//     r4.w = rsqrt(r4.w);
+//     r5.xy = r6.xy * r4.ww;
+//     r5.w = -r5.y;
+//     r6.xyz = r5.xzw * r4.zxy;
+//     r5.xyw = r4.yzx * r5.zwx + -r6.xyz;
+//     r6.xyz = r5.wxy * r4.yzx;
+//     r6.xyz = r5.ywx * r4.zxy + -r6.xyz;
+//     r4.w = dot(r2.xyz, r6.xyz);
+//     r6.xyz = -r6.xyz * r4.www + r2.xyz;
+//     r4.w = dot(r6.xyz, r6.xyz);
+//     r4.w = rsqrt(r4.w);
+//     r5.x = dot(r5.xyw, r6.xyz);
+//     r5.x = cmp(r5.x >= 0);
+//     r5.x = r5.x ? -1 : 1;
+//     r5.y = dot(r6.xyz, r4.xyz);
+//     r4.w = saturate(r5.y * r4.w);
+//     r5.y = r4.w * -0.156582996 + 1.57079995;
+//     r5.w = 1 + -r4.w;
+//     r5.w = (uint)r5.w >> 1;
+//     r5.w = (int)r5.w + 0x1fbd1df5;
+//     r5.y = r5.y * r5.w;
+//     r5.w = r5.x * r5.y;
+//     r6.x = abs(r3.z) * -0.156582996 + 1.57079995;
+//     r6.y = 1 + -abs(r3.z);
+//     r6.y = (uint)r6.y >> 1;
+//     r6.y = (int)r6.y + 0x1fbd1df5;
+//     r6.z = r6.x * r6.y;
+//     r6.w = cmp(r3.z >= 0);
+//     r6.x = -r6.x * r6.y + 3.14159989;
+//     r6.x = r6.w ? r6.z : r6.x;
+//     r6.y = abs(r3.w) * -0.156582996 + 1.57079995;
+//     r6.z = 1 + -abs(r3.w);
+//     r6.z = (uint)r6.z >> 1;
+//     r6.z = (int)r6.z + 0x1fbd1df5;
+//     r6.w = r6.y * r6.z;
+//     r7.x = cmp(r3.w >= 0);
+//     r6.y = -r6.y * r6.z + 3.14159989;
+//     r6.y = r7.x ? r6.w : r6.y;
+//     r6.x = -r5.x * r5.y + -r6.x;
+//     r6.x = max(-1.57079995, r6.x);
+//     r6.x = min(1.57079995, r6.x);
+//     r6.x = r5.x * r5.y + r6.x;
+//     r6.y = -r5.x * r5.y + r6.y;
+//     r6.y = max(-1.57079995, r6.y);
+//     r6.y = min(1.57079995, r6.y);
+//     r6.y = r5.x * r5.y + r6.y;
+//     r6.z = -r4.w * r4.w + 1;
+//     r6.z = (uint)r6.z >> 1;
+//     r6.z = (int)r6.z + 0x1fbd1df5;
+//     r6.z = r6.z * r5.x;
+//     r6.xy = r6.xy + r6.xy;
+//     r6.w = r6.x * r6.z + r4.w;
+//     r6.x = -r5.x * r5.y + r6.x;
+//     r6.x = cos(r6.x);
+//     r6.x = r6.w + -r6.x;
+//     r6.w = r6.y * r6.z + r4.w;
+//     r5.x = -r5.x * r5.y + r6.y;
+//     r5.x = cos(r5.x);
+//     r5.x = r6.w + -r5.x;
+//     r5.x = 0.25 * r5.x;
+//     r5.x = r6.x * 0.25 + r5.x;
+//     r4.w = r5.w * r6.z + r4.w;
+//     r4.w = r5.x / r4.w;
+//     r1.z = r4.w + r1.z;
+//     r2.w = (int)r2.w + 1;
+//   }
+//   r0.x = 0.166666672 * r1.z;
+//   r0.y = r1.z * 0.158333331 + -1.95000005;
+//   r0.y = r0.y * r0.x + 2;
+//   r0.y = r0.y * r0.x;
+//   o0.x = max(r0.x, r0.y);
+//   return;
+// }

@@ -1,3 +1,4 @@
+#if CUSTOM_SR == 1
 // ---- Created with 3Dmigoto v1.3.16 on Thu Nov 27 11:19:16 2025
 
 cbuffer PostFxCBuffer : register(b8)
@@ -231,120 +232,182 @@ void main(
   uint4 bitmask, uiDest;
   float4 fDest;
 
-#if CUSTOM_SR == 0
-  LET_THIS_BREAK;
-#endif
-
   o0 = colorTex.Sample(bilinearSampler_s, v1.xy).xyz;
+
+  //Gamma Decode from SDR
+  #if CUSTOM_SDR > 0
+    o0 = pow(o0, 2.2);
+  #endif
 
   //tradeoff in 
   o0 = TonemapHDRAndTradeIn(o0);
 
   o1 = 1; //for AA temporal, so dont care.
   return;
-
-  //FAILED DECOMP!
-//   r0.xy = renderTargetSize.zw * float2(2,2) + v1.xy;
-//   r0.x = depthTex.SampleLevel(bilinearSampler_s, r0.xy, 0).x;
-//   r1.xyzw = renderTargetSize.zwzw * float4(-2,-2,-2,2) + v1.xyxy;
-//   r0.y = depthTex.SampleLevel(bilinearSampler_s, r1.xy, 0).x;
-//   r0.z = depthTex.SampleLevel(bilinearSampler_s, r1.zw, 0).x;
-//   r0.x = max(r0.x, r0.y);
-//   r0.x = max(r0.x, r0.z);
-//   r1.xyzw = renderTargetSize.zwzw * float4(2,-2,-1,0) + v1.xyxy;
-//   r0.w = depthTex.SampleLevel(bilinearSampler_s, r1.xy, 0).x;
-//   r1.xyz = colorTex.SampleLevel(bilinearSampler_s, r1.zw, 0).xyz;
-//   r0.x = max(r0.x, r0.w);
-//   r1.w = depthTex.SampleLevel(bilinearSampler_s, v1.xy, 0).x;
-//   r0.x = max(r1.w, r0.x);
-//   r1.w = cmp(r0.x == r1.w);
-//   r0.yz = cmp(r0.xx == r0.yz);
-//   r0.y = r0.y ? -2 : 2;
-//   r0.x = cmp(r0.x == r0.w);
-//   r0.yz = r0.zz ? float2(-2,2) : r0.yy;
-//   r0.xy = r0.xx ? float2(2,-2) : r0.yz;
-//   r0.xy = renderTargetSize.zw * r0.xy;
-//   r0.xy = r1.ww ? float2(0,0) : r0.xy;
-//   r0.xy = v1.xy + r0.xy;
-//   r0.xy = velocityTex0.SampleLevel(bilinearSampler_s, r0.xy, 0).xy;
-//   r0.zw = abs(r0.xy) + abs(r0.xy);
-//   r0.zw = min(float2(1,1), r0.zw);
-//   r0.zw = float2(10,10) * r0.zw;
-//   r2.xy = float2(-0.5,-0.5) + abs(r0.xy);
-//   r0.xy = cmp(r0.xy >= float2(0,0));
-//   r2.xy = saturate(r2.xy + r2.xy);
-//   r0.zw = r2.xy * float2(30,30) + r0.zw;
-//   r0.xy = r0.xy ? r0.zw : -r0.zw;
-//   r0.zw = renderTargetSize.zw * r0.xy;
-//   r2.xy = -renderTargetSize.zw * r0.xy + v1.xy;
-//   r2.zw = velocityTex1.SampleLevel(bilinearSampler_s, r2.xy, 0).xy;
-//   r3.xy = abs(r2.zw) + abs(r2.zw);
-//   r3.xy = min(float2(1,1), r3.xy);
-//   r3.xy = float2(10,10) * r3.xy;
-//   r3.zw = float2(-0.5,-0.5) + abs(r2.zw);
-//   r2.zw = cmp(r2.zw >= float2(0,0));
-//   r3.zw = saturate(r3.zw + r3.zw);
-//   r3.xy = r3.zw * float2(30,30) + r3.xy;
-//   r2.zw = r2.zw ? r3.xy : -r3.xy;
-//   r3.xy = renderTargetSize.zw * r2.zw + -r0.zw;
-//   r0.zw = r3.xy * float2(2,2) + r0.zw;
-//   r3.xy = -renderTargetSize.zw * r2.zw + r2.xy;
-//   r0.zw = r3.xy + -r0.zw;
-//   r1.w = temporalHistoryLumaTex2.SampleLevel(bilinearSampler_s, r3.xy, 0).x;
-//   r3.xyzw = temporalHistoryLumaTex3.Gather(bilinearSampler_s, r0.zw, int2(0, 0)).xyzw;
-//   r4.xyzw = temporalHistoryLumaTex1.Gather(bilinearSampler_s, r2.xy, int2(0, 0)).xyzw;
-//   r0.zw = postFxControl0.zw + r2.xy;
-//   r5.xyz = temporalHistoryTex1.SampleLevel(bilinearSampler_s, r0.zw, 0).xyz;
-//   r3.xyzw = r4.xyzw + -r3.xyzw;
-//   r0.z = dot(abs(r3.xyzw), float4(10,10,10,10));
-//   r0.z = 1 + -r0.z;
-//   r2.xy = postFxControl0.xy + v1.xy;
-//   r3.xyz = colorTex.SampleLevel(bilinearSampler_s, r2.xy, 0).xyz;
-//   r4.xyz = float3(3.05175781e-005,3.05175781e-005,3.05175781e-005) * r3.xyz;
-//   r4.xyz = (uint3)r4.xyz >> int3(1,1,1);
-//   r4.xyz = (int3)r4.xyz + int3(0x1fbd1df5,0x1fbd1df5,0x1fbd1df5);
-//   r0.w = dot(r4.xyz, float3(0.212599993,0.715200007,0.0722000003));
-//   r1.w = r0.w + -r1.w;
-//   o1.x = r0.w;
-// 
-//   r0.w = -abs(r1.w) * 40 + 1;
-//   r0.zw = max(float2(0,0), r0.zw);
-//   r0.z = min(r0.z, r0.w);
-//   r2.xy = renderTargetSize.zw * float2(0,-1) + v1.xy;
-//   r4.xyz = colorTex.SampleLevel(bilinearSampler_s, r2.xy, 0).xyz;
-//   r6.xyzw = renderTargetSize.zwzw * float4(1,0,0,1) + v1.xyxy;
-//   r7.xyz = colorTex.SampleLevel(bilinearSampler_s, r6.zw, 0).xyz;
-//   r6.xyz = colorTex.SampleLevel(bilinearSampler_s, r6.xy, 0).xyz;
-//   r8.xyz = min(r7.xyz, r4.xyz);
-//   r4.xyz = max(r7.xyz, r4.xyz);
-//   r4.xyz = max(r6.xyz, r4.xyz);
-//   r6.xyz = min(r8.xyz, r6.xyz);
-//   r6.xyz = min(r6.xyz, r1.xyz);
-//   r1.xyz = max(r4.xyz, r1.xyz);
-//   r1.xyz = max(r3.xyz, r1.xyz);
-//   r4.xyz = min(r6.xyz, r3.xyz);
-//   r6.xyz = max(r4.xyz, r1.xyz);
-//   r4.xyz = max(r5.xyz, r4.xyz);
-//   r1.xyz = max(r5.xyz, r1.xyz);
-//   r1.xyz = min(r1.xyz, r6.xyz);
-//   r1.xyz = min(r4.xyz, r1.xyz);
-//   r4.xyz = r5.xyz + -r1.xyz;
-//   r1.xyz = r0.zzz * r4.xyz + r1.xyz;
-//   r1.xyz = r1.xyz + -r3.xyz;
-//   r0.z = dot(r0.xy, r0.xy);
-//   r0.xy = -r2.zw + r0.xy;
-//   r0.w = dot(r2.zw, r2.zw);
-//   r0.z = max(r0.z, r0.w);
-//   r0.z = (uint)r0.z >> 1;
-//   r0.z = (int)r0.z + 0x1fbd1df5;
-//   r0.z = saturate(40 + -r0.z);
-//   r0.x = dot(r0.xy, r0.xy);
-//   r0.x = (uint)r0.x >> 1;
-//   r0.x = (int)r0.x + 0x1fbd1df5;
-//   r0.x = saturate(-r0.x * 0.25 + 1);
-//   r0.x = r0.x * r0.x;
-//   r0.x = min(r0.x, r0.z);
-//   r0.x = 0.5 * r0.x;
-//   o0.xyz = r0.xxx * r1.xyz + r3.xyz;
-//   return;
 }
+#else
+cbuffer cb8_buf : register(b8)
+{
+    float2 cb8_m0 : packoffset(c0);
+    float2 cb8_m1 : packoffset(c0.z);
+};
+
+cbuffer cb1_buf : register(b1)
+{
+    uint4 cb1_m[45] : packoffset(c0);
+};
+
+SamplerState s0 : register(s0);
+Texture2D<float4> t0 : register(t0);
+Texture2D<float4> t6 : register(t6);
+Texture2D<float4> t7 : register(t7);
+Texture2D<float4> t9 : register(t9);
+Texture2D<float4> t10 : register(t10);
+Texture2D<float4> t11 : register(t11);
+Texture2D<float4> t12 : register(t12);
+Texture2D<float4> t14 : register(t14);
+
+static float2 TEXCOORD;
+static float3 SV_TARGET;
+static float SV_TARGET1;
+
+struct SPIRV_Cross_Input
+{
+    float4 v0 : SV_POSITION0;
+    float2 v1 : TEXCOORD0;
+};
+
+struct SPIRV_Cross_Output
+{
+    float3 SV_TARGET : SV_Target0;
+    float SV_TARGET1 : SV_Target1;
+};
+
+float dp4_f32(float4 a, float4 b)
+{
+    precise float _93 = a.x * b.x;
+    return mad(a.w, b.w, mad(a.z, b.z, mad(a.y, b.y, _93)));
+}
+
+float dp3_f32(float3 a, float3 b)
+{
+    precise float _79 = a.x * b.x;
+    return mad(a.z, b.z, mad(a.y, b.y, _79));
+}
+
+float dp2_f32(float2 a, float2 b)
+{
+    precise float _67 = a.x * b.x;
+    return mad(a.y, b.y, _67);
+}
+
+void frag_main()
+{
+    float _112 = asfloat(cb1_m[44u].z);
+    float _113 = asfloat(cb1_m[44u].w);
+    float _119 = mad(_112, 2.0f, TEXCOORD.x);
+    float _120 = mad(_113, 2.0f, TEXCOORD.y);
+    float _128 = mad(_112, -2.0f, TEXCOORD.x);
+    float _129 = mad(_113, -2.0f, TEXCOORD.y);
+    float4 _132 = t14.SampleLevel(s0, float2(_128, _129), 0.0f);
+    float _133 = _132.x;
+    float4 _136 = t14.SampleLevel(s0, float2(_128, _120), 0.0f);
+    float _137 = _136.x;
+    float _141 = mad(_113, 0.0f, TEXCOORD.y);
+    float4 _144 = t14.SampleLevel(s0, float2(_119, _129), 0.0f);
+    float _145 = _144.x;
+    float4 _149 = t0.SampleLevel(s0, float2(mad(_112, -1.0f, TEXCOORD.x), _141), 0.0f);
+    float _150 = _149.x;
+    float _151 = _149.y;
+    float _152 = _149.z;
+    float4 _156 = t14.SampleLevel(s0, float2(TEXCOORD.x, TEXCOORD.y), 0.0f);
+    float _157 = _156.x;
+    float _158 = max(max(max(_137, max(t14.SampleLevel(s0, float2(_119, _120), 0.0f).x, _133)), _145), _157);
+    bool _159 = _157 == _158;
+    bool _161 = _133 == _158;
+    bool _162 = _137 == _158;
+    bool _164 = _145 == _158;
+    float4 _182 = t11.SampleLevel(s0, float2(TEXCOORD.x + (_159 ? 0.0f : (_112 * (((!(_161 || _162)) || _164) ? 2.0f : (-2.0f)))), TEXCOORD.y + (_159 ? 0.0f : (_113 * ((_164 || (!((!_161) || _162))) ? (-2.0f) : 2.0f)))), 0.0f);
+    float _183 = _182.x;
+    float _184 = _182.y;
+    float _185 = abs(_183);
+    float _186 = abs(_184);
+    float _193 = _185 - 0.5f;
+    float _194 = _186 - 0.5f;
+    float _203 = (clamp(_193 + _193, 0.0f, 1.0f) * 30.0f) + (min(_185 + _185, 1.0f) * 10.0f);
+    float _204 = (clamp(_194 + _194, 0.0f, 1.0f) * 30.0f) + (min(_186 + _186, 1.0f) * 10.0f);
+    float _207 = (_183 >= 0.0f) ? _203 : (-_203);
+    float _208 = (_184 >= 0.0f) ? _204 : (-_204);
+    float _209 = _112 * _207;
+    float _210 = _113 * _208;
+    float _212 = mad(-_112, _207, TEXCOORD.x);
+    float _214 = mad(-_113, _208, TEXCOORD.y);
+    float2 _216 = float2(_212, _214);
+    float4 _218 = t12.SampleLevel(s0, _216, 0.0f);
+    float _219 = _218.x;
+    float _220 = _218.y;
+    float _221 = abs(_219);
+    float _222 = abs(_220);
+    float _229 = _221 - 0.5f;
+    float _230 = _222 - 0.5f;
+    float _239 = (min(_221 + _221, 1.0f) * 10.0f) + (clamp(_229 + _229, 0.0f, 1.0f) * 30.0f);
+    float _240 = (clamp(_230 + _230, 0.0f, 1.0f) * 30.0f) + (min(_222 + _222, 1.0f) * 10.0f);
+    float _243 = (_219 >= 0.0f) ? _239 : (-_239);
+    float _244 = (_220 >= 0.0f) ? _240 : (-_240);
+    float _254 = mad(-_112, _243, _212);
+    float _256 = mad(-_113, _244, _214);
+    float4 _267 = t10.GatherRed(s0, float2(_254 - (_209 + (((_112 * _243) - _209) * 2.0f)), _256 - ((((_113 * _244) - _210) * 2.0f) + _210)));
+    float4 _274 = t7.GatherRed(s0, _216);
+    float4 _290 = t6.SampleLevel(s0, float2(_212 + cb8_m1.x, _214 + cb8_m1.y), 0.0f);
+    float _291 = _290.x;
+    float _292 = _290.y;
+    float _293 = _290.z;
+    float4 _313 = t0.SampleLevel(s0, float2(TEXCOORD.x + cb8_m0.x, TEXCOORD.y + cb8_m0.y), 0.0f);
+    float _314 = _313.x;
+    float _315 = _313.y;
+    float _316 = _313.z;
+    float _333 = dp3_f32(float3(asfloat((asint(_314 * 3.0517578125e-05f) >> int(1u)) + 532487669), asfloat((asint(_315 * 3.0517578125e-05f) >> int(1u)) + 532487669), asfloat((asint(_316 * 3.0517578125e-05f) >> int(1u)) + 532487669)), float3(0.2125999927520751953125f, 0.715200006961822509765625f, 0.072200000286102294921875f));
+    SV_TARGET1 = _333;
+    float _339 = min(max(1.0f - dp4_f32(float4(abs(_274.x - _267.x), abs(_274.y - _267.y), abs(_274.z - _267.z), abs(_274.w - _267.w)), 10.0f.xxxx), 0.0f), max(mad(abs(_333 - t9.SampleLevel(s0, float2(_254, _256), 0.0f).x), -40.0f, 1.0f), 0.0f));
+    float _340 = mad(_112, 0.0f, TEXCOORD.x);
+    float4 _344 = t0.SampleLevel(s0, float2(_340, mad(_113, -1.0f, TEXCOORD.y)), 0.0f);
+    float _345 = _344.x;
+    float _346 = _344.y;
+    float _347 = _344.z;
+    float4 _352 = t0.SampleLevel(s0, float2(_340, mad(_113, 1.0f, TEXCOORD.y)), 0.0f);
+    float _353 = _352.x;
+    float _354 = _352.y;
+    float _355 = _352.z;
+    float4 _358 = t0.SampleLevel(s0, float2(mad(_112, 1.0f, TEXCOORD.x), _141), 0.0f);
+    float _359 = _358.x;
+    float _360 = _358.y;
+    float _361 = _358.z;
+    float _380 = max(_314, max(_150, max(_359, max(_345, _353))));
+    float _381 = max(_315, max(_151, max(_360, max(_346, _354))));
+    float _382 = max(_316, max(_152, max(_361, max(_347, _355))));
+    float _383 = min(_314, min(_150, min(min(_345, _353), _359)));
+    float _384 = min(_315, min(_151, min(_360, min(_346, _354))));
+    float _385 = min(_316, min(_152, min(_361, min(_347, _355))));
+    float _395 = clamp(_291, _383, min(max(_380, _383), max(_291, _380)));
+    float _396 = clamp(_292, _384, min(max(_292, _381), max(_384, _381)));
+    float _397 = clamp(_293, _385, min(max(_293, _382), max(_385, _382)));
+    float2 _407 = float2(_207, _208);
+    float2 _411 = float2(_243, _244);
+    float2 _420 = float2(_207 - _243, _208 - _244);
+    float _427 = clamp(mad(asfloat((asint(dp2_f32(_420, _420)) >> int(1u)) + 532487669), -0.25f, 1.0f), 0.0f, 1.0f);
+    float _430 = min(clamp(40.0f - asfloat((asint(max(dp2_f32(_407, _407), dp2_f32(_411, _411))) >> int(1u)) + 532487669), 0.0f, 1.0f), _427 * _427) * 0.5f;
+    SV_TARGET.x = mad(mad(_339, _291 - _395, _395) - _314, _430, _314);
+    SV_TARGET.y = mad(mad(_339, _292 - _396, _396) - _315, _430, _315);
+    SV_TARGET.z = mad(mad(_339, _293 - _397, _397) - _316, _430, _316);
+}
+
+SPIRV_Cross_Output main(SPIRV_Cross_Input stage_input)
+{
+    TEXCOORD = stage_input.v1;
+    frag_main();
+    SPIRV_Cross_Output stage_output;
+    stage_output.SV_TARGET = SV_TARGET;
+    stage_output.SV_TARGET1 = SV_TARGET1;
+    return stage_output;
+}
+#endif

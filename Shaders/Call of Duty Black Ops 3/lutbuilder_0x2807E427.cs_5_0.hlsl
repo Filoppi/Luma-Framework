@@ -424,6 +424,9 @@ void main(uint3 vThreadID : SV_DispatchThreadID)
 
 #if CUSTOM_LUTBUILDER_COLORSPACE == 0
   r0.xyz = DecodeRec709(r0.xyz);
+  #if CUSTOM_SDR > 0 && CUSTOM_SR == 0
+    r0.xyz *= 32768;
+  #endif
 #else
   #if CUSTOM_LUTBUILDER_SATBOOST == 0 || CUSTOM_SDR > 0
     r0.xyz = BT709_To_BT2020(DecodeRec709(r0.xyz));
