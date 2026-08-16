@@ -435,6 +435,10 @@ void main(
   o0.xyz = safePow(r0.xyz, cb_env_tonemapping_gamma_brightness.x); //TODO: apply this b4 TM?
   o0.w = 1;
 
+#if 0 // Debug: identity check for the brightness/gamma CB.
+  // At the in-game default brightness (17) these components are 1 and the
+  // tonemapper works. Moving brightness off default makes them != 1, so these
+  // fills painted the whole 3D frame solid green/red (intro video was fine).
   if (cb_env_tonemapping_gamma_brightness.y != 1)
   {
     o0.xyz = float3(0, 1, 0);
@@ -443,6 +447,7 @@ void main(
   {
     o0.xyz = float3(1, 0, 0);
   }
+#endif
 #if !FIX_RAISED_BLACKS && 0 // Test raised blacks. Happens always
   if (cb_postfx_tonemapping_tonemappingcoeffs0.z != 0)
   {
