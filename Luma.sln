@@ -117,6 +117,8 @@ Project("{8BC9CEB8-8B4A-11D0-8D11-00A0C91BC942}") = "Mass Effect Legendary Editi
 EndProject
 Project("{8BC9CEB8-8B4A-11D0-8D11-00A0C91BC942}") = "Middle-earth Shadow of War", "Source\Games\Middle-earth Shadow of War\Middle-earth Shadow of War.vcxproj", "{17FBB4FD-8E4E-4E61-AC32-BBEBA09B8D18}"
 EndProject
+Project("{8BC9CEB8-8B4A-11D0-8D11-00A0C91BC942}") = "The Witcher 2", "Source\Games\The Witcher 2\The Witcher 2.vcxproj", "{8F4A1D26-93BC-4E07-A5D1-64C2E7B9F310}"
+EndProject
 Global
 	GlobalSection(SolutionConfigurationPlatforms) = preSolution
 		Development-Debug|Win32 = Development-Debug|Win32
@@ -861,6 +863,18 @@ Global
 		{17FBB4FD-8E4E-4E61-AC32-BBEBA09B8D18}.Test-Release|Win32.Build.0 = Test-Release|x64
 		{17FBB4FD-8E4E-4E61-AC32-BBEBA09B8D18}.Test-Release|x64.ActiveCfg = Test-Release|x64
 		{17FBB4FD-8E4E-4E61-AC32-BBEBA09B8D18}.Test-Release|x64.Build.0 = Test-Release|x64
+		{8F4A1D26-93BC-4E07-A5D1-64C2E7B9F310}.Development-Debug|Win32.ActiveCfg = Development-Debug|Win32
+		{8F4A1D26-93BC-4E07-A5D1-64C2E7B9F310}.Development-Debug|Win32.Build.0 = Development-Debug|Win32
+		{8F4A1D26-93BC-4E07-A5D1-64C2E7B9F310}.Development-Debug|x64.ActiveCfg = Development-Debug|Win32
+		{8F4A1D26-93BC-4E07-A5D1-64C2E7B9F310}.Development-Release|Win32.ActiveCfg = Development-Release|Win32
+		{8F4A1D26-93BC-4E07-A5D1-64C2E7B9F310}.Development-Release|Win32.Build.0 = Development-Release|Win32
+		{8F4A1D26-93BC-4E07-A5D1-64C2E7B9F310}.Development-Release|x64.ActiveCfg = Development-Release|Win32
+		{8F4A1D26-93BC-4E07-A5D1-64C2E7B9F310}.Publishing-Release|Win32.ActiveCfg = Publishing-Release|Win32
+		{8F4A1D26-93BC-4E07-A5D1-64C2E7B9F310}.Publishing-Release|Win32.Build.0 = Publishing-Release|Win32
+		{8F4A1D26-93BC-4E07-A5D1-64C2E7B9F310}.Publishing-Release|x64.ActiveCfg = Publishing-Release|Win32
+		{8F4A1D26-93BC-4E07-A5D1-64C2E7B9F310}.Test-Release|Win32.ActiveCfg = Test-Release|Win32
+		{8F4A1D26-93BC-4E07-A5D1-64C2E7B9F310}.Test-Release|Win32.Build.0 = Test-Release|Win32
+		{8F4A1D26-93BC-4E07-A5D1-64C2E7B9F310}.Test-Release|x64.ActiveCfg = Test-Release|Win32
 	EndGlobalSection
 	GlobalSection(SolutionProperties) = preSolution
 		HideSolutionNode = FALSE
@@ -920,6 +934,7 @@ Global
 		{1180032D-8EEB-4A60-B120-E838393947DF} = {02EA681E-C7D8-13C7-8484-4AC65E1B71E8}
 		{B0DE12A4-5C7A-4E91-9F3B-08891303C0DE} = {02EA681E-C7D8-13C7-8484-4AC65E1B71E8}
 		{17FBB4FD-8E4E-4E61-AC32-BBEBA09B8D18} = {02EA681E-C7D8-13C7-8484-4AC65E1B71E8}
+		{8F4A1D26-93BC-4E07-A5D1-64C2E7B9F310} = {02EA681E-C7D8-13C7-8484-4AC65E1B71E8}
 	EndGlobalSection
 	GlobalSection(ExtensibilityGlobals) = postSolution
 		SolutionGuid = {8B799422-BA66-3174-B21F-B9FA07C4B2E3}
