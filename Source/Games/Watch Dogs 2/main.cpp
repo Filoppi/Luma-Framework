@@ -452,16 +452,36 @@ public:
          
          word_t instruction_operand_register; // we don't know register so use wildcard byte pattern
          
+         // The registers of the Luma "LumaData" cbuffer (cb11) this patch reads from are derived from the
+         // c++ mirror of the hlsl struct instead of being hardcoded: core added "RenderScaleActive" in front
+         // of "GameData" (2026-08-21 "Core: Add Resolution scaling to resource upgrades"), which pushed every
+         // "GameData" member down by one register. The hardcoded values here were never updated, so every
+         // patched material vertex shader read matrix rows as if they were the previous camera position (and
+         // two wrong matrix rows), producing a garbage previous clip position: all dynamic objects (the
+         // player, NPCs, vehicles) ended up with garbage motion vectors, which DLSS then rejects.
+         static constexpr uint32_t luma_data_cb_prev_vrp_register = (offsetof(CB::LumaInstanceData, GameData) + offsetof(CB::LumaGameData, PreviousViewRotProjectionMatrix)) / sizeof(float4);
+         static constexpr uint32_t luma_data_cb_prev_camera_register = (offsetof(CB::LumaInstanceData, GameData) + offsetof(CB::LumaGameData, PreviousCameraPosition)) / sizeof(float4);
+         static constexpr uint32_t luma_data_cb_registers_count = sizeof(CB::LumaInstanceDataPadded) / sizeof(float4);
+         // If any of these fire, the cbuffer layout moved again (the shaders replaced through hlsl follow it
+         // automatically, this bytecode patch cannot): dump any Luma compiled shader that uses "LumaData"
+         // with "fxc /dumpbin" and update the expectations below.
+         static_assert(luma_data_cb_prev_vrp_register == 8, "LumaData layout changed: GameData.PreviousViewRotProjectionMatrix moved");
+         static_assert(luma_data_cb_prev_camera_register == 12, "LumaData layout changed: GameData.PreviousCameraPosition moved");
+         static_assert(luma_data_cb_registers_count == 17, "LumaData layout changed: cbuffer size changed");
+         
          std::vector<uint8_t> appended_patch = {
             0x00, 0x00, 0x00, 0x09, // length(9)
             0x72, 0x00, 0x10, 0x00, 0x00, 0x00, 0x00, 0x00, //add r0.xyz
             0x46, 0x02, 0x10, 0x00, 0x00, 0x00, 0x00, 0x00, //r0.xyzx
             0x46, 0x82, 0x20, 0x80, 0x41, 0x00, 0x00, 0x00, //-cb__index__.xyzx
-            0x0B, 0x00, 0x00, 0x00, 0x0B, 0x00, 0x00, 0x00, //11[11]
+            static_cast<uint8_t>(luma_data_cbuffer_index), 0x00, 0x00, 0x00, //cb11
+            static_cast<uint8_t>(luma_data_cb_prev_camera_register), 0x00, 0x00, 0x00, //[12] (GameData.PreviousCameraPosition)
          };
          
          std::vector<uint8_t> appended_patch_cb = {
-            0x59, 0x00, 0x00, 0x04, 0x46, 0x8E, 0x20, 0x00, 0x0B, 0x00, 0x00, 0x00, 0x0C, 0x00, 0x00, 0x00, //dcl_constantbuffer cb11[16], immediateIndexed
+            0x59, 0x00, 0x00, 0x04, 0x46, 0x8E, 0x20, 0x00,
+            static_cast<uint8_t>(luma_data_cbuffer_index), 0x00, 0x00, 0x00,
+            static_cast<uint8_t>(luma_data_cb_registers_count), 0x00, 0x00, 0x00, //dcl_constantbuffer cb11[17], immediateIndexed
          };
          
          std::vector<std::byte*> matches;
@@ -507,22 +527,26 @@ public:
                // Copy the rest (including the return instruction)
                std::memcpy(new_code.get() + appended_patch_cb.size() + insert_pos + appended_patch.size(), code + insert_pos, size - insert_pos);
                
-               static const uint8_t cb_07_bytes[8] = {
-                  0x0B, 0x00, 0x00, 0x00,   // cb11
-                  0x07, 0x00, 0x00, 0x00    // [7]
+               // The game's cb0[20], cb0[21] and cb0[23] (rows 0, 1 and 3 of its absolute space
+               // "PreviousViewProjectionMatrix") become the matching rows of the camera relative
+               // "GameData.PreviousViewRotProjectionMatrix". Each "dp4" is 32 bytes and holds its constant
+               // buffer index at +24, hence the 44/76/108 offsets from the start of the inserted "add".
+               const uint8_t cb_prev_vrp_row_0[8] = {
+                  static_cast<uint8_t>(luma_data_cbuffer_index), 0x00, 0x00, 0x00,   // cb11
+                  static_cast<uint8_t>(luma_data_cb_prev_vrp_register + 0), 0x00, 0x00, 0x00
                };
-               static const uint8_t cb_08_bytes[8] = {
-                  0x0B, 0x00, 0x00, 0x00,   // cb11
-                  0x08, 0x00, 0x00, 0x00    // [8]
+               const uint8_t cb_prev_vrp_row_1[8] = {
+                  static_cast<uint8_t>(luma_data_cbuffer_index), 0x00, 0x00, 0x00,   // cb11
+                  static_cast<uint8_t>(luma_data_cb_prev_vrp_register + 1), 0x00, 0x00, 0x00
                };
-               static const uint8_t cb_10_bytes[8] = {
-                  0x0B, 0x00, 0x00, 0x00,   // cb11
-                  0x0A, 0x00, 0x00, 0x00    // [10]
+               const uint8_t cb_prev_vrp_row_3[8] = {
+                  static_cast<uint8_t>(luma_data_cbuffer_index), 0x00, 0x00, 0x00,   // cb11
+                  static_cast<uint8_t>(luma_data_cb_prev_vrp_register + 3), 0x00, 0x00, 0x00
                };
                
-               std::memcpy(new_code.get() + appended_patch_cb.size() + insert_pos + appended_patch.size() + 44, cb_07_bytes, 8);
-               std::memcpy(new_code.get() + appended_patch_cb.size() + insert_pos + appended_patch.size() + 76, cb_08_bytes, 8);
-               std::memcpy(new_code.get() + appended_patch_cb.size() + insert_pos + appended_patch.size() + 108, cb_10_bytes, 8);
+               std::memcpy(new_code.get() + appended_patch_cb.size() + insert_pos + appended_patch.size() + 44, cb_prev_vrp_row_0, 8);
+               std::memcpy(new_code.get() + appended_patch_cb.size() + insert_pos + appended_patch.size() + 76, cb_prev_vrp_row_1, 8);
+               std::memcpy(new_code.get() + appended_patch_cb.size() + insert_pos + appended_patch.size() + 108, cb_prev_vrp_row_3, 8);
                
                size += appended_patch.size() + appended_patch_cb.size();
             }
