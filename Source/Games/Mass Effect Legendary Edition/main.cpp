@@ -101,19 +101,18 @@ struct MEGameProfile
 {
    std::span<const TonemapPermDesc> tonemap_perms;
    float gtao_radius_override; // Native radius (uu) / DepthScale; 0 keeps the shader's own radius.
-   float bloom_scale_ref;      // Energy match; the native bright-pass scale alone over-blooms the pyramid.
+   float bloom_scale_ref;      // Divisor on the native bright-pass scale; 1 reproduces it.
 };
 static constexpr MEGameProfile ProfileFor(MEGame game)
 {
    switch (game)
    {
    case MEGame::ME2:
-      return {kTonemapPermsME2, 0.96f, 0.69f};
+      return {kTonemapPermsME2, 0.96f, 1.0f};
    case MEGame::ME3:
-      // Native scale 0.5 matches ME3 bloom energy despite sharing ME2's bright-pass parameters.
-      return {kTonemapPermsME3, 0.96f, 0.5f};
+      return {kTonemapPermsME3, 0.96f, 1.0f};
    default:
-      return {kTonemapPermsME1, 0.f, 1.01f};
+      return {kTonemapPermsME1, 0.f, 1.0f};
    }
 }
 // Quarter-resolution bloom bright-pass; cb0.xy = (BloomScale, Threshold).
@@ -135,9 +134,9 @@ static bool g_bloom_enable = true;
 // One sigma per mip, so the two counts cannot drift apart.
 static constexpr std::array<float, 6> kBloomSigmas = {1.5f, 2.f, 2.f, 2.f, 2.f, 1.f};
 static float g_bloom_intensity = 1.0f;
-// Artist-authored per-scene cb0.x, read two frames late through a no-stall ring. Per-game divisor at which
-// slider 1 matches native energy; DllMain overrides it for ME2/ME3.
-static float g_bloom_scale_ref = 1.01f;
+// Divisor on the artist-authored per-scene cb0.x, read two frames late through a no-stall ring. 1 reproduces the
+// native bright pass.
+static float g_bloom_scale_ref = 1.0f;
 
 // Bink targets the intermediate gamma buffer or the swapchain directly; GameSettings.VideoOnSwapchain reports
 // which, so the replacement applies the UI/Game scale exactly once.
