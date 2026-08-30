@@ -39,6 +39,12 @@ float3 MELE_NativeGammaCurve(float3 c, float3 scale, float invGamma, bool clampF
    return exp2(c);
 }
 
+// Native per-channel tone curve from the stage-1 decompiles, asymptotic to 1; the non-filmic and analytic HDR wraps invert it exactly to measure the max-channel compression.
+float MELE_NativeToneCurve(float x)
+{
+   return 1.0 - exp2(-1.70000005 * x);
+}
+
 // Native radial-vignette floors, transcribed from the stage-1 decompiles and selected through TM_VIG_FLOOR. The
 // shared tail rebuilds each white point as TM_VIG_FLOOR + 1, so these carry the tint too: ME1 nearly neutral,
 // ME2 strongly blue.

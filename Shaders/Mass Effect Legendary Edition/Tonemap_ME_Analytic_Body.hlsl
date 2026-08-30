@@ -11,7 +11,6 @@
 #include "Includes/Common.hlsl"
 #include "../Includes/Color.hlsl"
 #include "../Includes/DICE.hlsl"
-#include "../Includes/Reinhard.hlsl" // ReinhardScalable (max-channel compress)
 // clang-format on
 
 #define cmp -
@@ -121,14 +120,13 @@ void main(
    r1.xyz = float3(1, 1, 1) + -r1.xyz;
    r0.xyz = r0.xyz * r0.www + r1.xyz;
    // The native per-channel value reaches the analytic grade untouched, so the vanilla white blowout survives into
-   // HDR: HDR only measures the reversible max-channel Reinhard ratio that expands the grade output below. Its
-   // 0.18 -> 0.1911 anchor matches the native exponential curve at mid-gray.
+   // HDR: HDR only measures the reversible max-channel ratio that expands the grade output below, taken as the exact inverse of the native exponential curve.
    float mele_scale = 1.0;
    if (LumaSettings.DisplayMode == 1)
    {
       float mele_mch = max(max3(untonemapped), 1e-6);
-      // 1-exp2(-1.7*0.18) = 0.1911.
-      mele_scale = Reinhard::ReinhardScalable(mele_mch, 1.0, 0.0, 0.18, 0.1911) / mele_mch;
+      // Invert the curve the game actually applies, normalized so mid-gray holds still at 1-exp2(-1.7*0.18) = 0.1911
+      mele_scale = (MELE_NativeToneCurve(mele_mch) / mele_mch) * (0.18 / MELE_NativeToneCurve(0.18));
    }
 
    // Apply the same native grade function to the working value and, below, to the SDR reference.

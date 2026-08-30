@@ -9,7 +9,6 @@
 #include "Includes/Common.hlsl"
 #include "../Includes/Color.hlsl"
 #include "../Includes/DICE.hlsl"
-#include "../Includes/Reinhard.hlsl" // ReinhardScalable (max-channel compress)
 // clang-format on
 
 #define cmp -
@@ -105,14 +104,13 @@ void main(
 
    float3 untonemapped = r0.xyz * r0.www + r1.xyz;
    r0.xyz = untonemapped;
-   // No tonemap curve here, so the raw scene reaches the grade and the grade chain's own clamp is this
-   // permutation's vanilla blowout. HDR only measures the reversible max-channel ratio, with an identity mid-gray
-   // anchor because native SDR has no curve to match.
+   // No tonemap curve here, so the raw scene reaches the grade and the saturate its grade opens with is this permutation's vanilla blowout; that is a hard clip, so its inverse is the plain max-channel ratio, identity below the clip and mch above it.
    float mele_scale = 1.0;
    if (LumaSettings.DisplayMode == 1)
    {
       float mele_mch = max(max3(untonemapped), 1e-6);
-      mele_scale = Reinhard::ReinhardScalable(mele_mch, 1.0, 0.0, 0.18, 0.18) / mele_mch;
+      // A Reinhard anchored 0.18 -> 0.18 reduces to mch + 0.82, lifting mids the clip never touched by +32% at mch 0.5 and +82% at mch 1; the clip inverse also cancels the clip's own kink, keeping the product C1.
+      mele_scale = 1.0 / mele_mch;
    }
 
    float3 sdr_gamma = MELE_ME3Analytic_GradeChain(r0.xyz);

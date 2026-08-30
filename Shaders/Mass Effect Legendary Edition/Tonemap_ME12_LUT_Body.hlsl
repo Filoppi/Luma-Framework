@@ -17,7 +17,7 @@
 #include "Includes/Common.hlsl"      // Defines game settings; keep first.
 #include "../Includes/Color.hlsl"    // Transfer and color helpers.
 #include "../Includes/DICE.hlsl"     // Display-peak tonemap.
-#include "../Includes/Reinhard.hlsl" // Reversible max-channel compression.
+#include "../Includes/Reinhard.hlsl" // ReinhardPiecewise, used by the filmic expand.
 // clang-format on
 
 #ifndef TM_HAS_MOTIONBLUR
@@ -347,8 +347,8 @@ void main(
    if (LumaSettings.DisplayMode == 1)
    {
       float mele_mch = max(max3(untonemapped), 1e-6);
-      // 1-exp2(-1.7*0.18) = 0.1911.
-      mele_scale = Reinhard::ReinhardScalable(mele_mch, 1.0, 0.0, 0.18, 0.1911) / mele_mch;
+      // Invert the curve the game actually applies, normalized so mid-gray holds still at 1-exp2(-1.7*0.18) = 0.1911
+      mele_scale = (MELE_NativeToneCurve(mele_mch) / mele_mch) * (0.18 / MELE_NativeToneCurve(0.18));
    }
    // r0.xyz stays the native per-channel value.
 #endif
