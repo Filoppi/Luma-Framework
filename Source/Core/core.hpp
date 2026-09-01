@@ -5799,369 +5799,378 @@ namespace
          {
             IDXGISwapChain* native_swapchain = (IDXGISwapChain*)(swapchain->get_native());
 
-            UINT back_buffer_index = 0;
-            com_ptr<IDXGISwapChain3> native_swapchain3;
-            // The cast pointer is actually the same, we are just making sure the type is right (it should always be).
-            // This would always be 1 in DX11, even if two buffers were requested.
-            if (SUCCEEDED(native_swapchain->QueryInterface(&native_swapchain3)))
-            {
-               back_buffer_index = native_swapchain3->GetCurrentBackBufferIndex();
-            }
+            // In DX11 only buffer 0 can be read back through "GetBuffer()", in both the bitblt and
+            // flip presentation models: it always maps onto the current back buffer, the runtime
+            // rotates the others internally. Asking "IDXGISwapChain3::GetCurrentBackBufferIndex()"
+            // for an index here was not just unnecessary, it crashed: when a present interposer
+            // wraps the game's swapchain with a flip-model one of its own (NVIDIA Smooth Motion's
+            // "NvPresent64.dll" does), the index rotates, "GetBuffer(1)" fails with
+            // DXGI_ERROR_INVALID_CALL, and the null "back_buffer" was dereferenced below (the
+            // release build compiles the assert out). "display_composition_rtvs" also only holds
+            // "get_back_buffer_count()" entries (1 on DX11), so a rotating index would overflow it.
+            constexpr UINT back_buffer_index = 0;
             com_ptr<ID3D11Texture2D> back_buffer;
-            native_swapchain->GetBuffer(back_buffer_index, IID_PPV_ARGS(&back_buffer));
-            assert(back_buffer != nullptr && swapchain_data.back_buffers.size() >= back_buffer_index + 1);
+            HRESULT back_buffer_hr = native_swapchain->GetBuffer(back_buffer_index, IID_PPV_ARGS(&back_buffer));
+            assert(SUCCEEDED(back_buffer_hr) && back_buffer != nullptr && swapchain_data.back_buffers.size() >= back_buffer_index + 1);
             assert(swapchain_data.display_composition_rtvs.size() >= back_buffer_index + 1);
-
-            D3D11_TEXTURE2D_DESC target_desc;
-            back_buffer->GetDesc(&target_desc);
-            ASSERT_ONCE((target_desc.BindFlags & D3D11_BIND_RENDER_TARGET) != 0);
-            // For now we only support these formats, nothing else wouldn't really make sense
-            ASSERT_ONCE(target_desc.Format == DXGI_FORMAT_R16G16B16A16_FLOAT || target_desc.Format == DXGI_FORMAT_R10G10B10A2_UNORM);
-
-            uint32_t custom_const_buffer_data_1 = 0;
-            uint32_t custom_const_buffer_data_2 = 0;
-            float custom_const_buffer_data_3 = 0.f;
-
-#if DEVELOPMENT // See "debug_draw_srv_slot_numbers" etc...
-            DrawStateStack<DrawStateStackType::FullGraphics> draw_state_stack;
-#else
-            DrawStateStack<DrawStateStackType::SimpleGraphics> draw_state_stack;
-#endif
-            draw_state_stack.Cache(native_device_context, device_data.uav_max_count);
-
-#if DEVELOPMENT
-            UINT debug_draw_srv_slot = 2; // 0 is for background, 1 is for UI, 2+ for debug draw types
-            constexpr UINT debug_draw_srv_slot_numbers = 7; // The max amount of debug draw types, determined by the display composition shader too
-
-            if (device_data.debug_draw_texture.get())
+            if (FAILED(back_buffer_hr) || back_buffer == nullptr)
             {
-               // We might not be able to rely on SRVs automatic generation (by passing a nullptr desc), because depth resources take a custom view format etc
+               ASSERT_ONCE_MSG(false, "Retrieving the swapchain's back buffer failed during present; skipping the display composition draw for this frame");
+            }
+            else
+            {
 
-               // Note: it's possible to use "ID3D11Resource::GetType()" instead of this
-               com_ptr<ID3D11Texture2D> debug_draw_texture_2d;
-               device_data.debug_draw_texture->QueryInterface(&debug_draw_texture_2d);
-               com_ptr<ID3D11Texture3D> debug_draw_texture_3d;
-               device_data.debug_draw_texture->QueryInterface(&debug_draw_texture_3d);
-               com_ptr<ID3D11Texture1D> debug_draw_texture_1d;
-               device_data.debug_draw_texture->QueryInterface(&debug_draw_texture_1d);
-               D3D11_SHADER_RESOURCE_VIEW_DESC debug_srv_desc = {};
-               DXGI_FORMAT debug_draw_texture_format = DXGI_FORMAT_UNKNOWN;
-               if (debug_draw_texture_2d)
+               D3D11_TEXTURE2D_DESC target_desc;
+               back_buffer->GetDesc(&target_desc);
+               ASSERT_ONCE((target_desc.BindFlags & D3D11_BIND_RENDER_TARGET) != 0);
+               // For now we only support these formats, nothing else wouldn't really make sense
+               ASSERT_ONCE(target_desc.Format == DXGI_FORMAT_R16G16B16A16_FLOAT || target_desc.Format == DXGI_FORMAT_R10G10B10A2_UNORM);
+
+               uint32_t custom_const_buffer_data_1 = 0;
+               uint32_t custom_const_buffer_data_2 = 0;
+               float custom_const_buffer_data_3 = 0.f;
+
+   #if DEVELOPMENT // See "debug_draw_srv_slot_numbers" etc...
+               DrawStateStack<DrawStateStackType::FullGraphics> draw_state_stack;
+   #else
+               DrawStateStack<DrawStateStackType::SimpleGraphics> draw_state_stack;
+   #endif
+               draw_state_stack.Cache(native_device_context, device_data.uav_max_count);
+
+   #if DEVELOPMENT
+               UINT debug_draw_srv_slot = 2; // 0 is for background, 1 is for UI, 2+ for debug draw types
+               constexpr UINT debug_draw_srv_slot_numbers = 7; // The max amount of debug draw types, determined by the display composition shader too
+
+               if (device_data.debug_draw_texture.get())
                {
-                  D3D11_TEXTURE2D_DESC texture_2d_desc;
-                  debug_draw_texture_2d->GetDesc(&texture_2d_desc);
+                  // We might not be able to rely on SRVs automatic generation (by passing a nullptr desc), because depth resources take a custom view format etc
 
-                  debug_draw_texture_format = texture_2d_desc.Format;
-                  debug_srv_desc.Format = device_data.debug_draw_texture_format;
-                  if (texture_2d_desc.SampleDesc.Count <= 1 && texture_2d_desc.ArraySize <= 1) // Non Array Non MS
+                  // Note: it's possible to use "ID3D11Resource::GetType()" instead of this
+                  com_ptr<ID3D11Texture2D> debug_draw_texture_2d;
+                  device_data.debug_draw_texture->QueryInterface(&debug_draw_texture_2d);
+                  com_ptr<ID3D11Texture3D> debug_draw_texture_3d;
+                  device_data.debug_draw_texture->QueryInterface(&debug_draw_texture_3d);
+                  com_ptr<ID3D11Texture1D> debug_draw_texture_1d;
+                  device_data.debug_draw_texture->QueryInterface(&debug_draw_texture_1d);
+                  D3D11_SHADER_RESOURCE_VIEW_DESC debug_srv_desc = {};
+                  DXGI_FORMAT debug_draw_texture_format = DXGI_FORMAT_UNKNOWN;
+                  if (debug_draw_texture_2d)
                   {
-                     debug_srv_desc.ViewDimension = D3D11_SRV_DIMENSION_TEXTURE2D;
-                     debug_srv_desc.Texture2D.MostDetailedMip = 0;
-                     debug_srv_desc.Texture2D.MipLevels = UINT(-1); // Use all
-                     debug_draw_srv_slot = 2;
-                  }
-                  if (texture_2d_desc.SampleDesc.Count > 1) // Array
-                  {
-                     if (texture_2d_desc.ArraySize <= 1)
+                     D3D11_TEXTURE2D_DESC texture_2d_desc;
+                     debug_draw_texture_2d->GetDesc(&texture_2d_desc);
+
+                     debug_draw_texture_format = texture_2d_desc.Format;
+                     debug_srv_desc.Format = device_data.debug_draw_texture_format;
+                     if (texture_2d_desc.SampleDesc.Count <= 1 && texture_2d_desc.ArraySize <= 1) // Non Array Non MS
                      {
-                        debug_srv_desc.ViewDimension = D3D11_SRV_DIMENSION_TEXTURE2DMS;
-                        debug_srv_desc.Texture2DMS.UnusedField_NothingToDefine = 0; // Useless, but good to make it explicit
-                        debug_draw_srv_slot = 3;
+                        debug_srv_desc.ViewDimension = D3D11_SRV_DIMENSION_TEXTURE2D;
+                        debug_srv_desc.Texture2D.MostDetailedMip = 0;
+                        debug_srv_desc.Texture2D.MipLevels = UINT(-1); // Use all
+                        debug_draw_srv_slot = 2;
                      }
-                     debug_draw_options |= (uint32_t)DebugDrawTextureOptionsMask::TextureMultiSample;
-                  }
-                  else
-                  {
-                     debug_draw_options &= ~(uint32_t)DebugDrawTextureOptionsMask::TextureMultiSample;
-                  }
-                  if (texture_2d_desc.ArraySize > 1) // Array
-                  {
-                     if (texture_2d_desc.SampleDesc.Count > 1) // Array + MS
+                     if (texture_2d_desc.SampleDesc.Count > 1) // Array
                      {
-                        debug_srv_desc.ViewDimension = D3D11_SRV_DIMENSION_TEXTURE2DMSARRAY;
-                        debug_srv_desc.Texture2DMSArray.FirstArraySlice = 0;
-                        debug_srv_desc.Texture2DMSArray.ArraySize = texture_2d_desc.ArraySize;
-                        debug_draw_srv_slot = 5;
+                        if (texture_2d_desc.ArraySize <= 1)
+                        {
+                           debug_srv_desc.ViewDimension = D3D11_SRV_DIMENSION_TEXTURE2DMS;
+                           debug_srv_desc.Texture2DMS.UnusedField_NothingToDefine = 0; // Useless, but good to make it explicit
+                           debug_draw_srv_slot = 3;
+                        }
+                        debug_draw_options |= (uint32_t)DebugDrawTextureOptionsMask::TextureMultiSample;
                      }
                      else
                      {
-                        debug_srv_desc.ViewDimension = D3D11_SRV_DIMENSION_TEXTURE2DARRAY;
-                        debug_srv_desc.Texture2DArray.MostDetailedMip = 0;
-                        debug_srv_desc.Texture2DArray.MipLevels = UINT(-1); // Use all
-                        debug_srv_desc.Texture2DArray.FirstArraySlice = 0;
-                        debug_srv_desc.Texture2DArray.ArraySize = texture_2d_desc.ArraySize;
-                        debug_draw_srv_slot = 4;
+                        debug_draw_options &= ~(uint32_t)DebugDrawTextureOptionsMask::TextureMultiSample;
                      }
-                     debug_draw_options |= (uint32_t)DebugDrawTextureOptionsMask::TextureArray;
+                     if (texture_2d_desc.ArraySize > 1) // Array
+                     {
+                        if (texture_2d_desc.SampleDesc.Count > 1) // Array + MS
+                        {
+                           debug_srv_desc.ViewDimension = D3D11_SRV_DIMENSION_TEXTURE2DMSARRAY;
+                           debug_srv_desc.Texture2DMSArray.FirstArraySlice = 0;
+                           debug_srv_desc.Texture2DMSArray.ArraySize = texture_2d_desc.ArraySize;
+                           debug_draw_srv_slot = 5;
+                        }
+                        else
+                        {
+                           debug_srv_desc.ViewDimension = D3D11_SRV_DIMENSION_TEXTURE2DARRAY;
+                           debug_srv_desc.Texture2DArray.MostDetailedMip = 0;
+                           debug_srv_desc.Texture2DArray.MipLevels = UINT(-1); // Use all
+                           debug_srv_desc.Texture2DArray.FirstArraySlice = 0;
+                           debug_srv_desc.Texture2DArray.ArraySize = texture_2d_desc.ArraySize;
+                           debug_draw_srv_slot = 4;
+                        }
+                        debug_draw_options |= (uint32_t)DebugDrawTextureOptionsMask::TextureArray;
+                     }
+                     else
+                     {
+                        debug_draw_options &= ~(uint32_t)DebugDrawTextureOptionsMask::TextureArray;
+                     }
+                     debug_draw_options |= (uint32_t)DebugDrawTextureOptionsMask::Texture2D;
+                     debug_draw_options &= ~(uint32_t)DebugDrawTextureOptionsMask::Texture3D;
                   }
-                  else
+                  else if (debug_draw_texture_3d)
                   {
+                     D3D11_TEXTURE3D_DESC texture_3d_desc;
+                     debug_draw_texture_3d->GetDesc(&texture_3d_desc);
+
+                     debug_draw_texture_format = texture_3d_desc.Format;
+                     debug_srv_desc.Format = device_data.debug_draw_texture_format;
+                     debug_srv_desc.ViewDimension = D3D11_SRV_DIMENSION_TEXTURE3D;
+                     debug_srv_desc.Texture3D.MostDetailedMip = 0;
+                     debug_srv_desc.Texture3D.MipLevels = UINT(-1); // Use all
+                     debug_draw_srv_slot = 6;
+                     debug_draw_options &= ~(uint32_t)DebugDrawTextureOptionsMask::TextureMultiSample;
                      debug_draw_options &= ~(uint32_t)DebugDrawTextureOptionsMask::TextureArray;
+                     debug_draw_options |= (uint32_t)DebugDrawTextureOptionsMask::Texture3D;
+                     debug_draw_options &= ~(uint32_t)DebugDrawTextureOptionsMask::Texture2D;
                   }
-                  debug_draw_options |= (uint32_t)DebugDrawTextureOptionsMask::Texture2D;
-                  debug_draw_options &= ~(uint32_t)DebugDrawTextureOptionsMask::Texture3D;
-               }
-               else if (debug_draw_texture_3d)
-               {
-                  D3D11_TEXTURE3D_DESC texture_3d_desc;
-                  debug_draw_texture_3d->GetDesc(&texture_3d_desc);
+                  else if (debug_draw_texture_1d)
+                  {
+                     D3D11_TEXTURE1D_DESC texture_1d_desc;
+                     debug_draw_texture_1d->GetDesc(&texture_1d_desc);
 
-                  debug_draw_texture_format = texture_3d_desc.Format;
-                  debug_srv_desc.Format = device_data.debug_draw_texture_format;
-                  debug_srv_desc.ViewDimension = D3D11_SRV_DIMENSION_TEXTURE3D;
-                  debug_srv_desc.Texture3D.MostDetailedMip = 0;
-                  debug_srv_desc.Texture3D.MipLevels = UINT(-1); // Use all
-                  debug_draw_srv_slot = 6;
-                  debug_draw_options &= ~(uint32_t)DebugDrawTextureOptionsMask::TextureMultiSample;
-                  debug_draw_options &= ~(uint32_t)DebugDrawTextureOptionsMask::TextureArray;
-                  debug_draw_options |= (uint32_t)DebugDrawTextureOptionsMask::Texture3D;
-                  debug_draw_options &= ~(uint32_t)DebugDrawTextureOptionsMask::Texture2D;
-               }
-               else if (debug_draw_texture_1d)
-               {
-                  D3D11_TEXTURE1D_DESC texture_1d_desc;
-                  debug_draw_texture_1d->GetDesc(&texture_1d_desc);
+                     debug_draw_texture_format = texture_1d_desc.Format;
+                     debug_srv_desc.Format = device_data.debug_draw_texture_format;
+                     if (texture_1d_desc.ArraySize > 1)
+                     {
+                        debug_srv_desc.ViewDimension = D3D11_SRV_DIMENSION_TEXTURE1DARRAY;
+                        debug_srv_desc.Texture1DArray.MostDetailedMip = 0;
+                        debug_srv_desc.Texture1DArray.MipLevels = UINT(-1); // Use all
+                        debug_srv_desc.Texture1DArray.FirstArraySlice = 0;
+                        debug_srv_desc.Texture1DArray.ArraySize = texture_1d_desc.ArraySize;
+                        debug_draw_srv_slot = 8;
+                        debug_draw_options |= (uint32_t)DebugDrawTextureOptionsMask::TextureArray;
+                     }
+                     else
+                     {
+                        debug_srv_desc.ViewDimension = D3D11_SRV_DIMENSION_TEXTURE1D;
+                        debug_srv_desc.Texture1D.MostDetailedMip = 0;
+                        debug_srv_desc.Texture1D.MipLevels = UINT(-1); // Use all
+                        debug_draw_srv_slot = 7;
+                        debug_draw_options &= ~(uint32_t)DebugDrawTextureOptionsMask::TextureArray;
+                     }
+                     debug_draw_options &= ~(uint32_t)DebugDrawTextureOptionsMask::TextureMultiSample;
+                     debug_draw_options &= ~(uint32_t)DebugDrawTextureOptionsMask::Texture3D;
+                     debug_draw_options &= ~(uint32_t)DebugDrawTextureOptionsMask::Texture2D;
+                  }
 
-                  debug_draw_texture_format = texture_1d_desc.Format;
-                  debug_srv_desc.Format = device_data.debug_draw_texture_format;
-                  if (texture_1d_desc.ArraySize > 1)
+                  if (debug_draw_auto_gamma)
                   {
-                     debug_srv_desc.ViewDimension = D3D11_SRV_DIMENSION_TEXTURE1DARRAY;
-                     debug_srv_desc.Texture1DArray.MostDetailedMip = 0;
-                     debug_srv_desc.Texture1DArray.MipLevels = UINT(-1); // Use all
-                     debug_srv_desc.Texture1DArray.FirstArraySlice = 0;
-                     debug_srv_desc.Texture1DArray.ArraySize = texture_1d_desc.ArraySize;
-                     debug_draw_srv_slot = 8;
-                     debug_draw_options |= (uint32_t)DebugDrawTextureOptionsMask::TextureArray;
-                  }
-                  else
-                  {
-                     debug_srv_desc.ViewDimension = D3D11_SRV_DIMENSION_TEXTURE1D;
-                     debug_srv_desc.Texture1D.MostDetailedMip = 0;
-                     debug_srv_desc.Texture1D.MipLevels = UINT(-1); // Use all
-                     debug_draw_srv_slot = 7;
-                     debug_draw_options &= ~(uint32_t)DebugDrawTextureOptionsMask::TextureArray;
-                  }
-                  debug_draw_options &= ~(uint32_t)DebugDrawTextureOptionsMask::TextureMultiSample;
-                  debug_draw_options &= ~(uint32_t)DebugDrawTextureOptionsMask::Texture3D;
-                  debug_draw_options &= ~(uint32_t)DebugDrawTextureOptionsMask::Texture2D;
-               }
-
-               if (debug_draw_auto_gamma)
-               {
-                  // TODO: if this is depth and depth is inverted (or not), should we flip the gamma direction? Gamma to linear looks good on direct/linear depth
-                  if (!IsLinearFormat(device_data.debug_draw_texture_format)) // We don't use the view format as we create a new view with the native format
-                  {
-                     debug_draw_options |= (uint32_t)DebugDrawTextureOptionsMask::GammaToLinear;
-                  }
-                  else
-                  {
-                     debug_draw_options &= ~(uint32_t)DebugDrawTextureOptionsMask::LinearToGamma;
-                     debug_draw_options &= ~(uint32_t)DebugDrawTextureOptionsMask::GammaToLinear;
-                     // If the game rendering or post processing was in gamma space, automatically linearize color textures (just a guess, it's usually right)
-                     if (IsRGBAFormat(device_data.debug_draw_texture_format, false) && GetShaderDefineCompiledNumericalValue(POST_PROCESS_SPACE_TYPE_HASH) == 0)
+                     // TODO: if this is depth and depth is inverted (or not), should we flip the gamma direction? Gamma to linear looks good on direct/linear depth
+                     if (!IsLinearFormat(device_data.debug_draw_texture_format)) // We don't use the view format as we create a new view with the native format
                      {
                         debug_draw_options |= (uint32_t)DebugDrawTextureOptionsMask::GammaToLinear;
                      }
-                  }
-               }
-
-               com_ptr<ID3D11ShaderResourceView> debug_srv;
-               // We recreate this every frame, it doesn't really matter (and this is allowed to fail in case of quirky formats)
-               HRESULT hr = native_device->CreateShaderResourceView(device_data.debug_draw_texture.get(), &debug_srv_desc, &debug_srv);
-               // Try again with the resource format in case the above failed...
-               if (FAILED(hr))
-               {
-                  debug_srv_desc.Format = debug_draw_texture_format;
-                  debug_srv = nullptr; // Extra safety
-                  hr = native_device->CreateShaderResourceView(device_data.debug_draw_texture.get(), &debug_srv_desc, &debug_srv);
-               }
-               ASSERT_ONCE(SUCCEEDED(hr));
-
-               ID3D11ShaderResourceView* const debug_srv_const = debug_srv.get();
-               native_device_context->PSSetShaderResources(debug_draw_srv_slot, 1, &debug_srv_const); // Use index 1 (0 is already used)
-
-               auto temp_debug_draw_options = debug_draw_options;
-               bool debug_draw_saturate = (debug_draw_options & (uint32_t)DebugDrawTextureOptionsMask::Saturate) != 0;
-               // TODO: save two versions of "debug_draw_options", one that matches the user settings and one that is the current automated version of it
-               if (debug_draw_saturate || !IsFloatFormat(device_data.debug_draw_texture_format))
-               {
-                  temp_debug_draw_options &= ~(uint32_t)DebugDrawTextureOptionsMask::Tonemap;
-               }
-               custom_const_buffer_data_2 = temp_debug_draw_options;
-
-               custom_const_buffer_data_3 = float(debug_draw_mip);
-            }
-            // Empty the shader resources so the shader can tell there isn't one
-            else
-            {
-               ID3D11ShaderResourceView* const debug_srvs_const[debug_draw_srv_slot_numbers] = {};
-               native_device_context->PSSetShaderResources(debug_draw_srv_slot, debug_draw_srv_slot_numbers, &debug_srvs_const[0]);
-            }
-#endif
-
-            bool had_full_mips = false;
-            bool wants_mips = false;
-#if GAME_GENERIC && 0 // use this for AutoHDR deblooming //TODOFT: finish this stuff, the conditions make no sense. Maybe add "doAutoHDR"?
-            wants_mips = !mod_active;
-#endif
-            D3D11_TEXTURE2D_DESC proxy_target_desc;
-            if (device_data.display_composition_texture.get() != nullptr)
-            {
-               device_data.display_composition_texture->GetDesc(&proxy_target_desc);
-               had_full_mips = proxy_target_desc.MipLevels == 0 || proxy_target_desc.MipLevels == GetTextureMaxMipLevels(proxy_target_desc.Width, proxy_target_desc.Height);
-            }
-            if (device_data.display_composition_texture.get() == nullptr || proxy_target_desc.Width != target_desc.Width || proxy_target_desc.Height != target_desc.Height || proxy_target_desc.Format != target_desc.Format || had_full_mips != wants_mips)
-            {
-               proxy_target_desc = target_desc;
-               proxy_target_desc.BindFlags |= D3D11_BIND_SHADER_RESOURCE;
-               proxy_target_desc.BindFlags &= ~D3D11_BIND_RENDER_TARGET;
-               proxy_target_desc.BindFlags &= ~D3D11_BIND_UNORDERED_ACCESS;
-               proxy_target_desc.CPUAccessFlags = 0;
-               proxy_target_desc.Usage = D3D11_USAGE_DEFAULT;
-
-               if (wants_mips)
-               {
-                  proxy_target_desc.MipLevels = 0; // All mips
-                  proxy_target_desc.BindFlags |= D3D11_BIND_RENDER_TARGET; // Needed by "GenerateMips()"
-                  proxy_target_desc.MiscFlags |= D3D11_RESOURCE_MISC_GENERATE_MIPS; // For AutoHDR "bloom" feature
-               }
-
-               device_data.display_composition_texture = nullptr;
-               device_data.display_composition_srv = nullptr;
-               if (!force_create_swapchain_rtvs)
-               {
-                  const std::unique_lock lock_swapchain(swapchain_data.mutex);
-                  // Don't change the allocation number
-                  for (size_t i = 0; i < swapchain_data.display_composition_rtvs.size(); ++i)
-                  {
-                     swapchain_data.display_composition_rtvs[i] = nullptr;
-                  }
-               }
-               HRESULT hr = native_device->CreateTexture2D(&proxy_target_desc, nullptr, &device_data.display_composition_texture);
-               assert(SUCCEEDED(hr));
-
-               D3D11_TEXTURE2D_DESC tex_desc = {};
-               device_data.display_composition_texture->GetDesc(&tex_desc);
-
-               D3D11_SHADER_RESOURCE_VIEW_DESC srv_desc = {};
-               srv_desc.Format = proxy_target_desc.Format;
-               srv_desc.ViewDimension = D3D11_SRV_DIMENSION_TEXTURE2D;
-               srv_desc.Texture2D.MostDetailedMip = 0;
-               srv_desc.Texture2D.MipLevels = tex_desc.MipLevels == 0 ? UINT(-1) : tex_desc.MipLevels; // For some reason this requires -1 instead of 0 to specify all mips
-               hr = native_device->CreateShaderResourceView(device_data.display_composition_texture.get(), &srv_desc, &device_data.display_composition_srv);
-               assert(SUCCEEDED(hr));
-
-               if (wants_mips)
-               {
-                  UINT support = 0;
-                  hr = native_device->CheckFormatSupport(tex_desc.Format, &support);
-                  assert(SUCCEEDED(hr));
-                  assert(support & D3D11_FORMAT_SUPPORT_MIP_AUTOGEN);
-               }
-            }
-
-            // We need to copy the texture to read back from it, even if we only exclusively write to the same pixel we read and thus there couldn't be any race condition. Unfortunately DX works like that.
-            if (wants_mips)
-            {
-               native_device_context->CopySubresourceRegion(device_data.display_composition_texture.get(), 0, 0, 0, 0, back_buffer.get(), 0, nullptr); // Copy the base mip only
-               native_device_context->GenerateMips(device_data.display_composition_srv.get());
-            }
-            else
-            {
-               native_device_context->CopyResource(device_data.display_composition_texture.get(), back_buffer.get());
-            }
-
-            com_ptr<ID3D11RenderTargetView> target_resource_texture_view;
-            {
-               const std::unique_lock lock_swapchain(swapchain_data.mutex);
-               target_resource_texture_view = swapchain_data.display_composition_rtvs[back_buffer_index];
-               // If we already had a render target view (set by the game), we can assume it was already set to the swapchain,
-               // but it's good to make sure of it nonetheless, it might have been changed already between the last draw call and the swapchain present call.
-               if (draw_state_stack.state->render_target_views[0] != nullptr && draw_state_stack.state->render_target_views[0] != swapchain_data.display_composition_rtvs[back_buffer_index])
-               {
-                  com_ptr<ID3D11Resource> render_target_resource;
-                  draw_state_stack.state->render_target_views[0]->GetResource(&render_target_resource);
-                  if (render_target_resource.get() == back_buffer.get())
-                  {
-                     target_resource_texture_view = draw_state_stack.state->render_target_views[0];
-                     if (!force_create_swapchain_rtvs)
+                     else
                      {
-                        swapchain_data.display_composition_rtvs[back_buffer_index] = nullptr; // Not sure why we null this here, it's probably unnecessary
+                        debug_draw_options &= ~(uint32_t)DebugDrawTextureOptionsMask::LinearToGamma;
+                        debug_draw_options &= ~(uint32_t)DebugDrawTextureOptionsMask::GammaToLinear;
+                        // If the game rendering or post processing was in gamma space, automatically linearize color textures (just a guess, it's usually right)
+                        if (IsRGBAFormat(device_data.debug_draw_texture_format, false) && GetShaderDefineCompiledNumericalValue(POST_PROCESS_SPACE_TYPE_HASH) == 0)
+                        {
+                           debug_draw_options |= (uint32_t)DebugDrawTextureOptionsMask::GammaToLinear;
+                        }
                      }
                   }
-               }
-               if (!target_resource_texture_view)
-               {
-                  swapchain_data.display_composition_rtvs[back_buffer_index] = nullptr;
-                  HRESULT hr = native_device->CreateRenderTargetView(back_buffer.get(), nullptr, &swapchain_data.display_composition_rtvs[back_buffer_index]);
+
+                  com_ptr<ID3D11ShaderResourceView> debug_srv;
+                  // We recreate this every frame, it doesn't really matter (and this is allowed to fail in case of quirky formats)
+                  HRESULT hr = native_device->CreateShaderResourceView(device_data.debug_draw_texture.get(), &debug_srv_desc, &debug_srv);
+                  // Try again with the resource format in case the above failed...
+                  if (FAILED(hr))
+                  {
+                     debug_srv_desc.Format = debug_draw_texture_format;
+                     debug_srv = nullptr; // Extra safety
+                     hr = native_device->CreateShaderResourceView(device_data.debug_draw_texture.get(), &debug_srv_desc, &debug_srv);
+                  }
                   ASSERT_ONCE(SUCCEEDED(hr));
+
+                  ID3D11ShaderResourceView* const debug_srv_const = debug_srv.get();
+                  native_device_context->PSSetShaderResources(debug_draw_srv_slot, 1, &debug_srv_const); // Use index 1 (0 is already used)
+
+                  auto temp_debug_draw_options = debug_draw_options;
+                  bool debug_draw_saturate = (debug_draw_options & (uint32_t)DebugDrawTextureOptionsMask::Saturate) != 0;
+                  // TODO: save two versions of "debug_draw_options", one that matches the user settings and one that is the current automated version of it
+                  if (debug_draw_saturate || !IsFloatFormat(device_data.debug_draw_texture_format))
+                  {
+                     temp_debug_draw_options &= ~(uint32_t)DebugDrawTextureOptionsMask::Tonemap;
+                  }
+                  custom_const_buffer_data_2 = temp_debug_draw_options;
+
+                  custom_const_buffer_data_3 = float(debug_draw_mip);
+               }
+               // Empty the shader resources so the shader can tell there isn't one
+               else
+               {
+                  ID3D11ShaderResourceView* const debug_srvs_const[debug_draw_srv_slot_numbers] = {};
+                  native_device_context->PSSetShaderResources(debug_draw_srv_slot, debug_draw_srv_slot_numbers, &debug_srvs_const[0]);
+               }
+   #endif
+
+               bool had_full_mips = false;
+               bool wants_mips = false;
+   #if GAME_GENERIC && 0 // use this for AutoHDR deblooming //TODOFT: finish this stuff, the conditions make no sense. Maybe add "doAutoHDR"?
+               wants_mips = !mod_active;
+   #endif
+               D3D11_TEXTURE2D_DESC proxy_target_desc;
+               if (device_data.display_composition_texture.get() != nullptr)
+               {
+                  device_data.display_composition_texture->GetDesc(&proxy_target_desc);
+                  had_full_mips = proxy_target_desc.MipLevels == 0 || proxy_target_desc.MipLevels == GetTextureMaxMipLevels(proxy_target_desc.Width, proxy_target_desc.Height);
+               }
+               if (device_data.display_composition_texture.get() == nullptr || proxy_target_desc.Width != target_desc.Width || proxy_target_desc.Height != target_desc.Height || proxy_target_desc.Format != target_desc.Format || had_full_mips != wants_mips)
+               {
+                  proxy_target_desc = target_desc;
+                  proxy_target_desc.BindFlags |= D3D11_BIND_SHADER_RESOURCE;
+                  proxy_target_desc.BindFlags &= ~D3D11_BIND_RENDER_TARGET;
+                  proxy_target_desc.BindFlags &= ~D3D11_BIND_UNORDERED_ACCESS;
+                  proxy_target_desc.CPUAccessFlags = 0;
+                  proxy_target_desc.Usage = D3D11_USAGE_DEFAULT;
+
+                  if (wants_mips)
+                  {
+                     proxy_target_desc.MipLevels = 0; // All mips
+                     proxy_target_desc.BindFlags |= D3D11_BIND_RENDER_TARGET; // Needed by "GenerateMips()"
+                     proxy_target_desc.MiscFlags |= D3D11_RESOURCE_MISC_GENERATE_MIPS; // For AutoHDR "bloom" feature
+                  }
+
+                  device_data.display_composition_texture = nullptr;
+                  device_data.display_composition_srv = nullptr;
+                  if (!force_create_swapchain_rtvs)
+                  {
+                     const std::unique_lock lock_swapchain(swapchain_data.mutex);
+                     // Don't change the allocation number
+                     for (size_t i = 0; i < swapchain_data.display_composition_rtvs.size(); ++i)
+                     {
+                        swapchain_data.display_composition_rtvs[i] = nullptr;
+                     }
+                  }
+                  HRESULT hr = native_device->CreateTexture2D(&proxy_target_desc, nullptr, &device_data.display_composition_texture);
+                  assert(SUCCEEDED(hr));
+
+                  D3D11_TEXTURE2D_DESC tex_desc = {};
+                  device_data.display_composition_texture->GetDesc(&tex_desc);
+
+                  D3D11_SHADER_RESOURCE_VIEW_DESC srv_desc = {};
+                  srv_desc.Format = proxy_target_desc.Format;
+                  srv_desc.ViewDimension = D3D11_SRV_DIMENSION_TEXTURE2D;
+                  srv_desc.Texture2D.MostDetailedMip = 0;
+                  srv_desc.Texture2D.MipLevels = tex_desc.MipLevels == 0 ? UINT(-1) : tex_desc.MipLevels; // For some reason this requires -1 instead of 0 to specify all mips
+                  hr = native_device->CreateShaderResourceView(device_data.display_composition_texture.get(), &srv_desc, &device_data.display_composition_srv);
+                  assert(SUCCEEDED(hr));
+
+                  if (wants_mips)
+                  {
+                     UINT support = 0;
+                     hr = native_device->CheckFormatSupport(tex_desc.Format, &support);
+                     assert(SUCCEEDED(hr));
+                     assert(support & D3D11_FORMAT_SUPPORT_MIP_AUTOGEN);
+                  }
+               }
+
+               // We need to copy the texture to read back from it, even if we only exclusively write to the same pixel we read and thus there couldn't be any race condition. Unfortunately DX works like that.
+               if (wants_mips)
+               {
+                  native_device_context->CopySubresourceRegion(device_data.display_composition_texture.get(), 0, 0, 0, 0, back_buffer.get(), 0, nullptr); // Copy the base mip only
+                  native_device_context->GenerateMips(device_data.display_composition_srv.get());
+               }
+               else
+               {
+                  native_device_context->CopyResource(device_data.display_composition_texture.get(), back_buffer.get());
+               }
+
+               com_ptr<ID3D11RenderTargetView> target_resource_texture_view;
+               {
+                  const std::unique_lock lock_swapchain(swapchain_data.mutex);
                   target_resource_texture_view = swapchain_data.display_composition_rtvs[back_buffer_index];
+                  // If we already had a render target view (set by the game), we can assume it was already set to the swapchain,
+                  // but it's good to make sure of it nonetheless, it might have been changed already between the last draw call and the swapchain present call.
+                  if (draw_state_stack.state->render_target_views[0] != nullptr && draw_state_stack.state->render_target_views[0] != swapchain_data.display_composition_rtvs[back_buffer_index])
+                  {
+                     com_ptr<ID3D11Resource> render_target_resource;
+                     draw_state_stack.state->render_target_views[0]->GetResource(&render_target_resource);
+                     if (render_target_resource.get() == back_buffer.get())
+                     {
+                        target_resource_texture_view = draw_state_stack.state->render_target_views[0];
+                        if (!force_create_swapchain_rtvs)
+                        {
+                           swapchain_data.display_composition_rtvs[back_buffer_index] = nullptr; // Not sure why we null this here, it's probably unnecessary
+                        }
+                     }
+                  }
+                  if (!target_resource_texture_view)
+                  {
+                     swapchain_data.display_composition_rtvs[back_buffer_index] = nullptr;
+                     HRESULT hr = native_device->CreateRenderTargetView(back_buffer.get(), nullptr, &swapchain_data.display_composition_rtvs[back_buffer_index]);
+                     ASSERT_ONCE(SUCCEEDED(hr));
+                     target_resource_texture_view = swapchain_data.display_composition_rtvs[back_buffer_index];
+                  }
                }
-            }
 
-            // Push our settings cbuffer in case where no other custom shader run this frame
-            {
-               DeviceData& device_data = *queue->get_device()->get_private_data<DeviceData>();
-               const std::shared_lock lock(s_mutex_reshade); // TODO: why is this locked here? It could cause a deadlock with the device below!
-               // Force a custom display mode in case we have no game custom shaders loaded, so the custom linearization shader can linearize anyway, independently of "POST_PROCESS_SPACE_TYPE"
-               bool force_reencoding_or_gamma_correction = !mod_active; // We ignore "s_mutex_generic", it doesn't matter
-               if (force_reencoding_or_gamma_correction)
+               // Push our settings cbuffer in case where no other custom shader run this frame
                {
-                  // No need for "s_mutex_reshade" here or above, given that they are generally only also changed by the user manually changing the settings in ImGUI, which runs at the very end of the frame
-                  custom_const_buffer_data_1 = input_linear ? 2 : 1;
+                  DeviceData& device_data = *queue->get_device()->get_private_data<DeviceData>();
+                  const std::shared_lock lock(s_mutex_reshade); // TODO: why is this locked here? It could cause a deadlock with the device below!
+                  // Force a custom display mode in case we have no game custom shaders loaded, so the custom linearization shader can linearize anyway, independently of "POST_PROCESS_SPACE_TYPE"
+                  bool force_reencoding_or_gamma_correction = !mod_active; // We ignore "s_mutex_generic", it doesn't matter
+                  if (force_reencoding_or_gamma_correction)
+                  {
+                     // No need for "s_mutex_reshade" here or above, given that they are generally only also changed by the user manually changing the settings in ImGUI, which runs at the very end of the frame
+                     custom_const_buffer_data_1 = input_linear ? 2 : 1;
+                  }
+                  float custom_const_buffer_data_4 = (ui_needs_composition && device_data.has_drawn_main_post_processing) ? 1.f : 0.f;
+                  SetLumaConstantBuffers(native_device_context, cmd_list_data, device_data, reshade::api::shader_stage::pixel, LumaConstantBufferType::LumaSettings);
+                  SetLumaConstantBuffers(native_device_context, cmd_list_data, device_data, reshade::api::shader_stage::pixel, LumaConstantBufferType::LumaData, custom_const_buffer_data_1, custom_const_buffer_data_2, custom_const_buffer_data_3, custom_const_buffer_data_4);
                }
-               float custom_const_buffer_data_4 = (ui_needs_composition && device_data.has_drawn_main_post_processing) ? 1.f : 0.f;
-               SetLumaConstantBuffers(native_device_context, cmd_list_data, device_data, reshade::api::shader_stage::pixel, LumaConstantBufferType::LumaSettings);
-               SetLumaConstantBuffers(native_device_context, cmd_list_data, device_data, reshade::api::shader_stage::pixel, LumaConstantBufferType::LumaData, custom_const_buffer_data_1, custom_const_buffer_data_2, custom_const_buffer_data_3, custom_const_buffer_data_4);
-            }
 
-            // Set UI texture (limited by "DrawStateStackType::SimpleGraphics")
-            ID3D11ShaderResourceView* const ui_texture_srv_const = (ui_needs_composition && (!device_data.has_drawn_main_post_processing || !hide_ui)) ? device_data.ui_texture_srv.get() : nullptr;
-            native_device_context->PSSetShaderResources(1, 1, &ui_texture_srv_const);
+               // Set UI texture (limited by "DrawStateStackType::SimpleGraphics")
+               ID3D11ShaderResourceView* const ui_texture_srv_const = (ui_needs_composition && (!device_data.has_drawn_main_post_processing || !hide_ui)) ? device_data.ui_texture_srv.get() : nullptr;
+               native_device_context->PSSetShaderResources(1, 1, &ui_texture_srv_const);
 
-            // Set the sampler, in case we needed it (limited by "DrawStateStackType::SimpleGraphics")
-            // This can be useful to debug draw textures too as they have a linear sampling mode
-            if (wants_mips || needs_debug_draw_texture)
-            {
-               ID3D11SamplerState* const sampler_state_linear = device_data.sampler_state_linear.get();
-               native_device_context->PSSetSamplers(0, 1, &sampler_state_linear);
-            }
-
-            // Note: we don't really need to re-apply our custom cbuffers in most games (e.g. Prey), they are on indexes that are never used by the game's code
-            DrawCustomPixelShader(native_device_context, device_data.default_depth_stencil_state.get(), device_data.default_blend_state.get(), nullptr, device_data.native_vertex_shaders[CompileTimeStringHash("Copy VS")].get(), device_data.native_pixel_shaders[CompileTimeStringHash("Display Composition")].get(), device_data.display_composition_srv.get(), target_resource_texture_view.get(), target_desc.Width, target_desc.Height, false);
-
-#if DEVELOPMENT
-            {
-               const std::shared_lock lock_trace(s_mutex_trace);
-               if (trace_running)
+               // Set the sampler, in case we needed it (limited by "DrawStateStackType::SimpleGraphics")
+               // This can be useful to debug draw textures too as they have a linear sampling mode
+               if (wants_mips || needs_debug_draw_texture)
                {
-                  const std::unique_lock lock_trace_2(cmd_list_data.mutex_trace);
-                  TraceDrawCallData trace_draw_call_data;
-                  trace_draw_call_data.type = TraceDrawCallData::TraceDrawCallType::Custom;
-                  trace_draw_call_data.command_list = native_device_context;
-                  trace_draw_call_data.custom_name = "Luma Display Composition";
-                  cmd_list_data.trace_draw_calls_data.push_back(trace_draw_call_data);
+                  ID3D11SamplerState* const sampler_state_linear = device_data.sampler_state_linear.get();
+                  native_device_context->PSSetSamplers(0, 1, &sampler_state_linear);
                }
+
+               // Note: we don't really need to re-apply our custom cbuffers in most games (e.g. Prey), they are on indexes that are never used by the game's code
+               DrawCustomPixelShader(native_device_context, device_data.default_depth_stencil_state.get(), device_data.default_blend_state.get(), nullptr, device_data.native_vertex_shaders[CompileTimeStringHash("Copy VS")].get(), device_data.native_pixel_shaders[CompileTimeStringHash("Display Composition")].get(), device_data.display_composition_srv.get(), target_resource_texture_view.get(), target_desc.Width, target_desc.Height, false);
+
+   #if DEVELOPMENT
+               {
+                  const std::shared_lock lock_trace(s_mutex_trace);
+                  if (trace_running)
+                  {
+                     const std::unique_lock lock_trace_2(cmd_list_data.mutex_trace);
+                     TraceDrawCallData trace_draw_call_data;
+                     trace_draw_call_data.type = TraceDrawCallData::TraceDrawCallType::Custom;
+                     trace_draw_call_data.command_list = native_device_context;
+                     trace_draw_call_data.custom_name = "Luma Display Composition";
+                     cmd_list_data.trace_draw_calls_data.push_back(trace_draw_call_data);
+                  }
+               }
+   #endif // DEVELOPMENT
+
+               if (ui_needs_composition)
+               {
+                  // UI render target should be all zero at the beginning of each frame (the next one)
+                  const FLOAT ColorRGBA[4] = { 0.f, 0.f, 0.f, 0.f };
+                  native_device_context->ClearRenderTargetView(device_data.ui_texture_rtv.get(), ColorRGBA);
+
+                  // Reset this, it shouldn't persist between frames
+                  device_data.ui_latest_original_rtv = nullptr;
+                  device_data.ui_initial_original_rtv = nullptr;
+               }
+
+               draw_state_stack.Restore(native_device_context);
+
+   #if ENABLE_AUTO_CBUFFER_RESTORATION && 0 // Not needed for now, we already have "DrawStateStack" that should cover all cases
+               cmd_list_data.RestoreOriginalConstantBuffers(native_device_context);
+   #endif // ENABLE_AUTO_CBUFFER_RESTORATION
             }
-#endif // DEVELOPMENT
-
-            if (ui_needs_composition)
-            {
-               // UI render target should be all zero at the beginning of each frame (the next one)
-               const FLOAT ColorRGBA[4] = { 0.f, 0.f, 0.f, 0.f };
-               native_device_context->ClearRenderTargetView(device_data.ui_texture_rtv.get(), ColorRGBA);
-
-               // Reset this, it shouldn't persist between frames
-               device_data.ui_latest_original_rtv = nullptr;
-               device_data.ui_initial_original_rtv = nullptr;
-            }
-
-            draw_state_stack.Restore(native_device_context);
-
-#if ENABLE_AUTO_CBUFFER_RESTORATION && 0 // Not needed for now, we already have "DrawStateStack" that should cover all cases
-            cmd_list_data.RestoreOriginalConstantBuffers(native_device_context);
-#endif // ENABLE_AUTO_CBUFFER_RESTORATION
          }
          else
          {
