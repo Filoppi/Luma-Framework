@@ -1,10 +1,7 @@
-// Borderlands 2 / The Pre-Sequel — extract a normalized depth for SMAA predication.
-//
-// Both games (dgVoodoo DX9->11) expose NO separate depth buffer, but the fp16 scene-color buffer carries linear
-// view-space Z in its ALPHA channel (UE3 pattern): geometry = NEGATIVE z (right-handed view space, |z| grows
-// with distance), sky/invalid = a >= 0 (a large +sentinel). We read that, decode depth = -a, and perceptually
-// compress it into [0,1] so silhouette deltas comfortably exceed SMAA's predication threshold (~0.01) at all
-// distances. Output is single-channel (R) because SMAA predication Gathers the R channel (SMAA.hlsl).
+// Borderlands 2 / The Pre-Sequel — normalized depth for SMAA predication.
+// Neither game exposes a depth buffer under dgVoodoo, but the fp16 scene colour carries linear view-space Z in ALPHA
+// (UE3): geometry = negative z, sky/invalid = a >= 0 (+sentinel). depth = -a, compressed into [0,1] so silhouette
+// deltas clear SMAA's predication threshold (~0.01) at every distance. Single channel: SMAA predication Gathers R.
 
 Texture2D<float4> scene : register(t0); // fp16 scene color; .a = view-space Z (negative for geometry)
 RWTexture2D<float> uav : register(u0);  // R16_FLOAT normalized predication depth

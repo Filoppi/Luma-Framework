@@ -1,12 +1,8 @@
-// SMAA implementation for Borderlands 2 / The Pre-Sequel.
-// Reference: https://github.com/iryoku/smaa
-// ULTRA preset + color edge detection. Runs POST-tonemap on the tonemap's LDR output (main.cpp drives it via the
-// post-draw callback: it runs the tonemap, then SMAA on its LDR result) — NOT on the game's pre-tonemap FXAA pass.
-// This keeps SMAA from perturbing the depth-of-field (composited inside the tonemap; the native FXAA is left
-// running untouched to feed DoF as vanilla). The LDR buffer is GAMMA (the BL2 tonemap outputs gamma,
-// POST_PROCESS_SPACE_TYPE=0), so edge detection + neighborhood blending both work in gamma and the PS appends NO
-// HDR/tonemap tail (the core Display Composition still does paper-white + scRGB downstream). Predication uses the
-// scene-color .a depth captured at the tonemap; null-predication + scale 1.0 is the no-depth fallback.
+// SMAA for Borderlands 2 / The Pre-Sequel. Reference: https://github.com/iryoku/smaa
+// ULTRA preset + color edge detection, run POST-tonemap on the gamma LDR (main.cpp RunPostTonemapSMAA) so it cannot
+// perturb the DoF composited inside the tonemap; the native FXAA stays untouched. Edges and blending work in gamma
+// and the PS appends no HDR tail (Display Composition does paper-white + scRGB). Predication = scene-color .a depth,
+// null texture + scale 1.0 as the fallback.
 
 #include "../Includes/Common.hlsl"
 
@@ -23,12 +19,9 @@ cbuffer SmaaMetricsCB : register(b1)
 #define SMAA_PRESET_ULTRA
 #define SMAA_PREDICATION       1
 #define SMAA_PREDICATION_SCALE SmaaPredication.x
-// Predication tuned to BL2's clean view-Z depth signal:
-//  - flat threshold  = SCALE * SMAA_THRESHOLD            = 2.0 * 0.05      = 0.10 (recommended; rejects busy
-//    cel-shade texture color-noise so SMAA doesn't over-AA flat detail)
-//  - silhouette thr  = SCALE * SMAA_THRESHOLD * (1-STR)  = 2.0 * 0.05 *0.5 = 0.05 (= plain ULTRA base; predication
-//    only relaxes geometric edges back to normal sensitivity, never below -> no over-aggression)
-//  - PREDICATION_THRESHOLD lowered (depth-delta gate) since our normalized depth is clean (FPR ~0.1% on flats).
+// Predication tuned to BL2's clean view-Z depth: flat threshold = 2.0 * 0.05 = 0.10 (rejects cel-shade texture
+// noise), silhouette threshold = 2.0 * 0.05 * (1-0.5) = 0.05 = plain ULTRA, so predication only relaxes geometric
+// edges back to base sensitivity, never below. PREDICATION_THRESHOLD lowered because the normalized depth is clean.
 #define SMAA_PREDICATION_STRENGTH  0.5
 #define SMAA_PREDICATION_THRESHOLD 0.005
 #define SMAA_CUSTOM_SL
@@ -95,8 +88,7 @@ void smaa_neighborhood_blending_vs(uint id : SV_VertexID, out float4 position : 
 
 float4 smaa_neighborhood_blending_ps(float4 position : SV_Position, float2 texcoord : TEXCOORD0, float4 offset : TEXCOORD1) : SV_Target
 {
-   // tex0 = colorTex (gamma copy), tex1 = blendTex. Blend in gamma (the buffer's space): keeps the bright HDR sky
-   // compressed so 1px-thin dark features survive the average (linear blend erodes them). No HDR tail / re-encode:
-   // output stays in the gamma LDR buffer's space, mid-pipeline before the composition.
+   // tex0 = colorTex (gamma copy), tex1 = blendTex. Blend in gamma, the buffer's space: keeps the bright sky
+   // compressed so 1px dark features survive the average (a linear blend erodes them). No HDR tail / re-encode.
    return SMAANeighborhoodBlendingPS(texcoord, offset, tex0, tex1);
 }

@@ -1,15 +1,9 @@
-// Borderlands 2 — Bink intro/cutscene video (YUV->RGB) pass. SDR clamp + light AutoHDR for HDR.
-//
-// BL2's pre-rendered movies (2K/Gearbox/Unreal boot logos, story FMVs) decode to 3 YUV planes (Y=t0, U=t1,
-// V=t2) and a fullscreen quad converts them to RGB straight onto the swapchain — bypassing the scene tonemap
-// (0xD00AA2A7). On Luma's fp16 scRGB swapchain that SDR output would sit flat at paper white. So: restore the
-// vanilla clamp, then apply a LIGHT PumboAutoHDR so movies gain a little highlight pop in HDR.
-//
-// Body transcribed verbatim from the dgVoodoo->ps_5_0 disasm of 0xE41621CF (maps the DX9 video shader
-// 0x33244F80: tor/tog/tob/consts c0..c3 -> cb4[8..11], same cb4[N+8] mapping as the tonemap). The cb3 and/or
-// pairs are dgVoodoo's texture-format bit emulation (mask+set), kept exactly via asuint/asfloat.
-// NOTE: dgVoodoo dropped the SM3 `saturate(o)` (the vanilla 8-bit UNORM backbuffer clamped for free); the fp16
-// swapchain does not, so we re-add it before the AutoHDR (kills YUV overshoot + negatives).
+// Borderlands 2 / The Pre-Sequel — Bink video (YUV->RGB) pass. SDR clamp + light AutoHDR for HDR.
+// Movies decode to 3 YUV planes (Y=t0, U=t1, V=t2) and a fullscreen quad converts them straight onto the swapchain,
+// bypassing the tonemap; on the fp16 scRGB swapchain that SDR output sits flat at paper white. Body verbatim from the
+// dgVoodoo ps_5_0 disasm (DX9 0x33244F80: tor/tog/tob/consts c0..c3 -> cb4[8..11]); the cb3 and/or pairs are
+// dgVoodoo's texture-format bit emulation, kept via asuint/asfloat. dgVoodoo dropped the SM3 saturate(o) (the UNORM
+// backbuffer clamped for free), so it is re-added before the AutoHDR - kills YUV overshoot and negatives.
 
 #include "Includes/Common.hlsl" // game-local: pulls GameCBuffers (LumaGameSettings VideoAutoHDR* fields) + shared Common
 
