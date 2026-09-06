@@ -280,8 +280,10 @@ public:
 
          float output_aspect_ratio = device_data.output_resolution.x / device_data.output_resolution.y;
 
-         const std::unique_lock lock_texture_upgrades(s_mutex_texture_upgrades);
-         texture_format_upgrades_2d_custom_aspect_ratios = { 16.f / 9.f, 1916.f / 1080.f, min(output_aspect_ratio, 2.3916666666666666666666666666667f) };
+         {
+            const std::unique_lock lock(device_data.resource_upgrades.mutex);
+            device_data.resource_upgrades.texture_format_upgrades_2d_custom_aspect_ratios = { 16.f / 9.f, 1916.f / 1080.f, min(output_aspect_ratio, 2.3916666666666666666666666666667f) };
+         }
       }
    }
 

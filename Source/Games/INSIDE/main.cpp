@@ -37,10 +37,12 @@ namespace
             FlushInstructionCache(GetCurrentProcess(), pattern_address, 1);
          }
       }
+   }
 
-      // Add information on the aspect ratios to upgrade immediately, to avoid waiting for the swapchain to be resized
-      const std::unique_lock lock_texture_upgrades(s_mutex_texture_upgrades);
-      texture_format_upgrades_2d_custom_aspect_ratios = { 16.f / 9.f, target_aspect_ratio };
+   void SetAspectRatioUpgrades(DeviceData& device_data, float target_aspect_ratio)
+   {
+      const std::unique_lock lock(device_data.resource_upgrades.mutex);
+      device_data.resource_upgrades.texture_format_upgrades_2d_custom_aspect_ratios = { 16.f / 9.f, target_aspect_ratio };
    }
 }
 
@@ -281,6 +283,11 @@ public:
          auto& game_device_data = *static_cast<GameDeviceDataINSIDE*>(device_data.game);
 
          game_device_data.sanitize_nans_data = {};
+
+         int screen_width = GetSystemMetrics(SM_CXSCREEN);
+         int screen_height = GetSystemMetrics(SM_CYSCREEN);
+         float screen_aspect_ratio = static_cast<float>(screen_width) / static_cast<float>(screen_height);
+         SetAspectRatioUpgrades(device_data, screen_aspect_ratio);
       }
    }
 
@@ -856,6 +863,7 @@ public:
             else
                max_aspect_ratio = -1.f;
             PatchAspectRatio(output_aspect_ratio);
+            SetAspectRatioUpgrades(device_data, output_aspect_ratio);
             reshade::set_config_value(runtime, NAME, "CustomAspectRatio", max_aspect_ratio);
          }
          if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
@@ -873,11 +881,13 @@ public:
             {
                reshade::set_config_value(runtime, NAME, "CustomAspectRatio", max_aspect_ratio);
                PatchAspectRatio(max_aspect_ratio);
+               SetAspectRatioUpgrades(device_data, max_aspect_ratio);
             }
             if (DrawResetButton(max_aspect_ratio, output_aspect_ratio, "CustomAspectRatio", runtime))
             {
                reshade::set_config_value(runtime, NAME, "CustomAspectRatio", max_aspect_ratio);
                PatchAspectRatio(max_aspect_ratio);
+               SetAspectRatioUpgrades(device_data, max_aspect_ratio);
             }
          }
 

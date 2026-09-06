@@ -511,8 +511,7 @@ namespace
       // Textures
       //
 
-      // Only needed by "texture_format_upgrades_2d_custom_aspect_ratios" at the moment (if changed after initialization)
-      std::shared_mutex s_mutex_texture_upgrades;
+
 
       // Global texture format upgrades setting. Required by all other settings below.
       // Only swap between allowed enabled/disabled after init
@@ -584,6 +583,7 @@ namespace
       };
       uint32_t texture_format_upgrades_2d_size_filters = 0 | (uint32_t)TextureFormatUpgrades2DSizeFilters::SwapchainResolution | (uint32_t)TextureFormatUpgrades2DSizeFilters::SwapchainAspectRatio;
       std::unordered_set<float> texture_format_upgrades_2d_custom_aspect_ratios = { 16.f / 9.f };
+      // Custom sizes (width/height pairs) to match for upgrades.
       std::vector<uint2> texture_format_upgrades_2d_custom_sizes;
       // Most games do resolution scaling properly, with a maximum aspect ratio offset of 1 pixel, though occasionally it goes to 2 pixels of difference.
       // Set to 0 to only accept 100% matching aspect ratio.
@@ -2785,6 +2785,33 @@ namespace
       DeviceData& device_data = *device->create_private_data<DeviceData>();
       device_data.native_device = native_device;
 
+      // Compat shim: games set the global config values; the manager is the source of truth, so copy the
+      // globals into it at device init. (Phase 2 will migrate games to set the manager directly.)
+      // Note: the globals use the anonymous-namespace types, the manager has its own nested enum types,
+      // so convert explicitly.
+      device_data.resource_upgrades.texture_format_upgrades_type = static_cast<ResourceUpgradeManager::TextureFormatUpgradesType>(texture_format_upgrades_type);
+      device_data.resource_upgrades.enable_indirect_texture_format_upgrades = enable_indirect_texture_format_upgrades;
+      device_data.resource_upgrades.enable_chain_indirect_texture_format_upgrades = static_cast<ResourceUpgradeManager::ChainTextureFormatUpgradesType>(enable_chain_indirect_texture_format_upgrades);
+      device_data.resource_upgrades.ignore_indirect_upgraded_textures = ignore_indirect_upgraded_textures;
+      device_data.resource_upgrades.enable_upgraded_texture_resource_copy_redirection = enable_upgraded_texture_resource_copy_redirection;
+      device_data.resource_upgrades.texture_upgrade_formats = texture_upgrade_formats;
+      device_data.resource_upgrades.texture_depth_upgrade_formats = texture_depth_upgrade_formats;
+      device_data.resource_upgrades.texture_format_upgrades_2d_size_filters = texture_format_upgrades_2d_size_filters;
+      device_data.resource_upgrades.texture_format_upgrades_2d_custom_aspect_ratios = texture_format_upgrades_2d_custom_aspect_ratios;
+      device_data.resource_upgrades.texture_format_upgrades_2d_custom_sizes = texture_format_upgrades_2d_custom_sizes;
+      device_data.resource_upgrades.texture_format_upgrades_2d_aspect_ratio_pixel_threshold = texture_format_upgrades_2d_aspect_ratio_pixel_threshold;
+      device_data.resource_upgrades.texture_format_upgrades_lut_size = texture_format_upgrades_lut_size;
+      device_data.resource_upgrades.texture_format_upgrades_lut_dimensions = static_cast<ResourceUpgradeManager::LUTDimensions>(texture_format_upgrades_lut_dimensions);
+      device_data.resource_upgrades.auto_texture_format_upgrade_shader_hashes.clear();
+      for (const auto& [hash, def] : auto_texture_format_upgrade_shader_hashes)
+      {
+         ResourceUpgradeManager::AutoTextureFormatUpgradeShaderHash m;
+         m.rtv_slots = def.rtv_slots;
+         m.uav_slots = def.uav_slots;
+         m.scale = def.scale;
+         device_data.resource_upgrades.auto_texture_format_upgrade_shader_hashes[hash] = m;
+      }
+
 #if LUMA_USE_DXP
       device_data.recipes.SetRootPath(shaders_path);
 #endif
@@ -3242,7 +3269,7 @@ namespace
          const std::unique_lock lock(device_data.mutex);
          for (uint32_t index = 0; index < back_buffer_count; index++)
          {
-            device_data.original_upgraded_resources_formats[swapchain->get_back_buffer(index).handle] = last_attempted_upgraded_resource_creation_format;
+            device_data.resource_upgrades.original_upgraded_resources_formats[swapchain->get_back_buffer(index).handle] = last_attempted_upgraded_resource_creation_format;
          }
       }
 #endif
@@ -3506,7 +3533,7 @@ namespace
             {
                device_data.back_buffers.erase(handle);
 #if DEVELOPMENT
-               device_data.original_upgraded_resources_formats.erase(handle);
+               device_data.resource_upgrades.original_upgraded_resources_formats.erase(handle);
 #endif // DEVELOPMENT
             }
          }
@@ -5078,226 +5105,51 @@ namespace
    // fall back to get_resource_from_view outside the lock.
    uint64_t GetCachedResourceFromView(const DeviceData& device_data, uint64_t view_handle)
    {
-      if (auto it = device_data.mirror_views_to_mirror_resources.find(view_handle); it != device_data.mirror_views_to_mirror_resources.end())
-         return it->second;
-      if (auto it = device_data.original_views_to_resources.find(view_handle); it != device_data.original_views_to_resources.end())
-         return it->second;
-      return 0;
+      return device_data.resource_upgrades.GetCachedResourceFromView(view_handle);
    }
 
    bool FindOrCreateIndirectUpgradedResource(reshade::api::device* device, const uint64_t in_source_resource, const uint64_t in_resource, uint64_t& out_resource, DeviceData& device_data, bool allow_create, reshade::api::resource_usage initial_state, std::shared_lock<std::shared_mutex>& lock_device_read, bool allow_scale = false, bool force_scale = false, bool leave_locked = true)
    {
-      bool replaced = false;
+      // Swapchain backbuffers are excluded by the caller (checked here before invoking the manager, since
+      // the manager is decoupled from DeviceData's backbuffer bookkeeping).
+      const bool is_back_buffer = device_data.back_buffers.contains(in_resource);
 
-      auto original_resource_to_mirrored_upgraded_resource = device_data.original_resources_to_mirrored_upgraded_resources.find(in_resource);
-      if (original_resource_to_mirrored_upgraded_resource != device_data.original_resources_to_mirrored_upgraded_resources.end())
+      // Compute the scale policy here in core.hpp (not the manager):
+      //  - Seed (in_source_resource == 0): scale if the seed's scale toggle is set AND SR is active.
+      //  - Chain (in_source_resource != 0): scale once SR has actually drawn this frame.
+      //  - force_scale bypasses the has_drawn_sr gate for command lists recorded before SR ran (deferred contexts).
+      bool should_scale = force_scale;
+      if (in_source_resource == 0)
       {
-         out_resource = original_resource_to_mirrored_upgraded_resource->second.mirror_handle;
-         replaced = true;
+#if ENABLE_SR
+         should_scale = should_scale || (allow_scale && device_data.sr_type != SR::Type::None && !device_data.sr_suppressed);
+#else
+         should_scale = should_scale || (allow_scale && false);
+#endif
       }
-      // Ignore all swapchain textures, we can't directly upgrade these (even in case they weren't directly upgraded), given that it's the ultimate target and somehow we'll need to write the values in it // TODO: not true, we could still swap its texture and then copy it back on the og swapchain on presentation
-      else if (allow_create && in_resource != 0 && !device_data.upgraded_resources.contains(in_resource) && !device_data.back_buffers.contains(in_resource))
-      {
-         lock_device_read.unlock(); // Avoids deadlocks with the device
+      else
+         should_scale = should_scale || device_data.has_drawn_sr;
 
-         reshade::api::resource mirrored_upgraded_resource;
-         reshade::api::resource_desc source_desc = device->get_resource_desc({in_resource});
-         reshade::api::resource_desc target_desc = source_desc;
-         bool needs_upgraded_resource;
-         if (in_source_resource)
-         {
-            source_desc = device->get_resource_desc({in_source_resource});
+      ResourceUpgradeFrameState state;
+      state.render_resolution = device_data.render_resolution;
+      state.output_resolution = device_data.output_resolution;
+      state.has_drawn_sr = device_data.has_drawn_sr;
+#if ENABLE_SR
+      state.sr_active = device_data.sr_type != SR::Type::None && !device_data.sr_suppressed;
+#else
+      state.sr_active = false;
+#endif
 
-            float min_aspect_ratio = target_desc.texture.width <= target_desc.texture.height ? ((float)(target_desc.texture.width - texture_format_upgrades_2d_aspect_ratio_pixel_threshold) / (float)target_desc.texture.height) : ((float)target_desc.texture.width / (float)(target_desc.texture.height + texture_format_upgrades_2d_aspect_ratio_pixel_threshold));
-            float max_aspect_ratio = target_desc.texture.width <= target_desc.texture.height ? ((float)(target_desc.texture.width + texture_format_upgrades_2d_aspect_ratio_pixel_threshold) / (float)target_desc.texture.height) : ((float)target_desc.texture.width / (float)(target_desc.texture.height - texture_format_upgrades_2d_aspect_ratio_pixel_threshold));
-            float target_aspect_ratio = (float)source_desc.texture.width / (float)source_desc.texture.height;
-            bool is_2x_square = target_desc.texture.width == 2 && target_desc.texture.height == 2;
-            bool is_1x_square = target_desc.texture.width == 1 && target_desc.texture.height == 1;
-            bool aspect_ratio_filter = source_desc.type == reshade::api::resource_type::texture_2d && !is_2x_square && !is_1x_square && target_aspect_ratio >= (min_aspect_ratio - FLT_EPSILON) && target_aspect_ratio <= (max_aspect_ratio + FLT_EPSILON); // Note: we don't check the aspect ratio on the depth, we only do it on 2D textures. We also ignore 1x1 and 2x2 for extra safety
-            bool size_filter = source_desc.texture.width == target_desc.texture.width && source_desc.texture.height == target_desc.texture.height && source_desc.texture.depth_or_layers == target_desc.texture.depth_or_layers;
-            size_filter |= aspect_ratio_filter;
-            //size_filter |= source_desc.type == reshade::api::resource_type::texture_2d && target_desc.texture.width == uint(device_data.output_resolution.x + 0.5) && target_desc.texture.height == uint(device_data.output_resolution.y + 0.5); // Force upgrade if it's equal to the swapchain resolution, this pass could be one that converts from a constrained to a fullscreen aspect ratio
-
-            // Avoid upgrading textures that don't have the same number of channels (unless they'd now have more!), we wouldn't want to automatically turn 1 channel to 4 channel textures.
-            // Also prevent upgrades if the size isn't compatible (aspect ratio matching).
-            // And don't upgrade int formats for now, they could only cause troubles.
-            // See "enable_chain_indirect_texture_format_upgrades" for more.
-            needs_upgraded_resource = !AreFormatsCopyCompatible(DXGI_FORMAT(source_desc.texture.format), DXGI_FORMAT(target_desc.texture.format))
-               && IsRGBAFormat(DXGI_FORMAT(source_desc.texture.format), true) == IsRGBAFormat(DXGI_FORMAT(target_desc.texture.format), true)
-               && !IsIntFormat(DXGI_FORMAT(target_desc.texture.format))
-               && size_filter;
-
-            size_filter |= aspect_ratio_filter;
-            // TODO: instead of checking the formats for compatibility, also check if the source was upgraded and in that case force the target to be upgraded (faster checks)
-            if (needs_upgraded_resource)
-            {
-               target_desc.texture.format = source_desc.texture.format;
-            }
-         }
-         else // Upgrade format
-         {
-            target_desc.texture.format = GetBestResourceUpgradeFormat(source_desc);
-            needs_upgraded_resource = source_desc.texture.format != target_desc.texture.format;
-         }
-         needs_upgraded_resource &= target_desc.type == reshade::api::resource_type::texture_2d; // Filter out false positives (UAVs can be buffers)
-         // TODO: optionally copy the content of "in_resource"?
-
-         // Resolution scaling (upscale only): scale the mirror from render_resolution to output_resolution
-         bool needs_scale = false;
-         // Only scale when SR engaged and render resolution is smaller
-         if (target_desc.type == reshade::api::resource_type::texture_2d
-            && (device_data.has_drawn_sr || force_scale)
-            && device_data.render_resolution.x > 0 && device_data.render_resolution.y > 0
-            && device_data.render_resolution.x < device_data.output_resolution.x
-            && device_data.render_resolution.y < device_data.output_resolution.y)
-         {
-            const bool is_1x1 = target_desc.texture.width == 1 && target_desc.texture.height == 1;
-            const bool is_2x2 = target_desc.texture.width == 2 && target_desc.texture.height == 2;
-            const float min_aspect = target_desc.texture.width <= target_desc.texture.height
-               ? ((float)(target_desc.texture.width - texture_format_upgrades_2d_aspect_ratio_pixel_threshold) / (float)target_desc.texture.height)
-               : ((float)target_desc.texture.width / (float)(target_desc.texture.height + texture_format_upgrades_2d_aspect_ratio_pixel_threshold));
-            const float max_aspect = target_desc.texture.width <= target_desc.texture.height
-               ? ((float)(target_desc.texture.width + texture_format_upgrades_2d_aspect_ratio_pixel_threshold) / (float)target_desc.texture.height)
-               : ((float)target_desc.texture.width / (float)(target_desc.texture.height - texture_format_upgrades_2d_aspect_ratio_pixel_threshold));
-            const float render_aspect = device_data.render_resolution.x / device_data.render_resolution.y;
-            const bool matches_render = !is_1x1 && !is_2x2 && render_aspect >= (min_aspect - FLT_EPSILON) && render_aspect <= (max_aspect + FLT_EPSILON);
-            if (matches_render)
-            {
-               if (in_source_resource == 0)
-                  needs_scale = allow_scale; // seed: per-shader toggle only
-               else
-                  needs_scale = source_desc.texture.width == (uint32_t)device_data.output_resolution.x && source_desc.texture.height == (uint32_t)device_data.output_resolution.y; // chain: source already at output res
-            }
-         }
-         // Keep the original (render) size for the mirror bookkeeping, before the scale override below.
-         const uint32_t original_width = target_desc.texture.width;
-         const uint32_t original_height = target_desc.texture.height;
-         if (needs_scale)
-         {
-            // Scale to full output resolution (matches FFXV's native upscale), so mirrors are the same
-            // size as the swapchain and downstream copies to it stay size-matched.
-            target_desc.texture.width  = (uint32_t)device_data.output_resolution.x;
-            target_desc.texture.height = (uint32_t)device_data.output_resolution.y;
-         }
-         if (needs_upgraded_resource && device->create_resource(target_desc, nullptr, initial_state, &mirrored_upgraded_resource))
-         {
-            std::unique_lock lock_device_write(device_data.mutex);
-            if (!device_data.original_resources_to_mirrored_upgraded_resources.contains(in_resource))
-            {
-               device_data.original_resources_to_mirrored_upgraded_resources[in_resource] = { mirrored_upgraded_resource.handle, needs_scale, original_width, original_height, target_desc.texture.width, target_desc.texture.height };
-               out_resource = mirrored_upgraded_resource.handle;
-            }
-            else // Destroy it if it was accidentally created at the same time by another thread
-            {
-               out_resource = device_data.original_resources_to_mirrored_upgraded_resources[in_resource].mirror_handle;
-               lock_device_write.unlock(); // Not really necessary, reshade "destroy_resource" simply clears a com ptr
-               device->destroy_resource(mirrored_upgraded_resource);
-            }
-
-            replaced = true;
-         }
-         else if (needs_upgraded_resource)
-         {
-            ASSERT_ONCE_MSG(false, "Failed to create an indirect upgraded texture");
-         }
-
-         if (leave_locked)
-            lock_device_read.lock();
-      }
-
-      // Let the upgrades happen above, but ignore the override
-      if (ignore_indirect_upgraded_textures)
-      {
-         if (out_resource)
-         out_resource = in_resource;
-         return false;
-      }
-
-      return replaced;
+      return device_data.resource_upgrades.FindOrCreateIndirectUpgradedResource(
+         device, in_source_resource, in_resource, out_resource,
+         allow_create && !is_back_buffer, initial_state, lock_device_read, state,
+         should_scale, leave_locked);
    }
 
    bool FindOrCreateIndirectUpgradedResourceView(reshade::api::device* device, const uint64_t in_rv, uint64_t& out_rv, DeviceData& device_data, bool allow_create, reshade::api::resource_usage usage, std::shared_lock<std::shared_mutex>& lock_device_read)
    {
-      bool replaced = false;
-
-      // See if we already have a indirect resource view mapped to this resource view
-      auto original_resource_view_to_mirrored_upgraded_resource_view = device_data.original_resource_views_to_mirrored_upgraded_resource_views.find(in_rv);
-      if (original_resource_view_to_mirrored_upgraded_resource_view != device_data.original_resource_views_to_mirrored_upgraded_resource_views.end())
-      {
-         replaced = true;
-         out_rv = original_resource_view_to_mirrored_upgraded_resource_view->second;
-      }
-      // Otherwise, create it.
-      // For example, sometimes we upgrade resources after creation and we can't know all the views that were previously created for the original resource (well, we could cache them on creation based on the list of formats we ever upgrade, if ever...),
-      // so we need to create a mirrored upgraded view for every view it had.
-      // TODO: just cache all the views for any resource we might ever upgrade later (e.g. through "auto_texture_format_upgrade_shader_hashes"), as mentioned above, so we could skip many of these checks.
-      else if (allow_create && in_rv != 0 && !device_data.original_resources_to_mirrored_upgraded_resources.empty())
-      {
-         reshade::api::resource resource;
-         resource.handle = GetCachedResourceFromView(device_data, in_rv);
-         if (resource.handle == 0) // Unknown view (e.g. created before the addon loaded): query the device outside the lock
-         {
-            lock_device_read.unlock(); // Avoids deadlocks with the device
-            resource = device->get_resource_from_view({ in_rv });
-            lock_device_read.lock();
-         }
-         // The view may have been mapped by another thread while we were unlocked above: never create a duplicate
-         auto recheck_it = device_data.original_resource_views_to_mirrored_upgraded_resource_views.find(in_rv);
-         if (recheck_it != device_data.original_resource_views_to_mirrored_upgraded_resource_views.end())
-         {
-            replaced = true;
-            out_rv = recheck_it->second;
-         }
-         else
-         {
-            auto original_resource_to_mirrored_upgraded_resource = device_data.original_resources_to_mirrored_upgraded_resources.find(resource.handle);
-            if (original_resource_to_mirrored_upgraded_resource != device_data.original_resources_to_mirrored_upgraded_resources.end())
-            {
-               const auto original_resource_to_mirrored_upgraded_resource_ptr = original_resource_to_mirrored_upgraded_resource->second.mirror_handle;
-
-               lock_device_read.unlock(); // Avoids deadlocks with the device
-
-               reshade::api::resource_view_desc resource_view_desc = device->get_resource_view_desc({ in_rv });
-               resource_view_desc.format = reshade::api::format::unknown; // Null the format so it's determined automatically. All the formats returned by "GetBestResourceUpgradeFormat()" are not typeless, so we can make views of (almost) all of them directly.
-
-               reshade::api::resource_view mirrored_upgraded_resource_view;
-               if (device->create_resource_view({original_resource_to_mirrored_upgraded_resource_ptr}, usage, resource_view_desc, &mirrored_upgraded_resource_view))
-               {
-                  std::unique_lock lock_device_write(device_data.mutex);
-                  if (!device_data.original_resource_views_to_mirrored_upgraded_resource_views.contains(in_rv))
-                  {
-                     device_data.original_resource_views_to_mirrored_upgraded_resource_views[in_rv] = mirrored_upgraded_resource_view.handle;
-                     device_data.mirror_views_by_mirror_resource[original_resource_to_mirrored_upgraded_resource_ptr].emplace(mirrored_upgraded_resource_view.handle);
-                     device_data.mirror_views_to_mirror_resources[mirrored_upgraded_resource_view.handle] = original_resource_to_mirrored_upgraded_resource_ptr;
-                     out_rv = mirrored_upgraded_resource_view.handle;
-                  }
-                  else // Destroy it if it was accidentally created at the same time by another thread
-                  {
-                     out_rv = device_data.original_resource_views_to_mirrored_upgraded_resource_views[in_rv];
-                     lock_device_write.unlock(); // Not really necessary, reshade "destroy_resource" simply clears a com ptr
-                     device->destroy_resource_view(mirrored_upgraded_resource_view);
-                  }
-                  replaced = true;
-               }
-               else
-               {
-                  ASSERT_ONCE_MSG(false, "Failed to create an indirect upgraded texture view (maybe some format mismatch)");
-               }
-
-               lock_device_read.lock();
-            }
-         }
-      }
-
-      // Let the upgrades happen above, but ignore the override
-      if (ignore_indirect_upgraded_textures)
-      {
-         if (out_rv)
-         out_rv = in_rv;
-         return false;
-      }
-
-      return replaced;
+      return device_data.resource_upgrades.FindOrCreateIndirectUpgradedResourceView(
+         device, in_rv, out_rv, allow_create, usage, lock_device_read);
    }
 
    void OnBindRenderTargetsAndDepthStencil(reshade::api::command_list* cmd_list, uint32_t count, const reshade::api::resource_view* rtvs, reshade::api::resource_view dsv)
@@ -6233,8 +6085,8 @@ namespace
          std::vector<reshade::api::resource> pending_resources;
          {
             std::unique_lock lock(device_data.mutex);
-            pending_views = std::move(device_data.pending_mirror_view_destructions);
-            pending_resources = std::move(device_data.pending_mirror_resource_destructions);
+            pending_views = std::move(device_data.resource_upgrades.pending_mirror_view_destructions);
+            pending_resources = std::move(device_data.resource_upgrades.pending_mirror_resource_destructions);
          }
          for (const reshade::api::resource_view view : pending_views)
          {
@@ -6247,6 +6099,28 @@ namespace
       }
 
       game->OnPresent(native_device, device_data);
+
+      // Invalidate indirect mirrors when the scale-relevant state changed this frame (render resolution or
+      // SR selection). Mirrors are queued and freed at the start of the NEXT present, before any seed/chain
+      // mirror is recreated at the new scale. The decision lives here in core.hpp (not the manager), since
+      // other things may also need cleanup based on this change.
+      {
+         const bool render_changed = device_data.render_resolution.x != device_data.last_render_resolution.x
+            || device_data.render_resolution.y != device_data.last_render_resolution.y;
+#if ENABLE_SR
+         const bool sr_changed = device_data.sr_type != device_data.last_sr_type;
+#else
+         const bool sr_changed = false;
+#endif
+         if (render_changed || sr_changed)
+         {
+            device_data.resource_upgrades.InvalidateAllIndirectUpgradedResources();
+            device_data.last_render_resolution = device_data.render_resolution;
+#if ENABLE_SR
+            device_data.last_sr_type = device_data.sr_type;
+#endif
+         }
+      }
 
 #if DEVELOPMENT
       {
@@ -6401,14 +6275,14 @@ namespace
             ASSERT_ONCE(native_device_context);
             if (is_dispatch)
             {
-               AddTraceDrawCallData(cmd_list_data.trace_draw_calls_data, device_data, native_device_context, cmd_list_data.pipeline_state_original_compute_shader.handle, shader_cache, last_draw_dispatch_data, device_data.original_resource_views_to_mirrored_upgraded_resource_views);
+               AddTraceDrawCallData(cmd_list_data.trace_draw_calls_data, device_data, native_device_context, cmd_list_data.pipeline_state_original_compute_shader.handle, shader_cache, last_draw_dispatch_data, device_data.resource_upgrades.original_resource_views_to_mirrored_upgraded_resource_views);
             }
             else
             {
-               AddTraceDrawCallData(cmd_list_data.trace_draw_calls_data, device_data, native_device_context, cmd_list_data.pipeline_state_original_vertex_shader.handle, shader_cache, last_draw_dispatch_data, device_data.original_resource_views_to_mirrored_upgraded_resource_views);
+               AddTraceDrawCallData(cmd_list_data.trace_draw_calls_data, device_data, native_device_context, cmd_list_data.pipeline_state_original_vertex_shader.handle, shader_cache, last_draw_dispatch_data, device_data.resource_upgrades.original_resource_views_to_mirrored_upgraded_resource_views);
                if (cmd_list_data.pipeline_state_original_pixel_shader.handle != 0) // Somehow this can happen (e.g. query tests don't require pixel shaders)
                {
-                  AddTraceDrawCallData(cmd_list_data.trace_draw_calls_data, device_data, native_device_context, cmd_list_data.pipeline_state_original_pixel_shader.handle, shader_cache, last_draw_dispatch_data, device_data.original_resource_views_to_mirrored_upgraded_resource_views);
+                  AddTraceDrawCallData(cmd_list_data.trace_draw_calls_data, device_data, native_device_context, cmd_list_data.pipeline_state_original_pixel_shader.handle, shader_cache, last_draw_dispatch_data, device_data.resource_upgrades.original_resource_views_to_mirrored_upgraded_resource_views);
                }
             }
          }
@@ -6619,7 +6493,7 @@ namespace
                      {
                         const uint64_t prev_resource_view = reinterpret_cast<uint64_t>(rtvs[auto_texture_format_upgrade_shader_hashes_data.rtv_slots[i]].get());
                         // Already redirected to a mirror? Nothing to upgrade, keep the bound mirror.
-                        if (device_data.mirror_views_to_mirror_resources.contains(prev_resource_view))
+                        if (device_data.resource_upgrades.mirror_views_to_mirror_resources.contains(prev_resource_view))
                         {
                            any_changed = true;
                            continue;
@@ -6633,6 +6507,10 @@ namespace
                         }
                         uint64_t resource = prev_resource;
                         // TODO: add aspect ratio tolerance for the "force_indirect_texture_format_upgrades" case? Also check if the format and channels number make sense to be upgraded from that source
+#if DEVELOPMENT
+                        const bool seed_draw_before = hash_based_indirect_texture_format_upgrades && allow_scale;
+                        const uint64_t seed_res_before = prev_resource;
+#endif
                         if (FindOrCreateIndirectUpgradedResource(device, source_resource, prev_resource, resource, device_data, true, reshade::api::resource_usage::render_target, lock_device_read, allow_scale, force_scale) && resource != prev_resource)
                         {
                            uint64_t resource_view = prev_resource_view;
@@ -6640,6 +6518,33 @@ namespace
                            {
                               rtvs[auto_texture_format_upgrade_shader_hashes_data.rtv_slots[i]] = reinterpret_cast<ID3D11RenderTargetView*>(resource_view);
                               any_changed = true;
+#if DEVELOPMENT
+                              if (trace_running)
+                              {
+                                 // Diagnostic: log when a hash-based (seed) RTV is redirected to a mirror, and at what size.
+                                 if (seed_draw_before)
+                                 {
+                                    D3D11_TEXTURE2D_DESC orig_desc{}, mirror_desc{};
+                                    if (auto it = device_data.resource_upgrades.original_resources_to_mirrored_upgraded_resources.find(seed_res_before); it != device_data.resource_upgrades.original_resources_to_mirrored_upgraded_resources.end())
+                                    {
+                                       if (auto m = reinterpret_cast<ID3D11Resource*>(it->second.mirror_handle); m)
+                                       {
+                                          com_ptr<ID3D11Texture2D> mt; if (SUCCEEDED(m->QueryInterface(&mt))) mt->GetDesc(&mirror_desc);
+                                       }
+                                    }
+                                    if (auto o = reinterpret_cast<ID3D11Resource*>(seed_res_before); o)
+                                    {
+                                       com_ptr<ID3D11Texture2D> ot; if (SUCCEEDED(o->QueryInterface(&ot))) ot->GetDesc(&orig_desc);
+                                    }
+                                    char buf[256];
+                                    std::snprintf(buf, sizeof(buf), "[LumaScale] SEED RTV redirected hash=%08X orig=%ux%u mirror=%ux%u has_drawn_sr=%d allow_scale=%d",
+                                       (uint32_t)original_shader_hashes.pixel_shaders[0],
+                                       orig_desc.Width, orig_desc.Height, mirror_desc.Width, mirror_desc.Height,
+                                       device_data.has_drawn_sr ? 1 : 0, allow_scale ? 1 : 0);
+                                    reshade::log::message(reshade::log::level::info, buf);
+                                 }
+                              }
+#endif
                               // Note: we don't need to upgrade "cmd_list_data.ps_srvs_state" here, because if a resource is bound as RTV, it can't be bound as SRV (at least in DX10/11).
                               // However, it could still be bound as SRV on the compute stage (can it? actually probably not in DX10/11),
                               // so theoretically we should upgrade "cmd_list_data.cs_srvs_state", but the chances of that are pretty low, for now we ignore it.
@@ -6654,7 +6559,7 @@ namespace
                   {
                      const uint64_t prev_resource_view = reinterpret_cast<uint64_t>(uavs[auto_texture_format_upgrade_shader_hashes_data.uav_slots[i]].get());
                      // Already redirected to a mirror? Nothing to upgrade, keep the bound mirror.
-                     if (device_data.mirror_views_to_mirror_resources.contains(prev_resource_view))
+                     if (device_data.resource_upgrades.mirror_views_to_mirror_resources.contains(prev_resource_view))
                      {
                         any_changed = true;
                         continue;
@@ -6744,7 +6649,7 @@ namespace
                            if (rtvs[i] != nullptr)
                            {
                               const std::shared_lock lock_device_read(device_data.mutex);
-                              if (auto mirror_it = device_data.original_resources_to_mirrored_upgraded_resources.find(GetCachedResourceFromView(device_data, reinterpret_cast<uint64_t>(rtvs[i].get()))); mirror_it != device_data.original_resources_to_mirrored_upgraded_resources.end())
+                              if (auto mirror_it = device_data.resource_upgrades.original_resources_to_mirrored_upgraded_resources.find(GetCachedResourceFromView(device_data, reinterpret_cast<uint64_t>(rtvs[i].get()))); mirror_it != device_data.resource_upgrades.original_resources_to_mirrored_upgraded_resources.end())
                                  any_scaled = mirror_it->second.is_scaled; // Only scaled mirrors (created at output resolution), not plain format-upgrade mirrors
                            }
                         }
@@ -8117,216 +8022,16 @@ namespace
    // TODO: cache the last "almost" upgraded texture resolution to make sure that when the swapchain changes res, we didn't fail to upgrade resources before (needed even with indirect upgrades)
    std::optional<reshade::api::format> ShouldUpgradeResource(const reshade::api::resource_desc& desc, const DeviceData& device_data, bool has_initial_data = false)
    {
-      if (texture_format_upgrades_type < TextureFormatUpgradesType::AllowedEnabled)
-      {
-         return std::nullopt;
-      }
-
-      const bool is_rt_or_ua = (desc.usage & (reshade::api::resource_usage::render_target | reshade::api::resource_usage::unordered_access)) != 0;
-      // Convoluted check to test if the resource is "D3D11_USAGE_DEFAULT" (the only usage type that can be both used as SRV, and be the target of a CopyResource(), otherwise we'd never need to upgrade them).
-      // We also check the initial data for extra safety, in case this was a "static" content texture that accidentally wasn't created as immutable.
-      // This is needed by "Thumper", and possibly "Watch Dogs 2".
-      const bool is_writable_sr = (desc.usage & reshade::api::resource_usage::shader_resource) != 0 && desc.heap == reshade::api::memory_heap::gpu_only && !has_initial_data && (desc.flags & reshade::api::resource_flags::immutable) == 0;
-
-      const bool is_depth = (desc.usage & reshade::api::resource_usage::depth_stencil) != 0;
-
-      if ((!(is_rt_or_ua || ((enable_chain_indirect_texture_format_upgrades >= ChainTextureFormatUpgradesType::DirectDependencies) ? is_writable_sr : false))
-               || !texture_upgrade_formats.contains(desc.texture.format))
-            && (!is_depth || !texture_depth_upgrade_formats.contains(desc.texture.format)))
-      {
-         return std::nullopt;
-      }
-
-      // At least in DX11, any resource that isn't exclusively accessible by the GPU, can't be set as output (render target/unordered access).
-		// These probably wouldn't have the RT/UA usage flags set anyway, or they'd fail on creation if they did.
-      if (desc.heap != reshade::api::memory_heap::gpu_only)
-      {
-         ASSERT_ONCE(desc.heap != reshade::api::memory_heap::unknown && desc.heap != reshade::api::memory_heap::custom); // Unexpected heap types
-         return std::nullopt;
-      }
-
-      const bool is_cube = (desc.flags & reshade::api::resource_flags::cube_compatible) != 0 && (desc.texture.depth_or_layers % 6) == 0 && desc.texture.depth_or_layers != 0;
-
-      // Note: we can't fully exclude texture 2D arrays here, because they might still have 1 layer
-      bool type_and_size_filter = desc.type == reshade::api::resource_type::texture_2d && (desc.texture.depth_or_layers == 1 || is_cube);
-
-      if (texture_format_upgrades_2d_size_filters != (uint32_t)TextureFormatUpgrades2DSizeFilters::All)
-      {
-         bool size_filter = false;
-         
-         uint2 render_resolution = uint2(device_data.render_resolution.x, device_data.render_resolution.y);
-         uint2 output_resolution = uint2(device_data.output_resolution.x, device_data.output_resolution.y);
-         uint2 display_resolution = uint2(device_data.display_resolution.x, device_data.display_resolution.y);
-
-         if ((texture_format_upgrades_2d_size_filters & (uint32_t)TextureFormatUpgrades2DSizeFilters::PadTo4Px) != 0)
-         {
-            // If the texture is 4px aligned, pad all the resolution checks as well
-            bool is_4px_aligned = (desc.texture.width % 4) == 0 && (desc.texture.height % 4) == 0; 
-            if (is_4px_aligned)
-            {
-               render_resolution.x = (render_resolution.x + 3u) & ~3u;
-               render_resolution.y = (render_resolution.y + 3u) & ~3u;
-               output_resolution.x = (output_resolution.x + 3u) & ~3u;
-               output_resolution.y = (output_resolution.y + 3u) & ~3u;
-               display_resolution.x = (display_resolution.x + 3u) & ~3u;
-               display_resolution.y = (display_resolution.y + 3u) & ~3u;
-            }
-         }
-         
-         if ((texture_format_upgrades_2d_size_filters & (uint32_t)TextureFormatUpgrades2DSizeFilters::DisplayResolution) != 0)
-         {
-            size_filter |= desc.texture.width == display_resolution.x && desc.texture.height == display_resolution.y;
-         }
-         if ((texture_format_upgrades_2d_size_filters & (uint32_t)TextureFormatUpgrades2DSizeFilters::SwapchainResolution) != 0)
-         {
-            size_filter |= desc.texture.width == output_resolution.x && desc.texture.height == output_resolution.y;
-         }
-         if ((texture_format_upgrades_2d_size_filters & (uint32_t)TextureFormatUpgrades2DSizeFilters::SwapchainResolutionWidth) != 0)
-         {
-            size_filter |= desc.texture.width == output_resolution.x;
-         }
-         if ((texture_format_upgrades_2d_size_filters & (uint32_t)TextureFormatUpgrades2DSizeFilters::SwapchainResolutionHeight) != 0)
-         {
-            size_filter |= desc.texture.height == output_resolution.y;
-         }
-         if ((texture_format_upgrades_2d_size_filters & (uint32_t)TextureFormatUpgrades2DSizeFilters::RenderResolution) != 0)
-         {
-            size_filter |= desc.texture.width == render_resolution.x && desc.texture.height == render_resolution.y;
-         }
-         // Flipped condition, given we already allowed them above in "type_and_size_filter"
-         if ((texture_format_upgrades_2d_size_filters & (uint32_t)TextureFormatUpgrades2DSizeFilters::Cubes) == 0)
-         {
-            size_filter &= !is_cube;
-         }
-         // No limits on the size, we can assume it was square
-         else
-         {
-            size_filter |= is_cube;
-         }
-
-         // Always scale from the smallest dimension, as that gives up more threshold, depending on how the devs scaled down textures (they can use multiple rounding models)
-         float min_aspect_ratio = desc.texture.width <= desc.texture.height ? ((float)(desc.texture.width - texture_format_upgrades_2d_aspect_ratio_pixel_threshold) / (float)desc.texture.height) : ((float)desc.texture.width / (float)(desc.texture.height + texture_format_upgrades_2d_aspect_ratio_pixel_threshold));
-         float max_aspect_ratio = desc.texture.width <= desc.texture.height ? ((float)(desc.texture.width + texture_format_upgrades_2d_aspect_ratio_pixel_threshold) / (float)desc.texture.height) : ((float)desc.texture.width / (float)(desc.texture.height - texture_format_upgrades_2d_aspect_ratio_pixel_threshold));
-         bool generating_manual_mips = false;
-#if DEVELOPMENT
-         if ((texture_format_upgrades_2d_size_filters & (uint32_t)TextureFormatUpgrades2DSizeFilters::SwapchainAspectRatio) != 0
-            || (texture_format_upgrades_2d_size_filters & (uint32_t)TextureFormatUpgrades2DSizeFilters::RenderAspectRatio) != 0
-            || (texture_format_upgrades_2d_size_filters & (uint32_t)TextureFormatUpgrades2DSizeFilters::CustomAspectRatio) != 0)
-         {
-            static thread_local UINT last_texture_width = desc.texture.width;
-            static thread_local UINT last_texture_height = desc.texture.height;
-            // If this was a chain of downscaling, don't send a warning! This is just a heuristics based check... The creation order might have been random, or inverted (from smaller to bigger mips).
-            // Note that this isn't thread safe but whatever
-            if (max(desc.texture.width, desc.texture.height) == 1)
-            {
-               generating_manual_mips = (last_texture_width / 2) == desc.texture.width && (last_texture_height / 2) == desc.texture.height;
-            }
-            last_texture_width = desc.texture.width;
-            last_texture_height = desc.texture.height;
-         }
+      ResourceUpgradeFrameState state;
+      state.render_resolution = device_data.render_resolution;
+      state.output_resolution = device_data.output_resolution;
+      state.has_drawn_sr = device_data.has_drawn_sr;
+#if ENABLE_SR
+      state.sr_active = device_data.sr_type != SR::Type::None && !device_data.sr_suppressed;
+#else
+      state.sr_active = false;
 #endif
-         if ((texture_format_upgrades_2d_size_filters & (uint32_t)TextureFormatUpgrades2DSizeFilters::SwapchainAspectRatio) != 0)
-         {
-            float target_aspect_ratio = (float)output_resolution.x / (float)output_resolution.y;
-            bool aspect_ratio_filter = target_aspect_ratio >= (min_aspect_ratio - FLT_EPSILON) && target_aspect_ratio <= (max_aspect_ratio + FLT_EPSILON);
-            size_filter |= aspect_ratio_filter;
-#if DEVELOPMENT
-            ASSERT_ONCE_MSG(!aspect_ratio_filter || max(desc.texture.width, desc.texture.height) > 1 || generating_manual_mips || ((texture_format_upgrades_2d_size_filters & (uint32_t)TextureFormatUpgrades2DSizeFilters::No1Px) != 0), "Upgrading 1x1 resource by aspect ratio, this is possibly unwanted"); // TODO: add a min size for upgrades? Like >1 or >32 on the smallest axis? Or ... scan if the allocations shrink in size over time
-#endif
-         }
-         if ((texture_format_upgrades_2d_size_filters & (uint32_t)TextureFormatUpgrades2DSizeFilters::RenderAspectRatio) != 0)
-         {
-            float target_aspect_ratio = (float)render_resolution.x / (float)render_resolution.y;
-            bool aspect_ratio_filter = target_aspect_ratio >= (min_aspect_ratio - FLT_EPSILON) && target_aspect_ratio <= (max_aspect_ratio + FLT_EPSILON);
-            size_filter |= aspect_ratio_filter;
-#if DEVELOPMENT
-            ASSERT_ONCE_MSG(!aspect_ratio_filter || max(desc.texture.width, desc.texture.height) > 1 || generating_manual_mips || ((texture_format_upgrades_2d_size_filters & (uint32_t)TextureFormatUpgrades2DSizeFilters::No1Px) != 0), "Upgrading 1x1 resource by aspect ratio, this is possibly unwanted");
-#endif
-         }
-         if ((texture_format_upgrades_2d_size_filters & (uint32_t)TextureFormatUpgrades2DSizeFilters::DisplayAspectRatio) != 0)
-         {
-            float target_aspect_ratio = (float)display_resolution.x / (float)display_resolution.y;
-            bool aspect_ratio_filter = target_aspect_ratio >= (min_aspect_ratio - FLT_EPSILON) && target_aspect_ratio <= (max_aspect_ratio + FLT_EPSILON);
-            size_filter |= aspect_ratio_filter;
-#if DEVELOPMENT
-            ASSERT_ONCE_MSG(!aspect_ratio_filter || max(desc.texture.width, desc.texture.height) > 1 || generating_manual_mips || ((texture_format_upgrades_2d_size_filters & (uint32_t)TextureFormatUpgrades2DSizeFilters::No1Px) != 0), "Upgrading 1x1 resource by aspect ratio, this is possibly unwanted");
-#endif
-         }
-         if ((texture_format_upgrades_2d_size_filters & (uint32_t)TextureFormatUpgrades2DSizeFilters::CustomAspectRatio) != 0)
-         {
-            const std::shared_lock lock_texture_upgrades(s_mutex_texture_upgrades);
-            for (auto texture_format_upgrades_2d_custom_aspect_ratio : texture_format_upgrades_2d_custom_aspect_ratios)
-            {
-               float target_aspect_ratio = texture_format_upgrades_2d_custom_aspect_ratio;
-               bool aspect_ratio_filter = target_aspect_ratio >= (min_aspect_ratio - FLT_EPSILON) && target_aspect_ratio <= (max_aspect_ratio + FLT_EPSILON);
-               size_filter |= aspect_ratio_filter;
-#if DEVELOPMENT
-               ASSERT_ONCE_MSG(!aspect_ratio_filter || max(desc.texture.width, desc.texture.height) > 1 || generating_manual_mips || ((texture_format_upgrades_2d_size_filters & (uint32_t)TextureFormatUpgrades2DSizeFilters::No1Px) != 0), "Upgrading 1x1 resource by aspect ratio, this is possibly unwanted");
-#endif
-            }
-         }
-         if ((texture_format_upgrades_2d_size_filters & (uint32_t)TextureFormatUpgrades2DSizeFilters::CustomSize) != 0)
-         {
-            const std::shared_lock lock_texture_upgrades(s_mutex_texture_upgrades);
-            for (auto texture_format_upgrades_2d_custom_size : texture_format_upgrades_2d_custom_sizes)
-            {
-               size_filter |= desc.texture.width == texture_format_upgrades_2d_custom_size.x && desc.texture.height == texture_format_upgrades_2d_custom_size.y;
-               // We passed a very specific test, no need to do any more exclusion tests below
-               if (size_filter) break;
-            }
-         }
-
-         if ((texture_format_upgrades_2d_size_filters & (uint32_t)TextureFormatUpgrades2DSizeFilters::No1Px) != 0)
-         {
-            size_filter &= desc.texture.width != 1 || desc.texture.height != 1;
-         }
-
-         if ((texture_format_upgrades_2d_size_filters & (uint32_t)TextureFormatUpgrades2DSizeFilters::Mips) != 0)
-         {
-            auto max_resolution = output_resolution.y >= render_resolution.y ? output_resolution : render_resolution;
-            size_filter |= IsMipOf(max_resolution.x, max_resolution.y, desc.texture.width, desc.texture.height);
-         }
-
-         type_and_size_filter &= size_filter;
-      }
-
-      if (is_depth)
-      {
-         if (type_and_size_filter)
-         {
-            return GetBestResourceUpgradeFormat(desc);
-         }
-         return std::nullopt;
-      }
-
-      switch (texture_format_upgrades_lut_dimensions)
-      {
-      case LUTDimensions::_1D:
-      {
-         // For 1D, "texture_format_upgrades_lut_size" is the whole width (usually they extend in width)
-         type_and_size_filter |= desc.type == reshade::api::resource_type::texture_1d && desc.texture.width == texture_format_upgrades_lut_size && desc.texture.height == 1 && desc.texture.depth_or_layers == 1 && desc.texture.levels == 1;
-         break;
-      }
-      default:
-      case LUTDimensions::_2D:
-      {
-         // For 2D, "texture_format_upgrades_lut_size" is the height, usually they extend in width and that's squared
-         type_and_size_filter |= desc.type == reshade::api::resource_type::texture_2d && desc.texture.width == (texture_format_upgrades_lut_size * texture_format_upgrades_lut_size) && desc.texture.height == texture_format_upgrades_lut_size && desc.texture.depth_or_layers == 1 && desc.texture.levels == 1;
-         break;
-      }
-      case LUTDimensions::_3D:
-      {
-         // For 3D, all the dimensions usually match
-         type_and_size_filter |= desc.type == reshade::api::resource_type::texture_3d && desc.texture.width == texture_format_upgrades_lut_size && desc.texture.height == texture_format_upgrades_lut_size && desc.texture.depth_or_layers == texture_format_upgrades_lut_size && desc.texture.levels == 1;
-         break;
-      }
-      }
-
-      if (type_and_size_filter)
-      {
-         return GetBestResourceUpgradeFormat(desc);
-      }
-      return std::nullopt;
+      return device_data.resource_upgrades.ShouldUpgradeResource(desc, state, has_initial_data);
    }
 
    // Returns true if it changed the data.
@@ -8441,16 +8146,16 @@ namespace
             if (device->create_resource(upgraded_desc, new_initial_data_ptr, initial_state, &mirrored_upgraded_resource))
             {
                lock.lock();
-               device_data.original_resources_to_mirrored_upgraded_resources.emplace(resource.handle, DeviceData::IndirectUpgradedResource{ mirrored_upgraded_resource.handle, false, desc.texture.width, desc.texture.height, upgraded_desc.texture.width, upgraded_desc.texture.height });
+               device_data.resource_upgrades.original_resources_to_mirrored_upgraded_resources.emplace(resource.handle, ResourceUpgradeManager::IndirectUpgradedResource{ mirrored_upgraded_resource.handle, false, desc.texture.width, desc.texture.height, upgraded_desc.texture.width, upgraded_desc.texture.height });
             }
             if (new_initial_data_ptr)
                delete[] static_cast<uint8_t*>(new_initial_data_ptr->data);
          }
          else
          {
-            device_data.upgraded_resources.emplace(resource.handle);
+            device_data.resource_upgrades.upgraded_resources.emplace(resource.handle);
 #if DEVELOPMENT
-            device_data.original_upgraded_resources_formats[resource.handle] = last_attempted_upgraded_resource_creation_format;
+            device_data.resource_upgrades.original_upgraded_resources_formats[resource.handle] = last_attempted_upgraded_resource_creation_format;
 #endif
          }
          waiting_on_upgraded_resource_init = false;
@@ -8568,43 +8273,43 @@ namespace
       if (&device_data == nullptr)
          return;
       std::unique_lock lock(device_data.mutex);
-      auto original_resource_to_mirrored_upgraded_resource = device_data.original_resources_to_mirrored_upgraded_resources.find(resource.handle);
-      if (original_resource_to_mirrored_upgraded_resource != device_data.original_resources_to_mirrored_upgraded_resources.end())
+      auto original_resource_to_mirrored_upgraded_resource = device_data.resource_upgrades.original_resources_to_mirrored_upgraded_resources.find(resource.handle);
+      if (original_resource_to_mirrored_upgraded_resource != device_data.resource_upgrades.original_resources_to_mirrored_upgraded_resources.end())
       {
          const auto original_resource_to_mirrored_upgraded_resource_ptr = original_resource_to_mirrored_upgraded_resource->second.mirror_handle;
-         device_data.original_resources_to_mirrored_upgraded_resources.erase(original_resource_to_mirrored_upgraded_resource);
+         device_data.resource_upgrades.original_resources_to_mirrored_upgraded_resources.erase(original_resource_to_mirrored_upgraded_resource);
 
          // Invalidate stale view mappings for this mirror while the lock is held.
          std::vector<uint64_t> unlinked_mirror_views;
-         if (auto mirror_views_it = device_data.mirror_views_by_mirror_resource.find(original_resource_to_mirrored_upgraded_resource_ptr); mirror_views_it != device_data.mirror_views_by_mirror_resource.end())
+         if (auto mirror_views_it = device_data.resource_upgrades.mirror_views_by_mirror_resource.find(original_resource_to_mirrored_upgraded_resource_ptr); mirror_views_it != device_data.resource_upgrades.mirror_views_by_mirror_resource.end())
          {
             const auto& mirror_views = mirror_views_it->second;
-            for (auto view_map_it = device_data.original_resource_views_to_mirrored_upgraded_resource_views.begin(); view_map_it != device_data.original_resource_views_to_mirrored_upgraded_resource_views.end();)
+            for (auto view_map_it = device_data.resource_upgrades.original_resource_views_to_mirrored_upgraded_resource_views.begin(); view_map_it != device_data.resource_upgrades.original_resource_views_to_mirrored_upgraded_resource_views.end();)
             {
                if (mirror_views.contains(view_map_it->second))
                {
                   unlinked_mirror_views.push_back(view_map_it->second);
-                  device_data.mirror_views_to_mirror_resources.erase(view_map_it->second);
-                  view_map_it = device_data.original_resource_views_to_mirrored_upgraded_resource_views.erase(view_map_it);
+                  device_data.resource_upgrades.mirror_views_to_mirror_resources.erase(view_map_it->second);
+                  view_map_it = device_data.resource_upgrades.original_resource_views_to_mirrored_upgraded_resource_views.erase(view_map_it);
                }
                else
                {
                   ++view_map_it;
                }
             }
-            device_data.mirror_views_by_mirror_resource.erase(mirror_views_it);
+            device_data.resource_upgrades.mirror_views_by_mirror_resource.erase(mirror_views_it);
          }
 
          // Defer freeing to present: the mirror may still be in flight in hooks or bound on recorded lists.
          for (const uint64_t unlinked_mirror_view : unlinked_mirror_views)
          {
-            device_data.pending_mirror_view_destructions.push_back({ unlinked_mirror_view });
+            device_data.resource_upgrades.pending_mirror_view_destructions.push_back({ unlinked_mirror_view });
          }
-         device_data.pending_mirror_resource_destructions.push_back({ original_resource_to_mirrored_upgraded_resource_ptr });
+         device_data.resource_upgrades.pending_mirror_resource_destructions.push_back({ original_resource_to_mirrored_upgraded_resource_ptr });
       }
-      device_data.upgraded_resources.erase(resource.handle);
+      device_data.resource_upgrades.upgraded_resources.erase(resource.handle);
 #if DEVELOPMENT
-      device_data.original_upgraded_resources_formats.erase(resource.handle);
+      device_data.resource_upgrades.original_upgraded_resources_formats.erase(resource.handle);
 #endif // DEVELOPMENT
 
       // TODO: thread safe
@@ -8677,9 +8382,9 @@ namespace
          {
 #if DEVELOPMENT
             last_attempted_upgraded_resource_view_creation_view_format = desc.format;
-            if (last_attempted_upgraded_resource_view_creation_view_format == reshade::api::format::unknown && device_data.original_upgraded_resources_formats.contains(resource.handle))
+            if (last_attempted_upgraded_resource_view_creation_view_format == reshade::api::format::unknown && device_data.resource_upgrades.original_upgraded_resources_formats.contains(resource.handle))
             {
-               last_attempted_upgraded_resource_view_creation_view_format = device_data.original_upgraded_resources_formats[resource.handle];
+               last_attempted_upgraded_resource_view_creation_view_format = device_data.resource_upgrades.original_upgraded_resources_formats[resource.handle];
             }
 #endif // DEVELOPMENT
 
@@ -8747,22 +8452,22 @@ namespace
             case reshade::api::format::unknown:
             {
                // Happens when the call didn't provide a "DESC", creating a default view (because if we reached here, the texture is 16bpc float)
-               ASSERT_ONCE(device_data.upgraded_resources.contains(resource.handle));
+               ASSERT_ONCE(device_data.resource_upgrades.upgraded_resources.contains(resource.handle));
                break;
             }
             }
          }
 #endif
 
-         if (device_data.upgraded_resources.contains(resource.handle))
+         if (device_data.resource_upgrades.upgraded_resources.contains(resource.handle))
          {
 #if DEVELOPMENT
             last_attempted_upgraded_resource_view_creation_view_format = desc.format;
             // Note: if it's unknown, it usually means the game wanted to auto create a view. But it could also mean they dynamically created views based on the current resource format, and that code failed to find a valid view format for upgraded textures,
             // however if that was the case, it'd be hard to explain why all games still create resources even when upgrading textures.
-            if (last_attempted_upgraded_resource_view_creation_view_format == reshade::api::format::unknown && device_data.original_upgraded_resources_formats.contains(resource.handle))
+            if (last_attempted_upgraded_resource_view_creation_view_format == reshade::api::format::unknown && device_data.resource_upgrades.original_upgraded_resources_formats.contains(resource.handle))
             {
-               last_attempted_upgraded_resource_view_creation_view_format = device_data.original_upgraded_resources_formats[resource.handle];
+               last_attempted_upgraded_resource_view_creation_view_format = device_data.resource_upgrades.original_upgraded_resources_formats[resource.handle];
             }
 #endif // DEVELOPMENT
 
@@ -8796,9 +8501,9 @@ namespace
       const std::shared_lock lock(device_data.mutex);
       if (desc.format != upgraded_format)
       {
-         ASSERT_ONCE(!device_data.upgraded_resources.contains(resource.handle)); // Why did we get here in this case?
+         ASSERT_ONCE(!device_data.resource_upgrades.upgraded_resources.contains(resource.handle)); // Why did we get here in this case?
       }
-      if (device_data.upgraded_resources.contains(resource.handle))
+      if (device_data.resource_upgrades.upgraded_resources.contains(resource.handle))
       {
          ID3D11Resource* native_resource = reinterpret_cast<ID3D11Resource*>(resource.handle);
          ID3D11Texture2D* texture_2d = nullptr;
@@ -8845,9 +8550,9 @@ namespace
             texture_1d->Release();
 
          last_attempted_upgraded_resource_view_creation_view_format = desc.format;
-         if (last_attempted_upgraded_resource_view_creation_view_format == reshade::api::format::unknown && device_data.original_upgraded_resources_formats.contains(resource.handle))
+         if (last_attempted_upgraded_resource_view_creation_view_format == reshade::api::format::unknown && device_data.resource_upgrades.original_upgraded_resources_formats.contains(resource.handle))
          {
-            last_attempted_upgraded_resource_view_creation_view_format = device_data.original_upgraded_resources_formats[resource.handle];
+            last_attempted_upgraded_resource_view_creation_view_format = device_data.resource_upgrades.original_upgraded_resources_formats[resource.handle];
          }
          if (desc.type == reshade::api::resource_view_type::unknown)
          {
@@ -8886,21 +8591,21 @@ namespace
 
       // Cache the view -> resource mapping so the draw/descriptor/destroy paths never need a device call
       // (get_resource_from_view) while holding the luma mutex.
-      device_data.original_views_to_resources[view.handle] = resource.handle;
+      device_data.resource_upgrades.original_views_to_resources[view.handle] = resource.handle;
 
 #if DEVELOPMENT
-      if (device_data.original_upgraded_resources_formats.contains(resource.handle))
+      if (device_data.resource_upgrades.original_upgraded_resources_formats.contains(resource.handle))
       {
          // Only the last attempted creation would matter
-         device_data.original_upgraded_resource_views_formats.emplace(
+         device_data.resource_upgrades.original_upgraded_resource_views_formats.emplace(
             view.handle, // Key
             std::make_pair(resource.handle, last_attempted_upgraded_resource_view_creation_view_format) // Value
          );
       }
 #endif
 
-      auto original_resource_to_mirrored_upgraded_resource = device_data.original_resources_to_mirrored_upgraded_resources.find(resource.handle);
-      if (original_resource_to_mirrored_upgraded_resource != device_data.original_resources_to_mirrored_upgraded_resources.end())
+      auto original_resource_to_mirrored_upgraded_resource = device_data.resource_upgrades.original_resources_to_mirrored_upgraded_resources.find(resource.handle);
+      if (original_resource_to_mirrored_upgraded_resource != device_data.resource_upgrades.original_resources_to_mirrored_upgraded_resources.end())
       {
          const auto original_resource_to_mirrored_upgraded_resource_ptr = original_resource_to_mirrored_upgraded_resource->second.mirror_handle;
          lock.unlock(); // Avoids deadlocks with the device
@@ -8915,9 +8620,9 @@ namespace
          if (device->create_resource_view({original_resource_to_mirrored_upgraded_resource_ptr}, usage_type, upgraded_desc, &mirrored_upgraded_resource_view))
          {
             lock.lock();
-            device_data.original_resource_views_to_mirrored_upgraded_resource_views[view.handle] = mirrored_upgraded_resource_view.handle;
-            device_data.mirror_views_by_mirror_resource[original_resource_to_mirrored_upgraded_resource_ptr].emplace(mirrored_upgraded_resource_view.handle);
-            device_data.mirror_views_to_mirror_resources[mirrored_upgraded_resource_view.handle] = original_resource_to_mirrored_upgraded_resource_ptr;
+            device_data.resource_upgrades.original_resource_views_to_mirrored_upgraded_resource_views[view.handle] = mirrored_upgraded_resource_view.handle;
+            device_data.resource_upgrades.mirror_views_by_mirror_resource[original_resource_to_mirrored_upgraded_resource_ptr].emplace(mirrored_upgraded_resource_view.handle);
+            device_data.resource_upgrades.mirror_views_to_mirror_resources[mirrored_upgraded_resource_view.handle] = original_resource_to_mirrored_upgraded_resource_ptr;
          }
       }
    }
@@ -8936,34 +8641,34 @@ namespace
       std::unique_lock lock(device_data.mutex);
 
 #if DEVELOPMENT
-      device_data.original_upgraded_resource_views_formats.erase(view.handle);
+      device_data.resource_upgrades.original_upgraded_resource_views_formats.erase(view.handle);
 #endif
-      device_data.original_views_to_resources.erase(view.handle);
+      device_data.resource_upgrades.original_views_to_resources.erase(view.handle);
 
-      auto original_resource_view_to_mirrored_upgraded_resource_view = device_data.original_resource_views_to_mirrored_upgraded_resource_views.find(view.handle);
-      if (original_resource_view_to_mirrored_upgraded_resource_view != device_data.original_resource_views_to_mirrored_upgraded_resource_views.end())
+      auto original_resource_view_to_mirrored_upgraded_resource_view = device_data.resource_upgrades.original_resource_views_to_mirrored_upgraded_resource_views.find(view.handle);
+      if (original_resource_view_to_mirrored_upgraded_resource_view != device_data.resource_upgrades.original_resource_views_to_mirrored_upgraded_resource_views.end())
       {
          const auto mirrored_upgraded_resource_view = original_resource_view_to_mirrored_upgraded_resource_view->second;
-         device_data.original_resource_views_to_mirrored_upgraded_resource_views.erase(original_resource_view_to_mirrored_upgraded_resource_view);
+         device_data.resource_upgrades.original_resource_views_to_mirrored_upgraded_resource_views.erase(original_resource_view_to_mirrored_upgraded_resource_view);
          // No device call (get_resource_from_view) under the luma lock: this callback runs inside the D3D11
          // runtime's final Release (destruction notifier) on an arbitrary thread, so taking the luma lock here and
          // then calling back into the runtime inverts the lock order vs the draw path (which holds the shared luma
          // lock while making device calls) and can deadlock. The mirror resource handle is cached at insert time.
          reshade::api::resource mirror_resource;
          mirror_resource.handle = 0;
-         if (auto mirror_res_it = device_data.mirror_views_to_mirror_resources.find(mirrored_upgraded_resource_view); mirror_res_it != device_data.mirror_views_to_mirror_resources.end())
+         if (auto mirror_res_it = device_data.resource_upgrades.mirror_views_to_mirror_resources.find(mirrored_upgraded_resource_view); mirror_res_it != device_data.resource_upgrades.mirror_views_to_mirror_resources.end())
          {
             mirror_resource.handle = mirror_res_it->second;
-            device_data.mirror_views_to_mirror_resources.erase(mirror_res_it);
+            device_data.resource_upgrades.mirror_views_to_mirror_resources.erase(mirror_res_it);
          }
-         if (auto mirror_views_it = device_data.mirror_views_by_mirror_resource.find(mirror_resource.handle); mirror_views_it != device_data.mirror_views_by_mirror_resource.end())
+         if (auto mirror_views_it = device_data.resource_upgrades.mirror_views_by_mirror_resource.find(mirror_resource.handle); mirror_views_it != device_data.resource_upgrades.mirror_views_by_mirror_resource.end())
          {
             mirror_views_it->second.erase(mirrored_upgraded_resource_view);
             if (mirror_views_it->second.empty())
-               device_data.mirror_views_by_mirror_resource.erase(mirror_views_it);
+               device_data.resource_upgrades.mirror_views_by_mirror_resource.erase(mirror_views_it);
          }
          // Defer freeing to present: the mirror view may still be in flight. See OnDestroyResource.
-         device_data.pending_mirror_view_destructions.push_back({ mirrored_upgraded_resource_view });
+         device_data.resource_upgrades.pending_mirror_view_destructions.push_back({ mirrored_upgraded_resource_view });
       }
    }
 
@@ -9030,11 +8735,24 @@ namespace
 
                bool upgraded = replaced;
                // Also track direct upgrades, even if this is often useful, as if we have any, generally any of their render targets would automatically get upgraded, however that's not always the case in case we missed some formats, or in case we only upgrade the swapchain and it's read back (e.g. UE reads it back to do UI background blurring).
-               if (device_data.upgraded_resources.contains(original_resource.handle) || (swapchain_upgrade_type > SwapchainUpgradeType::None && device_data.back_buffers.contains(original_resource.handle)))
+               if (device_data.resource_upgrades.upgraded_resources.contains(original_resource.handle) || (swapchain_upgrade_type > SwapchainUpgradeType::None && device_data.back_buffers.contains(original_resource.handle)))
                {
                   upgraded = true;
                }
                any_upgraded |= upgraded;
+
+#if DEVELOPMENT
+               if (trace_running && original_resource.handle != 0 && device_data.resource_upgrades.HasMirror(original_resource.handle))
+               {
+                  // Diagnostic: a downstream shader is binding an SRV of a mirrored resource (e.g. the TAA
+                  // seed output). Log whether it was recognized as upgraded (which drives chain propagation).
+                  char buf[192];
+                  std::snprintf(buf, sizeof(buf), "[LumaScale] SRV bind of mirrored res=%llx replaced=%d upgraded=%d is_scaled=%d",
+                     (unsigned long long)original_resource.handle, replaced ? 1 : 0, upgraded ? 1 : 0,
+                     device_data.resource_upgrades.IsScaledMirrorResource(original_resource.handle) ? 1 : 0);
+                  reshade::log::message(reshade::log::level::info, buf);
+               }
+#endif
 
                // TODO: set these as upgraded even if we used direct texture upgrades? It's not really needed as the only purpose of these is to do chain upgrades, which are already handled with direct texture upgrades (then, if so, rename the variables to "*_indirect_upgrades_*")
                // Note: if the game somehow read back a previously upgraded SRV and re-set it, we'd miss it here (we don't check for that yet, it's "slow")
@@ -9357,8 +9075,8 @@ namespace
       bool needs_conversion = false;
       {
          const std::shared_lock lock(device_data.mutex);
-         needs_downgrade = device_data.upgraded_resources.contains(resource.handle); // TODO: also check the swapchain for stuff like this... We should add it to this list!
-         needs_conversion = needs_downgrade || device_data.original_resources_to_mirrored_upgraded_resources.contains(resource.handle);
+         needs_downgrade = device_data.resource_upgrades.upgraded_resources.contains(resource.handle); // TODO: also check the swapchain for stuff like this... We should add it to this list!
+         needs_conversion = needs_downgrade || device_data.resource_upgrades.original_resources_to_mirrored_upgraded_resources.contains(resource.handle);
       }
       // If this happened, we need to upgrade the data passed in to match the new format!
       // This happens in Dishonored 2 and Thief on boot, to update videos or splash screens.
@@ -9396,8 +9114,8 @@ namespace
          uint64_t indirect_upgraded_resource = 0;
          {
             const std::shared_lock lock(device_data.mutex);
-            direct_upgraded = device_data.upgraded_resources.contains(resource.handle);
-            indirect_upgraded_resource = MapFindOrDefaultValue(device_data.original_resources_to_mirrored_upgraded_resources, resource.handle, DeviceData::IndirectUpgradedResource{}).mirror_handle; // The indirect upgraded resource is guaranteed to be kept alive if the base one also is
+            direct_upgraded = device_data.resource_upgrades.upgraded_resources.contains(resource.handle);
+            indirect_upgraded_resource = MapFindOrDefaultValue(device_data.resource_upgrades.original_resources_to_mirrored_upgraded_resources, resource.handle, ResourceUpgradeManager::IndirectUpgradedResource{}).mirror_handle; // The indirect upgraded resource is guaranteed to be kept alive if the base one also is
          }
 
          // If we have an indirect upgrade, create an upgraded version of the data and map it in the indirect upgraded texture
@@ -9426,9 +9144,9 @@ namespace
 #if DEVELOPMENT
             {
                const std::shared_lock lock(device_data.mutex);
-               if (device_data.original_upgraded_resources_formats.contains(resource.handle))
+               if (device_data.resource_upgrades.original_upgraded_resources_formats.contains(resource.handle))
                {
-                  original_desc.texture.format = device_data.original_upgraded_resources_formats[resource.handle];
+                  original_desc.texture.format = device_data.resource_upgrades.original_upgraded_resources_formats[resource.handle];
                   ASSERT_ONCE(original_desc.texture.format == reshade::api::format::r8g8b8a8_unorm); // Cache "original_upgraded_resources_formats" outside of development too if this happens! It probably will at some point!
                }
             }
@@ -9494,7 +9212,7 @@ namespace
       reshade::api::resource_desc upgraded_desc;
       {
          std::shared_lock lock_device_read(device_data.mutex);
-         if (device_data.upgraded_resources.contains(resource.handle)) // This cannot be a swapchain texture, they can't be written by the CPU
+         if (device_data.resource_upgrades.upgraded_resources.contains(resource.handle)) // This cannot be a swapchain texture, they can't be written by the CPU
          {
             lock_device_read.unlock(); // Avoid deadlocks with device
             upgraded_desc = device->get_resource_desc(resource);
@@ -9503,16 +9221,16 @@ namespace
             // TODO: stop randomly guessing the format and actually cache it aside! Note that some games might dynamically pre-convert the data to match the upgraded target format, however, that's unlikely
             original_desc.texture.format = reshade::api::format::r8g8b8a8_unorm;
 #if DEVELOPMENT
-            if (device_data.original_upgraded_resources_formats.contains(resource.handle))
+            if (device_data.resource_upgrades.original_upgraded_resources_formats.contains(resource.handle))
             {
-               original_desc.texture.format = device_data.original_upgraded_resources_formats[resource.handle];
+               original_desc.texture.format = device_data.resource_upgrades.original_upgraded_resources_formats[resource.handle];
                ASSERT_ONCE(original_desc.texture.format == reshade::api::format::r8g8b8a8_unorm); // Cache "original_upgraded_resources_formats" outside of development too if this happens! It probably will at some point!
             }
 #endif
             convert_data = true;
          }
-         auto original_resource_to_mirrored_upgraded_resource = device_data.original_resources_to_mirrored_upgraded_resources.find(resource.handle);
-         if (!ignore_indirect_upgraded_textures && original_resource_to_mirrored_upgraded_resource != device_data.original_resources_to_mirrored_upgraded_resources.end())
+         auto original_resource_to_mirrored_upgraded_resource = device_data.resource_upgrades.original_resources_to_mirrored_upgraded_resources.find(resource.handle);
+         if (!ignore_indirect_upgraded_textures && original_resource_to_mirrored_upgraded_resource != device_data.resource_upgrades.original_resources_to_mirrored_upgraded_resources.end())
          {
             const auto original_resource_to_mirrored_upgraded_resource_ptr = original_resource_to_mirrored_upgraded_resource->second.mirror_handle;
             lock_device_read.unlock(); // Avoid deadlocks with device
@@ -9563,8 +9281,8 @@ namespace
       
       DeviceData& device_data = *cmd_list->get_device()->get_private_data<DeviceData>();
       std::shared_lock lock(device_data.mutex);
-      auto original_resource_view_to_mirrored_upgraded_resource_view = device_data.original_resource_views_to_mirrored_upgraded_resource_views.find(dsv.handle);
-      if (!ignore_indirect_upgraded_textures && original_resource_view_to_mirrored_upgraded_resource_view != device_data.original_resource_views_to_mirrored_upgraded_resource_views.end())
+      auto original_resource_view_to_mirrored_upgraded_resource_view = device_data.resource_upgrades.original_resource_views_to_mirrored_upgraded_resource_views.find(dsv.handle);
+      if (!ignore_indirect_upgraded_textures && original_resource_view_to_mirrored_upgraded_resource_view != device_data.resource_upgrades.original_resource_views_to_mirrored_upgraded_resource_views.end())
       {
          const auto original_resource_view_to_mirrored_upgraded_resource_view_ptr = original_resource_view_to_mirrored_upgraded_resource_view->second;
          lock.unlock(); // Avoids deadlock with the device
@@ -9604,8 +9322,8 @@ namespace
 
       DeviceData& device_data = *cmd_list->get_device()->get_private_data<DeviceData>();
       std::shared_lock lock(device_data.mutex);
-      auto original_resource_view_to_mirrored_upgraded_resource_view = device_data.original_resource_views_to_mirrored_upgraded_resource_views.find(rtv.handle);
-      if (!ignore_indirect_upgraded_textures && original_resource_view_to_mirrored_upgraded_resource_view != device_data.original_resource_views_to_mirrored_upgraded_resource_views.end())
+      auto original_resource_view_to_mirrored_upgraded_resource_view = device_data.resource_upgrades.original_resource_views_to_mirrored_upgraded_resource_views.find(rtv.handle);
+      if (!ignore_indirect_upgraded_textures && original_resource_view_to_mirrored_upgraded_resource_view != device_data.resource_upgrades.original_resource_views_to_mirrored_upgraded_resource_views.end())
       {
          const auto original_resource_view_to_mirrored_upgraded_resource_view_ptr = original_resource_view_to_mirrored_upgraded_resource_view->second;
          lock.unlock(); // Avoids deadlock with the device
@@ -9645,8 +9363,8 @@ namespace
 
       DeviceData& device_data = *cmd_list->get_device()->get_private_data<DeviceData>();
       std::shared_lock lock(device_data.mutex);
-      auto original_resource_view_to_mirrored_upgraded_resource_view = device_data.original_resource_views_to_mirrored_upgraded_resource_views.find(uav.handle);
-      if (!ignore_indirect_upgraded_textures && original_resource_view_to_mirrored_upgraded_resource_view != device_data.original_resource_views_to_mirrored_upgraded_resource_views.end())
+      auto original_resource_view_to_mirrored_upgraded_resource_view = device_data.resource_upgrades.original_resource_views_to_mirrored_upgraded_resource_views.find(uav.handle);
+      if (!ignore_indirect_upgraded_textures && original_resource_view_to_mirrored_upgraded_resource_view != device_data.resource_upgrades.original_resource_views_to_mirrored_upgraded_resource_views.end())
       {
          const auto original_resource_view_to_mirrored_upgraded_resource_view_ptr = original_resource_view_to_mirrored_upgraded_resource_view->second;
          lock.unlock(); // Avoids deadlock with the device
@@ -9698,8 +9416,8 @@ namespace
 
       DeviceData& device_data = *cmd_list->get_device()->get_private_data<DeviceData>();
       std::shared_lock lock(device_data.mutex);
-      auto original_resource_view_to_mirrored_upgraded_resource_view = device_data.original_resource_views_to_mirrored_upgraded_resource_views.find(uav.handle);
-      if (!ignore_indirect_upgraded_textures && original_resource_view_to_mirrored_upgraded_resource_view != device_data.original_resource_views_to_mirrored_upgraded_resource_views.end())
+      auto original_resource_view_to_mirrored_upgraded_resource_view = device_data.resource_upgrades.original_resource_views_to_mirrored_upgraded_resource_views.find(uav.handle);
+      if (!ignore_indirect_upgraded_textures && original_resource_view_to_mirrored_upgraded_resource_view != device_data.resource_upgrades.original_resource_views_to_mirrored_upgraded_resource_views.end())
       {
          const auto original_resource_view_to_mirrored_upgraded_resource_view_ptr = original_resource_view_to_mirrored_upgraded_resource_view->second;
          lock.unlock(); // Avoids deadlock with the device
@@ -9749,7 +9467,7 @@ namespace
       std::shared_lock device_read_lock(device_data.mutex);
       // Skip if none of the resources match our upgraded ones.
       // This should always be fine, unless the game used the upgraded resource desc to automatically determine other textures (so we try to catch for that in development)
-      if (!forced && !device_data.upgraded_resources.contains(source.handle) && !device_data.upgraded_resources.contains(dest.handle) && (swapchain_upgrade_type == SwapchainUpgradeType::None || (!device_data.back_buffers.contains(source.handle) && !device_data.back_buffers.contains(dest.handle))))
+      if (!forced && !device_data.resource_upgrades.upgraded_resources.contains(source.handle) && !device_data.resource_upgrades.upgraded_resources.contains(dest.handle) && (swapchain_upgrade_type == SwapchainUpgradeType::None || (!device_data.back_buffers.contains(source.handle) && !device_data.back_buffers.contains(dest.handle))))
       {
 #if !DEVELOPMENT
          return false;
@@ -9783,7 +9501,11 @@ namespace
                   return false;
                // Only scale when the hash-upgrade scale chain is active; otherwise this is the game's own
                // intentional different-size copy and must pass through untouched.
-               if (!IsScaleChainActive(device_data))
+               // Note: the seed mirror is created (and may be scaled) in the hash-upgrade block, which runs
+               // BEFORE the game's OnDrawOrDispatch executes SR and flips has_drawn_sr. So also treat a copy
+               // as scaleable when either resource is a scaled mirror, so we don't mistake the scaled seed
+               // (or a chain resource derived from it) for the game's own different-size copy.
+               if (!IsScaleChainActive(device_data) && !device_data.resource_upgrades.IsScaledMirrorResource(source.handle) && !device_data.resource_upgrades.IsScaledMirrorResource(dest.handle))
                   return false;
                use_scale = true;
             }
@@ -10176,7 +9898,7 @@ namespace
             ID3D11Resource* target_resource = reinterpret_cast<ID3D11Resource*>(dest.handle);
             DeviceData& device_data = *cmd_list->get_device()->get_private_data<DeviceData>();
             std::shared_lock lock_device_read(device_data.mutex);
-            if (enable_upgraded_texture_resource_copy_redirection && (device_data.upgraded_resources.contains(source.handle) || device_data.upgraded_resources.contains(dest.handle) || (swapchain_upgrade_type > SwapchainUpgradeType::None && (device_data.back_buffers.contains(source.handle) || device_data.back_buffers.contains(dest.handle)))))
+            if (enable_upgraded_texture_resource_copy_redirection && (device_data.resource_upgrades.upgraded_resources.contains(source.handle) || device_data.resource_upgrades.upgraded_resources.contains(dest.handle) || (swapchain_upgrade_type > SwapchainUpgradeType::None && (device_data.back_buffers.contains(source.handle) || device_data.back_buffers.contains(dest.handle)))))
             {
                lock_device_read.unlock(); // Avoid deadlocks with device
                ASSERT_ONCE(AreResourcesEqual(source_resource, target_resource)); // Note: this might catch some false positives too
@@ -10236,7 +9958,7 @@ namespace
             DeviceData& device_data = *cmd_list->get_device()->get_private_data<DeviceData>();
             std::shared_lock lock_device_read(device_data.mutex);
             // If any of the resources has been upgraded but the format specified by the game doesn't match, enforce the right format
-            if (device_data.upgraded_resources.contains(source.handle) || device_data.upgraded_resources.contains(dest.handle) || (swapchain_upgrade_type > SwapchainUpgradeType::None && device_data.back_buffers.contains(dest.handle)))
+            if (device_data.resource_upgrades.upgraded_resources.contains(source.handle) || device_data.resource_upgrades.upgraded_resources.contains(dest.handle) || (swapchain_upgrade_type > SwapchainUpgradeType::None && device_data.back_buffers.contains(dest.handle)))
             {
                lock_device_read.unlock(); // Avoid deadlocks with device
 
@@ -10270,7 +9992,7 @@ namespace
             ID3D11Resource* target_resource = reinterpret_cast<ID3D11Resource*>(dest.handle);
             DeviceData& device_data = *cmd_list->get_device()->get_private_data<DeviceData>();
             std::shared_lock lock_device_read(device_data.mutex);
-            if (enable_upgraded_texture_resource_copy_redirection && (device_data.upgraded_resources.contains(source.handle) || device_data.upgraded_resources.contains(dest.handle) || (swapchain_upgrade_type > SwapchainUpgradeType::None && (device_data.back_buffers.contains(source.handle) || device_data.back_buffers.contains(dest.handle)))))
+            if (enable_upgraded_texture_resource_copy_redirection && (device_data.resource_upgrades.upgraded_resources.contains(source.handle) || device_data.resource_upgrades.upgraded_resources.contains(dest.handle) || (swapchain_upgrade_type > SwapchainUpgradeType::None && (device_data.back_buffers.contains(source.handle) || device_data.back_buffers.contains(dest.handle)))))
             {
                lock_device_read.unlock(); // Avoid deadlocks with device
                ASSERT_ONCE(AreResourcesEqual(source_resource, target_resource)); // Note: this might catch some false positives too
@@ -12548,7 +12270,7 @@ namespace
                                           {
                                              const std::shared_lock lock(device_data.mutex);
                                              // TODO: store this information in the trace list, it might expire otherwise, or even be incorrect if ptrs were re-used. Also this info isn't shown if we use indirect texture upgrades.
-                                             for (auto upgraded_resource_pair : device_data.original_upgraded_resources_formats)
+                                             for (auto upgraded_resource_pair : device_data.resource_upgrades.original_upgraded_resources_formats)
                                              {
                                                 void* upgraded_resource_ptr = reinterpret_cast<void*>(upgraded_resource_pair.first);
                                                 if (sr_hash == std::to_string(std::hash<void*>{}(upgraded_resource_ptr)))
@@ -12557,7 +12279,7 @@ namespace
 
                                                    ImGui::Text("R Original Format: %s", GetFormatName(DXGI_FORMAT(upgraded_resource_pair.second)));
 
-                                                   if (const auto it = device_data.original_upgraded_resource_views_formats.find(reinterpret_cast<uint64_t>(draw_call_data.srvs[i])); it != device_data.original_upgraded_resource_views_formats.end())
+                                                   if (const auto it = device_data.resource_upgrades.original_upgraded_resource_views_formats.find(reinterpret_cast<uint64_t>(draw_call_data.srvs[i])); it != device_data.resource_upgrades.original_upgraded_resource_views_formats.end())
                                                    {
                                                       const auto& [native_resource, original_view_format] = it->second;
                                                       ASSERT_ONCE(native_resource == upgraded_resource_pair.first); // Uh!?
@@ -12584,7 +12306,7 @@ namespace
                                                    break;
                                                 }
                                              }
-                                             for (auto upgraded_resource_pair : device_data.original_resources_to_mirrored_upgraded_resources)
+                                             for (auto upgraded_resource_pair : device_data.resource_upgrades.original_resources_to_mirrored_upgraded_resources)
                                              {
                                                 void* upgraded_resource_ptr = reinterpret_cast<void*>(upgraded_resource_pair.first);
                                                 if (sr_hash == std::to_string(std::hash<void*>{}(upgraded_resource_ptr)))
@@ -12680,7 +12402,7 @@ namespace
                                           bool upgraded = false;
                                           {
                                              const std::shared_lock lock(device_data.mutex);
-                                             for (auto upgraded_resource_pair : device_data.original_upgraded_resources_formats)
+                                             for (auto upgraded_resource_pair : device_data.resource_upgrades.original_upgraded_resources_formats)
                                              {
                                                 void* upgraded_resource_ptr = reinterpret_cast<void*>(upgraded_resource_pair.first);
                                                 if (ua_hash == std::to_string(std::hash<void*>{}(upgraded_resource_ptr)))
@@ -12689,7 +12411,7 @@ namespace
 
                                                    ImGui::Text("R Original Format: %s", GetFormatName(DXGI_FORMAT(upgraded_resource_pair.second)));
 
-                                                   if (const auto it = device_data.original_upgraded_resource_views_formats.find(reinterpret_cast<uint64_t>(draw_call_data.uavs[i])); it != device_data.original_upgraded_resource_views_formats.end())
+                                                   if (const auto it = device_data.resource_upgrades.original_upgraded_resource_views_formats.find(reinterpret_cast<uint64_t>(draw_call_data.uavs[i])); it != device_data.resource_upgrades.original_upgraded_resource_views_formats.end())
                                                    {
                                                       const auto& [native_resource, original_view_format] = it->second;
                                                       ASSERT_ONCE(native_resource == upgraded_resource_pair.first); // Uh!?
@@ -12709,7 +12431,7 @@ namespace
                                                    break;
                                                 }
                                              }
-                                             for (auto upgraded_resource_pair : device_data.original_resources_to_mirrored_upgraded_resources)
+                                             for (auto upgraded_resource_pair : device_data.resource_upgrades.original_resources_to_mirrored_upgraded_resources)
                                              {
                                                 void* upgraded_resource_ptr = reinterpret_cast<void*>(upgraded_resource_pair.first);
                                                 if (ua_hash == std::to_string(std::hash<void*>{}(upgraded_resource_ptr)))
@@ -12841,7 +12563,7 @@ namespace
                                           {
                                              const std::shared_lock lock(device_data.mutex);
                                              // TODO: this is missing the "R is UAV" print
-                                             for (auto upgraded_resource_pair : device_data.original_upgraded_resources_formats)
+                                             for (auto upgraded_resource_pair : device_data.resource_upgrades.original_upgraded_resources_formats)
                                              {
                                                 void* upgraded_resource_ptr = reinterpret_cast<void*>(upgraded_resource_pair.first);
                                                 if (rt_hash == std::to_string(std::hash<void*>{}(upgraded_resource_ptr)))
@@ -12851,7 +12573,7 @@ namespace
                                                    ImGui::Text("R Original Format: %s", GetFormatName(DXGI_FORMAT(upgraded_resource_pair.second)));
 
                                                    // TODO: why does this flicker on and off in Deux Ex HR when it writes on the swapchain for material draws?
-                                                   if (const auto it = device_data.original_upgraded_resource_views_formats.find(reinterpret_cast<uint64_t>(draw_call_data.rtvs[i])); it != device_data.original_upgraded_resource_views_formats.end())
+                                                   if (const auto it = device_data.resource_upgrades.original_upgraded_resource_views_formats.find(reinterpret_cast<uint64_t>(draw_call_data.rtvs[i])); it != device_data.resource_upgrades.original_upgraded_resource_views_formats.end())
                                                    {
                                                       const auto& [native_resource, original_view_format] = it->second;
                                                       ASSERT_ONCE(native_resource == upgraded_resource_pair.first); // Uh!?
@@ -12871,7 +12593,7 @@ namespace
                                                    break;
                                                 }
                                              }
-                                             for (auto upgraded_resource_pair : device_data.original_resources_to_mirrored_upgraded_resources)
+                                             for (auto upgraded_resource_pair : device_data.resource_upgrades.original_resources_to_mirrored_upgraded_resources)
                                              {
                                                 void* upgraded_resource_ptr = reinterpret_cast<void*>(upgraded_resource_pair.first);
                                                 if (rt_hash == std::to_string(std::hash<void*>{}(upgraded_resource_ptr)))
@@ -13213,7 +12935,7 @@ namespace
                                           ImGui::Text("R Size: %ux%u", draw_call_data.ds_size.x, draw_call_data.ds_size.y); // Should match all the Render Targets size
                                           {
                                              const std::shared_lock lock(device_data.mutex);
-                                             for (uint64_t upgraded_resource : device_data.upgraded_resources)
+                                             for (uint64_t upgraded_resource : device_data.resource_upgrades.upgraded_resources)
                                              {
                                                 void* upgraded_resource_ptr = reinterpret_cast<void*>(upgraded_resource);
                                                 if (draw_call_data.ds_hash == std::to_string(std::hash<void*>{}(upgraded_resource_ptr)))
@@ -13222,7 +12944,7 @@ namespace
                                                    break;
                                                 }
                                              }
-                                             for (auto upgraded_resource_pair : device_data.original_resources_to_mirrored_upgraded_resources)
+                                             for (auto upgraded_resource_pair : device_data.resource_upgrades.original_resources_to_mirrored_upgraded_resources)
                                              {
                                                 void* upgraded_resource_ptr = reinterpret_cast<void*>(upgraded_resource_pair.first);
                                                 if (draw_call_data.ds_hash == std::to_string(std::hash<void*>{}(upgraded_resource_ptr)))
@@ -13346,7 +13068,7 @@ namespace
                                        ImGui::Text("Source R Format: %s", GetFormatName(sr_format));
                                     }
                                     ImGui::Text("Source R Size: %ux%ux%ux%u", sr_size.x, sr_size.y, sr_size.z, sr_size.w);
-                                    for (uint64_t upgraded_resource : device_data.upgraded_resources)
+                                    for (uint64_t upgraded_resource : device_data.resource_upgrades.upgraded_resources)
                                     {
                                        void* upgraded_resource_ptr = reinterpret_cast<void*>(upgraded_resource);
                                        if (sr_hash == std::to_string(std::hash<void*>{}(upgraded_resource_ptr)))
@@ -13356,7 +13078,7 @@ namespace
                                           break;
                                        }
                                     }
-                                    for (auto upgraded_resource_pair : device_data.original_resources_to_mirrored_upgraded_resources)
+                                    for (auto upgraded_resource_pair : device_data.resource_upgrades.original_resources_to_mirrored_upgraded_resources)
                                     {
                                        void* upgraded_resource_ptr = reinterpret_cast<void*>(upgraded_resource_pair.first);
                                        if (sr_hash == std::to_string(std::hash<void*>{}(upgraded_resource_ptr)))
@@ -13396,7 +13118,7 @@ namespace
                                        ImGui::Text("Target R Format: %u", rt_format);
                                     }
                                     ImGui::Text("Target R Size: %ux%ux%ux%u", rt_size.x, rt_size.y, rt_size.z, rt_size.w);
-                                    for (uint64_t upgraded_resource : device_data.upgraded_resources)
+                                    for (uint64_t upgraded_resource : device_data.resource_upgrades.upgraded_resources)
                                     {
                                        void* upgraded_resource_ptr = reinterpret_cast<void*>(upgraded_resource);
                                        if (rt_hash == std::to_string(std::hash<void*>{}(upgraded_resource_ptr)))
@@ -13405,7 +13127,7 @@ namespace
                                           break;
                                        }
                                     }
-                                    for (auto upgraded_resource_pair : device_data.original_resources_to_mirrored_upgraded_resources)
+                                    for (auto upgraded_resource_pair : device_data.resource_upgrades.original_resources_to_mirrored_upgraded_resources)
                                     {
                                        void* upgraded_resource_ptr = reinterpret_cast<void*>(upgraded_resource_pair.first);
                                        if (rt_hash == std::to_string(std::hash<void*>{}(upgraded_resource_ptr)))
@@ -13958,8 +13680,8 @@ namespace
                   const std::shared_lock lock(device_data.mutex); // Note: this is probably not 100% safe, as we don't keep the resources as a com ptr, DX might destroy them as we iterate the array, but this is debug code so, whatever!
 
                   // TODO: add all resources (textures), including non upgraded ones, swapchain (we couldn't draw debug that one!) etc
-                  std::unordered_set<uint64_t> upgraded_resources = device_data.upgraded_resources;
-                  for (const auto& original_resource_to_mirrored_upgraded_resource : device_data.original_resources_to_mirrored_upgraded_resources)
+                  std::unordered_set<uint64_t> upgraded_resources = device_data.resource_upgrades.upgraded_resources;
+                  for (const auto& original_resource_to_mirrored_upgraded_resource : device_data.resource_upgrades.original_resources_to_mirrored_upgraded_resources)
                   {
                      upgraded_resources.insert(original_resource_to_mirrored_upgraded_resource.second.mirror_handle);
                   }
@@ -13984,7 +13706,7 @@ namespace
                      auto text_color = IM_COL32(255, 255, 255, 255); // White
 
                      bool swapchain = device_data.back_buffers.contains(upgraded_resource);
-                     bool direct_upgraded = device_data.upgraded_resources.contains(upgraded_resource) || swapchain;
+                     bool direct_upgraded = device_data.resource_upgrades.upgraded_resources.contains(upgraded_resource) || swapchain;
                      if (swapchain)
                      {
                         text_color = IM_COL32(0, 0, 255, 255); // Blue
@@ -14002,7 +13724,7 @@ namespace
                      std::string name = hash;
 
                      // Redirect the hash
-                     for (const auto& original_resource_to_mirrored_upgraded_resource : device_data.original_resources_to_mirrored_upgraded_resources)
+                     for (const auto& original_resource_to_mirrored_upgraded_resource : device_data.resource_upgrades.original_resources_to_mirrored_upgraded_resources)
                      {
                         if (original_resource_to_mirrored_upgraded_resource.second.mirror_handle == uint64_t(selected_resource.get()))
                         {
@@ -14027,7 +13749,7 @@ namespace
                      }
 
                      bool is_scaled = false;
-                     for (const auto& original_resource_to_mirrored_upgraded_resource : device_data.original_resources_to_mirrored_upgraded_resources)
+                     for (const auto& original_resource_to_mirrored_upgraded_resource : device_data.resource_upgrades.original_resources_to_mirrored_upgraded_resources)
                      {
                         if (original_resource_to_mirrored_upgraded_resource.second.mirror_handle == upgraded_resource && original_resource_to_mirrored_upgraded_resource.second.is_scaled)
                         {
@@ -14084,7 +13806,7 @@ namespace
                      swapchain = device_data.back_buffers.contains(uint64_t(selected_resource.get()));
 
                      // Redirect the hash to the indirect texture
-                     for (const auto& original_resource_to_mirrored_upgraded_resource : device_data.original_resources_to_mirrored_upgraded_resources)
+                     for (const auto& original_resource_to_mirrored_upgraded_resource : device_data.resource_upgrades.original_resources_to_mirrored_upgraded_resources)
                      {
                         if (original_resource_to_mirrored_upgraded_resource.second.mirror_handle == uint64_t(selected_resource.get()))
                         {
@@ -15487,18 +15209,18 @@ namespace
                      
                      // TODO: add a button to also re-create all of them live (we'd need some sort of tracking for that, or to temporarily white list all PS/CS shaders to automatically upgrade textures, or actually, we can just read the source texture and re-upgrade it if we keep them in the list)
                      std::unordered_map<uint64_t, uint64_t> original_resource_views_to_mirrored_upgraded_resource_views;
-                     std::unordered_map<uint64_t, DeviceData::IndirectUpgradedResource> original_resources_to_mirrored_upgraded_resources;
+                     std::unordered_map<uint64_t, ResourceUpgradeManager::IndirectUpgradedResource> original_resources_to_mirrored_upgraded_resources;
                      std::shared_lock lock_device_read(device_data.mutex);
-                     if (!device_data.original_resources_to_mirrored_upgraded_resources.empty() && ImGui::Button("Clear Indirect Upgraded Textures"))
+                     if (!device_data.resource_upgrades.original_resources_to_mirrored_upgraded_resources.empty() && ImGui::Button("Clear Indirect Upgraded Textures"))
                      {
                         lock_device_read.unlock();
                         {
                            std::unique_lock lock_device_write(device_data.mutex);
-                           original_resource_views_to_mirrored_upgraded_resource_views = device_data.original_resource_views_to_mirrored_upgraded_resource_views;
-                           original_resources_to_mirrored_upgraded_resources = device_data.original_resources_to_mirrored_upgraded_resources;
-                           device_data.original_resource_views_to_mirrored_upgraded_resource_views.clear();
-                           device_data.original_resources_to_mirrored_upgraded_resources.clear();
-                           device_data.mirror_views_by_mirror_resource.clear();
+                           original_resource_views_to_mirrored_upgraded_resource_views = device_data.resource_upgrades.original_resource_views_to_mirrored_upgraded_resource_views;
+                           original_resources_to_mirrored_upgraded_resources = device_data.resource_upgrades.original_resources_to_mirrored_upgraded_resources;
+                           device_data.resource_upgrades.original_resource_views_to_mirrored_upgraded_resource_views.clear();
+                           device_data.resource_upgrades.original_resources_to_mirrored_upgraded_resources.clear();
+                           device_data.resource_upgrades.mirror_views_by_mirror_resource.clear();
                         }
                         for (const auto& original_resource_view_to_mirrored_upgraded_resource_view : original_resource_views_to_mirrored_upgraded_resource_views)
                         {
@@ -15510,9 +15232,9 @@ namespace
                         }
                      }
                      // Make sure there's no views if there's no textures, something would be wrong otherwise
-                     else if (device_data.original_resources_to_mirrored_upgraded_resources.empty())
+                     else if (device_data.resource_upgrades.original_resources_to_mirrored_upgraded_resources.empty())
                      {
-                        ASSERT_ONCE(device_data.original_resource_views_to_mirrored_upgraded_resource_views.empty());
+                        ASSERT_ONCE(device_data.resource_upgrades.original_resource_views_to_mirrored_upgraded_resource_views.empty());
                      }
                   }
                }
@@ -16071,11 +15793,11 @@ namespace
 
 #if !GRAPHICS_ANALYZER
                ImGui::Text("Direct Upgraded Textures: ", "");
-               text = std::to_string((int)device_data.upgraded_resources.size());
+               text = std::to_string((int)device_data.resource_upgrades.upgraded_resources.size());
                ImGui::Text(text.c_str(), "");
 
                ImGui::Text("Indirect Upgraded Textures: ", "");
-               text = std::to_string((int)device_data.original_resources_to_mirrored_upgraded_resources.size());
+               text = std::to_string((int)device_data.resource_upgrades.original_resources_to_mirrored_upgraded_resources.size());
                ImGui::Text(text.c_str(), "");
 
                ImGui::NewLine();

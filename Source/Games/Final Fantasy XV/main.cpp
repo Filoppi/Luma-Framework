@@ -1003,9 +1003,9 @@ public:
                   const std::unique_lock lock_trace_2(cmd_list_data.mutex_trace);
                   const std::lock_guard<std::recursive_mutex> lock_dumping(s_mutex_dumping);
                   const std::shared_lock lock_device(device_data.mutex);
-                  AddTraceDrawCallData(cmd_list_data.trace_draw_calls_data, device_data, native_device_context, cmd_list_data.pipeline_state_original_vertex_shader.handle, shader_cache, last_draw_dispatch_data, device_data.original_resource_views_to_mirrored_upgraded_resource_views);
+                  AddTraceDrawCallData(cmd_list_data.trace_draw_calls_data, device_data, native_device_context, cmd_list_data.pipeline_state_original_vertex_shader.handle, shader_cache, last_draw_dispatch_data, device_data.resource_upgrades.original_resource_views_to_mirrored_upgraded_resource_views);
                   if (cmd_list_data.pipeline_state_original_pixel_shader.handle != 0)
-                     AddTraceDrawCallData(cmd_list_data.trace_draw_calls_data, device_data, native_device_context, cmd_list_data.pipeline_state_original_pixel_shader.handle, shader_cache, last_draw_dispatch_data, device_data.original_resource_views_to_mirrored_upgraded_resource_views);
+                     AddTraceDrawCallData(cmd_list_data.trace_draw_calls_data, device_data, native_device_context, cmd_list_data.pipeline_state_original_pixel_shader.handle, shader_cache, last_draw_dispatch_data, device_data.resource_upgrades.original_resource_views_to_mirrored_upgraded_resource_views);
                }
             }
 #endif
@@ -1175,9 +1175,9 @@ public:
                   const std::unique_lock lock_trace_2(cmd_list_data.mutex_trace);
                   const std::lock_guard<std::recursive_mutex> lock_dumping(s_mutex_dumping);
                   const std::shared_lock lock_device(device_data.mutex);
-                  AddTraceDrawCallData(cmd_list_data.trace_draw_calls_data, device_data, native_device_context, cmd_list_data.pipeline_state_original_vertex_shader.handle, shader_cache, last_draw_dispatch_data, device_data.original_resource_views_to_mirrored_upgraded_resource_views);
+                  AddTraceDrawCallData(cmd_list_data.trace_draw_calls_data, device_data, native_device_context, cmd_list_data.pipeline_state_original_vertex_shader.handle, shader_cache, last_draw_dispatch_data, device_data.resource_upgrades.original_resource_views_to_mirrored_upgraded_resource_views);
                   if (cmd_list_data.pipeline_state_original_pixel_shader.handle != 0)
-                     AddTraceDrawCallData(cmd_list_data.trace_draw_calls_data, device_data, native_device_context, cmd_list_data.pipeline_state_original_pixel_shader.handle, shader_cache, last_draw_dispatch_data, device_data.original_resource_views_to_mirrored_upgraded_resource_views);
+                     AddTraceDrawCallData(cmd_list_data.trace_draw_calls_data, device_data, native_device_context, cmd_list_data.pipeline_state_original_pixel_shader.handle, shader_cache, last_draw_dispatch_data, device_data.resource_upgrades.original_resource_views_to_mirrored_upgraded_resource_views);
                }
             }
 #endif

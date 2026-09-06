@@ -21,6 +21,7 @@
 #include "managed_resources.h"
 #include "patch.hpp"
 #include "debug.h"
+#include "resource_upgrades.hpp"
 #if LUMA_USE_DXP
 #include "recipes.h"
 #endif
@@ -478,34 +479,10 @@ struct __declspec(uuid("cfebf6d4-d184-4e1a-ac14-09d088e560ca")) DeviceData
    uint64_t async_queue_version = 0;
 #endif // async providers
 
-   std::unordered_set<uint64_t> upgraded_resources; // All the directly upgraded resources, excluding the swapchains backbuffers, as they are created internally by DX
-#if DEVELOPMENT
-   std::unordered_map<uint64_t, reshade::api::format> original_upgraded_resources_formats; // Maps the original resource to its direct upgraded format. These include the swapchain buffers too!
-   std::unordered_map<uint64_t, std::pair<uint64_t, reshade::api::format>> original_upgraded_resource_views_formats; // All the views for direct upgraded resources, with the resource and the original resource view format
-#endif
-   struct IndirectUpgradedResource {
-      uint64_t mirror_handle = 0;
-      bool is_scaled = false;
-      uint32_t original_width = 0;
-      uint32_t original_height = 0;
-      uint32_t mirror_width = 0;
-      uint32_t mirror_height = 0;
-   };
-   std::unordered_map<uint64_t, IndirectUpgradedResource> original_resources_to_mirrored_upgraded_resources; // TODO: convert/copy the initial/current data from the source texture when created. Also rename to "indirect_upgraded"
-   std::unordered_map<uint64_t, uint64_t> original_resource_views_to_mirrored_upgraded_resource_views;
-   // Mirror views grouped by their mirror resource. Lets OnDestroyResource unlink a destroyed mirror's views by
-   // iterating only that mirror's (small) set with plain hash lookups, instead of scanning the whole view map with
-   // a device call (get_resource_from_view) per entry while holding the lock.
-   std::unordered_map<uint64_t, std::unordered_set<uint64_t>> mirror_views_by_mirror_resource;
-   // View handle -> resource handle caches, so the draw/descriptor/destroy paths never need a device call
-   // (get_resource_from_view) while holding the luma mutex (lock-order inversion vs D3D11 runtime locks taken in
-   // destruction-notifier callbacks). Populated in OnInitResourceView / at mirror-view insert sites.
-   std::unordered_map<uint64_t, uint64_t> original_views_to_resources;      // game view -> its resource
-   std::unordered_map<uint64_t, uint64_t> mirror_views_to_mirror_resources; // mirror view -> mirror resource
-   // Mirrors freed at present (frame boundary) instead of on original destruction, so in-flight
-   // hooks/game state can never dereference a freed mirror. Guarded by `mutex`.
-   std::vector<reshade::api::resource> pending_mirror_resource_destructions;
-   std::vector<reshade::api::resource_view> pending_mirror_view_destructions;
+   // Resource upgrade / mirroring state and configuration (see resource_upgrades.hpp).
+   // Owns the mirror bookkeeping and upgrade/scale configuration; core.hpp passes the frame's
+   // resolution/SR state into its methods. Migrated subsystem-by-subsystem.
+   ResourceUpgradeManager resource_upgrades;
 
 #if LUMA_PATCH_PROVIDERS != 0
    // Stored shader patches (both bytecode and recipe methods) + per-method
@@ -675,6 +652,13 @@ struct __declspec(uuid("cfebf6d4-d184-4e1a-ac14-09d088e560ca")) DeviceData
    // Note: this is the window/swapchain res
    float2 output_resolution = { 1, 1 };
    float2 display_resolution = { 1, 1 };
+
+   // Last frame's scale-relevant state, used to detect when indirect mirrors (and anything else tied to
+   // the render scale) must be invalidated because the render resolution or SR selection changed.
+   float2 last_render_resolution = { 1, 1 };
+#if ENABLE_SR
+   SR::Type last_sr_type = SR::Type::None;
+#endif
 
    // Live settings (set by the code, not directly by users):
    float default_user_peak_white = default_peak_white;
