@@ -59,7 +59,8 @@ void main(
   colorUntonemappedMask = r0.w;
   
   //bloom
-  r1.xyz = g_textures_1_.Sample(g_samplers_1__s, v1.zw).xyz * GS.BloomStrength;
+  // r1.xyz = g_textures_1_.Sample(g_samplers_1__s, v1.zw).xyz * GS.BloomStrength;
+    r1.xyz = Tonemap_BloomSample(g_textures_1_, g_samplers_1__s, v1.zw);
   #if CUSTOM_TESTBGSPRITES == 1
     r1.xyz = 0;
   #endif
@@ -67,7 +68,7 @@ void main(
   r1.xyz = r1.xyz + r0.xyz; //bloom add
   r0.xyz = r1.www ? r1.xyz : r0.xyz; //dont draw if not surpasses threshold
 
-  //lensflare
+  //overlays
   r1.x = cmp(0 < g_texcoord_transforms[0].w);
   if (r1.x != 0) {
     r1.xyz = g_textures_4_.Sample(g_samplers_4__s, v2.xy).xyz;
@@ -80,8 +81,6 @@ void main(
     r1.xyz = r1.xyz * r1.xyz;
     r0.xyz = r1.xyz * g_texcoord_transforms[2].www + r0.xyz;
   }
-
-  //idk
   r1.x = cmp(0 < v4.z);
   if (r1.x != 0) {
     r1.xyz = g_textures_7_.Sample(g_samplers_7__s, v4.xy).xyz;
