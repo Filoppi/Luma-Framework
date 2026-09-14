@@ -1,0 +1,50 @@
+// ---- Created with 3Dmigoto v1.3.16 on Tue Jul 14 00:59:32 2026
+
+cbuffer _Globals : register(b0)
+{
+  float3 k_vParticleScale : packoffset(c0) = {1,1,1};
+  float k_fPeakVelocity : packoffset(c0.w) = {500};
+  float k_fFlatVelocity : packoffset(c1) = {25};
+  float k_fStreakLength : packoffset(c1.y) = {25};
+  float k_fFadeTime : packoffset(c1.z) = {0.5};
+  row_major float4x4 k_mObjectToClip : packoffset(c2);
+  row_major float3x4 k_mObjectToView : packoffset(c6);
+  row_major float3x4 k_mObjectToWorld : packoffset(c9);
+  float4 k_vObjectColor : packoffset(c12);
+  float3 k_vObjectSpaceEyePos : packoffset(c13);
+  row_major float4x4 k_mPrevObjectToClip : packoffset(c14);
+  row_major float3x4 k_mPrevObjectToView : packoffset(c18);
+  row_major float3x4 k_mPrevObjectToWorld : packoffset(c21);
+  float3 k_cTintColor : packoffset(c24) = {1,1,1};
+  float k_fBrightness : packoffset(c24.w) = {1};
+  float k_fAlphaAmount : packoffset(c25) = {1};
+}
+
+SamplerState sAniso8X_WRAPWRAPCLAMP_Sampler_s : register(s0);
+Texture2D<float4> tTextureMap : register(t0);
+
+
+// 3Dmigoto declarations
+#define cmp -
+
+
+void main(
+  float4 v0 : SV_POSITION0,
+  float2 v1 : TEXCOORD0,
+  float4 v2 : COLOR0,
+  float3 v3 : TEXCOORD1,
+  out float4 o0 : SV_Target0)
+{
+  float4 r0;
+  uint4 bitmask, uiDest;
+  float4 fDest;
+
+  r0.xyzw = tTextureMap.Sample(sAniso8X_WRAPWRAPCLAMP_Sampler_s, v1.xy).xyzw;
+  r0.xyz = k_cTintColor.xyz * r0.xyz;
+  r0.w = v2.w * r0.w;
+  o0.w = k_fAlphaAmount * r0.w;
+  r0.xyz = k_fBrightness * r0.xyz;
+  o0.xyz = v2.xyz * r0.xyz + v3.xyz;
+  o0.xyz = saturate(o0.xyz);
+  return;
+}

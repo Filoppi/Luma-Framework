@@ -7,7 +7,7 @@
 
 #include "..\..\Core\includes\shader_patching.h"
 
-class GameTemplate final : public Game
+class GameShadowOfMordor final : public Game
 {
 public:
    void OnInit(bool async) override
@@ -223,7 +223,7 @@ BOOL APIENTRY DllMain(HMODULE hModule, DWORD ul_reason_for_call, LPVOID lpReserv
       forced_shader_names.emplace(std::stoul("A525E946", nullptr, 16), "UI");
 #endif
 
-      game = new GameTemplate();
+      game = new GameShadowOfMordor();
    }
 
    CoreMain(hModule, ul_reason_for_call, lpReserved);

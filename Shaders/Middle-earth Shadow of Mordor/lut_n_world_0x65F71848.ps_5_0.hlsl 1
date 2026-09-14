@@ -1,0 +1,183 @@
+// ---- Created with 3Dmigoto v1.3.16 on Mon Jul 13 01:19:49 2026
+
+cbuffer _Globals : register(b0)
+{
+  float DefaultHeight : packoffset(c0) = {100};
+  float DefaultWidth : packoffset(c0.y) = {100};
+
+  struct
+  {
+    float3 m_Position;
+    float3 m_Normal;
+    float2 m_TexCoord;
+    float3 m_Tangent;
+    float3 m_Binormal;
+    float4 m_Color;
+  } MaterialVertexDef_Rigid : packoffset(c1);
+
+
+  struct
+  {
+    float3 m_Position;
+    float3 m_Normal;
+    float2 m_TexCoord;
+    float3 m_Tangent;
+    float3 m_Binormal;
+    float4 m_Color;
+    float4 m_Weights;
+    float4 m_Indices;
+  } MaterialVertexDef_Skeletal : packoffset(c7);
+
+  float k_fBandValue : packoffset(c15) = {0.5};
+  float k_fBandWidth : packoffset(c15.y) = {0.5};
+  float k_fCharacterColorization : packoffset(c15.z) = {1};
+  float k_fDistortAmt : packoffset(c15.w) = {0.0500000007};
+  float k_fDistortPanU : packoffset(c16) = {0.300000012};
+  float k_fDistortPanV : packoffset(c16.y) = {0.300000012};
+  float k_fLUTBlend : packoffset(c16.z) = {1};
+  float k_fLastFrameScale : packoffset(c16.w) = {0.800000012};
+  float k_fMaskScaleU : packoffset(c17) = {1};
+  float k_fMaskScaleV : packoffset(c17.y) = {1};
+  float k_fMaskWarpAmt : packoffset(c17.z) = {0.100000001};
+  float k_fNormalScaleU : packoffset(c17.w) = {0.5};
+  float k_fNormalScaleV : packoffset(c18) = {0.5};
+  float k_fPanBumpU : packoffset(c18.y) = {0.0500000007};
+  float k_fPanBumpV : packoffset(c18.z) = {0};
+  float k_fTime : packoffset(c18.w);
+  row_major float4x4 k_mObjectToClip : packoffset(c19);
+  row_major float3x4 k_mObjectToWorld : packoffset(c23);
+  float4 k_vFogMieA : packoffset(c26);
+  float4 k_vFogMieB : packoffset(c27);
+  float4 k_vFogMieC : packoffset(c28);
+  float4 k_vFogRayleigh : packoffset(c29);
+  float4 k_vFogSky : packoffset(c30);
+  float4 k_vFogSunColor : packoffset(c31);
+  float3 k_vFogSunDir : packoffset(c32);
+  float4 k_vObjectColor : packoffset(c33);
+  float4 k_vObjectLightColor : packoffset(c34);
+  float3 k_vObjectSpaceEyePos : packoffset(c35);
+  float2 k_vScene_TexCoordScale : packoffset(c36);
+}
+
+SamplerState sDetailMapSampler_s : register(s0);
+SamplerState sNormalMapSampler_s : register(s1);
+SamplerState sWorldLUTSampler_s : register(s2);
+SamplerState sWraithLUTSampler_s : register(s3);
+SamplerState sDeferredNormalsSampler_s : register(s4);
+SamplerState sForcedCurFrameMapSampler_s : register(s5);
+Texture2D<float4> tDetailMap : register(t0);
+Texture2D<float4> tNormalMap : register(t1);
+Texture3D<float4> tWorldLUT : register(t2);
+Texture3D<float4> tWraithLUT : register(t3);
+Texture2D<float4> tDeferredNormals : register(t4);
+Texture2D<float4> tForcedCurFrameMap : register(t5);
+
+
+// 3Dmigoto declarations
+#define cmp -
+
+
+void main(
+  float4 v0 : SV_POSITION0,
+  float4 v1 : TEXCOORD0,
+  float4 v2 : TEXCOORD1,
+  float4 v3 : TEXCOORD2,
+  float4 v4 : TEXCOORD3,
+  float4 v5 : TEXCOORD4,
+  float4 v6 : TEXCOORD5,
+  float4 v7 : TEXCOORD6,
+  float4 v8 : COLOR0,
+  out float4 o0 : SV_Target0,
+  out float4 o1 : SV_Target1,
+  out float4 o2 : SV_Target2,
+  out float4 o3 : SV_Target3)
+{
+  float4 r0,r1,r2,r3;
+  uint4 bitmask, uiDest;
+  float4 fDest;
+
+  r0.xy = v3.xy / v3.ww;
+  r0.zw = r0.yx * float2(2,2) + float2(-1,-1);
+  r1.x = max(abs(r0.z), abs(r0.w));
+  r1.x = 1 / r1.x;
+  r1.y = min(abs(r0.z), abs(r0.w));
+  r1.x = r1.y * r1.x;
+  r1.y = r1.x * r1.x;
+  r1.z = r1.y * 0.0208350997 + -0.0851330012;
+  r1.z = r1.y * r1.z + 0.180141002;
+  r1.z = r1.y * r1.z + -0.330299497;
+  r1.y = r1.y * r1.z + 0.999866009;
+  r1.z = r1.x * r1.y;
+  r1.z = r1.z * -2 + 1.57079637;
+  r1.w = cmp(abs(r0.w) < abs(r0.z));
+  r1.z = r1.w ? r1.z : 0;
+  r1.x = r1.x * r1.y + r1.z;
+  r1.y = cmp(r0.w < -r0.w);
+  r1.y = r1.y ? -3.141593 : 0;
+  r1.x = r1.x + r1.y;
+  r1.y = min(r0.z, r0.w);
+  r1.y = cmp(r1.y < -r1.y);
+  r1.z = max(r0.z, r0.w);
+  r0.z = dot(r0.zw, r0.zw);
+  r0.z = sqrt(r0.z);
+  r2.x = r0.z + r0.z;
+  r0.z = cmp(r1.z >= -r1.z);
+  r0.z = r0.z ? r1.y : 0;
+  r0.z = r0.z ? -r1.x : r1.x;
+  r2.y = 0.159159631 * r0.z;
+  r0.zw = k_fTime * k_fPanBumpU + r2.xy;
+  r1.xy = k_fTime * k_fDistortPanU + r2.xy;
+  r1.xy = tDetailMap.Sample(sDetailMapSampler_s, r1.xy).xy;
+  r1.xy = k_fDistortAmt * r1.xy;
+  r2.x = k_fNormalScaleU * r0.z;
+  r2.y = k_fNormalScaleV * r0.w;
+  r0.zw = tNormalMap.Sample(sNormalMapSampler_s, r2.xy).yw;
+  r0.zw = r0.zw * float2(2,2) + float2(-1,-1);
+  r1.zw = float2(1,1) + -k_fMaskScaleU;
+  r1.zw = float2(0.5,0.5) * r1.zw;
+  r1.zw = r0.xy * k_fMaskScaleU + r1.zw;
+  r0.zw = r0.zw * k_fMaskWarpAmt + r1.zw;
+  r0.zw = r0.zw * float2(2,2) + float2(-1,-1);
+  r0.z = dot(r0.zw, r0.zw);
+  r0.z = -k_fBandValue + r0.z;
+  r0.w = 1 / k_fBandWidth;
+  r0.z = saturate(r0.z * r0.w);
+  r0.w = r0.z * -2 + 3;
+  r0.z = r0.z * r0.z;
+  r0.z = r0.w * r0.z;
+  r1.zw = float2(-0.5,-0.5) + r0.xy;
+  r1.zw = float2(0.330000013,0.330000013) * r1.zw;
+  r0.xy = r1.xy * r1.zw + r0.xy;
+  r0.w = 1 + -k_fLastFrameScale;
+  r0.w = 0.5 * r0.w;
+  r1.xy = r0.xy * k_fLastFrameScale + r0.ww;
+  r1.xy = r1.xy + -r0.xy;
+  r1.zw = r0.xy * float2(2,2) + float2(-1,-1);
+  r0.w = dot(r1.zw, r1.zw);
+  r0.w = -0.25 + r0.w;
+  r0.w = r0.w * r0.w;
+  r0.xy = r0.ww * r1.xy + r0.xy;
+  r1.xyz = tForcedCurFrameMap.Sample(sForcedCurFrameMapSampler_s, r0.xy).xyz;
+  r0.x = tDeferredNormals.Sample(sDeferredNormalsSampler_s, r0.xy).w;
+  r0.x = 255 * r0.x;
+  r0.x = round(r0.x);
+  r0.x = cmp(99 < r0.x);
+  r2.xyz = r1.xyz * float3(0.875,0.875,0.875) + float3(0.0625,0.0625,0.0625);
+
+  r3.xyz = tWraithLUT.SampleLevel(sWraithLUTSampler_s, r2.xyz, 0).xyz;
+  r2.xyz = tWorldLUT.SampleLevel(sWorldLUTSampler_s, r2.xyz, 0).xyz;
+  r3.xyz = r3.xyz + -r2.xyz;
+  r0.yzw = r0.zzz * r3.xyz + r2.xyz;
+  r0.yzw = r0.yzw + -r1.xyz;
+  r1.w = saturate(k_fCharacterColorization);
+  r2.x = saturate(k_fLUTBlend);
+  r1.w = r2.x * r1.w;
+  r0.x = r0.x ? r1.w : r2.x;
+  o0.xyz = r0.xxx * r0.yzw + r1.xyz;
+  
+  o0.w = v8.w;
+  o1.xyzw = float4(0,0,0,0);
+  o2.xyzw = float4(0,0,0,0);
+  o3.xyzw = float4(0,0,0,0);
+  return;
+}

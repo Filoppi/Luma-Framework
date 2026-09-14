@@ -6,7 +6,7 @@ struct GameDeviceDataTemplate final : public GameDeviceData
 {
 };
 
-class GameTemplate final : public Game
+class GameShadowOfMordor final : public Game
 {
    static GameDeviceDataTemplate& GetGameDeviceData(DeviceData& device_data)
    {
@@ -84,7 +84,7 @@ BOOL APIENTRY DllMain(HMODULE hModule, DWORD ul_reason_for_call, LPVOID lpReserv
 
       enable_samplers_upgrade = true;
 
-      game = new GameTemplate();
+      game = new GameShadowOfMordor();
    }
 
    CoreMain(hModule, ul_reason_for_call, lpReserved);
