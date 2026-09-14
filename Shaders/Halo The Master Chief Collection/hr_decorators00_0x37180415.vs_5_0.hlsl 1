@@ -1,0 +1,224 @@
+// ---- Created with 3Dmigoto v1.3.16 on Wed Aug 05 17:39:43 2026
+
+cbuffer ViewVS : register(b0)
+{
+  float4x4 View_Projection : packoffset(c0);
+  float4x4 Camera_To_World : packoffset(c4);
+  float4 v_clip_plane : packoffset(c8);
+}
+
+cbuffer VertexCompressionVS : register(b11)
+{
+  float4 Position_Compression_Scale : packoffset(c0);
+  float4 Position_Compression_Offset : packoffset(c1);
+  float4 UV_Compression_Scale_Offset : packoffset(c2);
+}
+
+cbuffer MeshVS : register(b1)
+{
+  float4 k_vs_hidden_from_compiler : packoffset(c0);
+  float4 k_vs_tessellation_parameter : packoffset(c1);
+  float4 v_analytical_light_direction : packoffset(c2);
+  float4 v_analytical_light_intensity : packoffset(c3);
+  float4 k_vs_wetness_constants : packoffset(c4);
+  float4 per_vertex_lighting_offset : packoffset(c5);
+  bool vs_boolean_enable_wet_effect : packoffset(c6);
+  bool k_vs_boolean_enable_atm_fog : packoffset(c6.y);
+  bool k_bool_render_rigid_imposter : packoffset(c6.z);
+}
+
+cbuffer WindVS : register(b2)
+{
+  float4 wind_data : packoffset(c0);
+  float4 wind_data2 : packoffset(c1);
+}
+
+cbuffer DecoratorsVS : register(b3)
+{
+  int v_simple_light_count : packoffset(c0);
+  int3 v_simple_light_count_pad : packoffset(c0.y);
+  float4 v_simple_lights[40] : packoffset(c1);
+  float4 v_cloud_motion : packoffset(c41);
+  float4 vs_antialias_scalars : packoffset(c42);
+  float4 vs_object_velocity : packoffset(c43);
+  float4 vs_camera_velocity : packoffset(c44);
+}
+
+cbuffer DecoratorsInstanceVS : register(b4)
+{
+  float4 instance_compression_offset : packoffset(c0);
+  float4 instance_compression_scale : packoffset(c1);
+  float4 instance_data : packoffset(c2);
+  float4 translucency : packoffset(c3);
+  float4 wave_flow : packoffset(c4);
+  float4 instance_position_and_scale : packoffset(c5);
+  float4 instance_quaternion : packoffset(c6);
+}
+
+SamplerState UserParameterSampler_cloud_texture_s : register(s1);
+SamplerState GlobalSampler_wind_texture_s : register(s3);
+Texture2D<float4> UserParameterTexture_cloud_texture : register(t1);
+Texture2D<float4> GlobalTexture_wind_texture : register(t3);
+
+
+// 3Dmigoto declarations
+#define cmp -
+
+
+void main(
+  float4 v0 : POSITION0,
+  float2 v1 : TEXCOORD0,
+  float3 v2 : NORMAL0,
+  uint v3 : POSITION1,
+  uint4 v4 : COLOR2,
+  float4 v5 : NORMAL1,
+  float4 v6 : COLOR1,
+  uint v7 : SV_VertexID0,
+  out float4 o0 : SV_Position0,
+  out float4 o1 : TEXCOORD0,
+  out float4 o2 : TEXCOORD1)
+{
+// Needs manual fix for instruction:
+// unknown dcl_: dcl_input_sgv v7.x, vertex_id
+  
+  float4 r0,r1,r2,r3,r4,r5;
+  uint4 bitmask, uiDest;
+  float4 fDest;
+
+  r0.x = (int)v3.x & 2047;
+  r0.x = (uint)r0.x;
+  if (11 == 0) r0.w = 0; else if (11+11 < 32) {   r0.w = (uint)v3.x << (32-(11 + 11)); r0.w = (uint)r0.w >> (32-11);  } else r0.w = (uint)v3.x >> 11;
+  r0.w = (uint)r0.w;
+  r0.xy = instance_compression_scale.xy * r0.xw;
+  r0.w = (uint)v3.x >> 22;
+  r0.w = (uint)r0.w;
+  r0.z = instance_compression_scale.z * r0.w;
+  r1.xy = (uint2)v4.zx;
+  r0.xyz = r0.xyz * float3(0.000488519785,0.000488519785,0.000977517106) + instance_compression_offset.xyz;
+  r2.xyz = -Camera_To_World._m03_m13_m23 + r0.xyz;
+  r0.w = 0.00390625 * r1.x;
+
+  r1.x = (uint)v7.x;
+  r1.x = -instance_data.z + r1.x;
+  r1.x = saturate(instance_data.w * r1.x);
+  o2.w = 1/*  + -r1.x */;
+
+  r3.xyz = v0.xyz * Position_Compression_Scale.xyz + Position_Compression_Offset.xyz;
+  o1.xy = v1.xy * UV_Compression_Scale_Offset.xy + UV_Compression_Scale_Offset.zw;
+  r1.xz = r0.xy * wind_data.zz + wind_data.xy;
+  r1.xz = GlobalTexture_wind_texture.SampleLevel(GlobalSampler_wind_texture_s, r1.xz, 0).xy;
+  r1.xz = r1.xz * wind_data2.zz + wind_data2.xy;
+  r1.w = saturate(r3.z);
+  r0.w = r1.w * r0.w;
+  r1.xz = r1.xz * r0.ww;
+  r0.w = dot(r1.xz, r1.xz);
+  r1.w = dot(v5.xyzw, v5.xyzw);
+  r1.w = r1.w * r3.z + 0.00999999978;
+  r0.w = r1.w + r0.w;
+  r0.w = r1.w / r0.w;
+  r0.w = sqrt(r0.w);
+  r3.w = r3.z * r0.w;
+  r4.xyz = -v5.zyw * r3.wxy;
+  r4.xyz = r3.ywx * -v5.ywz + -r4.xyz;
+  r1.w = dot(r3.wyx, -v5.yzw);
+  r4.w = -r1.w;
+  r3.xyz = v5.xxx * r3.xyw;
+  r3.w = 0;
+  r3.xyzw = r4.xyzw + r3.xyzw;
+  r4.xyz = v5.ywz * r3.yzx;
+  r4.xyz = v5.zyw * r3.zxy + -r4.xyz;
+  r3.xyz = v5.xxx * r3.xyz + r4.xyz;
+  r3.xyz = r3.www * v5.wzy + r3.xyz;
+  r3.xyz = r3.xyz + r0.xyz;
+  r3.xy = r1.xz * r0.ww + r3.xy;
+  r3.w = 1;
+  o0.x = dot(r3.xyzw, View_Projection._m00_m10_m20_m30);
+  o0.y = dot(r3.xyzw, View_Projection._m01_m11_m21_m31);
+  o0.z = dot(r3.xyzw, View_Projection._m02_m12_m22_m32);
+  o0.w = dot(r3.xyzw, View_Projection._m03_m13_m23_m33);
+  r0.xyz = -v5.zyw * v2.zxy;
+  r0.xyz = v2.yzx * -v5.ywz + -r0.xyz;
+  r1.x = dot(v2.zyx, -v5.yzw);
+  r0.w = -r1.x;
+  r4.xyz = v2.xyz;
+  r4.w = 0;
+  r0.xyzw = v5.xxxx * r4.xyzw + r0.xyzw;
+  r1.xzw = v5.ywz * r0.yzx;
+  r1.xzw = v5.zyw * r0.zxy + -r1.xzw;
+  r0.xyz = v5.xxx * r0.xyz + r1.xzw;
+  r0.xyz = r0.www * v5.wzy + r0.xyz;
+  r0.w = dot(r0.xyz, r0.xyz);
+  r0.w = rsqrt(r0.w);
+  r0.xyz = r0.xyz * r0.www;
+  r1.xzw = Camera_To_World._m03_m13_m23 + -r3.xyz;
+  r0.w = dot(r0.xyz, r1.xzw);
+  r1.x = cmp(0 < r0.w);
+  r0.w = cmp(r0.w < 0);
+  r0.w = (int)-r1.x + (int)r0.w;
+  r0.w = (int)r0.w;
+  r0.xyz = r0.xyz * r0.www;
+  r1.xzw = float3(0,0,0);
+  r0.w = 0;
+  while (true) {
+    r2.w = cmp((int)r0.w >= v_simple_light_count);
+    if (r2.w != 0) break;
+    r2.w = (int)r0.w * 5;
+    r4.xyz = v_simple_lights[r2.w].xyz + -r3.xyz;
+    r2.w = dot(r4.xyz, r4.xyz);
+    r3.w = mad((int)r0.w, 5, 4);
+    r4.w = cmp(r2.w >= v_simple_lights[r3.w].x);
+    if (r4.w != 0) {
+      r4.w = (int)r0.w + 1;
+      r0.w = r4.w;
+      continue;
+    }
+    r2.w = sqrt(r2.w);
+    r4.xyz = r4.xyz / r2.www;
+    r2.w = v_simple_lights[r3.w].y + -r2.w;
+    r2.w = saturate(v_simple_lights[r3.w].z * r2.w);
+    r2.w = r2.w * r2.w;
+    r5.xyz = mad((int3)r0.www, int3(5,5,5), int3(1,3,2));
+    r3.w = dot(r4.xyz, v_simple_lights[r5.x].xyz);
+    r3.w = -v_simple_lights[r5.y].x + r3.w;
+    r3.w = saturate(v_simple_lights[r5.y].y * r3.w);
+    r4.w = cmp(0.000000 == v_simple_lights[r5.y].z);
+    r3.w = log2(r3.w);
+    r3.w = v_simple_lights[r5.y].z * r3.w;
+    r3.w = exp2(r3.w);
+    r3.w = r4.w ? 1 : r3.w;
+    r2.w = r3.w * r2.w;
+    r5.xyz = v_simple_lights[r5.z].xyz * r2.www;
+    r2.w = dot(r0.xyz, r4.xyz);
+    r3.w = r2.w * translucency.x + translucency.y;
+    r2.w = r3.w * r2.w + translucency.z;
+    r1.xzw = r5.xyz * r2.www + r1.xzw;
+    r0.w = (int)r0.w + 1;
+  }
+  r0.x = v6.w * 63.75 + -31.75;
+  r0.x = exp2(r0.x);
+  r0.xyz = v6.xyz * r0.xxx + r1.xzw;
+  r0.w = cmp(1 < r1.y);
+  // if (r0.w != 0) {
+    r1.xz = v_analytical_light_direction.xy * r3.zz;
+    r1.xz = -r1.xz * v_analytical_light_direction.ww + r3.xy;
+    r1.xz = r1.xz * v_cloud_motion.yy + v_cloud_motion.zw;
+    r0.w = UserParameterTexture_cloud_texture.SampleLevel(UserParameterSampler_cloud_texture_s, r1.xz, 0).x;
+    r1.xzw = v_analytical_light_intensity.xyz * r0.www;
+    r1.xyz = r1.xzw * r1.yyy;
+    r1.xyz = v6.xyz * r1.xyz;
+    o2.xyz = r1.xyz * float3(0.000811378122,0.000811378122,0.000811378122) + r0.xyz;
+  // } else {
+  //   o2.xyz = r0.xyz;
+  // }
+
+  r0.x = dot(r2.xyz, r2.xyz);
+  r0.x = sqrt(r0.x);
+  r0.x = vs_object_velocity.w / r0.x;
+  r0.x = vs_antialias_scalars.y + r0.x;
+  r0.x = saturate(vs_antialias_scalars.x / r0.x);
+  r0.x = saturate(vs_antialias_scalars.w * r0.x + vs_antialias_scalars.z);
+  o1.w = 0.03125 * r0.x;
+
+  o1.z = 0;
+  return;
+}

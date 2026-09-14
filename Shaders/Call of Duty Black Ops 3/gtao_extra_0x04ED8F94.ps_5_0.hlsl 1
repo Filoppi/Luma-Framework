@@ -120,7 +120,7 @@ void frag_main()
     float _235 = mad(asfloat(cb1_m[6u].y), _198, (_196 * asfloat(cb1_m[4u].y)) + (asfloat(cb1_m[5u].y) * _197));
     float _236 = mad(asfloat(cb1_m[6u].z), _198, (_196 * asfloat(cb1_m[4u].z)) + (asfloat(cb1_m[5u].z) * _197));
 
-    // dither
+    // dither interweave (which next shader denoise will resolve)
     float _253 = mad(float(spvBitfieldInsert(spvBitfieldInsert(0u, _139, 2u, 2u) + spvBitfieldInsert(0u, _140, 2u, 2u), _139, 0u, 2u) & 15u), 0.0625f, cb8_m1.x);
     float _260 = asfloat(cb1_m[44u].z);
     float _261 = asfloat(cb1_m[44u].w);
@@ -147,7 +147,7 @@ void frag_main()
     float _304 = _236 + 1.0f;
     float _305 = frac(mad(float(uint((_136 - _137) & 3)), 0.25f, cb8_m1.y)) * 0.25f;
 
-    // GTAO slice=
+    // GTAO slice
     float _307;
     _307 = 0.0f;
     float _308;
@@ -173,7 +173,7 @@ void frag_main()
         uint _331;
         uint _325 = 3276275712u;
         uint _330 = 0u;
-        // GTAO steps per slice
+        // GTAO steps per slice 1st dir?
         for (;;)
         {
             int _334 = int(_330);
@@ -213,7 +213,7 @@ void frag_main()
         uint _406;
         uint _400 = 3276275712u;
         uint _405 = 0u;
-        // GTAO steps per slice
+        // GTAO steps per slice second dir?
         for (;;)
         {
             int _409 = int(_405);

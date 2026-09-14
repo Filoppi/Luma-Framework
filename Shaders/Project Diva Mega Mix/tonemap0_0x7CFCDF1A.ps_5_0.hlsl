@@ -56,28 +56,26 @@ void main(
   r0.xyzw = g_textures_0_.Sample(g_samplers_0__s, v1.xy).xyzw;
   
   //bloom
-  r1.xyz = g_textures_1_.Sample(g_samplers_1__s, v1.zw).xyz * GS.BloomStrength;
+  // r1.xyz = g_textures_1_.Sample(g_samplers_1__s, v1.zw).xyz * GS.BloomStrength;
+    r1.xyz = Tonemap_BloomSample(g_textures_1_, g_samplers_1__s, v1.zw);
   r1.w = cmp(0 < v3.z); //threshold
   r1.xyz = r1.xyz + r0.xyz; //add bloom
   r0.xyz = r1.www ? r1.xyz : r0.xyz; //dont draw if not surpasses threshold
 
-  //lensflare0
+  //optional overlays
   r1.x = cmp(0 < g_texcoord_transforms[0].w);
   if (r1.x != 0) {
     r1.xyz = g_textures_4_.Sample(g_samplers_4__s, v2.xy).xyz;
     r1.xyz = r1.xyz * r1.xyz;
     r0.xyz = r1.xyz * g_texcoord_transforms[0].www + r0.xyz;
   }
-
-  //lensflare1
   r1.x = cmp(0 < g_texcoord_transforms[2].w);
   if (r1.x != 0) {
     r1.xyz = g_textures_5_.Sample(g_samplers_5__s, v2.zw).xyz;
     r1.xyz = r1.xyz * r1.xyz;
     r0.xyz = r1.xyz * g_texcoord_transforms[2].www + r0.xyz;
   }
-
-  //still dont know
+  r1.x = cmp(0 < v4.z);
   if (r1.x != 0) {
     r1.xyz = g_textures_7_.Sample(g_samplers_7__s, v4.xy).xyz;
     r0.xyz = r1.xyz + r0.xyz;

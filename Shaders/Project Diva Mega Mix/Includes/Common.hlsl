@@ -1,26 +1,15 @@
-// Always include this instead of the global "Common.hlsl" if you made any changes to the game shaders/cbuffers
+#ifndef __COMMON_HLSL__
+#define __COMMON_HLSL__
 
-// Define the game custom cbuffer structs
 #include "GameCBuffers.hlsl"
-// Global common
 #include "../../Includes/Common.hlsl"
-// Game specific settings
 #include "Settings.hlsl"
 
 #define GS LumaSettings.GameSettings
-
-/*
-
-#include "./Includes/Common.hlsl"
-if (!GS.IsHud) discard;
-
-#include "./common1.hlsl"
-
-*/
-
 #define HDR_ENABLED LumaSettings.DisplayMode == 1
 #define HDR_PEAK PeakWhiteNits / GamePaperWhiteNits
 #define HDR_INTSCALING GamePaperWhiteNits / UIPaperWhiteNits
 #define HDR_SHOULDERSTART GS.TonemapperRolloffStart / GamePaperWhiteNits
 #define HDR_MAXEXPECTED GS.TonemapperMaxExpected / GamePaperWhiteNits
 
+#endif

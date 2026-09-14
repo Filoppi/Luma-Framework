@@ -1,0 +1,39 @@
+// ---- Created with 3Dmigoto v1.3.16 on Tue Jun 23 00:40:03 2026
+Texture2D<float4> t2 : register(t2);
+
+SamplerState s0_s : register(s0);
+
+cbuffer cb2 : register(b2)
+{
+  float4 cb2[26];
+}
+
+
+
+
+// 3Dmigoto declarations
+#define cmp -
+
+
+void main(
+  float4 v0 : SV_POSITION0,
+  float4 v1 : TEXCOORD0,
+  out float4 o0 : SV_TARGET0)
+{
+  float4 r0,r1;
+  uint4 bitmask, uiDest;
+  float4 fDest;
+
+  r0.z = t2.SampleLevel(s0_s, v1.xy, 0).x;
+  r0.xy = v1.xy;
+  r0.w = 1;
+  r1.x = dot(r0.xyzw, cb2[6].xyzw);
+  r1.y = dot(r0.xyzw, cb2[7].xyzw);
+  r0.x = dot(r0.xyzw, cb2[8].xyzw);
+  r0.xy = r1.xy / r0.xx;
+  r0.xy = v1.xy + -r0.xy;
+  r0.xy = cb2[25].xy * r0.xy;
+  o0.xy = float2(0.00787401572,0.00787401572) * r0.xy;
+  o0.zw = float2(0,0);
+  return;
+}

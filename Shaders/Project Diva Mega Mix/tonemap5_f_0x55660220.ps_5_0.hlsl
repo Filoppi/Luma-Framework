@@ -45,8 +45,9 @@ void main(
   float3 colorUntonemapped, colorTonemapped;
 
   //sample bloom
-  r0.xyz = g_textures_1_.Sample(g_samplers_1__s, v1.zw).xyz * GS.BloomStrength;
-  
+  // r0.xyz = g_textures_1_.Sample(g_samplers_1__s, v1.zw).xyz * GS.BloomStrength;
+      r0.xyz = Tonemap_BloomSample(g_textures_1_, g_samplers_1__s, v1.zw);
+      
   //sample color
   r0.w = 0.479999989 * v3.x; //color scaler (not related to sampled bloom)
   r1.xyzw = g_textures_0_.Sample(g_samplers_0__s, v1.xy).xyzw; //sample color

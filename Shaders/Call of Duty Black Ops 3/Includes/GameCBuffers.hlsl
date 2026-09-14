@@ -20,6 +20,7 @@ namespace CB
         float TonemapperRolloffStart;
         float TonemapperMaxExpected;
 
+        float AmbientOcclusion;
         float Bloom;
         float LensFlare;
         float SlideLensDirt;
@@ -71,6 +72,7 @@ namespace CB
     #define GS_PerChannelLuminanceReductionEmulatePeak LumaSettings.GameSettings.PerChannelLuminanceReductionEmulatePeak
     #define GS_PerChannelLuminanceReductionEmulateMakeup LumaSettings.GameSettings.PerChannelLuminanceReductionEmulateMakeup
     
+    #define GS_AmbientOcclusion LumaSettings.GameSettings.AmbientOcclusion
     #define GS_Bloom LumaSettings.GameSettings.Bloom
     #define GS_LensFlare LumaSettings.GameSettings.LensFlare
     #define GS_SlideLensDirt LumaSettings.GameSettings.SlideLensDirt
@@ -147,7 +149,8 @@ namespace CB
     // #define GS_PerChannelLuminanceReductionEmulateStrength CB::shader_injection.PerChannelLuminanceReductionEmulateStrength
     // #define GS_PerChannelLuminanceReductionEmulatePeak 1.3
     // #define GS_PerChannelLuminanceReductionEmulateMakeup 1.2
-    
+
+    #define GS_AmbientOcclusion CB::shader_injection.AmbientOcclusion
     #define GS_Bloom CB::shader_injection.Bloom
     #define GS_LensFlare CB::shader_injection.LensFlare
     #define GS_SlideLensDirt CB::shader_injection.SlideLensDirt
