@@ -495,7 +495,8 @@ struct __declspec(uuid("cfebf6d4-d184-4e1a-ac14-09d088e560ca")) DeviceData
 
    std::unordered_set<reshade::api::swapchain*> swapchains;
    std::unordered_set<uint64_t> back_buffers; // From all the swapchains (whether they are upgraded or not)
-   ID3D11Device* native_device = nullptr; // Doesn't need mutex, always valid given it's a ptr to itself
+   ID3D11Device* native_device = nullptr; // Doesn't need mutex, always valid given it's a ptr to "itself"
+   reshade::api::device* reshade_device = nullptr; // Always valid as it's our parent. Not owned by this.
    com_ptr<ID3D11DeviceContext> primary_command_list; // The immediate/primary command list is always valid
    CommandListData* primary_command_list_data = nullptr; // The immediate/primary command list is always valid
 

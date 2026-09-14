@@ -2784,6 +2784,7 @@ namespace
       ID3D11Device* native_device = (ID3D11Device*)(device->get_native()); // This is the unproxied device, the one the game tried to natively create was instead created as a proxy by reshade, but we don't want that one, as that will pass all our calls through ReShade too, while we want to keep that layer only for stuff coming from the game
       DeviceData& device_data = *device->create_private_data<DeviceData>();
       device_data.native_device = native_device;
+      device_data.reshade_device = device;
 
       // Compat shim: games set the global config values; the manager is the source of truth, so copy the
       // globals into it at device init. (Phase 2 will migrate games to set the manager directly.)
