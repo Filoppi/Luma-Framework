@@ -4,6 +4,7 @@
     <LocalDebuggerCommand>$(LUMA_THIEF_BIN_PATH)\Shipping-ThiefGame.exe</LocalDebuggerCommand>
     <DebuggerFlavor>WindowsLocalDebugger</DebuggerFlavor>
     <LocalDebuggerCommandArguments>-nolauncher</LocalDebuggerCommandArguments>
+    <LocalDebuggerCommandArgumentsHistory>-nolauncher|</LocalDebuggerCommandArgumentsHistory>
   </PropertyGroup>
   <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Publishing-Release|x64'">
     <LocalDebuggerCommand>$(LUMA_THIEF_BIN_PATH)\Shipping-ThiefGame.exe</LocalDebuggerCommand>

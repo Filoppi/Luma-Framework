@@ -21,5 +21,6 @@
     <LocalDebuggerCommand>$(LUMA_BIOSHOCK_BIN_PATH)\ShippingPC-XGame.exe</LocalDebuggerCommand>
     <DebuggerFlavor>WindowsLocalDebugger</DebuggerFlavor>
     <LocalDebuggerCommandArguments>-nointro</LocalDebuggerCommandArguments>
+    <LocalDebuggerCommandArgumentsHistory>-nointro|</LocalDebuggerCommandArgumentsHistory>
   </PropertyGroup>
 </Project>
