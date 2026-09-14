@@ -11455,17 +11455,17 @@ namespace
                            {
                               name << "^";
                            }
-                           if (draw_call_data.any_output_resources_format_upgraded)
-                           {
-                              name << "v";
-                           }
                            if (draw_call_data.any_input_resources_scaled)
                            {
-                              name << "~^";
+                              name << "\\";
                            }
                            if (draw_call_data.any_output_resources_scaled)
                            {
-                              name << "~v";
+                              name << "/";
+                           }
+                           if (draw_call_data.any_output_resources_format_upgraded)
+                           {
+                              name << "v";
                            }
                            if (targets_swapchain)
                            {
@@ -12305,7 +12305,7 @@ namespace
                                           ImGui::Text("R Size: %ux%ux%ux%u", sr_size.x, sr_size.y, sr_size.z, sr_size.w);
                                           ImGui::Text("RV Mip: %u", draw_call_data.srv_mip[i]);
                                           ImGui::Text("RV Size: %ux%ux%u", srv_size.x, srv_size.y, srv_size.z);
-                                          ImGui::Text("R is RT: %s", sr_is_rt ? "True" : "False"); // TODO: add if they have CPU access, or immutable etc
+                                          ImGui::Text("R is RT: %s", sr_is_rt ? "True" : "False"); // TODO: add if they have CPU access, or immutable etc, and also whether they are a depth buffer (DSV)
                                           ImGui::Text("R is UA: %s", sr_is_ua ? "True" : "False");
                                           bool upgraded = false;
                                           {
@@ -12352,6 +12352,10 @@ namespace
                                                 void* upgraded_resource_ptr = reinterpret_cast<void*>(upgraded_resource_pair.first);
                                                 if (sr_hash == std::to_string(std::hash<void*>{}(upgraded_resource_ptr)))
                                                 {
+                                                   if (upgraded_resource_pair.second.is_scaled)
+                                                   {
+                                                      ImGui::Text("R Indirect Upgraded Size: %ux%u", upgraded_resource_pair.second.mirror_width, upgraded_resource_pair.second.mirror_height);
+                                                   }
                                                    ImGui::Text("R: Indirect Upgraded");
                                                    upgraded = true;
                                                    break;
@@ -12477,6 +12481,10 @@ namespace
                                                 void* upgraded_resource_ptr = reinterpret_cast<void*>(upgraded_resource_pair.first);
                                                 if (ua_hash == std::to_string(std::hash<void*>{}(upgraded_resource_ptr)))
                                                 {
+                                                   if (upgraded_resource_pair.second.is_scaled)
+                                                   {
+                                                      ImGui::Text("R Indirect Upgraded Size: %ux%u", upgraded_resource_pair.second.mirror_width, upgraded_resource_pair.second.mirror_height);
+                                                   }
                                                    ImGui::Text("R: Indirect Upgraded");
                                                    upgraded = true;
                                                    break;
@@ -12599,6 +12607,7 @@ namespace
                                           ImGui::Text("R Size: %ux%ux%ux%u", rt_size.x, rt_size.y, rt_size.z, rt_size.w);
                                           ImGui::Text("RV Mip: %u", draw_call_data.rtv_mip[i]);
                                           ImGui::Text("RV Size: %ux%ux%u", rtv_size.x, rtv_size.y, rtv_size.z);
+                                          ImGui::Text("R is Swapchain: %s", draw_call_data.rt_is_swapchain[i] ? "True" : "False"); // TODO: add this for compute shaders / UAVs toos
                                           bool upgraded = false;
                                           bool indirect_upgraded = false;
                                           {
@@ -12639,6 +12648,10 @@ namespace
                                                 void* upgraded_resource_ptr = reinterpret_cast<void*>(upgraded_resource_pair.first);
                                                 if (rt_hash == std::to_string(std::hash<void*>{}(upgraded_resource_ptr)))
                                                 {
+                                                   if (upgraded_resource_pair.second.is_scaled)
+                                                   {
+                                                      ImGui::Text("R Indirect Upgraded Size: %ux%u", upgraded_resource_pair.second.mirror_width, upgraded_resource_pair.second.mirror_height);
+                                                   }
                                                    ImGui::Text("R: Indirect Upgraded");
                                                    upgraded = true;
                                                    indirect_upgraded = true;
@@ -12646,7 +12659,6 @@ namespace
                                                 }
                                              }
                                           }
-                                          ImGui::Text("R Swapchain: %s", draw_call_data.rt_is_swapchain[i] ? "True" : "False"); // TODO: add this for compute shaders / UAVs toos
 
                                           // Blend mode
                                           {
@@ -12990,6 +13002,10 @@ namespace
                                                 void* upgraded_resource_ptr = reinterpret_cast<void*>(upgraded_resource_pair.first);
                                                 if (draw_call_data.ds_hash == std::to_string(std::hash<void*>{}(upgraded_resource_ptr)))
                                                 {
+                                                   if (upgraded_resource_pair.second.is_scaled)
+                                                   {
+                                                      ImGui::Text("R Indirect Upgraded Size: %ux%u", upgraded_resource_pair.second.mirror_width, upgraded_resource_pair.second.mirror_height);
+                                                   }
                                                    ImGui::Text("R: Indirect Upgraded");
                                                    break;
                                                 }
