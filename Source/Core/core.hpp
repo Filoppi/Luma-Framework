@@ -612,7 +612,7 @@ namespace
       // This assumes that when the upgraded texture is created (it could be at any time, if the target shader doesn't always run), the original texture values aren't relevant, because they won't be preserved.
       // Do not remove elements from this map as there might be pointers to them around the code.
       // Requires "enable_chain_indirect_texture_format_upgrades" to work, otherwise views from the new indirect upgraded textures don't ever get mirrored.
-      struct AutoTextureFormatUpgradeShaderHash
+      struct AutoTextureFormatUpgradeShaderHash // TODO: dupe definition (this one has commenting)
       {
          std::vector<uint8_t> rtv_slots;
          std::vector<uint8_t> uav_slots;
@@ -6724,6 +6724,7 @@ namespace
                         const bool seed_draw_before = hash_based_indirect_texture_format_upgrades && allow_scale;
                         const uint64_t seed_res_before = prev_resource;
 #endif
+                        // TODO: what's the "resource != prev_resource" check for? It seems useless?
                         if (FindOrCreateIndirectUpgradedResource(device, source_resource, prev_resource, resource, device_data, true, reshade::api::resource_usage::render_target, lock_device_read, allow_scale, force_scale) && resource != prev_resource)
                         {
                            uint64_t resource_view = prev_resource_view;
@@ -8378,7 +8379,7 @@ namespace
    // TODO: cache the last "almost" upgraded texture resolution to make sure that when the swapchain changes res, we didn't fail to upgrade resources before (needed even with indirect upgrades)
    std::optional<reshade::api::resource_desc> GetOptionalResourceUpgradeDesc(const reshade::api::resource_desc& desc, const DeviceData& device_data, bool has_initial_data /*= false*/)
    {
-      ResourceUpgradeFrameState state;
+      ResourceUpgradeFrameState state; // TODO: just pass in the whole device data after fixing the order of includes, this is probably fairly slow
       state.render_resolution = device_data.render_resolution;
       state.output_resolution = device_data.output_resolution;
       state.display_resolution = device_data.display_resolution;
@@ -9154,6 +9155,7 @@ namespace
                }
 #endif
 
+               // TODO: set these as upgraded even if we used direct texture upgrades? It's not really needed as the only purpose of these is to do chain upgrades, which are already handled with direct texture upgrades (then, if so, rename the variables to "*_indirect_upgrades_*")
                SetCachedViewsState(upgraded ? CommandListData::ViewState::SetAndUpgraded : CommandListData::ViewState::Set);
             }
          }

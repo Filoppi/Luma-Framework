@@ -623,6 +623,7 @@
     <ClInclude Include="includes\math.h" />
     <ClInclude Include="includes\matrix.h" />
     <ClInclude Include="includes\recursive_shared_mutex.h" />
+    <ClInclude Include="includes\resource_upgrades.hpp" />
     <ClInclude Include="includes\shaders.h" />
     <ClInclude Include="includes\shader_define.h" />
     <ClInclude Include="includes\shader_patching.h" />
@@ -635,6 +636,9 @@
     <ClInclude Include="utils\resource.hpp" />
     <ClInclude Include="utils\shader_compiler.hpp" />
     <ClInclude Include="utils\system.h" />
+  </ItemGroup>
+  <ItemGroup>
+    <None Include="includes\resource_upgrades.inl" />
   </ItemGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
   <ImportGroup Label="ExtensionTargets">

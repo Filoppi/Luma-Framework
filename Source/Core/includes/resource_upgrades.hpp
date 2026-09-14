@@ -54,7 +54,7 @@ inline bool ResourceUpgradeIsMipOf(uint32_t base_w, uint32_t base_h, uint32_t w,
    return valid_w && valid_h;
 }
 
-// Kept local to the manager to avoid utils/resource.hpp's DeviceData dependency.
+// Kept local to the manager to avoid utils/resource.hpp's DeviceData dependency. // TODO: re-use the originals.
 inline uint32_t ResourceUpgradeGetTextureMaxMipLevels(uint32_t width, uint32_t height = 0, uint32_t depth = 0)
 {
    uint32_t max_dimension = max(max(width, height), depth);

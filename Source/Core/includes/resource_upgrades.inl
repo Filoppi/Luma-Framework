@@ -362,7 +362,11 @@ bool ResourceUpgradeManager::FindOrCreateIndirectUpgradedResource(
       reshade::api::resource mirrored_upgraded_resource;
       reshade::api::resource_desc source_desc = device->get_resource_desc({in_resource});
       reshade::api::resource_desc target_desc = source_desc;
+      // Keep the original (render) size for the mirror bookkeeping, before the scale override below.
+      const uint32_t original_width = source_desc.texture.width;
+      const uint32_t original_height = source_desc.texture.height;
       bool needs_upgraded_resource = false;
+      // Chained upgrades. Take part of the desc from the alternative source. // TODO: polish this, it's incomplete.
       if (in_source_resource)
       {
          source_desc = device->get_resource_desc({in_source_resource});
@@ -396,7 +400,7 @@ bool ResourceUpgradeManager::FindOrCreateIndirectUpgradedResource(
       else // Upgrade texture desc
       {
 #if 1
-         if (std::optional<reshade::api::resource_desc> upgraded_desc = GetOptionalResourceUpgradeDesc(target_desc, state, false))
+         if (std::optional<reshade::api::resource_desc> upgraded_desc = GetOptionalResourceUpgradeDesc(source_desc, state, false))
          {
             target_desc = upgraded_desc.value();
             needs_upgraded_resource = true;
@@ -412,7 +416,7 @@ bool ResourceUpgradeManager::FindOrCreateIndirectUpgradedResource(
       // Only scale when SR engaged and render resolution is smaller
       if (target_desc.type == reshade::api::resource_type::texture_2d
          && should_scale
-         && state.render_resolution.x > 0 && state.render_resolution.y > 0
+         && state.render_resolution.x > 0 && state.render_resolution.y > 0 // TODO: pointless check? It defaults to swapchain
          && state.render_resolution.x < state.output_resolution.x
          && state.render_resolution.y < state.output_resolution.y)
       {
@@ -427,15 +431,12 @@ bool ResourceUpgradeManager::FindOrCreateIndirectUpgradedResource(
          const bool matches_render = !is_1x1 && render_aspect >= (min_aspect - FLT_EPSILON) && render_aspect <= (max_aspect + FLT_EPSILON);
          if (matches_render)
          {
-            if (in_source_resource == 0) // Seed scaling policy is computed by core.hpp
+            if (in_source_resource == 0) // TODO: why this check here? Also, we should always check "allow_scale" to avoid random scaling positives??? It's a fallback value in case we have no source desc specified?
                needs_scale = true; // seed: per-shader toggle only
             else
                needs_scale = source_desc.texture.width == (uint32_t)state.output_resolution.x && source_desc.texture.height == (uint32_t)state.output_resolution.y; // chain: source already at output res
          }
       }
-      // Keep the original (render) size for the mirror bookkeeping, before the scale override below.
-      const uint32_t original_width = target_desc.texture.width;
-      const uint32_t original_height = target_desc.texture.height;
       if (needs_scale)
       {
          // Scale to full output resolution (matches FFXV's native upscale), so mirrors are the same
@@ -460,7 +461,7 @@ bool ResourceUpgradeManager::FindOrCreateIndirectUpgradedResource(
          else // Destroy it if it was accidentally created at the same time by another thread
          {
             out_resource = original_resources_to_mirrored_upgraded_resources[in_resource].mirror_handle;
-            lock_device_write.unlock(); // Not really necessary, reshade "destroy_resource" simply clears a com ptr
+            lock_device_write.unlock();
             device->destroy_resource(mirrored_upgraded_resource);
          }
 
@@ -511,71 +512,61 @@ bool ResourceUpgradeManager::FindOrCreateIndirectUpgradedResourceView(
    {
       reshade::api::resource resource;
       resource.handle = GetCachedResourceFromView(in_rv, true, false, true, &lock_device_read, device);
-      // The view may have been mapped by another thread while we were unlocked above: never create a duplicate
-      auto recheck_it = original_resource_views_to_mirrored_upgraded_resource_views.find(in_rv);
-      if (recheck_it != original_resource_views_to_mirrored_upgraded_resource_views.end())
+      auto original_resource_to_mirrored_upgraded_resource = original_resources_to_mirrored_upgraded_resources.find(resource.handle);
+      if (original_resource_to_mirrored_upgraded_resource != original_resources_to_mirrored_upgraded_resources.end())
       {
-         replaced = true;
-         out_rv = recheck_it->second;
-      }
-      else
-      {
-         auto original_resource_to_mirrored_upgraded_resource = original_resources_to_mirrored_upgraded_resources.find(resource.handle);
-         if (original_resource_to_mirrored_upgraded_resource != original_resources_to_mirrored_upgraded_resources.end())
+         const auto original_resource_to_mirrored_upgraded_resource_ptr = original_resource_to_mirrored_upgraded_resource->second.mirror_handle;
+
+         lock_device_read.unlock(); // Avoids deadlocks with the device
+
+         reshade::api::resource_view_desc resource_view_desc = device->get_resource_view_desc({ in_rv });
+         const reshade::api::resource_desc mirrored_upgraded_resource_desc = device->get_resource_desc({ original_resource_to_mirrored_upgraded_resource_ptr }); // The format should match previous calls to "GetBestResourceUpgradeFormat()"
+         // Depth/Stencil resources are the only ones "GetBestResourceUpgradeFormat()" upgrades to a typeless format (so they can be cast to both a depth/stencil write view and a shader resource view),
+         // and views can't use typeless formats, so here we can't let the format be determined automatically from the resource, we need to explicitly pick the view format matching the upgrade.
+         // Note that this applies to their SRVs as well, not just their DSVs.
+         if (IsTypelessFormat(DXGI_FORMAT(mirrored_upgraded_resource_desc.texture.format)))
          {
-            const auto original_resource_to_mirrored_upgraded_resource_ptr = original_resource_to_mirrored_upgraded_resource->second.mirror_handle;
-
-            lock_device_read.unlock();
-
-            reshade::api::resource_view_desc resource_view_desc = device->get_resource_view_desc({ in_rv });
-            const reshade::api::resource_desc mirrored_upgraded_resource_desc = device->get_resource_desc({ original_resource_to_mirrored_upgraded_resource_ptr }); // The format should match previous calls to "GetBestResourceUpgradeFormat()"
-            // Depth/Stencil resources are the only ones "GetBestResourceUpgradeFormat()" upgrades to a typeless format (so they can be cast to both a depth/stencil write view and a shader resource view),
-            // and views can't use typeless formats, so here we can't let the format be determined automatically from the resource, we need to explicitly pick the view format matching the upgrade.
-            // Note that this applies to their SRVs as well, not just their DSVs.
-            if (IsTypelessFormat(DXGI_FORMAT(mirrored_upgraded_resource_desc.texture.format)))
-            {
-               const reshade::api::resource_desc original_resource_desc = device->get_resource_desc(resource);
-               // We need an explicit format to tell which plane (and thus which view format) the original view was reading/writing.
-               // At least in DX11 that's always the case for depth/stencil resources, given neither DSVs nor SRVs can inherit a typeless resource format.
-               ASSERT_ONCE(resource_view_desc.format != reshade::api::format::unknown);
-               // For "depth_stencil" usage this returns "d32_float" or "d32_float_s8_uint" (depending on whether the original resource had a stencil).
-               // Note that DX11 has no stencil only DSV: a DSV format always covers the depth, and the stencil too if the resource has one (read only depth/stencil is expressed through the "D3D11_DSV_READ_ONLY_*" flags, not through the format).
-               // For any other usage (e.g. SRVs) it returns the depth read view ("r32_float" / "r32_float_x8_uint") or the stencil read view ("x32_float_g8_uint"), mirroring whichever plane the original view read.
-               resource_view_desc.format = GetBestResourceViewUpgradeFormat(resource_view_desc, usage, original_resource_desc, mirrored_upgraded_resource_desc);
-               ASSERT_ONCE(!IsTypelessFormat(DXGI_FORMAT(resource_view_desc.format))); // We failed to pick a castable format, the view creation below would fail
-            }
-            // Null the format so it's determined automatically. All the other formats returned by "GetBestResourceUpgradeFormat()" are not typeless, so we can make views of (almost) all of them directly.
-            else
-            {
-               resource_view_desc.format = reshade::api::format::unknown;
-            }
-
-            reshade::api::resource_view mirrored_upgraded_resource_view;
-            if (device->create_resource_view({ original_resource_to_mirrored_upgraded_resource_ptr }, usage, resource_view_desc, &mirrored_upgraded_resource_view))
-            {
-               std::unique_lock lock_device_write(*lock_device_read.mutex());
-               if (!original_resource_views_to_mirrored_upgraded_resource_views.contains(in_rv))
-               {
-                  original_resource_views_to_mirrored_upgraded_resource_views[in_rv] = mirrored_upgraded_resource_view.handle;
-                  mirror_views_by_mirror_resource[original_resource_to_mirrored_upgraded_resource_ptr].emplace(mirrored_upgraded_resource_view.handle);
-                  mirror_views_to_mirror_resources[mirrored_upgraded_resource_view.handle] = original_resource_to_mirrored_upgraded_resource_ptr;
-                  out_rv = mirrored_upgraded_resource_view.handle;
-               }
-               else // Destroy it if it was accidentally created at the same time by another thread
-               {
-                  out_rv = original_resource_views_to_mirrored_upgraded_resource_views[in_rv];
-                  lock_device_write.unlock();
-                  device->destroy_resource_view(mirrored_upgraded_resource_view);
-               }
-               replaced = true;
-            }
-            else
-            {
-               ASSERT_ONCE_MSG(false, "Failed to create an indirect upgraded texture view (maybe some format mismatch)");
-            }
-
-            lock_device_read.lock();
+            const reshade::api::resource_desc original_resource_desc = device->get_resource_desc(resource);
+            // We need an explicit format to tell which plane (and thus which view format) the original view was reading/writing.
+            // At least in DX11 that's always the case for depth/stencil resources, given neither DSVs nor SRVs can inherit a typeless resource format.
+            ASSERT_ONCE(resource_view_desc.format != reshade::api::format::unknown);
+            // For "depth_stencil" usage this returns "d32_float" or "d32_float_s8_uint" (depending on whether the original resource had a stencil).
+            // Note that DX11 has no stencil only DSV: a DSV format always covers the depth, and the stencil too if the resource has one (read only depth/stencil is expressed through the "D3D11_DSV_READ_ONLY_*" flags, not through the format).
+            // For any other usage (e.g. SRVs) it returns the depth read view ("r32_float" / "r32_float_x8_uint") or the stencil read view ("x32_float_g8_uint"), mirroring whichever plane the original view read.
+            resource_view_desc.format = GetBestResourceViewUpgradeFormat(resource_view_desc, usage, original_resource_desc, mirrored_upgraded_resource_desc);
+            ASSERT_ONCE(!IsTypelessFormat(DXGI_FORMAT(resource_view_desc.format))); // We failed to pick a castable format, the view creation below would fail
          }
+         // Null the format so it's determined automatically. All the other formats returned by "GetBestResourceUpgradeFormat()" are not typeless, so we can make views of (almost) all of them directly.
+         else
+         {
+            resource_view_desc.format = reshade::api::format::unknown;
+         }
+
+         reshade::api::resource_view mirrored_upgraded_resource_view;
+         if (device->create_resource_view({ original_resource_to_mirrored_upgraded_resource_ptr }, usage, resource_view_desc, &mirrored_upgraded_resource_view))
+         {
+            std::unique_lock lock_device_write(*lock_device_read.mutex());
+            if (!original_resource_views_to_mirrored_upgraded_resource_views.contains(in_rv))
+            {
+               original_resource_views_to_mirrored_upgraded_resource_views[in_rv] = mirrored_upgraded_resource_view.handle;
+               mirror_views_by_mirror_resource[original_resource_to_mirrored_upgraded_resource_ptr].emplace(mirrored_upgraded_resource_view.handle);
+               mirror_views_to_mirror_resources[mirrored_upgraded_resource_view.handle] = original_resource_to_mirrored_upgraded_resource_ptr;
+               out_rv = mirrored_upgraded_resource_view.handle;
+            }
+            else // Destroy it if it was accidentally created at the same time by another thread
+            {
+               out_rv = original_resource_views_to_mirrored_upgraded_resource_views[in_rv];
+               lock_device_write.unlock();
+               device->destroy_resource_view(mirrored_upgraded_resource_view);
+            }
+            replaced = true;
+         }
+         else
+         {
+            ASSERT_ONCE_MSG(false, "Failed to create an indirect upgraded texture view (maybe some format mismatch)");
+         }
+
+         lock_device_read.lock();
       }
    }
 
