@@ -137,22 +137,22 @@ namespace
    CBPerViewGlobal cb_per_view_global = { };
    CBPerViewGlobal cb_per_view_global_previous = cb_per_view_global;
 
-   ShaderHashesList shader_hashes_TiledShadingTiledDeferredShading;
+   ShaderHashesList<ShaderHashesCount::Multiple, ShaderHashesStages::Compute> shader_hashes_TiledShadingTiledDeferredShading;
    uint32_t shader_hash_DeferredShadingSSRRaytrace;
    uint32_t shader_hash_DeferredShadingSSReflectionComp;
    uint32_t shader_hash_PostEffectsGaussBlurBilinear;
    uint32_t shader_hash_PostEffectsTextureToTextureResampled;
-   ShaderHashesList shader_hashes_MotionBlur;
-   ShaderHashesList shader_hashes_HDRPostProcessHDRFinalScene;
-   ShaderHashesList shader_hashes_HDRPostProcessHDRFinalScene_Sunshafts;
-   ShaderHashesList shader_hashes_SMAA_EdgeDetection;
-   ShaderHashesList shader_hashes_PostAA;
-   ShaderHashesList shader_hashes_PostAA_TAA;
-   ShaderHashesList shader_hashes_PostAAComposites;
+   ShaderHashesList<ShaderHashesCount::Multiple, ShaderHashesStages::Graphics> shader_hashes_MotionBlur;
+   ShaderHashesList<ShaderHashesCount::Multiple, ShaderHashesStages::Graphics> shader_hashes_HDRPostProcessHDRFinalScene;
+   ShaderHashesList<ShaderHashesCount::Multiple, ShaderHashesStages::Graphics> shader_hashes_HDRPostProcessHDRFinalScene_Sunshafts;
+   ShaderHashesList<ShaderHashesCount::Multiple, ShaderHashesStages::Graphics> shader_hashes_SMAA_EdgeDetection;
+   ShaderHashesList<ShaderHashesCount::Multiple, ShaderHashesStages::Graphics> shader_hashes_PostAA;
+   ShaderHashesList<ShaderHashesCount::Multiple, ShaderHashesStages::Graphics> shader_hashes_PostAA_TAA;
+   ShaderHashesList<ShaderHashesCount::Multiple, ShaderHashesStages::Graphics> shader_hashes_PostAAComposites;
    uint32_t shader_hash_PostAAUpscaleImage;
-   ShaderHashesList shader_hashes_LensOptics;
-   ShaderHashesList shader_hashes_DirOccPass;
-   ShaderHashesList shader_hashes_SSDO_Blur;
+   ShaderHashesList<ShaderHashesCount::Multiple, ShaderHashesStages::Graphics> shader_hashes_LensOptics;
+   ShaderHashesList<ShaderHashesCount::Multiple, ShaderHashesStages::Graphics> shader_hashes_DirOccPass;
+   ShaderHashesList<ShaderHashesCount::Multiple, ShaderHashesStages::Graphics> shader_hashes_SSDO_Blur;
 
 #if DEVELOPMENT
    std::vector<std::string> cb_per_view_globals_last_drawn_shader; // Not exactly thread safe but it's fine...
@@ -2027,7 +2027,7 @@ public:
          {
 #if DEVELOPMENT && 0
             cb_per_view_globals.emplace_back(global_buffer_data);
-            cb_per_view_globals_last_drawn_shader.emplace_back(last_drawn_shader); // The shader hash could we unspecified if we didn't replace the shader
+            cb_per_view_globals_last_drawn_shader.emplace_back(last_drawn_shader != SHADER_HASH_NONE ? Shader::Hash_NumToStr(last_drawn_shader) : ""); // The shader hash could we unspecified if we didn't replace the shader
 #endif // DEVELOPMENT
 #if 1
             if (game->UpdateGlobalCB(device_data.cb_per_view_global_buffer_map_data, device))

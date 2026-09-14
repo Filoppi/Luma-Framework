@@ -1,5 +1,6 @@
 #pragma once
 
+#include <cstddef>
 #include <cstdint>
 
 #include "matrix.h"
@@ -126,4 +127,48 @@ namespace
 
    typedef Math::Matrix44F float4x4;
    static_assert(sizeof(Math::Matrix44F) == sizeof(float4) * 4);
+}
+
+// Hashes for the types above, so they can be used as keys in unordered containers.
+// These types have internal linkage (anonymous namespace), so each translation unit specializes for its own distinct type.
+namespace std
+{
+   template <>
+   struct hash<uint2>
+   {
+      size_t operator()(const uint2& v) const noexcept
+      {
+         uint64_t h = 14695981039346656037ULL;
+         h = (h ^ v.x) * 1099511628211ULL;
+         h = (h ^ v.y) * 1099511628211ULL;
+         return (size_t)h;
+      }
+   };
+
+   template <>
+   struct hash<uint3>
+   {
+      size_t operator()(const uint3& v) const noexcept
+      {
+         uint64_t h = 14695981039346656037ULL;
+         h = (h ^ v.x) * 1099511628211ULL;
+         h = (h ^ v.y) * 1099511628211ULL;
+         h = (h ^ v.z) * 1099511628211ULL;
+         return (size_t)h;
+      }
+   };
+
+   template <>
+   struct hash<uint4>
+   {
+      size_t operator()(const uint4& v) const noexcept
+      {
+         uint64_t h = 14695981039346656037ULL;
+         h = (h ^ v.x) * 1099511628211ULL;
+         h = (h ^ v.y) * 1099511628211ULL;
+         h = (h ^ v.z) * 1099511628211ULL;
+         h = (h ^ v.w) * 1099511628211ULL;
+         return (size_t)h;
+      }
+   };
 }

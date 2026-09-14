@@ -83,6 +83,7 @@ namespace Shader
       // wins over a patch on the same clone.
       CloneOrigin clone_origin = CloneOrigin::None;
       // Original shaders hash (there should only be one except in DX12)
+      // Any value is valid and possible, including 0
 #if DX12
       std::vector<uint32_t> shader_hashes;
 #else
@@ -183,6 +184,7 @@ namespace Shader
       bool srvs[D3D11_COMMONSHADER_INPUT_RESOURCE_SLOT_COUNT] = {};
       // Unordered Access Views
       bool uavs[D3D11_1_UAV_SLOT_COUNT] = {};
+      uint3 compute_thread_size = {};
 
       // Own storage for live patched shader bytes (e.g. DXP clone injection), so debug UI pointers stay valid.
       std::vector<uint8_t> live_patched_owned_data;
@@ -227,14 +229,37 @@ namespace Shader
 #endif
    };
 
-   // When we only have one element, set it to 64 bits to we can set it to UINT64_MAX to highlight the hash is invalid/none
-   template <bool SingleShaderHashes>
-   using ShaderHashesType = std::conditional_t<SingleShaderHashes, uint64_t, uint32_t>;
+   // Invalid hash sentinel
+   constexpr uint64_t SHADER_HASH_NONE = UINT64_MAX;
 
-   template <bool SingleShaderHashes>
-   using ShaderHashesContainer = std::conditional_t<SingleShaderHashes,
-      std::array<ShaderHashesType<SingleShaderHashes>, 1>,
-      std::unordered_set<ShaderHashesType<SingleShaderHashes>>>;
+   enum class ShaderHashesCount : bool
+   {
+      Single,
+      Multiple
+   };
+
+   // Which shader stages a "ShaderHashesList" covers. The stages it doesn't cover are ignored by all its functions.
+   enum class ShaderHashesStages : uint8_t
+   {
+      All,
+      Graphics,
+      Compute,
+   };
+
+   // When we only have one element, set it to 64 bits to we can set it to "SHADER_HASH_NONE" to highlight the hash is invalid/none (0 is a possible hash too)
+   template <ShaderHashesCount Count>
+   using ShaderHashesType = std::conditional_t<Count == ShaderHashesCount::Single, uint64_t, uint32_t>;
+
+   template <ShaderHashesCount Count>
+   using ShaderHashesContainer = std::conditional_t<Count == ShaderHashesCount::Single,
+      std::array<ShaderHashesType<Count>, 1>, // No performance overhead from being a 1x array
+      std::unordered_set<ShaderHashesType<Count>>>;
+
+   // Placeholder for the stages a "ShaderHashesList" doesn't cover: they take no memory and can't be accidentally used
+   struct UnusedShaderHashesContainer {};
+
+   template <ShaderHashesCount Count, bool Unused>
+   using OptionalShaderHashesContainer = std::conditional_t<Unused, UnusedShaderHashesContainer, ShaderHashesContainer<Count>>;
 
    template <typename T1, typename T2>
    bool ShaderHashesContains(const std::unordered_set<T1>& container, const T2& value)
@@ -244,176 +269,220 @@ namespace Shader
    template <typename T1, typename T2, std::size_t N>
    bool ShaderHashesContains(const std::array<T1, N>& container, const T2& value)
    {
-      ASSERT_ONCE(container[0] != UINT64_MAX || value != UINT64_MAX); // If both are UINT64_MAX, something is wrong!... We need to return false for that case!
+      ASSERT_ONCE(container[0] != SHADER_HASH_NONE || value != SHADER_HASH_NONE); // If both are "SHADER_HASH_NONE", something is wrong!... We need to return false for that case!
       static_assert(N == 1, "Only supports std::array<T, 1>");
       return container[0] == value;
    }
 
-   template <bool SingleShaderHashes = false>
+   template <typename T>
+   bool ShaderHashesEmpty(const std::unordered_set<T>& container)
+   {
+      return container.empty();
+   }
+   template <typename T, std::size_t N>
+   bool ShaderHashesEmpty(const std::array<T, N>& container)
+   {
+      static_assert(N == 1, "Only supports std::array<T, 1>");
+      return container[0] == SHADER_HASH_NONE;
+   }
+
+   template <ShaderHashesCount Count = ShaderHashesCount::Multiple, ShaderHashesStages Stages = ShaderHashesStages::All>
    struct ShaderHashesList
    {
-      ShaderHashesContainer<SingleShaderHashes> pixel_shaders;
-      ShaderHashesContainer<SingleShaderHashes> vertex_shaders;
+      static constexpr bool IgnoreGraphics = Stages == ShaderHashesStages::Compute;
+      static constexpr bool IgnoreCompute = Stages == ShaderHashesStages::Graphics;
+
+      [[msvc::no_unique_address]] OptionalShaderHashesContainer<Count, IgnoreGraphics> pixel_shaders;
+      [[msvc::no_unique_address]] OptionalShaderHashesContainer<Count, IgnoreGraphics> vertex_shaders;
 #if GEOMETRY_SHADER_SUPPORT
-      ShaderHashesContainer<SingleShaderHashes> geometry_shaders;
+      [[msvc::no_unique_address]] OptionalShaderHashesContainer<Count, IgnoreGraphics> geometry_shaders;
 #endif
-      ShaderHashesContainer<SingleShaderHashes> compute_shaders;
+      [[msvc::no_unique_address]] OptionalShaderHashesContainer<Count, IgnoreCompute> compute_shaders;
 
       bool Contains(uint32_t shader_hash, reshade::api::shader_stage shader_stage) const
       {
-         // NOTE: we could probably check if the value matches a specific shader stage (e.g. a switch?), but I'm not 100% sure other flags are ever set
-         if ((shader_stage & reshade::api::shader_stage::pixel) != 0)
+         if constexpr (!IgnoreGraphics)
          {
-            if (ShaderHashesContains(pixel_shaders, shader_hash)) return true;
-         }
-         if ((shader_stage & reshade::api::shader_stage::vertex) != 0)
-         {
-            if (ShaderHashesContains(vertex_shaders, shader_hash)) return true;
-         }
+            // NOTE: we could probably check if the value matches a specific shader stage (e.g. a switch?), but I'm not 100% sure other flags are ever set
+            if ((shader_stage & reshade::api::shader_stage::pixel) != 0)
+            {
+               if (ShaderHashesContains(pixel_shaders, shader_hash))
+                  return true;
+            }
+            if ((shader_stage & reshade::api::shader_stage::vertex) != 0)
+            {
+               if (ShaderHashesContains(vertex_shaders, shader_hash))
+                  return true;
+            }
 #if GEOMETRY_SHADER_SUPPORT
-         if ((shader_stage & reshade::api::shader_stage::geometry) != 0)
-         {
-            if (ShaderHashesContains(geometry_shaders, shader_hash)) return true;
-         }
+            if ((shader_stage & reshade::api::shader_stage::geometry) != 0)
+            {
+               if (ShaderHashesContains(geometry_shaders, shader_hash))
+                  return true;
+            }
 #endif
-         if ((shader_stage & reshade::api::shader_stage::compute) != 0)
+         }
+         if constexpr (!IgnoreCompute)
          {
-            return ShaderHashesContains(compute_shaders, shader_hash);
+            if ((shader_stage & reshade::api::shader_stage::compute) != 0)
+            {
+               return ShaderHashesContains(compute_shaders, shader_hash);
+            }
          }
          return false;
       }
-      template <bool OtherSingleShaderHashes>
-      bool Contains(const ShaderHashesList<OtherSingleShaderHashes>& other) const
+      // TODO: rename these to "ContainsAny"
+      template <ShaderHashesCount OtherShaderHashesCount, ShaderHashesStages OtherStages>
+      bool Contains(const ShaderHashesList<OtherShaderHashesCount, OtherStages>& other) const
       {
-         for (const ShaderHashesType<OtherSingleShaderHashes> shader_hash : other.pixel_shaders)
+         using OtherList = ShaderHashesList<OtherShaderHashesCount, OtherStages>;
+         if constexpr (!IgnoreGraphics && !OtherList::IgnoreGraphics)
          {
-            if (ShaderHashesContains(pixel_shaders, shader_hash))
+            for (const ShaderHashesType<OtherShaderHashesCount> shader_hash : other.pixel_shaders)
             {
-               return true;
+               if (ShaderHashesContains(pixel_shaders, shader_hash))
+               {
+                  return true;
+               }
             }
-         }
-         for (const ShaderHashesType<OtherSingleShaderHashes> shader_hash : other.vertex_shaders)
-         {
-            if (ShaderHashesContains(vertex_shaders, shader_hash))
+            for (const ShaderHashesType<OtherShaderHashesCount> shader_hash : other.vertex_shaders)
             {
-               return true;
+               if (ShaderHashesContains(vertex_shaders, shader_hash))
+               {
+                  return true;
+               }
             }
-         }
 #if GEOMETRY_SHADER_SUPPORT
-         for (const ShaderHashesType<OtherSingleShaderHashes> shader_hash : other.geometry_shaders)
-         {
-            if (ShaderHashesContains(geometry_shaders, shader_hash))
+            for (const ShaderHashesType<OtherShaderHashesCount> shader_hash : other.geometry_shaders)
             {
-               return true;
+               if (ShaderHashesContains(geometry_shaders, shader_hash))
+               {
+                  return true;
+               }
             }
-         }
 #endif
-         for (const ShaderHashesType<OtherSingleShaderHashes> shader_hash : other.compute_shaders)
+         }
+         if constexpr (!IgnoreCompute && !OtherList::IgnoreCompute)
          {
-            if (ShaderHashesContains(compute_shaders, shader_hash))
+            for (const ShaderHashesType<OtherShaderHashesCount> shader_hash : other.compute_shaders)
             {
-               return true;
+               if (ShaderHashesContains(compute_shaders, shader_hash))
+               {
+                  return true;
+               }
             }
          }
          return false;
+      }
+      // Returns true if every stage that has any hashes in "other" has at least one of them in our matching stage.
+      // Stages that are empty in "other" are ignored. Returns false if "this" or "other" is fully empty.
+      // Stages not covered by either list (see "ShaderHashesStages") aren't checked.
+      template <ShaderHashesCount OtherShaderHashesCount, ShaderHashesStages OtherStages>
+      bool ContainsAll(const ShaderHashesList<OtherShaderHashesCount, OtherStages>& other) const
+      {
+         using OtherList = ShaderHashesList<OtherShaderHashesCount, OtherStages>;
+         bool any_stage = false;
+         auto StageMatches = [&any_stage](const auto& stage_shaders, const auto& other_stage_shaders)
+         {
+            if (ShaderHashesEmpty(other_stage_shaders)) return true;
+
+            any_stage = true;
+            for (const ShaderHashesType<OtherShaderHashesCount> shader_hash : other_stage_shaders)
+            {
+               if (ShaderHashesContains(stage_shaders, shader_hash))
+               {
+                  return true;
+               }
+            }
+            return false;
+         };
+         if constexpr (!IgnoreGraphics && !OtherList::IgnoreGraphics)
+         {
+            if (!StageMatches(pixel_shaders, other.pixel_shaders)) return false;
+            if (!StageMatches(vertex_shaders, other.vertex_shaders)) return false;
+#if GEOMETRY_SHADER_SUPPORT
+            if (!StageMatches(geometry_shaders, other.geometry_shaders)) return false;
+#endif
+         }
+         if constexpr (!IgnoreCompute && !OtherList::IgnoreCompute)
+         {
+            if (!StageMatches(compute_shaders, other.compute_shaders)) return false;
+         }
+         return any_stage;
       }
       bool Empty() const
       {
-         if constexpr (SingleShaderHashes)
+         if constexpr (!IgnoreGraphics)
          {
-            return pixel_shaders[0] == UINT64_MAX && vertex_shaders[0] == UINT64_MAX && compute_shaders[0] == UINT64_MAX
+            if (!ShaderHashesEmpty(pixel_shaders) || !ShaderHashesEmpty(vertex_shaders)
 #if GEOMETRY_SHADER_SUPPORT
-               && geometry_shaders[0] == UINT64_MAX
+               || !ShaderHashesEmpty(geometry_shaders)
 #endif
-               ;
+               )
+            {
+               return false;
+            }
          }
-         else
+         if constexpr (!IgnoreCompute)
          {
-            // Values are expected to be non null if the array has element
-            return pixel_shaders.empty() && vertex_shaders.empty() && compute_shaders.empty()
-#if GEOMETRY_SHADER_SUPPORT
-               && geometry_shaders.empty()
-#endif
-               ;
+            if (!ShaderHashesEmpty(compute_shaders))
+            {
+               return false;
+            }
          }
+         return true;
       }
       bool HasAny(reshade::api::shader_stage shader_stage) const
       {
-         if ((shader_stage & reshade::api::shader_stage::pixel) != 0)
+         if constexpr (!IgnoreGraphics)
          {
-            if constexpr (SingleShaderHashes)
-            {
-               if (pixel_shaders[0] != UINT64_MAX)
-                  return true;
-            }
-            else
-            {
-               if (!pixel_shaders.empty())
-                  return true;
-            }
-         }
-         if ((shader_stage & reshade::api::shader_stage::vertex) != 0)
-         {
-            if constexpr (SingleShaderHashes)
-            {
-               if (vertex_shaders[0] != UINT64_MAX)
-                  return true;
-            }
-            else
-            {
-               if (!vertex_shaders.empty())
-                  return true;
-            }
-         }
+            if ((shader_stage & reshade::api::shader_stage::pixel) != 0 && !ShaderHashesEmpty(pixel_shaders))
+               return true;
+            if ((shader_stage & reshade::api::shader_stage::vertex) != 0 && !ShaderHashesEmpty(vertex_shaders))
+               return true;
 #if GEOMETRY_SHADER_SUPPORT
-         if ((shader_stage & reshade::api::shader_stage::geometry) != 0)
-         {
-            if constexpr (SingleShaderHashes)
-            {
-               if (geometry_shaders[0] != UINT64_MAX)
-                  return true;
-            }
-            else
-            {
-               if (!geometry_shaders.empty())
-                  return true;
-            }
-         }
+            if ((shader_stage & reshade::api::shader_stage::geometry) != 0 && !ShaderHashesEmpty(geometry_shaders))
+               return true;
 #endif
-         if ((shader_stage & reshade::api::shader_stage::compute) != 0)
+         }
+         if constexpr (!IgnoreCompute)
          {
-            if constexpr (SingleShaderHashes)
-            {
-               if (compute_shaders[0] != UINT64_MAX)
-                  return true;
-            }
-            else
-            {
-               if (!compute_shaders.empty())
-                  return true;
-            }
+            if ((shader_stage & reshade::api::shader_stage::compute) != 0 && !ShaderHashesEmpty(compute_shaders))
+               return true;
          }
          return false;
       }
       void Clear()
       {
-         if constexpr (SingleShaderHashes)
+         if constexpr (Count == ShaderHashesCount::Single)
          {
-            pixel_shaders[0] = UINT64_MAX;
-            vertex_shaders[0] = UINT64_MAX;
+            if constexpr (!IgnoreGraphics)
+            {
+               pixel_shaders[0] = SHADER_HASH_NONE;
+               vertex_shaders[0] = SHADER_HASH_NONE;
 #if GEOMETRY_SHADER_SUPPORT
-            geometry_shaders[0] = UINT64_MAX;
+               geometry_shaders[0] = SHADER_HASH_NONE;
 #endif
-            compute_shaders[0] = UINT64_MAX;
+            }
+            if constexpr (!IgnoreCompute)
+            {
+               compute_shaders[0] = SHADER_HASH_NONE;
+            }
          }
          else
          {
-            pixel_shaders.clear();
-            vertex_shaders.clear();
+            if constexpr (!IgnoreGraphics)
+            {
+               pixel_shaders.clear();
+               vertex_shaders.clear();
 #if GEOMETRY_SHADER_SUPPORT
-            geometry_shaders.clear();
+               geometry_shaders.clear();
 #endif
-            compute_shaders.clear();
+            }
+            if constexpr (!IgnoreCompute)
+            {
+               compute_shaders.clear();
+            }
          }
       }
    };
@@ -534,3 +603,6 @@ namespace Shader
       return template_shader_name;
    }
 }
+
+// TODO: delete. This is useless. If anything, make a typedef of "ShaderHashesList" with a single shader per stage.
+constexpr Shader::ShaderHashesCount OneShaderPerPipeline = Shader::ShaderHashesCount::Single;

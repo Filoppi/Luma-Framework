@@ -40,7 +40,7 @@ static void EnsureScaledTexture(DeviceData& device_data, GameDeviceDataGBFR& gam
 // On first detection, copies the scene to an output-resolution texture with
 // bilinear filtering and redirects the render target + viewport.
 // Returns true when the draw is part of the UI phase.
-static bool DetectUIPhase(DeviceData& device_data, ID3D11DeviceContext* ctx, const ShaderHashesList<true>& original_shader_hashes)
+static bool DetectUIPhase(DeviceData& device_data, ID3D11DeviceContext* ctx, const ShaderHashesList<OneShaderPerPipeline>& original_shader_hashes)
 {
    auto& game_device_data = *static_cast<GameDeviceDataGBFR*>(device_data.game);
    auto& ui_scale = game_device_data.ui_scale;

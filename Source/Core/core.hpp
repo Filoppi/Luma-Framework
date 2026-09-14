@@ -141,11 +141,8 @@
 #error Rename "ENABLE_POST_DRAW_CALLBACK" to "ENABLE_POST_DRAW_DISPATCH_CALLBACK"
 #endif
 
-#if DX12
-constexpr bool OneShaderPerPipeline = false;
-#else
+#if !DX12
 #define DX11 1
-constexpr bool OneShaderPerPipeline = true;
 #endif
 
 // This might not disable all shaders dumping related code, but it disables enough to remove any performance cost
@@ -175,6 +172,7 @@ constexpr bool OneShaderPerPipeline = true;
 #include "dlss/DLSS.h" // see "ENABLE_NGX"
 #include "fsr/FSR.h" // see "ENABLE_FIDELITY_SK"
 
+#include "includes/containers.h"
 #include "includes/globals.h"
 #include "includes/debug.h"
 #include "includes/cbuffers.h"
@@ -643,12 +641,13 @@ namespace
       // For high quality gamma space SDR use "DXGI_FORMAT_R10G10B10A2_UNORM", it can alternatively be used to improve the quality if you are sure the game doesn't read back alpha (you can try with "DXGI_FORMAT_R11G11B10_FLOAT" as a test, and see if any of the UI looks different, given it has no alpha).
       DXGI_FORMAT ui_separation_format = DXGI_FORMAT_UNKNOWN;
       // Optionally add the UI shaders to this list, to make sure they draw to a separate render target for proper HDR composition
-      ShaderHashesList shader_hashes_UI;
+      // For now this is only for the graphics state (no compute shaders)
+      ShaderHashesList<ShaderHashesCount::Multiple, ShaderHashesStages::Graphics> shader_hashes_UI;
       // If true, only shaders in "shader_hashes_UI" are redirected to the separate UI render target.
       // Otherwise, any draw after main post-processing that targets the same render target is treated as UI unless excluded.
       bool ui_separation_use_ui_hashes_only = false;
       // Shaders that might be running after "has_drawn_main_post_processing" has turned true, but that are still not UI (most games don't have a fixed last shader that runs on the scene rendering before UI, e.g. FXAA might add a pass based on user settings etc), so we have to exclude them like this
-      ShaderHashesList shader_hashes_UI_excluded;
+      ShaderHashesList<ShaderHashesCount::Multiple, ShaderHashesStages::Graphics> shader_hashes_UI_excluded;
       // Hides gameplay UI (or well, any UI that draws when the main scene also draws, some games always render the main scene, even behind pause or main menus).
       // Requires "enable_ui_separation"
       bool hide_ui = false;
@@ -1027,7 +1026,7 @@ namespace
    bool trace_running = false; // For this frame
    uint32_t trace_count = 0; // Not exactly necessary but... it might help
 
-   std::string last_drawn_shader = ""; // Not exactly thread safe but it's fine...
+   uint64_t last_drawn_shader = SHADER_HASH_NONE; // Not exactly thread safe but it's fine...
 
    thread_local reshade::api::command_list* thread_local_cmd_list = nullptr; // Hacky global variable (possibly not cleared, stale), only use to quickly tell the command list of the thread
 
@@ -4322,6 +4321,9 @@ namespace
                            cached_shader->type_and_version = type_prefix + "_" + std::to_string(major_version) + "_" + std::to_string(minor_version);
 
 #if DEVELOPMENT
+                           if (type == D3D11_SHVER_COMPUTE_SHADER)
+                              shader_reflector->GetThreadGroupSize(&cached_shader->compute_thread_size.x, &cached_shader->compute_thread_size.y, &cached_shader->compute_thread_size.z);
+
                            bool found_any_rtvs = false;
                            bool found_any_other_bindings = false;
 
@@ -4729,7 +4731,6 @@ namespace
 #endif
       }
 
-
 #if LUMA_PATCH_PROVIDERS & (LUMA_PATCH_PROVIDER_BYTECODE_ASYNC | LUMA_PATCH_PROVIDER_RECIPE_ASYNC)
       // Patches are automatic: queueing must not depend on the "Auto Load
       // Shaders" checkbox (a user tool for their own files), only on the unloaded
@@ -4853,7 +4854,7 @@ namespace
       CommandListData& cmd_list_data = *cmd_list->get_private_data<CommandListData>();
 
       const Shader::CachedPipeline* cached_pipeline = nullptr;
-      uint32_t cached_pipeline_shader_hash = 0;
+      uint64_t cached_pipeline_shader_hash = SHADER_HASH_NONE;
 
       if (pipeline.handle != 0)
       {
@@ -4931,7 +4932,7 @@ namespace
 #if DX12
             cmd_list_data.pipeline_state_original_compute_shader_hashes.compute_shaders.clear();
 #else
-            cmd_list_data.pipeline_state_original_compute_shader_hashes.compute_shaders[0] = UINT64_MAX;
+            cmd_list_data.pipeline_state_original_compute_shader_hashes.compute_shaders[0] = SHADER_HASH_NONE;
 #endif
             cmd_list_data.pipeline_state_has_custom_compute_shader = false;
          }
@@ -4969,7 +4970,7 @@ namespace
 #if DX12
             cmd_list_data.pipeline_state_original_graphics_shader_hashes.vertex_shaders.clear();
 #else
-            cmd_list_data.pipeline_state_original_graphics_shader_hashes.vertex_shaders[0] = UINT64_MAX;
+            cmd_list_data.pipeline_state_original_graphics_shader_hashes.vertex_shaders[0] = SHADER_HASH_NONE;
 #endif
             cmd_list_data.pipeline_state_has_custom_vertex_shader = false;
          }

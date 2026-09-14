@@ -8,8 +8,8 @@
 
 namespace
 {
-   const ShaderHashesList shader_hashes_FXAA = { .pixel_shaders = { 0xFAB5AE7C } };
-   const ShaderHashesList shader_hashes_SwapchainCopy = { .pixel_shaders = { 0xD4BDA6C0 } };
+   const ShaderHashesList<ShaderHashesCount::Multiple, ShaderHashesStages::Graphics> shader_hashes_FXAA = { .pixel_shaders = { 0xFAB5AE7C } };
+   const ShaderHashesList<ShaderHashesCount::Multiple, ShaderHashesStages::Graphics> shader_hashes_SwapchainCopy = { .pixel_shaders = { 0xD4BDA6C0 } };
 
    // User settings:
    bool smaa_enable = true; // TODO: test!

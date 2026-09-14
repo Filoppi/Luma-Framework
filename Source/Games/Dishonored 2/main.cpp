@@ -185,7 +185,7 @@ public:
 
 #if DEVELOPMENT && 0
       cb_per_view_globals.emplace_back(global_buffer_data);
-      cb_per_view_globals_last_drawn_shader.emplace_back(last_drawn_shader); // The shader hash could we unspecified if we didn't replace the shader
+      cb_per_view_globals_last_drawn_shader.emplace_back(last_drawn_shader != SHADER_HASH_NONE ? Shader::Hash_NumToStr(last_drawn_shader) : ""); // The shader hash could we unspecified if we didn't replace the shader
 #endif // DEVELOPMENT
 
       if (!is_valid_cbuffer)

@@ -83,7 +83,7 @@ static bool IsTAAResolve(const ShaderHashesList<OneShaderPerPipeline>& hashes)
 static uint32_t FirstComputeHash(const ShaderHashesList<OneShaderPerPipeline>& hashes)
 {
    for (auto h : hashes.compute_shaders)
-      if (h != UINT64_MAX)
+      if (h != SHADER_HASH_NONE)
          return (uint32_t)h;
    return 0;
 }

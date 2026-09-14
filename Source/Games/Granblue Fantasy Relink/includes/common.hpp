@@ -81,20 +81,20 @@ struct GameDeviceDataGBFR final : public GameDeviceData, public GBFRUpscaleState
 
 struct GBFRShaderHashes
 {
-   ShaderHashesList<false> outline_prefilter;
-   ShaderHashesList<false> outline_cs;
-   ShaderHashesList<false> temporal_upscale;
-   ShaderHashesList<false> taa;
-   ShaderHashesList<false> tonemap;
-   ShaderHashesList<false> motion_blur;
-   ShaderHashesList<false> motion_blur_denoise;
-   ShaderHashesList<false> cutscene_gamma;
-   ShaderHashesList<false> cutscene_color_grade;
-   ShaderHashesList<false> cutscene_overlay_blend;
-   ShaderHashesList<false> cutscene_overlay_modulate;
-   ShaderHashesList<false> bloom;
-   ShaderHashesList<false> ui_background_downscale;
-   ShaderHashesList<false> output;
+   ShaderHashesList<ShaderHashesCount::Multiple> outline_prefilter;
+   ShaderHashesList<ShaderHashesCount::Multiple> outline_cs;
+   ShaderHashesList<ShaderHashesCount::Multiple> temporal_upscale;
+   ShaderHashesList<ShaderHashesCount::Multiple> taa;
+   ShaderHashesList<ShaderHashesCount::Multiple> tonemap;
+   ShaderHashesList<ShaderHashesCount::Multiple> motion_blur;
+   ShaderHashesList<ShaderHashesCount::Multiple> motion_blur_denoise;
+   ShaderHashesList<ShaderHashesCount::Multiple> cutscene_gamma;
+   ShaderHashesList<ShaderHashesCount::Multiple> cutscene_color_grade;
+   ShaderHashesList<ShaderHashesCount::Multiple> cutscene_overlay_blend;
+   ShaderHashesList<ShaderHashesCount::Multiple> cutscene_overlay_modulate;
+   ShaderHashesList<ShaderHashesCount::Multiple> bloom;
+   ShaderHashesList<ShaderHashesCount::Multiple> ui_background_downscale;
+   ShaderHashesList<ShaderHashesCount::Multiple> output;
 };
 
 struct GBFRRuntimeSettings

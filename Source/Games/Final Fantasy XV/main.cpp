@@ -97,7 +97,7 @@ namespace
 #if LUMA_HAS_RECIPE_PROVIDERS
    bool BindPatchedResources(ID3D11DeviceContext* native_device_context, CommandListData& cmd_list_data, DeviceData& device_data, const ShaderHashesList<OneShaderPerPipeline>& original_shader_hashes, reshade::api::shader_stage stages, bool& updated_cbuffers)
    {
-      if ((stages & reshade::api::shader_stage::pixel) == 0 || original_shader_hashes.pixel_shaders[0] == UINT64_MAX)
+      if ((stages & reshade::api::shader_stage::pixel) == 0 || original_shader_hashes.pixel_shaders[0] == SHADER_HASH_NONE)
       {
          return false;
       }

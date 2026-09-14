@@ -18,7 +18,7 @@
 
 namespace
 {
-   ShaderHashesList<> shader_hashes_Tonemapper;
+   ShaderHashesList shader_hashes_Tonemapper;
 
    Luma::Settings::Settings settings = {
       new Luma::Settings::Section{
