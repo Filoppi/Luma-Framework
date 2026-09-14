@@ -14,6 +14,16 @@ namespace Reinhard
   {
     return x / ((abs(x) / peak) + 1.0);
   }
+
+  float InverseReinhardSimple(float y, float peak = 1.0)
+  {
+    return (y * peak) / (peak - abs(y));
+  }
+
+  float3 InverseReinhardSimple(float3 y, float peak = 1.0)
+  {
+    return (y * peak) / (peak - abs(y));
+  }
   
   // Compresses the range from "ShoulderStart" to "In_Peak", onto "ShoulderStart" to "Out_Peak".
   // If "In_Peak" is <= 0, it will then start compressing from "infinite".
@@ -21,7 +31,7 @@ namespace Reinhard
   // This is useful to compress back an HDR display mapped image to SDR, or any other color that needs to left intact below a certain threshold, and has a peak value different from ~infinite.
   // 
   // Don't pre-offset inputs by the shoulder start.
-  // TODO: this can actually cause the output color to be greater if the in peak was low, so maybe prevent that?
+  // TODO: this can actually cause the output color to be greater if the in peak was low, so maybe prevent that? The one belows fix it.
   float3 ReinhardRange(float3 Color, float ShoulderStart = MidGray, float In_Peak = -1.0, float Out_Peak = 1.0, bool ClampOutput = false)
   {
     const float3 compressableColor = Color - ShoulderStart;
@@ -44,6 +54,44 @@ namespace Reinhard
       Color = max(Color, 0.0);
     }
     return (Color <= ShoulderStart) ? Color : possibleOutValue;
+  }
+
+  // Reinhard highlight compression that is identity up to ShoulderStart, then smoothly compresses toward PeakOut (never exceeding it).
+  // Continuous at ShoulderStart.
+  // 
+  // Assumes inputs are in [0..+INF) (negative values pass through unchanged below).
+  // Assumes PeakOut > ShoulderStart.
+  float3 ReinhardRanged(float3 Color, float3 ShoulderStart = MidGray, float3 PeakOut = 1.0)
+  {
+    float3 Range = PeakOut - ShoulderStart;
+
+    float3 ColorBelowShoulderStart = min(Color, ShoulderStart);
+    float3 ColorBeyondShoulderStart = Color - ColorBelowShoulderStart;
+
+    return ColorBelowShoulderStart + (ColorBeyondShoulderStart / (ColorBeyondShoulderStart + Range)) * Range;
+  }
+  
+  // "ShoulderStrength" is expected to be > 0 or the math breaks. Neutral Reinhard at 1.
+  float3 ReinhardAdvanced(float3 Color, float3 ShoulderStart = MidGray, float3 PeakIn = FLT_MAX, float3 PeakOut = 1.0, float ShoulderStrength = 1.0)
+  {
+      float3 RangeOut = PeakOut - ShoulderStart;
+
+      float3 ColorBelowShoulderStart = min(Color, ShoulderStart);
+      float3 ColorBeyondShoulderStart = Color - ColorBelowShoulderStart;
+
+      float3 NormalizedColorBeyondShoulderStart = ColorBeyondShoulderStart / RangeOut;
+      float3 NormalizedCompressedBeyondShoulderStart = 1.0 - pow(1.0 + (NormalizedColorBeyondShoulderStart / ShoulderStrength), -ShoulderStrength);
+      
+      if (all(PeakIn != FLT_MAX))
+      {
+          float3 RangeIn = PeakIn - ShoulderStart;
+          float3 WhiteRatio = RangeIn / RangeOut;
+          float3 YAtWhite = 1.0 - pow(1.0 + (WhiteRatio / ShoulderStrength), -ShoulderStrength);
+          float3 WhiteScale = (rcp(YAtWhite) - 1.0) / WhiteRatio;
+          NormalizedCompressedBeyondShoulderStart *= 1.0 + (NormalizedColorBeyondShoulderStart * WhiteScale);
+      }
+
+      return ColorBelowShoulderStart + NormalizedCompressedBeyondShoulderStart * RangeOut;
   }
   
   // This converts a color compressed with Reinhard with a white level to another white level
