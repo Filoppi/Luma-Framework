@@ -1,0 +1,36 @@
+// ---- Created with 3Dmigoto v1.3.16 on Tue Aug 04 16:15:09 2026
+
+SamplerState SAMPLERS_4__s : register(s4);
+Texture2D<float4> TEXTURES_2D_0_ : register(t0);
+Texture2D<float4> TEXTURES_2D_1_ : register(t1);
+
+
+// 3Dmigoto declarations
+#define cmp -
+#include "./Includes/Common.hlsl"
+
+void main(
+  float4 v0 : SV_Position0,
+  float2 v1 : TEXCOORD0,
+  out float4 o0 : SV_Target0)
+{
+  float4 r0,r1,r2;
+  uint4 bitmask, uiDest;
+  float4 fDest;
+
+  r0.xyzw = TEXTURES_2D_1_.Sample(SAMPLERS_4__s, v1.xy).xyzw; //bloom
+  r0.xyzw = max(r0.xyzw, 0);
+  r0.w = min(r0.w, 1);
+  r0.xyzw = pow(r0.xyzw, 2.2);
+
+  r1.xyzw = TEXTURES_2D_0_.Sample(SAMPLERS_4__s, v1.xy).xyzw; //color
+  r1.xyzw = max(r1.xyzw, 0);
+
+  // r2.xyzw = float4(1,1,1,1) + -r1.xyzw; //screen
+  // o0.xyzw = r2.xyzw * r0.xyzw + r1.xyzw;
+  o0.xyzw = r0.xyzw + r1.xyzw;
+  o0.w = saturate(o0.w);
+
+  o0.xyz = sRGB_Encode(o0.xyz);
+  return;
+}

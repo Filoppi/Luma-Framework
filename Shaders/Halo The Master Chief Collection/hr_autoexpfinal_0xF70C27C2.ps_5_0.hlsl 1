@@ -1,0 +1,66 @@
+// ---- Created with 3Dmigoto v1.3.16 on Wed Aug 05 17:40:30 2026
+
+cbuffer PostProcessPS : register(b0)
+{
+  float4 pixel_size : packoffset(c0);
+  float4 scale : packoffset(c1);
+  float4x3 p_postprocess_hue_saturation_matrix : packoffset(c2);
+  float4 p_postprocess_contrast : packoffset(c5);
+}
+
+SamplerState LocalSampler_source_sampler_s : register(s0);
+SamplerState LocalSampler_weight_sampler_s : register(s1);
+Texture2D<float4> LocalTexture_source_sampler : register(t0);
+Texture2D<float4> LocalTexture_weight_sampler : register(t1);
+
+
+// 3Dmigoto declarations
+#define cmp -
+#include "./Includes/Common.hlsl"
+
+// TODO: failed decomp
+void main(
+  float4 v0 : SV_Position0,
+  float2 v1 : TEXCOORD0,
+  out float4 o0 : SV_Target0)
+{
+  float4 r0,r1,r2,r3;
+  uint4 bitmask, uiDest;
+  float4 fDest;
+
+  r0.z = 1;
+  r1.xyz = float3(0,0,0);
+  r0.w = -3;
+
+  while (true) {
+    r1.w = cmp(3 < (int)r0.w);
+    if (r1.w != 0) break;
+    r2.x = (int)r0.w;
+    r3.xyz = r1.xyz;
+    r1.w = -7;
+    while (true) {
+      r2.z = cmp(7 < (int)r1.w);
+      if (r2.z != 0) break;
+      r2.y = (int)r1.w;
+      r2.yz = r2.xy * pixel_size.xy + v1.xy;
+      r2.w = LocalTexture_weight_sampler.Sample(LocalSampler_weight_sampler_s, r2.yz).y;
+      r2.y = LocalTexture_source_sampler.Sample(LocalSampler_source_sampler_s, r2.yz).w; 
+      r0.y = 8 * r2.y;
+      r2.y = r2.y * 8 + 9.99999975e-006;
+      r0.x = log2(r2.y);
+      r3.xyz = r2.www * r0.xyz + r3.xyz;
+      r1.w = (int)r1.w + 2;
+    }
+    r1.xyz = r3.xyz;
+    r0.w = (int)r0.w + 2;
+  }
+
+  r0.xy = r1.xy / r1.zz;
+  r0.y = 9.99999975e-006 + r0.y;
+  r0.y = log2(r0.y);
+  r0.z = 1 + -scale.x;
+  r0.x = r0.x * r0.z;
+  o0.xyzw = r0.yyyy * scale.xxxx + r0.xxxx;
+  o0 = max(0, o0);
+  return;
+}

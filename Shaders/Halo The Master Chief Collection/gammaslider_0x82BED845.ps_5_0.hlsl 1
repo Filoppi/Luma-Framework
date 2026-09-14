@@ -1,0 +1,15 @@
+// ---- Created with 3Dmigoto v1.3.16 on Tue Aug 04 12:24:18 2026
+cbuffer cb0 : register(b0)
+{
+  float4 cb0[1];
+}
+
+// 3Dmigoto declarations
+#define cmp -
+
+void main(
+  out float4 o0 : SV_Target0)
+{
+  o0.xyzw = 0/* cb0[0].xyzw */;
+  return;
+}

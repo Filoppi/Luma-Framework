@@ -286,5 +286,8 @@ void main(
   r2.xyz = v8.xyz + -r0.xyz;
   r0.xyz = v6.www * r2.xyz + r0.xyz;
   o0.xyz = r5.yyy ? r1.xyz : r0.xyz;
+
+  o0 = saturate(o0); // Luma: saturate to avoid issues
+  
   return;
 }
