@@ -17,6 +17,11 @@
 #ifndef RCAS_LIMIT
 #define RCAS_LIMIT (0.25-(1.0/16.0))
 #endif
+// AMD FSR 1.2 lower-limiter compensation reduces negative undershoot when the center pixel is darker than its neighboring ring.
+// Enabled by default to match the current AMD implementation. Define this as 0 before including this file to restore the old RCAS behavior.
+#ifndef RCAS_LOWER_LIMITER_COMPENSATION
+#define RCAS_LOWER_LIMITER_COMPENSATION 1
+#endif
 // This should look better, avoid hue shifts and be more compatible with HDR (scRGB, which can have negative values). This appears to have stronger sharpening when enabled, but also causes more black dots to appear at extreme sharpening values.
 // For now it's disabled by default as there's not enough proof to justify it, sharpening is a perceptual trick so hue shifts don't really matter (in fact, possibly they make it better).
 #define RCAS_LUMINANCE_BASED 0
@@ -77,7 +82,7 @@ float4 RCAS(int2 pixelCoord, int2 minPixelCoord /*= 0*/, int2 maxPixelCoord /*= 
     float3 f = linearColorTexture.Load(int3(min(pixelCoord.x + 1, maxPixelCoord.x), pixelCoord.y, 0)).rgb / paperWhite;
     float3 h = linearColorTexture.Load(int3(pixelCoord.x, min(pixelCoord.y + 1, maxPixelCoord.y), 0)).rgb / paperWhite;
 
-#if RCAS_DENOISE >= 1
+#if RCAS_DENOISE >= 1 || RCAS_LOWER_LIMITER_COMPENSATION >= 1
     // Get lumas times 2. Should use luma weights that are twice as large as normal.
     float bL = getRCASLuma(b);
     float dL = getRCASLuma(d);
@@ -85,11 +90,19 @@ float4 RCAS(int2 pixelCoord, int2 minPixelCoord /*= 0*/, int2 maxPixelCoord /*= 
     float fL = getRCASLuma(f);
     float hL = getRCASLuma(h);
 
+#if RCAS_LOWER_LIMITER_COMPENSATION >= 1
+    // FSR 1.2 scales the lower limiter by center luma divided by the darkest ring luma.
+    // Clamp the divisor so black and negative scRGB samples cannot produce NaNs or flip the limiter.
+    float lowerLimiterMultiplier = saturate(eL * rcp(max(min(min(bL, dL), min(fL, hL)), 1e-6)));
+#endif
+
+#if RCAS_DENOISE >= 1
     // denoise
     float nz = (bL + dL + fL + hL) * 0.25 - eL;
     float range = max(max(max(bL, dL), max(hL, fL)), eL) - min(min(min(bL, dL), min(eL, fL)), hL);
     nz = saturate(abs(nz) * rcp(range));
     nz = -0.5 * nz + 1.0;
+#endif
 #endif
 
     static const float samplesNum = 4.0; // There's 4 (5) colors to be mixed
@@ -108,6 +121,9 @@ float4 RCAS(int2 pixelCoord, int2 minPixelCoord /*= 0*/, int2 maxPixelCoord /*= 
     float maxLum = max(max(bLum, dLum), max(fLum, hLum));
 
     float hitMin = minLum * rcp(samplesNum * maxLum);
+#if RCAS_LOWER_LIMITER_COMPENSATION >= 1
+    hitMin *= lowerLimiterMultiplier;
+#endif
     float hitMax = (peakC.x - maxLum) * rcp(samplesNum * minLum + peakC.y);
 
     float localLobe = max(-hitMin, hitMax);
@@ -125,6 +141,9 @@ float4 RCAS(int2 pixelCoord, int2 minPixelCoord /*= 0*/, int2 maxPixelCoord /*= 
     // Decided to use standard rcp for now in hopes of optimizing it.
     // It's fine if either of these can go below zero!
     float3 hitMin = minRGB * rcp(samplesNum * maxRGB);
+#if RCAS_LOWER_LIMITER_COMPENSATION >= 1
+    hitMin *= lowerLimiterMultiplier;
+#endif
     float3 hitMax = (peakC.xxx - maxRGB) * rcp(samplesNum * minRGB + peakC.yyy);
 
     float3 lobeRGB = max(-hitMin, hitMax);
