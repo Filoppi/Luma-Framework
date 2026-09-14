@@ -1,36 +1,29 @@
-/************************************************************************************************************************************\
-|*                                                                                                                                    *|
-|*     Copyright © 2012 NVIDIA Corporation.  All rights reserved.                                                                     *|
-|*                                                                                                                                    *|
-|*  NOTICE TO USER:                                                                                                                   *|
-|*                                                                                                                                    *|
-|*  This software is subject to NVIDIA ownership rights under U.S. and international Copyright laws.                                  *|
-|*                                                                                                                                    *|
-|*  This software and the information contained herein are PROPRIETARY and CONFIDENTIAL to NVIDIA                                     *|
-|*  and are being provided solely under the terms and conditions of an NVIDIA software license agreement.                             *|
-|*  Otherwise, you have no rights to use or access this software in any manner.                                                       *|
-|*                                                                                                                                    *|
-|*  If not covered by the applicable NVIDIA software license agreement:                                                               *|
-|*  NVIDIA MAKES NO REPRESENTATION ABOUT THE SUITABILITY OF THIS SOFTWARE FOR ANY PURPOSE.                                            *|
-|*  IT IS PROVIDED "AS IS" WITHOUT EXPRESS OR IMPLIED WARRANTY OF ANY KIND.                                                           *|
-|*  NVIDIA DISCLAIMS ALL WARRANTIES WITH REGARD TO THIS SOFTWARE,                                                                     *|
-|*  INCLUDING ALL IMPLIED WARRANTIES OF MERCHANTABILITY, NONINFRINGEMENT, AND FITNESS FOR A PARTICULAR PURPOSE.                       *|
-|*  IN NO EVENT SHALL NVIDIA BE LIABLE FOR ANY SPECIAL, INDIRECT, INCIDENTAL, OR CONSEQUENTIAL DAMAGES,                               *|
-|*  OR ANY DAMAGES WHATSOEVER RESULTING FROM LOSS OF USE, DATA OR PROFITS,  WHETHER IN AN ACTION OF CONTRACT,                         *|
-|*  NEGLIGENCE OR OTHER TORTIOUS ACTION,  ARISING OUT OF OR IN CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOURCE CODE.            *|
-|*                                                                                                                                    *|
-|*  U.S. Government End Users.                                                                                                        *|
-|*  This software is a "commercial item" as that term is defined at 48 C.F.R. 2.101 (OCT 1995),                                       *|
-|*  consisting  of "commercial computer  software"  and "commercial computer software documentation"                                  *|
-|*  as such terms are  used in 48 C.F.R. 12.212 (SEPT 1995) and is provided to the U.S. Government only as a commercial end item.     *|
-|*  Consistent with 48 C.F.R.12.212 and 48 C.F.R. 227.7202-1 through 227.7202-4 (JUNE 1995),                                          *|
-|*  all U.S. Government End Users acquire the software with only those rights set forth herein.                                       *|
-|*                                                                                                                                    *|
-|*  Any use of this software in individual and commercial software must include,                                                      *|
-|*  in the user documentation and internal comments to the code,                                                                      *|
-|*  the above Disclaimer (as applicable) and U.S. Government End Users Notice.                                                        *|
-|*                                                                                                                                    *|
- \************************************************************************************************************************************/
+/*********************************************************************************************************\
+|*                                                                                                        *|
+|* SPDX-FileCopyrightText: Copyright (c) 2019-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.  *|
+|* SPDX-License-Identifier: MIT                                                                           *|
+|*                                                                                                        *|
+|* Permission is hereby granted, free of charge, to any person obtaining a                                *|
+|* copy of this software and associated documentation files (the "Software"),                             *|
+|* to deal in the Software without restriction, including without limitation                              *|
+|* the rights to use, copy, modify, merge, publish, distribute, sublicense,                               *|
+|* and/or sell copies of the Software, and to permit persons to whom the                                  *|
+|* Software is furnished to do so, subject to the following conditions:                                   *|
+|*                                                                                                        *|
+|* The above copyright notice and this permission notice shall be included in                             *|
+|* all copies or substantial portions of the Software.                                                    *|
+|*                                                                                                        *|
+|* THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR                             *|
+|* IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,                               *|
+|* FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT.  IN NO EVENT SHALL                               *|
+|* THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER                             *|
+|* LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING                                *|
+|* FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER                                    *|
+|* DEALINGS IN THE SOFTWARE.                                                                              *|
+|*                                                                                                        *|
+|*                                                                                                        *|
+\*********************************************************************************************************/
+
 #pragma once
 #include"nvapi_lite_salstart.h"
 #pragma pack(push,8)
@@ -53,6 +46,12 @@ extern "C" {
 #endif
 #endif
 
+#define NV_U8_MAX       (+255U)
+#define NV_U16_MAX      (+65535U)
+#define NV_S32_MAX      (+2147483647)
+#define NV_U32_MIN      (0U)
+#define NV_U32_MAX      (+4294967295U)
+#define NV_U64_MAX      (+18446744073709551615ULL)
 
 /* 64-bit types for compilers that support them, plus some obsolete variants */
 #if defined(__GNUC__) || defined(__arm) || defined(__IAR_SYSTEMS_ICC__) || defined(__ghs__) || defined(_WIN64)
@@ -63,6 +62,10 @@ typedef unsigned __int64   NvU64; /* 0 to 18446744073709551615  */
 typedef __int64            NvS64; /* -9223372036854775808 to 9223372036854775807  */
 #endif
 
+#ifndef NVAPI_USE_STDINT
+#define NVAPI_USE_STDINT 0
+#endif
+
 #if NVAPI_USE_STDINT
 typedef uint32_t           NvV32; /* "void": enumerated or multiple fields   */
 typedef uint32_t           NvU32; /* 0 to 4294967295                         */
@@ -71,15 +74,17 @@ typedef  int32_t           NvS32; /* -2147483648 to 2147483647               */
 #else
 // mac os 32-bit still needs this
 #if (defined(macintosh) || defined(__APPLE__)) && !defined(__LP64__)
-typedef signed long        NvS32; /* -2147483648 to 2147483647  */   
+typedef signed long        NvS32; /* -2147483648 to 2147483647  */
 #else
-typedef signed int         NvS32; /* -2147483648 to 2147483647 */  
+typedef signed int         NvS32; /* -2147483648 to 2147483647 */
 #endif
 
-#if !(NVOS_IS_UNIX ||  (defined(__unix)))
+#if !((defined(NV_UNIX)) ||  (defined(__unix)))
 // mac os 32-bit still needs this
 #if ( (defined(macintosh) && defined(__LP64__) && (__NVAPI_RESERVED0__)) || \
-      (!defined(macintosh) && defined(__NVAPI_RESERVED0__)) ) 
+      (!defined(macintosh) && defined(__NVAPI_RESERVED0__)) )
+typedef unsigned int       NvU32; /* 0 to 4294967295                         */
+#elif defined(__clang__)
 typedef unsigned int       NvU32; /* 0 to 4294967295                         */
 #else
 typedef unsigned long      NvU32; /* 0 to 4294967295                         */
@@ -106,6 +111,7 @@ typedef double           NvF64;
  */
 #define NvF32TONvU32(_pData) *(NvU32 *)(_pData)
 
+#define NVAPI_SDK_VERSION 61683
 /* Boolean type */
 typedef NvU8 NvBool;
 #define NV_TRUE           ((NvBool)(0 == 0))
@@ -130,7 +136,7 @@ typedef struct _NV_RECT
 //!                 Most handles remain valid until a display re-configuration (display mode set) or GPU
 //!                 reconfiguration (going into or out of SLI modes) occurs.  If NVAPI_HANDLE_INVALIDATED
 //!                 is received by an app, it should discard all handles, and re-enumerate them.
-//! @{  
+//! @{
 NV_DECLARE_HANDLE(NvLogicalGpuHandle);             //!< One or more physical GPUs acting in concert (SLI)
 NV_DECLARE_HANDLE(NvPhysicalGpuHandle);            //!< A single physical GPU
 NV_DECLARE_HANDLE(NvDisplayHandle);                //!< Display Device driven by NVIDIA GPU(s) (an attached display)
@@ -162,7 +168,7 @@ NV_DECLARE_HANDLE(NvPresentBarrierClientHandle);   //!< PresentBarrier client ob
 //! \ingroup nvapihandles
 //! @{
 #define NVAPI_DEFAULT_HANDLE        0
-#define NV_BIT(x)    (1 << (x)) 
+#define NV_BIT(x)    (1 << (x))
 //! @}
 
 
@@ -173,7 +179,7 @@ NV_DECLARE_HANDLE(NvPresentBarrierClientHandle);   //!< PresentBarrier client ob
 #define NVAPI_LONG_STRING_MAX       256
 #define NVAPI_SHORT_STRING_MAX      64
 
-typedef struct 
+typedef struct
 {
     NvS32   sX;
     NvS32   sY;
@@ -214,6 +220,8 @@ typedef struct
 #define NVAPI_SYSTEM_MAX_HWBCS              128
 #define NVAPI_SYSTEM_HWBC_INVALID_ID        0xffffffff
 
+#define NVAPI_UUID_LEN                      16
+
 #define NVAPI_SYSTEM_MAX_DISPLAYS           NVAPI_MAX_PHYSICAL_GPUS * NV_MAX_HEADS
 #define NV_MAX_HEADS                        4   //!< Maximum heads, each with NVAPI_DESKTOP_RES resolution
 #define NVAPI_MAX_HEADS_PER_GPU             32
@@ -249,7 +257,7 @@ typedef NvU16 NvAPI_UnicodeShortString[NVAPI_SHORT_STRING_MAX];
 // ====================================================
 //! NvAPI Status Values
 //!   All NvAPI functions return one of these codes.
-//!   \ingroup nvapistatus 
+//!   \ingroup nvapistatus
 // ====================================================
 
 
@@ -275,11 +283,11 @@ typedef enum _NvAPI_Status
     NVAPI_EXPECTED_LOGICAL_GPU_HANDLE           = -100,    //!< Expected a logical GPU handle for one or more parameters
     NVAPI_EXPECTED_PHYSICAL_GPU_HANDLE          = -101,    //!< Expected a physical GPU handle for one or more parameters
     NVAPI_EXPECTED_DISPLAY_HANDLE               = -102,    //!< Expected an NV display handle for one or more parameters
-    NVAPI_INVALID_COMBINATION                   = -103,    //!< The combination of parameters is not valid. 
+    NVAPI_INVALID_COMBINATION                   = -103,    //!< The combination of parameters is not valid.
     NVAPI_NOT_SUPPORTED                         = -104,    //!< Requested feature is not supported in the selected GPU
     NVAPI_PORTID_NOT_FOUND                      = -105,    //!< No port ID was found for the I2C transaction
     NVAPI_EXPECTED_UNATTACHED_DISPLAY_HANDLE    = -106,    //!< Expected an unattached display handle as one of the input parameters.
-    NVAPI_INVALID_PERF_LEVEL                    = -107,    //!< Invalid perf level 
+    NVAPI_INVALID_PERF_LEVEL                    = -107,    //!< Invalid perf level
     NVAPI_DEVICE_BUSY                           = -108,    //!< Device is busy; request not fulfilled
     NVAPI_NV_PERSIST_FILE_NOT_FOUND             = -109,    //!< NV persist file is not found
     NVAPI_PERSIST_DATA_NOT_FOUND                = -110,    //!< NV persist data is not found
@@ -301,7 +309,7 @@ typedef enum _NvAPI_Status
     NVAPI_MIXED_TARGET_TYPES                    = -126,    //!< The target types are not all the same
     NVAPI_SYSWOW64_NOT_SUPPORTED                = -127,    //!< The function is not supported from 32-bit on a 64-bit system.
     NVAPI_IMPLICIT_SET_GPU_TOPOLOGY_CHANGE_NOT_ALLOWED = -128,    //!< There is no implicit GPU topology active. Use NVAPI_SetHybridMode to change topology.
-    NVAPI_REQUEST_USER_TO_CLOSE_NON_MIGRATABLE_APPS = -129,      //!< Prompt the user to close all non-migratable applications.    
+    NVAPI_REQUEST_USER_TO_CLOSE_NON_MIGRATABLE_APPS = -129,      //!< Prompt the user to close all non-migratable applications.
     NVAPI_OUT_OF_MEMORY                         = -130,    //!< Could not allocate sufficient memory to complete the call.
     NVAPI_WAS_STILL_DRAWING                     = -131,    //!< The previous operation that is transferring information to or from this surface is incomplete.
     NVAPI_FILE_NOT_FOUND                        = -132,    //!< The file was not found.
@@ -323,7 +331,7 @@ typedef enum _NvAPI_Status
     NVAPI_STEREO_PARAMETER_OUT_OF_RANGE         = -147,    //!< Separation percentage or JPEG image capture quality is out of [0-100] range.
     NVAPI_STEREO_FRUSTUM_ADJUST_MODE_NOT_SUPPORTED = -148, //!< The given frustum adjust mode is not supported.
     NVAPI_TOPO_NOT_POSSIBLE                     = -149,    //!< The mosaic topology is not possible given the current state of the hardware.
-    NVAPI_MODE_CHANGE_FAILED                    = -150,    //!< An attempt to do a display resolution mode change has failed.        
+    NVAPI_MODE_CHANGE_FAILED                    = -150,    //!< An attempt to do a display resolution mode change has failed.
     NVAPI_D3D11_LIBRARY_NOT_FOUND               = -151,    //!< d3d11.dll/d3d11_beta.dll cannot be loaded.
     NVAPI_INVALID_ADDRESS                       = -152,    //!< Address is outside of valid range.
     NVAPI_STRING_TOO_SMALL                      = -153,    //!< The pre-allocated string is too small to hold the result.
@@ -335,19 +343,19 @@ typedef enum _NvAPI_Status
     NVAPI_ADVANCED_DISPLAY_TOPOLOGY_REQUIRED    = -159,    //!< Information can't be returned due to "advanced display topology".
     NVAPI_SETTING_NOT_FOUND                     = -160,    //!< Setting is not found.
     NVAPI_SETTING_SIZE_TOO_LARGE                = -161,    //!< Setting size is too large.
-    NVAPI_TOO_MANY_SETTINGS_IN_PROFILE          = -162,    //!< There are too many settings for a profile. 
+    NVAPI_TOO_MANY_SETTINGS_IN_PROFILE          = -162,    //!< There are too many settings for a profile.
     NVAPI_PROFILE_NOT_FOUND                     = -163,    //!< Profile is not found.
     NVAPI_PROFILE_NAME_IN_USE                   = -164,    //!< Profile name is duplicated.
     NVAPI_PROFILE_NAME_EMPTY                    = -165,    //!< Profile name is empty.
     NVAPI_EXECUTABLE_NOT_FOUND                  = -166,    //!< Application not found in the Profile.
     NVAPI_EXECUTABLE_ALREADY_IN_USE             = -167,    //!< Application already exists in the other profile.
-    NVAPI_DATATYPE_MISMATCH                     = -168,    //!< Data Type mismatch 
+    NVAPI_DATATYPE_MISMATCH                     = -168,    //!< Data Type mismatch
     NVAPI_PROFILE_REMOVED                       = -169,    //!< The profile passed as parameter has been removed and is no longer valid.
-    NVAPI_UNREGISTERED_RESOURCE                 = -170,    //!< An unregistered resource was passed as a parameter. 
+    NVAPI_UNREGISTERED_RESOURCE                 = -170,    //!< An unregistered resource was passed as a parameter.
     NVAPI_ID_OUT_OF_RANGE                       = -171,    //!< The DisplayId corresponds to a display which is not within the normal outputId range.
     NVAPI_DISPLAYCONFIG_VALIDATION_FAILED       = -172,    //!< Display topology is not valid so the driver cannot do a mode set on this configuration.
     NVAPI_DPMST_CHANGED                         = -173,    //!< Display Port Multi-Stream topology has been changed.
-    NVAPI_INSUFFICIENT_BUFFER                   = -174,    //!< Input buffer is insufficient to hold the contents.    
+    NVAPI_INSUFFICIENT_BUFFER                   = -174,    //!< Input buffer is insufficient to hold the contents.
     NVAPI_ACCESS_DENIED                         = -175,    //!< No access to the caller.
     NVAPI_MOSAIC_NOT_ACTIVE                     = -176,    //!< The requested action cannot be performed without Mosaic being enabled.
     NVAPI_SHARE_RESOURCE_RELOCATED              = -177,    //!< The surface is relocated away from video memory.
@@ -359,15 +367,15 @@ typedef enum _NvAPI_Status
     NVAPI_DEFAULT_STEREO_PROFILE_IS_NOT_DEFINED = -183,    //!< Default stereo profile is not currently defined
     NVAPI_DEFAULT_STEREO_PROFILE_DOES_NOT_EXIST = -184,    //!< Default stereo profile does not exist
     NVAPI_CLUSTER_ALREADY_EXISTS                = -185,    //!< A cluster is already defined with the given configuration.
-    NVAPI_DPMST_DISPLAY_ID_EXPECTED             = -186,    //!< The input display id is not that of a multi stream enabled connector or a display device in a multi stream topology 
+    NVAPI_DPMST_DISPLAY_ID_EXPECTED             = -186,    //!< The input display id is not that of a multi stream enabled connector or a display device in a multi stream topology
     NVAPI_INVALID_DISPLAY_ID                    = -187,    //!< The input display id is not valid or the monitor associated to it does not support the current operation
     NVAPI_STREAM_IS_OUT_OF_SYNC                 = -188,    //!< While playing secure audio stream, stream goes out of sync
     NVAPI_INCOMPATIBLE_AUDIO_DRIVER             = -189,    //!< Older audio driver version than required
     NVAPI_VALUE_ALREADY_SET                     = -190,    //!< Value already set, setting again not allowed.
-    NVAPI_TIMEOUT                               = -191,    //!< Requested operation timed out 
+    NVAPI_TIMEOUT                               = -191,    //!< Requested operation timed out
     NVAPI_GPU_WORKSTATION_FEATURE_INCOMPLETE    = -192,    //!< The requested workstation feature set has incomplete driver internal allocation resources
     NVAPI_STEREO_INIT_ACTIVATION_NOT_DONE       = -193,    //!< Call failed because InitActivation was not called.
-    NVAPI_SYNC_NOT_ACTIVE                       = -194,    //!< The requested action cannot be performed without Sync being enabled.    
+    NVAPI_SYNC_NOT_ACTIVE                       = -194,    //!< The requested action cannot be performed without Sync being enabled.
     NVAPI_SYNC_MASTER_NOT_FOUND                 = -195,    //!< The requested action cannot be performed without Sync Master being enabled.
     NVAPI_INVALID_SYNC_TOPOLOGY                 = -196,    //!< Invalid displays passed in the NV_GSYNC_DISPLAY pointer.
     NVAPI_ECID_SIGN_ALGO_UNSUPPORTED            = -197,    //!< The specified signing algorithm is not supported. Either an incorrect value was entered or the current installed driver/hardware does not support the input value.
@@ -375,12 +383,12 @@ typedef enum _NvAPI_Status
     NVAPI_FIRMWARE_OUT_OF_DATE                  = -199,    //!< The device's firmware is out of date.
     NVAPI_FIRMWARE_REVISION_NOT_SUPPORTED       = -200,    //!< The device's firmware is not supported.
     NVAPI_LICENSE_CALLER_AUTHENTICATION_FAILED  = -201,    //!< The caller is not authorized to modify the License.
-    NVAPI_D3D_DEVICE_NOT_REGISTERED             = -202,    //!< The user tried to use a deferred context without registering the device first  
+    NVAPI_D3D_DEVICE_NOT_REGISTERED             = -202,    //!< The user tried to use a deferred context without registering the device first
     NVAPI_RESOURCE_NOT_ACQUIRED                 = -203,    //!< Head or SourceId was not reserved for the VR Display before doing the Modeset or the dedicated display.
     NVAPI_TIMING_NOT_SUPPORTED                  = -204,    //!< Provided timing is not supported.
     NVAPI_HDCP_ENCRYPTION_FAILED                = -205,    //!< HDCP Encryption Failed for the device. Would be applicable when the device is HDCP Capable.
     NVAPI_PCLK_LIMITATION_FAILED                = -206,    //!< Provided mode is over sink device pclk limitation.
-    NVAPI_NO_CONNECTOR_FOUND                    = -207,    //!< No connector on GPU found. 
+    NVAPI_NO_CONNECTOR_FOUND                    = -207,    //!< No connector on GPU found.
     NVAPI_HDCP_DISABLED                         = -208,    //!< When a non-HDCP capable HMD is connected, we would inform user by this code.
     NVAPI_API_IN_USE                            = -209,    //!< Atleast an API is still being called
     NVAPI_NVIDIA_DISPLAY_NOT_FOUND              = -210,    //!< No display found on Nvidia GPU(s).
@@ -425,7 +433,7 @@ typedef enum _NvAPI_Status
 //
 //!   DESCRIPTION: This API returns display driver version and driver-branch string.
 //!
-//! SUPPORTED OS:  Windows 7 and higher
+//! SUPPORTED OS:  Windows 10 and higher
 //!
 //! 
 //! \param [out]  pDriverVersion         Contains the driver version after successful return.
@@ -509,7 +517,7 @@ typedef NV_DISPLAY_DRIVER_MEMORY_INFO_V3 NV_DISPLAY_DRIVER_MEMORY_INFO;
 //!                If the GPU is in TCC Mode, only dedicatedVideoMemory will be returned in pMemoryInfo (NV_DISPLAY_DRIVER_MEMORY_INFO).
 //!
 //! \deprecated  Do not use this function - it is deprecated in release 520. Instead, use NvAPI_GPU_GetMemoryInfoEx.
-//! SUPPORTED OS:  Windows 7 and higher
+//! SUPPORTED OS:  Windows 10 and higher
 //!
 //!
 //! TCC_SUPPORTED
@@ -542,7 +550,7 @@ typedef struct
                                                //!< Typically used with integrated GPUs that do not have dedicated video memory.
     NvU64   sharedSystemMemory;                //!< Size(in bytes) of shared system memory that driver is allowed to commit for surfaces across all allocations.
                                                //!< On discrete GPUs, it is used to utilize system memory for various operations. It does not need to be reserved during boot.
-                                               //!< It may be used by both GPU and CPU, and has an “on-demand” type of usage.
+                                               //!< It may be used by both GPU and CPU, and has an "on-demand" type of usage.
     NvU64   curAvailableDedicatedVideoMemory;  //!< Size(in bytes) of the current available physical framebuffer for allocating video memory surfaces.
     NvU64   dedicatedVideoMemoryEvictionsSize; //!< Size(in bytes) of the total size of memory released as a result of the evictions.
     NvU64   dedicatedVideoMemoryEvictionCount; //!< Indicates the number of eviction events that caused an allocation to be removed from dedicated video memory to free GPU
@@ -611,7 +619,7 @@ NVAPI_INTERFACE NvAPI_GPU_GetMemoryInfoEx(NvPhysicalGpuHandle hPhysicalGpu, NV_G
 //!
 //!       For GPU handles in TCC MODE please use NvAPI_EnumTCCPhysicalGPUs()
 //!
-//! SUPPORTED OS:  Windows 7 and higher
+//! SUPPORTED OS:  Windows 10 and higher
 //!
 //!
 //! \par Introduced in
@@ -642,7 +650,7 @@ static const NVDX_ObjectHandle NVDX_OBJECT_NONE = 0;
 //!                         we want the NvAPI handle
 //! \param [out]  pHandle   A handle to the resource
 //!
-//! SUPPORTED OS:  Windows 7 and higher
+//! SUPPORTED OS:  Windows 10 and higher
 //!
 //!
 //! \since Release: 185
