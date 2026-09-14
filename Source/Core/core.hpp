@@ -15446,8 +15446,8 @@ namespace
                      }
                   }
                }
-               if (enable_ui_separation)
-                  ImGui::Checkbox("Hide Gameplay UI", &hide_ui);
+               if (enable_ui_separation || !shader_hashes_UI.Empty())
+                  ImGui::Checkbox(enable_ui_separation ? "Hide Gameplay UI" : "Hide UI", &hide_ui);
 #endif
 
                game->DrawImGuiDevSettings(device_data);
