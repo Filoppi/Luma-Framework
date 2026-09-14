@@ -12,13 +12,6 @@
 #define GAME_TEMPLATE 1
 
 //// Define all the global "core" defines before including its files: ////
-// Enable these to use DLSS and/or FSR.
-// If using, add these to the Project Properties: (w/o quotation marks)
-// C/C++ -> All Options -> Additional Include Directories -> "..\..\External\FidelityFX;..\..\External\NGX;" 
-// Linker -> All Options -> Additional Dependencies -> "nvsdk_ngx_d.lib;ffx_backend_dx11_x64.lib;ffx_fsr3_x64.lib;ffx_frameinterpolation_x64.lib;ffx_fsr3upscaler_x64.lib;ffx_opticalflow_x64.lib;"
-// Linker -> All Options -> Additional Library Directories -> "..\..\External\NGX\libs;..\..\External\FidelityFX\libs;"
-#define ENABLE_NGX 0
-#define ENABLE_FIDELITY_SK 0
 
 // Enable support for Geometry Shaders (GS), rather rare.
 #define GEOMETRY_SHADER_SUPPORT 0
@@ -39,6 +32,8 @@
 //
 // To compile in different modes (e.g. "DEVELOPMENT", "TEST" etc see "global_defines.h").
 #include "..\..\Core\core.hpp"
+
+// For DLSS and FSR support, open the project settings in Visual Studio, go to the Luma tab, and enable their respective libraries. You will then be able to use them.
 
 struct TemplateGameDeviceData final : public GameDeviceData
 {
