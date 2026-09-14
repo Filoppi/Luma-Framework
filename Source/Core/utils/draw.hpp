@@ -363,7 +363,7 @@ void AddTraceDrawCallData(std::vector<TraceDrawCallData>& trace_draw_calls_data,
       }
       return ptr;
    };
-   auto FlagUpgradedResources = [&](auto* rv)
+   auto FlagUpgradedResources = [&](auto* rv, TraceDrawCallData::DepthStateType depth_state = TraceDrawCallData::DepthStateType::Invalid, TraceDrawCallData::DepthStateType stencil_state = TraceDrawCallData::DepthStateType::Invalid)
    {
       com_ptr<ID3D11Resource> resource;
       if (rv)
@@ -377,7 +377,6 @@ void AddTraceDrawCallData(std::vector<TraceDrawCallData>& trace_draw_calls_data,
          }();
 
          using ViewType = std::remove_pointer_t<decltype(rv)>;
-         // Note: depth/stencil views are ignored for now
          if constexpr (std::is_same_v<ViewType, ID3D11ShaderResourceView>)
          {
             trace_draw_call_data.any_input_resources_format_upgraded |= upgraded;
@@ -394,6 +393,25 @@ void AddTraceDrawCallData(std::vector<TraceDrawCallData>& trace_draw_calls_data,
             trace_draw_call_data.any_output_resources_format_upgraded |= upgraded;
             trace_draw_call_data.any_input_resources_scaled |= scaled;
             trace_draw_call_data.any_output_resources_scaled |= scaled;
+         }
+         else if constexpr (std::is_same_v<ViewType, ID3D11DepthStencilView>)
+         {
+            if (depth_state == TraceDrawCallData::DepthStateType::TestOnly ||
+                depth_state == TraceDrawCallData::DepthStateType::TestAndWrite ||
+                stencil_state == TraceDrawCallData::DepthStateType::TestOnly ||
+                stencil_state == TraceDrawCallData::DepthStateType::TestAndWrite)
+            {
+               trace_draw_call_data.any_input_resources_format_upgraded |= upgraded;
+               trace_draw_call_data.any_input_resources_scaled |= scaled;
+            }
+            if (depth_state == TraceDrawCallData::DepthStateType::WriteOnly ||
+               depth_state == TraceDrawCallData::DepthStateType::TestAndWrite ||
+               stencil_state == TraceDrawCallData::DepthStateType::WriteOnly ||
+               stencil_state == TraceDrawCallData::DepthStateType::TestAndWrite)
+            {
+               trace_draw_call_data.any_output_resources_format_upgraded |= upgraded;
+               trace_draw_call_data.any_output_resources_scaled |= scaled;
+            }
          }
       }
    };
@@ -512,10 +530,14 @@ void AddTraceDrawCallData(std::vector<TraceDrawCallData>& trace_draw_calls_data,
             {
                trace_draw_call_data.dsv_format = dsv_desc.Format;
                ASSERT_ONCE(dsv_desc.Format != DXGI_FORMAT_UNKNOWN); // Unexpected?
+
+               FlagUpgradedResources(dsv.get(), trace_draw_call_data.depth_state, trace_draw_call_data.stencil_state);
+
                com_ptr<ID3D11Resource> ds_resource;
                dsv->GetResource(&ds_resource);
                uint4 ds_size = {};
                GetResourceInfo(ds_resource.get(), ds_size, trace_draw_call_data.ds_format, nullptr, &trace_draw_call_data.ds_hash, &trace_draw_call_data.ds_debug_name);
+
                trace_draw_call_data.ds_size.x = ds_size.x;
                trace_draw_call_data.ds_size.y = ds_size.y;
             }
