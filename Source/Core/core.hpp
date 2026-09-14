@@ -3101,9 +3101,14 @@ namespace
 
       if (enable_samplers_upgrade)
       {
+         // Release custom samplers outside the lock, as releasing them can trigger "OnDestroySampler()", which locks it again (and would hang)
+         decltype(device_data.custom_sampler_by_original_sampler) samplers;
+      {
          const std::unique_lock lock_samplers(s_mutex_samplers);
-         ASSERT_ONCE(device_data.custom_sampler_by_original_sampler.empty()); // These should be guaranteed to have been cleared already ("OnDestroySampler()")
-         device_data.custom_sampler_by_original_sampler.clear(); // Redundant but, let's do it anyway (change the mutex lock to shared if you change this)
+            ASSERT_ONCE(device_data.custom_sampler_by_original_sampler.empty()); // These should have been cleared already ("OnDestroySampler()")
+            samplers = std::move(device_data.custom_sampler_by_original_sampler);
+            device_data.custom_sampler_by_original_sampler.clear();
+         }
       }
 
 #if ENABLE_SR
@@ -7883,6 +7888,13 @@ namespace
          parent_device->Release();
       }
 #endif
+
+      // Nothing to upgrade. Creating it anyway would return the original sampler itself (DX11 shares identical state objects),
+      // making the map hold a strong ref to its own key, which certainly won't help with ref counting.
+      if (std::memcmp(&desc, &original_desc, sizeof(D3D11_SAMPLER_DESC)) == 0)
+      {
+         return nullptr;
+      }
 
       com_ptr<ID3D11SamplerState> sampler;
       device->CreateSamplerState(&desc, &sampler); // Note: in DX11 all state objects are shared, so if we create one with the same desc as an existing one, it will return the ptr to that one instead.

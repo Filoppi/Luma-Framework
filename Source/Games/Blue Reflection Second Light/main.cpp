@@ -989,18 +989,6 @@ struct GameDeviceDataBlueReflectionSecondLight final : public GameDeviceData
 
       modifiable_vertex_buffer.reset();
       modifiable_inedx_buffer.reset();
-
-      // Manually release upgraded samplers to avoid hang
-      if (enable_samplers_upgrade)
-      {
-         decltype(device_data.custom_sampler_by_original_sampler) samplers;
-
-         {
-            std::lock_guard lock(s_mutex_samplers);
-            samplers = std::move(device_data.custom_sampler_by_original_sampler);
-            device_data.custom_sampler_by_original_sampler.clear();
-         }
-      }
    }
 };
 
