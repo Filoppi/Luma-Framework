@@ -819,6 +819,7 @@ public:
       if (max_aspect_ratio > 0.f)
       {
          PatchAspectRatio(max_aspect_ratio);
+         //SetAspectRatioUpgrades(device_data, max_aspect_ratio); // TODO: add
       }
 
       reshade::get_config_value(runtime, NAME, "DisableDither", disable_dither);
