@@ -1,0 +1,80 @@
+// ---- Created with 3Dmigoto v1.3.16 on Thu Jul 16 19:31:21 2026
+Texture2D<float4> t0 : register(t0);
+
+SamplerState s0_s : register(s0);
+
+cbuffer cb3 : register(b3)
+{
+  float4 cb3[4];
+}
+
+
+
+
+void main(
+  float4 v0 : SV_POSITION0,
+  float2 v1 : TEXCOORD0,
+  uint v2 : SV_IsFrontFace0,
+  out float4 o0 : SV_Target0)
+{
+#if 0
+  // Base sample at current pixel (unweighted)
+  float3 accum = t0.SampleLevel(s0_s, v1.xy, 0).xyz;
+
+  // Radial step direction (from pixel towards light source center)
+  float2 dir = cb3[1].x * (cb3[2].xy - v1.xy);
+
+  // Weight falls off with distance from center
+  float dist = sqrt(dot(dir, dir));
+  float weight = cb3[1].y * (1.0 - saturate(dist * 2.0 - 1.0));
+
+  // Per-sample UV offset (1/48 of full direction)
+  float2 stepUV = dir * 0.020833334;
+  float2 uv = v1.xy + stepUV;
+
+  [loop]
+  for (int i = 0; i < 48; i++)
+  {
+    bool oob = any(uv < float2(0, 0)) || any(uv > cb3[0].zw);
+    float3 color = oob ? float3(0, 0, 0) : t0.SampleLevel(s0_s, uv, 0).xyz;
+    accum += color * weight;
+    uv += stepUV;
+    weight *= cb3[1].z;
+  }
+
+  o0.xyz = accum;
+  o0.w = 1;
+  return;
+#else
+  static const int NUM_SAMPLES = 96;
+
+  // Base
+  float3 accum = t0.SampleLevel(s0_s, v1.xy, 0).xyz;
+
+  // Direction
+  float2 dir = cb3[1].x * (cb3[2].xy - v1.xy);
+
+  // Weight
+  float dist = sqrt(dot(dir, dir));
+  float weight = cb3[1].y * (1.0 - saturate(dist * 2.0 - 1.0));
+
+  // Step
+  float2 stepUV = dir / NUM_SAMPLES;
+  float decayPerStep = pow(cb3[1].z, 48.0 / NUM_SAMPLES);
+  float2 uv = v1.xy + stepUV;
+
+  [loop]
+  for (int i = 0; i < NUM_SAMPLES; i++)
+  {
+    bool oob = any(uv < float2(0, 0)) || any(uv > cb3[0].zw);
+    float3 color = oob ? float3(0, 0, 0) : t0.SampleLevel(s0_s, uv, 0).xyz;
+    accum += color * weight;
+    uv += stepUV;
+    weight *= decayPerStep;
+  }
+
+  o0.xyz = accum * 0.6; //fudge
+  o0.w = 1;
+  return;
+#endif
+}
