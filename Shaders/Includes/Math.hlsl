@@ -311,4 +311,73 @@ float2 RepeatUV(float2 uv)
     return uv;
 }
 
+// Box area resampling
+float4 SampleArea(Texture2D<float4> source, SamplerState linearSampler,
+  float2 uv, float2 sourceResolution, float2 targetResolution,
+  float2 uvMin = float2(0.0, 0.0), float2 uvMax = float2(1.0, 1.0),
+  bool bilinearMagnification = true)
+{
+  float2 boxSize = sourceResolution / targetResolution;
+  // Preserving bilinear upscaling
+  if (bilinearMagnification)
+    boxSize = max(boxSize, 1.0);
+
+  float2 invSourceResolution = rcp(sourceResolution);
+#if 0
+  float2 minTexelEdge = saturate(uvMin) * sourceResolution;
+  float2 maxTexelEdge = saturate(uvMax) * sourceResolution;
+  // Undo roundoff in integerExtent / sourceResolution * sourceResolution before
+  // floor/ceil. This does not move texel-center bounds, which are half-integers.
+  float2 boundsTolerance = 2.0 * FLT_EPSILON * sourceResolution;
+  minTexelEdge = select(abs(minTexelEdge - round(minTexelEdge)) <= boundsTolerance, round(minTexelEdge), minTexelEdge);
+  maxTexelEdge = select(abs(maxTexelEdge - round(maxTexelEdge)) <= boundsTolerance, round(maxTexelEdge), maxTexelEdge);
+  float2 firstValidTexel = clamp(floor(minTexelEdge), 0.0, sourceResolution - 1.0);
+  float2 lastValidTexel = clamp(ceil(maxTexelEdge) - 1.0, firstValidTexel, sourceResolution - 1.0);
+#else // Optimized and identical in most cases, unless "uvMax" has an arbitrary value that isn't the center of a texel.
+  float2 firstValidTexel = clamp(floor(uvMin * sourceResolution), 0.0, sourceResolution - 1.0);
+  float2 lastValidTexel = clamp(floor(uvMax * sourceResolution), firstValidTexel, sourceResolution - 1.0);
+#endif
+  float2 sampleMin = (firstValidTexel + 0.5) * invSourceResolution;
+  float2 sampleMax = (lastValidTexel + 0.5) * invSourceResolution;
+
+  // A one-texel box is exactly bilinear. Pure-area magnification must run the
+  // integration below instead, even when both axes are smaller than one texel.
+  float4 result = 0.0;
+  if (all(boxSize == 1.0))
+  {
+    result = source.SampleLevel(linearSampler, clamp(uv, sampleMin, sampleMax), 0);
+  }
+  else
+  {
+    // Texel i occupies [i, i+1]. Keep the full footprint at borders and clamp
+    // each fetch, so missing coverage repeats the edge instead of reading padding.
+    float2 boxMin = uv * sourceResolution - 0.5 * boxSize;
+    float2 boxMax = boxMin + boxSize;
+    int2 firstTexel = int2(floor(boxMin));
+    int2 endTexel = int2(ceil(boxMax));
+
+    [loop]
+    for (int y = firstTexel.y; y < endTexel.y; y += 2)
+    {
+      float2 weightsY = saturate(min(float2(y + 1, y + 2), boxMax.y) - max(float2(y, y + 1), boxMin.y));
+      float weightY = weightsY.x + weightsY.y;
+      float sampleY = (float(y) + 0.5 + weightsY.y / weightY) * invSourceResolution.y;
+
+      [loop]
+      for (int x = firstTexel.x; x < endTexel.x; x += 2)
+      {
+        float2 weightsX = saturate(min(float2(x + 1, x + 2), boxMax.x) - max(float2(x, x + 1), boxMin.x));
+        float weightX = weightsX.x + weightsX.y;
+        float sampleX = (float(x) + 0.5 + weightsX.y / weightX) * invSourceResolution.x;
+        float2 sampleUV = clamp(float2(sampleX, sampleY), sampleMin, sampleMax);
+        result += source.SampleLevel(linearSampler, sampleUV, 0) * (weightX * weightY);
+      }
+    }
+
+    result /= boxSize.x * boxSize.y;
+  }
+
+  return result;
+}
+
 #endif // SRC_MATH_HLSL
