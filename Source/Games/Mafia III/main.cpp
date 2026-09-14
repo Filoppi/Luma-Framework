@@ -308,11 +308,11 @@ public:
 #if DEVELOPMENT || TEST
          {"STRETCH_ORIGINAL_TONEMAPPER", '0', true, false, "An alternative HDR implementation that doesn't look good", 1},
 #endif
-         {"ENABLE_SHARPENING", '1', true, false, "Native sharpening to combat the game's blurriness", 1},
-         {"ENABLE_AUTO_HDR", '1', true, false, "Enables an SDR to HDR conversion for Videos and car's Rear View Mirror (HUD)", 1},
+         {"ENABLE_SHARPENING", '1', true, false, "Native sharpening to combat the game's blurriness. Disable for a slight performance boost", 1},
+         {"ENABLE_AUTO_HDR", '1', true, false, "Enables an SDR to HDR conversion for Videos and Car's Rear View Mirror (HUD)", 1},
          {"FIX_VIDEOS_COLOR_SPACE", '1', true, false, "Videos were incorrectly decoded as BT.601 instead of BT.709, making them more red than intended", 1},
          {"ENABLE_CITY_LIGHTS_BOOST", '1', true, false, "Boost up all the transparent lights like lamp posts and car highlights etc, they look nicer in HDR", 1},
-         {"ENABLE_LUT_EXTRAPOLATION", '1', true, false, "Use Luma's signature technique for expanding Color Grading LUTs from SDR to HDR,\nthis might better represent the look the game devs wanted to go for, and have a nice highlights rolloff", 1},
+         {"ENABLE_LUT_EXTRAPOLATION", '0', true, false, "Use Luma's signature technique for expanding Color Grading LUTs from SDR to HDR,\nthis might better represent the look the game devs wanted to go for, and have a nice highlights rolloff", 1},
          {"EXPAND_COLOR_GAMUT", '1', true, false, "Do tonemapping in a wider color gamut, to minimize hue shifts and get more saturated shadow, though this can change the look of the game a bit", 1},
       };
       shader_defines_data.append_range(game_shader_defines_data);
@@ -1484,6 +1484,9 @@ public:
          "\n\nMain:"
          "\nPumbo"
 
+         "\n\nContributors:"
+         "\nz1rp"
+
          "\n\nThird Party:"
          "\nReShade"
          "\nImGui"
@@ -1526,8 +1529,6 @@ public:
 	{
 		ID3D11Device* native_device = (ID3D11Device*)(device->get_native());
 		ID3D11Buffer* buffer = reinterpret_cast<ID3D11Buffer*>(resource.handle);
-      DeviceData& device_data = *device->get_private_data<DeviceData>();
-		//auto& game_device_data = GetGameDeviceData(device_data);
 
 		if (access == reshade::api::map_access::write_only || access == reshade::api::map_access::write_discard || access == reshade::api::map_access::read_write)
 		{
@@ -1539,6 +1540,7 @@ public:
 			// Some how these are not marked as "D3D11_BIND_CONSTANT_BUFFER", probably because it copies them over to some other buffer later?
 			if (buffer_desc.ByteWidth == CBPerViewGlobal_buffer_size)
 			{
+            DeviceData& device_data = *device->get_private_data<DeviceData>();
 				device_data.cb_per_view_global_buffer = buffer;
 #if DEVELOPMENT
 				ASSERT_ONCE(buffer_desc.Usage == D3D11_USAGE_DYNAMIC && buffer_desc.BindFlags == D3D11_BIND_CONSTANT_BUFFER && buffer_desc.CPUAccessFlags == D3D11_CPU_ACCESS_WRITE && buffer_desc.MiscFlags == 0 && buffer_desc.StructureByteStride == 0);
@@ -1850,14 +1852,15 @@ public:
 	static bool OnUpdateBufferRegion(reshade::api::device* device, const void* data, reshade::api::resource resource, uint64_t offset, uint64_t size)
 	{
 		ID3D11Device* native_device = (ID3D11Device*)(device->get_native());
-		DeviceData& device_data = *device->get_private_data<DeviceData>();
 		//auto& game_device_data = GetGameDeviceData(*device->get_private_data<DeviceData>());
       ID3D11Buffer* buffer = reinterpret_cast<ID3D11Buffer*>(resource.handle);
 
       D3D11_BUFFER_DESC buffer_desc;
       buffer->GetDesc(&buffer_desc);
 
-		if (size == CBPerViewGlobal_buffer_size || buffer_desc.ByteWidth == CBPerViewGlobal_buffer_size) {
+		if (size == CBPerViewGlobal_buffer_size || buffer_desc.ByteWidth == CBPerViewGlobal_buffer_size)
+      {
+         DeviceData& device_data = *device->get_private_data<DeviceData>();
 			// It's not very nice to const cast, but we know for a fact this is dynamic memory, so it's probably fine to edit it (ReShade doesn't offer an interface for replacing it easily, and doesn't pass in the command list)
 			//float4* mutable_float_data = reinterpret_cast<float4*>(const_cast<void*>(data));
 			//const float4* float_data = reinterpret_cast<const float4*>(data);
@@ -1928,8 +1931,8 @@ BOOL APIENTRY DllMain(HMODULE hModule, DWORD ul_reason_for_call, LPVOID lpReserv
 
 #if DEVELOPMENT
       forced_shader_names.emplace(std::stoul("FD2925A4", nullptr, 16), "Clear");
-      forced_shader_names.emplace(std::stoul("B00E89BC", nullptr, 16), "Encode Motion Vectors"); // Second output is 8bit UNORM, seemengly unused (with high quality settings at least). First output is R16G16B16A16F (dunno why), it's used by the 3 TAA shaders. SRV 4 is the raw proper MVs R16G16F.
-      forced_shader_names.emplace(std::stoul("C3E123B6", nullptr, 16), "Downscale Encoded Motion Vectors"); // Downscales the R16G16B16A16F encoded MVs to half res. Output is seemengly unused (with high quality settings at least).
+      forced_shader_names.emplace(std::stoul("B00E89BC", nullptr, 16), "Encode Motion Vectors"); // Second output is 8bit UNORM, seemingly unused (with high quality settings at least). First output is R16G16B16A16F (dunno why), it's used by the 3 TAA shaders. SRV 4 is the raw proper MVs R16G16F.
+      forced_shader_names.emplace(std::stoul("C3E123B6", nullptr, 16), "Downscale Encoded Motion Vectors"); // Downscales the R16G16B16A16F encoded MVs to half res. Output is seemingly unused (with high quality settings at least).
       forced_shader_names.emplace(std::stoul("2E9DF0A7", nullptr, 16), "Downscale Motion Vectors 1/2"); // Downscales the raw FLOAT motion vectors to half size (for motion blur)
       forced_shader_names.emplace(std::stoul("FB0E84FB", nullptr, 16), "Downscale Motion Vectors 1/4"); // Second downscale pass from 1/2 to 1/8
       forced_shader_names.emplace(std::stoul("9AD611CB", nullptr, 16), "Blur Downscaled Motion Vectors");
@@ -2049,7 +2052,7 @@ BOOL APIENTRY DllMain(HMODULE hModule, DWORD ul_reason_for_call, LPVOID lpReserv
       swapchain_format_upgrade_type = TextureFormatUpgradesType::AllowedEnabled;
       swapchain_upgrade_type = SwapchainUpgradeType::scRGB;
       texture_format_upgrades_type = TextureFormatUpgradesType::AllowedEnabled;
-      // Note that this game has an optional rear view mirror HUD, which has its own rendering, by default it renders to r8g8b8a8_typeless with an sRGB view. It seemengly follows the main rendering aspect ratio, or is ~32:9 anyway (low res)
+      // Note that this game has an optional rear view mirror HUD, which has its own rendering, by default it renders to r8g8b8a8_typeless with an sRGB view. It seemingly follows the main rendering aspect ratio, or is ~32:9 anyway (low res)
       texture_upgrade_formats = {
 #if 0 // Not needed really, swapchain is all we need, though the rest wouldn't hurt.
             reshade::api::format::r8g8b8a8_unorm,

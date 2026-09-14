@@ -320,6 +320,7 @@ bool ShouldForceSDR(float2 UV, bool FlipY /*= false*/, out bool blackBar, float 
   return false;
 }
 
+// TODO: rename to ShouldForceVanilla, or add separate modes for SDR/Vanilla.
 bool ShouldForceSDR(float2 UV, bool FlipY = false)
 {
   bool unused;

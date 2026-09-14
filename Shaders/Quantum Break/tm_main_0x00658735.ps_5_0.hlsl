@@ -64,7 +64,7 @@ void main(float2 v0: TEXCOORD0, float4 v1: SV_Position0, out float4 o0: SV_Targe
    r0.w = g_sLensTexture.Sample(g_sLensTexture_s, v0.xy).x;
    r0.w = r0.w + r0.w;
    r1.xyz = r0.xyz * r0.www + -r0.xyz;
-   r0.xyz = g_fLensTextureIntensity * r1.xyz + r0.xyz;
+   r0.xyz = g_fLensTextureIntensity * r1.xyz + r0.xyz; // Bloom intensity
    r1.xyz = g_tBaseTexture.SampleLevel(g_sLinearClamp_s, v0.xy, 0).xyz;
    r0.xyz = r1.xyz + r0.xyz;
    r0.w = g_tBrightness.Load(int3(1, 0, 0));

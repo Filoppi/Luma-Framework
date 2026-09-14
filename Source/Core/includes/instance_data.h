@@ -254,12 +254,11 @@ struct __declspec(uuid("90d9d05b-fdf5-44ee-8650-3bfd0810667a")) CommandListData
    // Used when has_drawn_sr isn't available during recording, potential issue if sr fails to draw.
    bool force_scale = false;
 
-
    reshade::api::pipeline pipeline_state_original_compute_shader = reshade::api::pipeline(0);
    reshade::api::pipeline pipeline_state_original_vertex_shader = reshade::api::pipeline(0);
    reshade::api::pipeline pipeline_state_original_pixel_shader = reshade::api::pipeline(0);
 
-   // Patch clone handles (hash → clone pipeline). Original handle is always
+   // Patch clone handles (hash -> clone pipeline). Original handle is always
    // derivable from pipeline_state_original_*_shader (the bound pipeline).
    std::unordered_map<uint32_t, reshade::api::pipeline> patch_clone_handles;
 

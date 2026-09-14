@@ -126,7 +126,7 @@ public:
                if (it != custom_samplers.second.end())
                {
                   ID3D11SamplerState* native_sampler = reinterpret_cast<ID3D11SamplerState*>(custom_samplers.first);
-                  if (it->second == samplers[i])
+                  if (it->second != nullptr && it->second == samplers[i]) // Null means the sampler didn't need an upgrade
                   {
                      samplers[i] = native_sampler;
                      break;

@@ -2121,7 +2121,6 @@ public:
       return DrawOrDispatchOverrideType::None; // Don't cancel the original draw call
    }
 
-#if LUMA_PATCH_PROVIDERS != 0
    void OnPatchedShadersPublished(DeviceData& device_data, const std::vector<uint32_t>& published_shader_hashes) override
    {
       auto& game_device_data = GetGameDeviceData(device_data);
@@ -2140,9 +2139,7 @@ public:
          game_device_data.pending_patched_shaders.erase(it);
       }
    }
-#endif
 
-#if LUMA_PATCH_PROVIDERS != 0
    bool OnBindPatchedShader(DeviceData& device_data, uint32_t shader_hash, reshade::api::pipeline_subobject_type type) override
    {
       auto& game_device_data = *static_cast<GameDeviceDataFF7Remake*>(device_data.game);
@@ -2159,7 +2156,6 @@ public:
       
       return enabled_dithering_fix != 0.f && patch_ready;
    }
-#endif
 
    void OnPresent(ID3D11Device* native_device, DeviceData& device_data) override
    {

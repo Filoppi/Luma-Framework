@@ -864,19 +864,18 @@ public:
 
    static void OnMapBufferRegion(reshade::api::device* device, reshade::api::resource resource, uint64_t offset, uint64_t size, reshade::api::map_access access, void** data)
    {
-      auto& device_data = *device->get_private_data<DeviceData>();
       ID3D11Buffer* buffer = reinterpret_cast<ID3D11Buffer*>(resource.handle);
       // No need to convert to native DX11 flags
       if (access == reshade::api::map_access::write_only || access == reshade::api::map_access::write_discard || access == reshade::api::map_access::read_write)
       {
-         D3D11_BUFFER_DESC buffer_desc;
-         buffer->GetDesc(&buffer_desc);
-
+         auto& device_data = *device->get_private_data<DeviceData>();
          // There seems to only ever be one buffer type of this size, but it's not guaranteed (we might have found more, but it doesn't matter, they are discarded later)...
          // They seemingly all happen on the same thread.
          // Some how these are not marked as "D3D11_BIND_CONSTANT_BUFFER", probably because it copies them over to some other buffer later?
-         if (buffer != nullptr && device_data.cb_per_view_global_buffer == buffer)
+         if (device_data.cb_per_view_global_buffer == buffer)
          {
+            D3D11_BUFFER_DESC buffer_desc;
+            buffer->GetDesc(&buffer_desc);
 #if DEVELOPMENT
             // These are the classic "features" of cbuffer 13 (the one we are looking for), in case any of these were different, it could possibly mean we are looking at the wrong buffer here.
             ASSERT_ONCE(buffer_desc.Usage == D3D11_USAGE_DYNAMIC && buffer_desc.BindFlags == D3D11_BIND_CONSTANT_BUFFER && buffer_desc.CPUAccessFlags == D3D11_CPU_ACCESS_WRITE && buffer_desc.MiscFlags == 0 && buffer_desc.StructureByteStride == 0);

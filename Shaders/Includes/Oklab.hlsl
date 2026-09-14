@@ -18,7 +18,7 @@ namespace Oklab
 		0.100150644779205322265625f,  0.2040043175220489501953125f, 0.69632470607757568359375f };
 
 	//OKLab's (_) L'M'S' -> OKLab
-	static const float3x3 oklms__to_oklab = {
+	static const float3x3 oklms_to_oklab = {
 		0.2104542553f,  0.7936177850f, -0.0040720468f,
 		1.9779984951f, -2.4285922050f,  0.4505937099f,
 		0.0259040371f,  0.7827717662f, -0.8086757660f};
@@ -55,7 +55,7 @@ namespace Oklab
 		// If we pass in scRGB negative colors (or better, colors outside the Oklab gamut), this avoids them breaking
 		float3 lms_ = mirrored ? (pow(abs(lms), 1.f/3.f) * Sign_Fast(lms)) : pow(lms, 1.f/3.f);
 
-		return mul(oklms__to_oklab, lms_);
+		return mul(oklms_to_oklab, lms_);
 	}
 
 	// (in) linear BT.2020
@@ -67,7 +67,7 @@ namespace Oklab
 		//L'M'S'
 		float3 lms_ = mirrored ? (pow(abs(lms), 1.f/3.f) * Sign_Fast(lms)) : pow(lms, 1.f/3.f);
 
-		return mul(oklms__to_oklab, lms_);
+		return mul(oklms_to_oklab, lms_);
 	}
 
 	// (in) OKLab

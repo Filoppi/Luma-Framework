@@ -1992,7 +1992,6 @@ public:
       if (access == reshade::api::map_access::write_only || access == reshade::api::map_access::write_discard || access == reshade::api::map_access::read_write)
       {
          ID3D11Buffer* buffer = reinterpret_cast<ID3D11Buffer*>(resource.handle);
-         DeviceData& device_data = *device->get_private_data<DeviceData>();
 
          D3D11_BUFFER_DESC buffer_desc;
          buffer->GetDesc(&buffer_desc);
@@ -2003,6 +2002,7 @@ public:
          // Some how these are not marked as "D3D11_BIND_CONSTANT_BUFFER", probably because it copies them over to some other buffer later?
          if (buffer_desc.ByteWidth == CBPerViewGlobal_buffer_size)
          {
+            DeviceData& device_data = *device->get_private_data<DeviceData>();
             device_data.cb_per_view_global_buffer = buffer;
             ASSERT_ONCE(!device_data.cb_per_view_global_buffer_map_data);
             device_data.cb_per_view_global_buffer_map_data = *data;
@@ -2032,19 +2032,19 @@ public:
 #if 1
             if (game->UpdateGlobalCB(device_data.cb_per_view_global_buffer_map_data, device))
 #else // TODO: delete
-         // The whole buffer size is theoretically "CBPerViewGlobal_buffer_size" but we actually don't have the data for the excessive (padding) bytes,
-         // they are never read by shaders on the GPU anyway.
-         char global_buffer_data[CBPerViewGlobal_buffer_size];
-         std::memcpy(&global_buffer_data[0], device_data.cb_per_view_global_buffer_map_data, CBPerViewGlobal_buffer_size);
-         if (game->UpdateGlobalCB(&global_buffer_data[0], device))
+            // The whole buffer size is theoretically "CBPerViewGlobal_buffer_size" but we actually don't have the data for the excessive (padding) bytes,
+            // they are never read by shaders on the GPU anyway.
+            char global_buffer_data[CBPerViewGlobal_buffer_size];
+            std::memcpy(&global_buffer_data[0], device_data.cb_per_view_global_buffer_map_data, CBPerViewGlobal_buffer_size);
+            if (game->UpdateGlobalCB(&global_buffer_data[0], device))
 #endif
-         {
-            // Write back the cbuffer data after we have fixed it up (we always do!)
-            std::memcpy(device_data.cb_per_view_global_buffer_map_data, &cb_per_view_global, sizeof(CBPerViewGlobal));
+            {
+               // Write back the cbuffer data after we have fixed it up (we always do!)
+               std::memcpy(device_data.cb_per_view_global_buffer_map_data, &cb_per_view_global, sizeof(CBPerViewGlobal));
 #if DEVELOPMENT
-            device_data.cb_per_view_global_buffers.emplace(buffer);
+               device_data.cb_per_view_global_buffers.emplace(buffer);
 #endif // DEVELOPMENT
-         }
+            }
          }
          device_data.cb_per_view_global_buffer_map_data = nullptr;
          device_data.cb_per_view_global_buffer = nullptr; // No need to keep this cached

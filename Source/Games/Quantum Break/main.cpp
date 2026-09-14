@@ -235,8 +235,11 @@ namespace
          std::byte* base = reinterpret_cast<std::byte*>(module_handle);
          const std::size_t section_size = nt_headers->OptionalHeader.SizeOfImage;
 
-         // Ultrawide patch: QB hardcodes its borderless/fullscreen resolution list and clamps aspect ratio.
-         // Replace the highest built-in ultrawide option with the current primary monitor resolution.
+         // Ultrawide patch (game only supported some resolutions, up to 21:9).
+         // The game hardcodes borderless/fullscreen resolutions and won't accept any other, so we need to patch them.
+         // Beyond ~21:9, the game would stretch, so we need to patch the aspect ratio limit too.
+
+         // Replace the highest hardcoded ultrawide resolution
          const int hardcoded_res_width = 3440;
          const int hardcoded_res_height = 1440;
          const char hardcoded_res_str[] = "3440 x 1440";
@@ -249,13 +252,14 @@ namespace
             std::vector<std::byte*> hardcoded_res_height_addresses = System::ScanMemoryForPattern(hardcoded_res_width_address, sizeof(hardcoded_res_height) * 3u, reinterpret_cast<const std::byte*>(&hardcoded_res_height), sizeof(hardcoded_res_height));
             if (!hardcoded_res_height_addresses.empty())
             {
+               // Use the current fullscreen (primary monitor) resolution, it should be the target one!
                const int screen_width = GetSystemMetrics(SM_CXSCREEN);
                const int screen_height = GetSystemMetrics(SM_CYSCREEN);
 
                System::PatchMemory(hardcoded_res_width_address, &screen_width, sizeof(screen_width), System::PatchMemoryType::Code);
                System::PatchMemory(hardcoded_res_height_addresses[0], &screen_height, sizeof(screen_height), System::PatchMemoryType::Code);
 
-               // Patch the menu label as well. QB stores these resolution strings in 16-byte slots.
+               // Patch the aspect ratio (additional credits to Rose, for finding the address)
                const std::vector<std::byte> hardcoded_res_str_pattern(reinterpret_cast<const std::byte*>(hardcoded_res_str), reinterpret_cast<const std::byte*>(hardcoded_res_str) + std::strlen(hardcoded_res_str) + 1u);
                std::vector<std::byte*> hardcoded_res_str_addresses = System::ScanMemoryForPattern(base, section_size, hardcoded_res_str_pattern, true);
                if (!hardcoded_res_str_addresses.empty())
@@ -488,8 +492,6 @@ public:
 
    void OnInit(bool async) override
    {
-      (void)async;
-
       RuntimeConfig::ApplyUltrawidePatches();
 
       // QB custom shaders reserve these slots for Luma settings/data during the temporal resolve replacement.
