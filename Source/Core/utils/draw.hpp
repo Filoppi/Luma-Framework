@@ -1080,30 +1080,34 @@ bool IsBlendInverted(const T& blend_desc, UINT render_targets = 1, bool check_al
       case D3D11_BLEND_INV_SRC_ALPHA:
       case D3D11_BLEND_INV_DEST_ALPHA:
       case D3D11_BLEND_INV_SRC1_ALPHA:
+      case D3D11_BLEND_SRC_ALPHA_SAT: // This is "min(src alpha, 1 - dest alpha)", so it inverts too
          return check_alpha;
       }
       return false;
    };
 
-   for (UINT i = first_render_target; i < D3D11_SIMULTANEOUS_RENDER_TARGET_COUNT && i < (render_targets - first_render_target); i++)
+   for (UINT i = first_render_target; i < D3D11_SIMULTANEOUS_RENDER_TARGET_COUNT && i < (first_render_target + render_targets); i++)
    {
-      if (blend_desc.RenderTarget[i].BlendEnable)
+      // Without independent blending, render target 0 describes all of them (so "first_render_target" doesn't apply)
+      const auto& render_target_blend_desc = blend_desc.RenderTarget[blend_desc.IndependentBlendEnable ? i : 0];
+
+      if (render_target_blend_desc.BlendEnable)
       {
-         if (blend_desc.RenderTarget[i].BlendOp == D3D11_BLEND_OP_SUBTRACT || blend_desc.RenderTarget[i].BlendOp == D3D11_BLEND_OP_REV_SUBTRACT)
+         if (render_target_blend_desc.BlendOp == D3D11_BLEND_OP_SUBTRACT || render_target_blend_desc.BlendOp == D3D11_BLEND_OP_REV_SUBTRACT)
          {
             return true;
          }
-         if (IsBlendInverted_Internal(blend_desc.RenderTarget[i].SrcBlend, check_alpha) || IsBlendInverted_Internal(blend_desc.RenderTarget[i].DestBlend, check_alpha))
+         if (IsBlendInverted_Internal(render_target_blend_desc.SrcBlend, check_alpha) || IsBlendInverted_Internal(render_target_blend_desc.DestBlend, check_alpha))
          {
             return true;
          }
          if (check_alpha)
          {
-            if (blend_desc.RenderTarget[i].BlendOpAlpha == D3D11_BLEND_OP_SUBTRACT || blend_desc.RenderTarget[i].BlendOpAlpha == D3D11_BLEND_OP_REV_SUBTRACT)
+            if (render_target_blend_desc.BlendOpAlpha == D3D11_BLEND_OP_SUBTRACT || render_target_blend_desc.BlendOpAlpha == D3D11_BLEND_OP_REV_SUBTRACT)
             {
                return true;
             }
-            if (IsBlendInverted_Internal(blend_desc.RenderTarget[i].SrcBlendAlpha, check_alpha) || IsBlendInverted_Internal(blend_desc.RenderTarget[i].DestBlendAlpha, check_alpha))
+            if (IsBlendInverted_Internal(render_target_blend_desc.SrcBlendAlpha, check_alpha) || IsBlendInverted_Internal(render_target_blend_desc.DestBlendAlpha, check_alpha))
             {
                return true;
             }
