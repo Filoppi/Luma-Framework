@@ -567,38 +567,38 @@ public:
                std::unique_lock lock_device_write(device_data.mutex);
 
                // Inverted map search to find the original resource from the upgraded one (assuming there was one)
-               for (const auto& original_resource_to_mirrored_upgraded_resource : device_data.original_resources_to_mirrored_upgraded_resources)
+               for (const auto& original_resource_to_mirrored_upgraded_resource : device_data.resource_upgrades.original_resources_to_mirrored_upgraded_resources)
                {
                   if (original_resource_to_mirrored_upgraded_resource.second.mirror_handle == srv_resource_handle)
                   {
                      original_srv_resource_handle = original_resource_to_mirrored_upgraded_resource.first;
 
-                     // TODO1: do a "remove indirect upgraded resource" func instead! This is already copied from it. Below too.
-                     auto original_resource_to_mirrored_upgraded_resource = device_data.original_resources_to_mirrored_upgraded_resources.find(original_srv_resource_handle);
-                     if (original_resource_to_mirrored_upgraded_resource != device_data.original_resources_to_mirrored_upgraded_resources.end())
+                     // TODO1: do a "remove indirect upgraded resource" func instead! This is already copied from it. Below too. see "device_data.resource_upgrades.ReUpgradeResource()";"
+                     auto original_resource_to_mirrored_upgraded_resource = device_data.resource_upgrades.original_resources_to_mirrored_upgraded_resources.find(original_srv_resource_handle);
+                     if (original_resource_to_mirrored_upgraded_resource != device_data.resource_upgrades.original_resources_to_mirrored_upgraded_resources.end())
                      {
                         const auto mirrored_upgraded_resource = original_resource_to_mirrored_upgraded_resource->second.mirror_handle;
-                        device_data.original_resources_to_mirrored_upgraded_resources.erase(original_resource_to_mirrored_upgraded_resource);
+                        device_data.resource_upgrades.original_resources_to_mirrored_upgraded_resources.erase(original_resource_to_mirrored_upgraded_resource);
 
                         // Invalidate stale view mappings for this mirror while the lock is held.
                         std::vector<uint64_t> unlinked_mirror_views;
-                        if (auto mirror_views_it = device_data.mirror_views_by_mirror_resource.find(mirrored_upgraded_resource); mirror_views_it != device_data.mirror_views_by_mirror_resource.end())
+                        if (auto mirror_views_it = device_data.resource_upgrades.mirror_views_by_mirror_resource.find(mirrored_upgraded_resource); mirror_views_it != device_data.resource_upgrades.mirror_views_by_mirror_resource.end())
                         {
                            const auto& mirror_views = mirror_views_it->second;
-                           for (auto view_map_it = device_data.original_resource_views_to_mirrored_upgraded_resource_views.begin(); view_map_it != device_data.original_resource_views_to_mirrored_upgraded_resource_views.end();)
+                           for (auto view_map_it = device_data.resource_upgrades.original_resource_views_to_mirrored_upgraded_resource_views.begin(); view_map_it != device_data.resource_upgrades.original_resource_views_to_mirrored_upgraded_resource_views.end();)
                            {
                               if (mirror_views.contains(view_map_it->second))
                               {
                                  unlinked_mirror_views.push_back(view_map_it->second);
-                                 device_data.mirror_views_to_mirror_resources.erase(view_map_it->second);
-                                 view_map_it = device_data.original_resource_views_to_mirrored_upgraded_resource_views.erase(view_map_it);
+                                 device_data.resource_upgrades.mirror_views_to_mirror_resources.erase(view_map_it->second);
+                                 view_map_it = device_data.resource_upgrades.original_resource_views_to_mirrored_upgraded_resource_views.erase(view_map_it);
                               }
                               else
                               {
                                  ++view_map_it;
                               }
                            }
-                           device_data.mirror_views_by_mirror_resource.erase(mirror_views_it);
+                           device_data.resource_upgrades.mirror_views_by_mirror_resource.erase(mirror_views_it);
                         }
 
                         constexpr bool delayed_destruction = true;
@@ -607,9 +607,9 @@ public:
                         {
                            for (const uint64_t unlinked_mirror_view : unlinked_mirror_views)
                            {
-                              device_data.pending_mirror_view_destructions.push_back({ unlinked_mirror_view });
+                              device_data.resource_upgrades.pending_mirror_view_destructions.push_back({ unlinked_mirror_view });
                            }
-                           device_data.pending_mirror_resource_destructions.push_back({ mirrored_upgraded_resource });
+                           device_data.resource_upgrades.pending_mirror_resource_destructions.push_back({ mirrored_upgraded_resource });
                         }
                         else
                         {

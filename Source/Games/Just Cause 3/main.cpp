@@ -2,6 +2,7 @@
 
 // TODO: move SR to run before the final screen space stuff starts happening (e.g. heat distortion, bloom, blur, tonemap, etc)! Alternatively, dejitter the image before calculating bloom and dof etc?
 // FSR is disabled in publishing builds, JC3 has no proper motion vectors on vegetation nor skinned meshes, hence it looks terrible on them (DLSS looks fine with them!).
+// TODO: set this in the luma properties!
 #define ENABLE_FIDELITY_SK ((DEVELOPMENT || TEST) ? 1 : 0)
 #define AUTO_ENABLE_SR 1
 

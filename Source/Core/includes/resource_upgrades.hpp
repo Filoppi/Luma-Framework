@@ -152,63 +152,67 @@ public:
    };
 
    // ------------------------------------------------------------------
-   // Configuration (source of truth). Games set these through the manager.
+   // Configuration (source of truth).
+   // Static, so it's shared by all devices. The global settings in "core.hpp" are references to these, so games can set either.
    // ------------------------------------------------------------------
-   TextureFormatUpgradesType texture_format_upgrades_type = TextureFormatUpgradesType::None;
+   // Global texture format upgrades setting. Required by all other settings below.
+   // Only swap between allowed enabled/disabled after init
+   static inline TextureFormatUpgradesType texture_format_upgrades_type = TextureFormatUpgradesType::None;
    // Whether texture upgrades (the ones that happen on resource creation) are done directly on the original resource, or on an upgraded mirrored version of it that we keep separately and live replace when the original resource is referenced.
    // Indirect upgrades might be safer, and can be made more selective, to avoid upgrading random textures, though they also keep the original texture so memory usage goes up.
    // Note: indirect upgrades will fail to replace references to resources if the game had DLSS/Streamline calls, as we can't intercept their calls to DX (at least in some cases?).
    // These are sometimes referred to as: indirect, mirrored, proxy, redirected, cloned, ...
    // See "FindOrCreateIndirectUpgradedResource()" for the main functionality.
-   bool enable_indirect_texture_format_upgrades = false;
+   static inline bool enable_indirect_texture_format_upgrades = false;
    // Automatically upgrade all textures that are used as target of an indirect upgraded resource, and their views.
    // Indirect texture mirrors might still be automatically created if "texture_format_upgrades_type" is enabled, in case the game tried to copy an upgraded resource into an incompatible one that wasn't upgraded etc.
    // This can work even without "enable_indirect_texture_format_upgrades", in case we upgraded textures through "auto_texture_format_upgrade_shader_hashes", or in case a texture wasn't a render target but was used as copy target of one.
    // It's generally suggested to true if "enable_indirect_texture_format_upgrades" is enabled, unless you are use it works fine without and want to maximize performance.
-   ChainTextureFormatUpgradesType enable_chain_indirect_texture_format_upgrades = ChainTextureFormatUpgradesType::None;
+   static inline ChainTextureFormatUpgradesType enable_chain_indirect_texture_format_upgrades = ChainTextureFormatUpgradesType::None;
    // Allows to temporarily ignore indirectly upgraded textures
    // In publishing mode, there's no need to ever forcefully ignore the indirectly upgraded textures,
    // given that the settings can't change live, hence they are not created if they are not enabled in the first place.
-   bool ignore_indirect_upgraded_textures = false; // TODO: test why when this is turned off live in Lego City Undercover, the output breaks
+   static inline bool ignore_indirect_upgraded_textures = false; // TODO: test why when this is turned off live in Lego City Undercover, the output breaks // TODO: restore "PUBLISHING_CONSTEXPR" here
    // List of render targets (and unordered access) textures that we upgrade to R16G16B16A16_FLOAT or other formats (depends on GetBestResourceUpgradeFormat()).
    // Most formats are supported but some might not act well when upgraded.
-   std::unordered_set<reshade::api::format> texture_upgrade_formats;
+   static inline std::unordered_set<reshade::api::format> texture_upgrade_formats;
    // Similar to "texture_upgrade_formats" but allows upgrading depth to R32_FLOAT/D32_FLOAT instead (e.g. useful in old games, especially when they allocated bits for stencil without using them)
-   std::unordered_set<reshade::api::format> texture_depth_upgrade_formats;
+   static inline std::unordered_set<reshade::api::format> texture_depth_upgrade_formats;
    // Redirect incompatible copies between UNORM and FLOAT textures to a custom pixel shader that would do the same (not globally compatible).
    // This can happen if the game uses a temp texture that isn't either a render target nor is unordered access, so we don't upgrade it.
-   bool enable_upgraded_texture_resource_copy_redirection = true; // TODO: delete given that we now have "enable_indirect_texture_format_upgrades"
+   static inline bool enable_upgraded_texture_resource_copy_redirection = true; // TODO: delete given that we now have "enable_indirect_texture_format_upgrades"
 
-   uint32_t texture_format_upgrades_2d_size_filters = 0 | (uint32_t)TextureFormatUpgrades2DSizeFilters::SwapchainResolution | (uint32_t)TextureFormatUpgrades2DSizeFilters::SwapchainAspectRatio;
-   std::unordered_set<float> texture_format_upgrades_2d_custom_aspect_ratios = { 16.f / 9.f };
+   static inline uint32_t texture_format_upgrades_2d_size_filters = 0 | (uint32_t)TextureFormatUpgrades2DSizeFilters::SwapchainResolution | (uint32_t)TextureFormatUpgrades2DSizeFilters::SwapchainAspectRatio;
+   static inline std::unordered_set<float> texture_format_upgrades_2d_custom_aspect_ratios = { 16.f / 9.f };
    // Custom sizes (width/height pairs) to match for upgrades.
-   std::vector<uint2> texture_format_upgrades_2d_custom_sizes = {};
+   static inline std::vector<uint2> texture_format_upgrades_2d_custom_sizes = {};
    // Most games do resolution scaling properly, with a maximum aspect ratio offset of 1 pixel, though occasionally it goes to 2 pixels of difference.
    // Set to 0 to only accept 100% matching aspect ratio.
-   uint32_t texture_format_upgrades_2d_aspect_ratio_pixel_threshold = 1;
+   static inline uint32_t texture_format_upgrades_2d_aspect_ratio_pixel_threshold = 1;
    // The size of the LUT we might want to upgrade, whether it's 1D, 2D or 3D.
    // LUTs in most games are 16x or 32x, though in some cases they might be 15x, 31x, 48x, 64x etc.
-   uint32_t texture_format_upgrades_lut_size = -1;
-   LUTDimensions texture_format_upgrades_lut_dimensions = LUTDimensions::_2D;
+   static inline uint32_t texture_format_upgrades_lut_size = -1;
+   static inline LUTDimensions texture_format_upgrades_lut_dimensions = LUTDimensions::_2D;
 
    // Map of source to target texture upgrade sizes, with the filter format too.
    // Only advised with indirect upgrades, otherwise the viewport/scissor sizes won't be automatically updated.
    // Width, Height, Depth/Array Layers, Samples (MS).
    // If there's multiple matches, the first one is used.
    // Set any of the filter values to 0 to ignore them.
-   std::vector<std::tuple<uint4, reshade::api::format, uint4>> texture_custom_dimensions_upgrades;
+   static inline std::vector<std::tuple<uint4, reshade::api::format, uint4>> texture_custom_dimensions_upgrades;
 
    // Automatically upgrade the formats of the textures this shader pass draws to. Generally best used on shaders that originally encoded from HDR (native rendering) to SDR. If the source textures were SDR too (UNORM), they'd need to be upgraded through other means.
    // "rtv_slots" are the RTV indexes to upgrade, "uav_slots" the UAVs (whether it's a pixel or compute shader).
    // This is meant to be used if "enable_indirect_texture_format_upgrades" is off, or if very specific custom upgrades are needed.
    // This assumes that when the upgraded texture is created (it could be at any time, if the target shader doesn't always run), the original texture values aren't relevant, because they won't be preserved.
+   // Do not remove elements from this map as there might be pointers to them around the code.
    // Requires "enable_chain_indirect_texture_format_upgrades" to work, otherwise views from the new indirect upgraded textures don't ever get mirrored.
-   std::unordered_map<uint32_t, AutoTextureFormatUpgradeShaderHash> auto_texture_format_upgrade_shader_hashes;
+   static inline std::unordered_map<uint32_t, AutoTextureFormatUpgradeShaderHash> auto_texture_format_upgrade_shader_hashes;
 
    // Optional pre-seed ordering gate: when enabled, chain resources are not redirected to
    // output-resolution mirrors until their origin seed has actually drawn this frame. Default OFF
    // to preserve existing behaviour.
-   bool enable_pre_seed_ordering_gate = false;
+   static inline bool enable_pre_seed_ordering_gate = false; // TODO: hook or delete
 
    // ------------------------------------------------------------------
    // Runtime mirror state
@@ -425,8 +429,9 @@ public:
    // Synchronization (for runtime config modifications by game code)
    // ------------------------------------------------------------------
 
-   // Only needed by "texture_format_upgrades_2d_custom_aspect_ratios" at the moment (if changed after initialization)
-   mutable std::shared_mutex mutex;
+   // Only needed by "texture_format_upgrades_2d_custom_aspect_ratios" at the moment (if changed after initialization).
+   // Static, like the settings it guards.
+   static inline std::shared_mutex mutex;
 
    // ------------------------------------------------------------------
    // Lifecycle
@@ -437,13 +442,16 @@ public:
    void InvalidateAllIndirectUpgradedResources();
 
    // Flushes pending mirror/view destructions (call at present boundary).
-   void FlushPendingDestructions(reshade::api::device* device);
+   // Callers must not hold "device_mutex" (it's locked internally, but not while destroying).
+   void FlushPendingDestructions(reshade::api::device* device, std::shared_mutex& device_mutex);
 
    // Handles a resource being destroyed: unlink its mirror + mirror views, defer free to present.
    void OnResourceDestroyed(uint64_t resource_handle);
 
    // Handles a resource view being destroyed: unlink the mirror view.
    void OnResourceViewDestroyed(uint64_t view_handle);
+
+   void ReUpgradeResource(uint64_t original_resource_handle, reshade::api::resource_usage additional_bind_flags = reshade::api::resource_usage(0));
 
 private:
    void UnlinkMirror(uint64_t mirror_handle);

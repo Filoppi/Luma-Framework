@@ -114,6 +114,6 @@ static inline NVSDK_NGX_Result NGX_DLSS_GET_OPTIMAL_SETTINGS(
 }
 
 #include "nvsdk_ngx_helpers_d3d.h"
-#include "nvsdk_ngx_helpers_cuda.h"
+//#include "nvsdk_ngx_helpers_cuda.h" // Luma: not used so we deleted it
 
 #endif // NVSDK_NGX_HELPERS_H

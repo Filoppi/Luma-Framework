@@ -454,34 +454,15 @@ namespace
           "SDR on HDR", // (Fake) SDR (baseline to 203 nits) on scRGB HDR for HDR (gamma 2.2) - Dev only, for quick comparisons
       };
 
-      enum class TextureFormatUpgradesType : uint8_t
-      {
-         None,
-         AllowedDisabled,
-         AllowedEnabled
-      };
-      enum class ChainTextureFormatUpgradesType : uint
-      {
-         None,
-         // Direct "copies" of the texture, like: CopyResource, CopySubresourceRegion, ResolveSubresource
-         DirectDependencies,
-         // Also indirect dependencies of the texture, like a SRV or UAV being read in a pixel or compute shader
-         DirectAndIndirectDependencies
-      };
+      // The texture upgrade types (and settings below) are defined in "ResourceUpgradeManager" (see "resource_upgrades.hpp"), these are aliases to them
+      using TextureFormatUpgradesType = ResourceUpgradeManager::TextureFormatUpgradesType;
+      using ChainTextureFormatUpgradesType = ResourceUpgradeManager::ChainTextureFormatUpgradesType;
       const char* chain_texture_format_upgrades_type_strings[3] = {
           "None",
           "Direct Dependencies",
           "Direct and Indirect Dependencies",
       };
-      enum class SwapchainUpgradeType : uint8_t
-      {
-         // keep the original one, SDR or whatnot
-         None,
-         // scRGB linear HDR (16 bit float)
-         scRGB,
-         // BT.2020 PQ HDR (10 bit UNORM)
-         HDR10
-      };
+      using SwapchainUpgradeType = ResourceUpgradeManager::SwapchainUpgradeType;
 
       //
       // Swapchain/Window
@@ -509,116 +490,32 @@ namespace
       // Textures
       //
 
-
-
-      // Global texture format upgrades setting. Required by all other settings below.
-      // Only swap between allowed enabled/disabled after init
-      TextureFormatUpgradesType texture_format_upgrades_type = TextureFormatUpgradesType::None;
-      // Whether texture upgrades (the ones that happen on resource creation) are done directly on the original resource, or on an upgraded mirrored version of it that we keep separately and live replace when the original resource is referenced.
-      // Indirect upgrades might be safer, and can be made more selective, to avoid upgrading random textures, though they also keep the original texture so memory usage goes up.
-      // Note: indirect upgrades will fail to replace references to resources if the game had DLSS/Streamline calls, as we can't intercept their calls to DX (at least in some cases?).
-      // These are sometimes referred to as: indirect, mirrored, proxy, redirected, cloned, ...
-      // See "FindOrCreateIndirectUpgradedResource()" for the main functionality.
-      bool enable_indirect_texture_format_upgrades = false;
-      // Automatically upgrade all textures that are used as target of an indirect upgraded resource, and their views.
-      // Indirect texture mirrors might still be automatically created if "texture_format_upgrades_type" is enabled, in case the game tried to copy an upgraded resource into an incompatible one that wasn't upgraded etc.
-      // This can work even without "enable_indirect_texture_format_upgrades", in case we upgraded textures through "auto_texture_format_upgrade_shader_hashes", or in case a texture wasn't a render target but was used as copy target of one.
-      // It's generally suggested to true if "enable_indirect_texture_format_upgrades" is enabled, unless you are use it works fine without and want to maximize performance.
-      ChainTextureFormatUpgradesType enable_chain_indirect_texture_format_upgrades = ChainTextureFormatUpgradesType::None;
-      // Allows to temporarily ignore indirectly upgraded textures
-      // In publishing mode, there's no need to ever forcefully ignore the indirectly upgraded textures,
-      // given that the settings can't change live, hence they are not created if they are not enabled in the first place.
-      PUBLISHING_CONSTEXPR bool ignore_indirect_upgraded_textures = false; // TODO: test why when this is turned off live in Lego City Undercover, the output breaks
+      // TODO: delete all redirectors by doing a global rename
+      TextureFormatUpgradesType& texture_format_upgrades_type = ResourceUpgradeManager::texture_format_upgrades_type;
+      bool& enable_indirect_texture_format_upgrades = ResourceUpgradeManager::enable_indirect_texture_format_upgrades;
+      ChainTextureFormatUpgradesType& enable_chain_indirect_texture_format_upgrades = ResourceUpgradeManager::enable_chain_indirect_texture_format_upgrades;
+      bool& ignore_indirect_upgraded_textures = ResourceUpgradeManager::ignore_indirect_upgraded_textures;
 #if DEVELOPMENT && 0 // WIP
       // From 0.5 to 2.0, resolution multiplier. Ideally exactly 0.5 or 2.0 (beside 1.0).
       // It should work until any shader does ".Load()" on a texture, or gets their dimensions from shaders.
       float indirect_upgraded_textures_size_scaling = 1.f;
 #endif
-	   // List of render targets (and unordered access) textures that we upgrade to R16G16B16A16_FLOAT or other formats (depends on GetBestResourceUpgradeFormat()).
-      // Most formats are supported but some might not act well when upgraded.
-      std::unordered_set<reshade::api::format> texture_upgrade_formats;
-      // Redirect incompatible copies between UNORM and FLOAT textures to a custom pixel shader that would do the same (not globally compatible).
-      // This can happen if the game uses a temp texture that isn't either a render target nor is unordered access, so we don't upgrade it.
-      bool enable_upgraded_texture_resource_copy_redirection = true; // TODO: delete given that we now have "enable_indirect_texture_format_upgrades"
-      // Initialize freshly created mirrors with the original's current content (converted when needed).
-      // TODO: Add a warning for textures we missed upgrading if the swapchain resolution changed later.
-      enum class TextureFormatUpgrades2DSizeFilters : uint32_t
-      {
-         // If the flags are set to 0, we upgrade all textures independently of their size. This flag can't be added separately!
-         All = 0,
-         // The output resolution (usually matches the window resolution too).
-         SwapchainResolution = 1 << 0,
-         // The rendering resolution (e.g. for TAA and other types of upscaling).
-         RenderResolution = 1 << 1,
-         // The aspect ratio of the swapchain texture.
-         // This can be useful for bloom or resolution scaling etc.
-         // Ideally we'd also check the rendering resolution, but we can't really reliably determine it until rendering has started and textures have been created.
-         SwapchainAspectRatio = 1 << 2,
-         RenderAspectRatio = 1 << 3,
-         // A custom aspect ratio (defaulted to 16:9, because that's the global standard).
-         // It can be useful for games that don't support UltraWide or 4:3 resolutions and internally force 16:9 rendering, while having a fullscreen swapchain with black bars.
-         CustomAspectRatio = 1 << 4,
-         CustomSize = 1 << 5, 
-         // All mip chain sizes based starting from the highest resolution between rendering and swapchain resolution (they should generally have the same aspect ratio anyway) to 1.
-         // This can be useful for blur passes etc, if they used power of 2 mips, instead of simply halving the base resolution.
-         Mips = 1 << 6,
-         // Upgrade textures cubes (of all sizes), these are sometimes used by old games to do reflections (e.g. Burnout Revenge cars reflections)
-         Cubes = 1 << 7,
-         // Checks the swapchain/output resolution width only (e.g. used by games that add horizontal lines, like "Thumper" or "Beyond: Two Souls").
-         // These are usually hard to match to an aspect ratio without using the "CustomAspectRatio" with a manually found aspect ratio,
-         // and thus mips like bloom might be missing
-         SwapchainResolutionWidth = 1 << 8,
-         SwapchainResolutionHeight = 1 << 9,
-         // The display resolution (useful for games that create textures before setting the swapchain size).
-         DisplayResolution = 1 << 10,
-         DisplayAspectRatio = 1 << 11,
-         // Loosen up the aspect ratio checks to multiples of 4 pixels, per axis, that's what some engines do (e.g. Unreal Engine).
-         PadTo4Px = 1 << 12,
-         // Avoid upgrading 1x1 textures
-         No1Px = 1 << 13,
-         // "None" needs to be != 0, and specify all the negating flags
-         None = No1Px,
-      };
-      uint32_t texture_format_upgrades_2d_size_filters = 0 | (uint32_t)TextureFormatUpgrades2DSizeFilters::SwapchainResolution | (uint32_t)TextureFormatUpgrades2DSizeFilters::SwapchainAspectRatio;
-      std::unordered_set<float> texture_format_upgrades_2d_custom_aspect_ratios = { 16.f / 9.f };
-      // Custom sizes (width/height pairs) to match for upgrades.
-      std::vector<uint2> texture_format_upgrades_2d_custom_sizes;
-      // Most games do resolution scaling properly, with a maximum aspect ratio offset of 1 pixel, though occasionally it goes to 2 pixels of difference.
-      // Set to 0 to only accept 100% matching aspect ratio.
-      uint32_t texture_format_upgrades_2d_aspect_ratio_pixel_threshold = 1;
-      // The size of the LUT we might want to upgrade, whether it's 1D, 2D or 3D.
-      // LUTs in most games are 16x or 32x, though in some cases they might be 15x, 31x, 48x, 64x etc.
-      uint32_t texture_format_upgrades_lut_size = -1;
-      enum class LUTDimensions
-      {
-         _1D,
-         _2D,
-         _3D
-      };
-      LUTDimensions texture_format_upgrades_lut_dimensions = LUTDimensions::_2D;
-      // Similar to "texture_upgrade_formats" but allows upgrading depth to R32_FLOAT/D32_FLOAT instead (e.g. useful in old games, especially when they allocated bits for stencil without using them)
-      std::unordered_set<reshade::api::format> texture_depth_upgrade_formats;
+      std::unordered_set<reshade::api::format>& texture_upgrade_formats = ResourceUpgradeManager::texture_upgrade_formats;
+      bool& enable_upgraded_texture_resource_copy_redirection = ResourceUpgradeManager::enable_upgraded_texture_resource_copy_redirection;
+      using TextureFormatUpgrades2DSizeFilters = ResourceUpgradeManager::TextureFormatUpgrades2DSizeFilters;
+      uint32_t& texture_format_upgrades_2d_size_filters = ResourceUpgradeManager::texture_format_upgrades_2d_size_filters;
+      std::unordered_set<float>& texture_format_upgrades_2d_custom_aspect_ratios = ResourceUpgradeManager::texture_format_upgrades_2d_custom_aspect_ratios;
+      std::vector<uint2>& texture_format_upgrades_2d_custom_sizes = ResourceUpgradeManager::texture_format_upgrades_2d_custom_sizes;
+      uint32_t& texture_format_upgrades_2d_aspect_ratio_pixel_threshold = ResourceUpgradeManager::texture_format_upgrades_2d_aspect_ratio_pixel_threshold;
+      uint32_t& texture_format_upgrades_lut_size = ResourceUpgradeManager::texture_format_upgrades_lut_size;
+      using LUTDimensions = ResourceUpgradeManager::LUTDimensions;
+      LUTDimensions& texture_format_upgrades_lut_dimensions = ResourceUpgradeManager::texture_format_upgrades_lut_dimensions;
+      std::unordered_set<reshade::api::format>& texture_depth_upgrade_formats = ResourceUpgradeManager::texture_depth_upgrade_formats;
 
-      // Map of source to target texture upgrade sizes, with the filter format too.
-      // Only advised with indirect upgrades, otherwise the viewport/scissor sizes won't be automatically updated.
-      // Width, Height, Depth/Array Layers, Samples (MS).
-      // If there's multiple matches, the first one is used.
-      // Set any of the filter values to 0 to ignore them.
-      std::vector<std::tuple<uint4, reshade::api::format, uint4>> texture_custom_dimensions_upgrades;
+      std::vector<std::tuple<uint4, reshade::api::format, uint4>>& texture_custom_dimensions_upgrades = ResourceUpgradeManager::texture_custom_dimensions_upgrades;
 
-      // Automatically upgrade the formats of the textures this shader pass draws to. Generally best used on shaders that originally encoded from HDR (native rendering) to SDR. If the source textures were SDR too (UNORM), they'd need to be upgraded through other means.
-      // "rtv_slots" are the RTV indexes to upgrade, "uav_slots" the UAVs (whether it's a pixel or compute shader).
-      // This is meant to be used if "enable_indirect_texture_format_upgrades" is off, or if very specific custom upgrades are needed.
-      // This assumes that when the upgraded texture is created (it could be at any time, if the target shader doesn't always run), the original texture values aren't relevant, because they won't be preserved.
-      // Do not remove elements from this map as there might be pointers to them around the code.
-      // Requires "enable_chain_indirect_texture_format_upgrades" to work, otherwise views from the new indirect upgraded textures don't ever get mirrored.
-      struct AutoTextureFormatUpgradeShaderHash // TODO: dupe definition (this one has commenting)
-      {
-         std::vector<uint8_t> rtv_slots;
-         std::vector<uint8_t> uav_slots;
-         bool scale = false; // When the hash-upgrade scale chain is active (SR upscaled early this frame), the mirror for this shader is created at output resolution instead of render resolution.
-      };
-      std::unordered_map<uint32_t, AutoTextureFormatUpgradeShaderHash> auto_texture_format_upgrade_shader_hashes;
+      using AutoTextureFormatUpgradeShaderHash = ResourceUpgradeManager::AutoTextureFormatUpgradeShaderHash;
+      std::unordered_map<uint32_t, AutoTextureFormatUpgradeShaderHash>& auto_texture_format_upgrade_shader_hashes = ResourceUpgradeManager::auto_texture_format_upgrade_shader_hashes;
 
       //
       // UI
@@ -2805,34 +2702,6 @@ namespace
       device_data.native_device = native_device;
       device_data.reshade_device = device;
 
-      // Compat shim: games set the global config values; the manager is the source of truth, so copy the
-      // globals into it at device init. (Phase 2 will migrate games to set the manager directly.)
-      // Note: the globals use the anonymous-namespace types, the manager has its own nested enum types,
-      // so convert explicitly.
-      device_data.resource_upgrades.texture_format_upgrades_type = static_cast<ResourceUpgradeManager::TextureFormatUpgradesType>(texture_format_upgrades_type);
-      device_data.resource_upgrades.enable_indirect_texture_format_upgrades = enable_indirect_texture_format_upgrades;
-      device_data.resource_upgrades.enable_chain_indirect_texture_format_upgrades = static_cast<ResourceUpgradeManager::ChainTextureFormatUpgradesType>(enable_chain_indirect_texture_format_upgrades);
-      device_data.resource_upgrades.ignore_indirect_upgraded_textures = ignore_indirect_upgraded_textures;
-      device_data.resource_upgrades.enable_upgraded_texture_resource_copy_redirection = enable_upgraded_texture_resource_copy_redirection;
-      device_data.resource_upgrades.texture_upgrade_formats = texture_upgrade_formats;
-      device_data.resource_upgrades.texture_depth_upgrade_formats = texture_depth_upgrade_formats;
-      device_data.resource_upgrades.texture_custom_dimensions_upgrades = texture_custom_dimensions_upgrades;
-      device_data.resource_upgrades.texture_format_upgrades_2d_size_filters = texture_format_upgrades_2d_size_filters;
-      device_data.resource_upgrades.texture_format_upgrades_2d_custom_aspect_ratios = texture_format_upgrades_2d_custom_aspect_ratios;
-      device_data.resource_upgrades.texture_format_upgrades_2d_custom_sizes = texture_format_upgrades_2d_custom_sizes;
-      device_data.resource_upgrades.texture_format_upgrades_2d_aspect_ratio_pixel_threshold = texture_format_upgrades_2d_aspect_ratio_pixel_threshold;
-      device_data.resource_upgrades.texture_format_upgrades_lut_size = texture_format_upgrades_lut_size;
-      device_data.resource_upgrades.texture_format_upgrades_lut_dimensions = static_cast<ResourceUpgradeManager::LUTDimensions>(texture_format_upgrades_lut_dimensions);
-      device_data.resource_upgrades.auto_texture_format_upgrade_shader_hashes.clear();
-      for (const auto& [hash, def] : auto_texture_format_upgrade_shader_hashes)
-      {
-         ResourceUpgradeManager::AutoTextureFormatUpgradeShaderHash m;
-         m.rtv_slots = def.rtv_slots;
-         m.uav_slots = def.uav_slots;
-         m.scale = def.scale;
-         device_data.resource_upgrades.auto_texture_format_upgrade_shader_hashes[hash] = m;
-      }
-
 #if LUMA_USE_DXP
       device_data.recipes.SetRootPath(shaders_path);
 #endif
@@ -2859,6 +2728,7 @@ namespace
             device_data.render_resolution = device_data.output_resolution;
          }
          device_data.previous_render_resolution = device_data.render_resolution;
+         device_data.last_render_resolution = device_data.render_resolution; // TODO: we have two of these now!
          // In case there already was a device, we could copy some states from it, but given that the previous device might still be rendering a frame and is in a "random" state, let's keep them completely independent
          global_native_devices.push_back(native_device);
          global_devices_data.push_back(&device_data);
@@ -6260,26 +6130,11 @@ namespace
       // Free mirrors queued this frame: all command lists have executed by now (usually).
       // Without this (and with inline ReShade side destructions instead), the code might crash,
       // but the issue is likely on our side, because we keep handles as int, so they might be stale pointers after destruction in case we missed some around.
-      {
-         std::vector<reshade::api::resource_view> pending_views;
-         std::vector<reshade::api::resource> pending_resources;
-         {
-            std::unique_lock lock(device_data.mutex);
-            pending_views = std::move(device_data.resource_upgrades.pending_mirror_view_destructions);
-            pending_resources = std::move(device_data.resource_upgrades.pending_mirror_resource_destructions);
-         }
-         for (const reshade::api::resource_view view : pending_views)
-         {
-            queue->get_device()->destroy_resource_view(view);
-         }
-         for (const reshade::api::resource resource : pending_resources)
-         {
-            queue->get_device()->destroy_resource(resource);
-         }
-      }
+      device_data.resource_upgrades.FlushPendingDestructions(queue->get_device(), device_data.mutex);
 
       game->OnPresent(native_device, device_data);
 
+#if 0 // TODO: this breaks games atm, need more restrictive checks
       // Invalidate indirect mirrors when the scale-relevant state changed this frame (render resolution or
       // SR selection). Mirrors are queued and freed at the start of the NEXT present, before any seed/chain
       // mirror is recreated at the new scale. The decision lives here in core.hpp (not the manager), since
@@ -6301,6 +6156,7 @@ namespace
 #endif
          }
       }
+#endif
 
 #if DEVELOPMENT
       {
@@ -8611,58 +8467,8 @@ namespace
       if (&device_data == nullptr)
          return;
       std::unique_lock lock(device_data.mutex);
-      auto original_resource_to_mirrored_upgraded_resource = device_data.resource_upgrades.original_resources_to_mirrored_upgraded_resources.find(resource.handle);
-      if (original_resource_to_mirrored_upgraded_resource != device_data.resource_upgrades.original_resources_to_mirrored_upgraded_resources.end())
-      {
-         const auto mirrored_upgraded_resource = original_resource_to_mirrored_upgraded_resource->second.mirror_handle;
-         device_data.resource_upgrades.original_resources_to_mirrored_upgraded_resources.erase(original_resource_to_mirrored_upgraded_resource);
-
-         // Invalidate stale view mappings for this mirror while the lock is held.
-         std::vector<uint64_t> unlinked_mirror_views;
-         if (auto mirror_views_it = device_data.resource_upgrades.mirror_views_by_mirror_resource.find(mirrored_upgraded_resource); mirror_views_it != device_data.resource_upgrades.mirror_views_by_mirror_resource.end())
-         {
-            const auto& mirror_views = mirror_views_it->second;
-            for (auto view_map_it = device_data.resource_upgrades.original_resource_views_to_mirrored_upgraded_resource_views.begin(); view_map_it != device_data.resource_upgrades.original_resource_views_to_mirrored_upgraded_resource_views.end();)
-            {
-               if (mirror_views.contains(view_map_it->second))
-               {
-                  unlinked_mirror_views.push_back(view_map_it->second);
-                  device_data.resource_upgrades.mirror_views_to_mirror_resources.erase(view_map_it->second);
-                  view_map_it = device_data.resource_upgrades.original_resource_views_to_mirrored_upgraded_resource_views.erase(view_map_it);
-               }
-               else
-               {
-                  ++view_map_it;
-               }
-            }
-            device_data.resource_upgrades.mirror_views_by_mirror_resource.erase(mirror_views_it);
-         }
-
-         constexpr bool delayed_destruction = true;
-         // Defer freeing to present: the mirror may still be in flight in hooks or bound on recorded lists.
-         if (delayed_destruction)
-         {
-            for (const uint64_t unlinked_mirror_view : unlinked_mirror_views)
-            {
-               device_data.resource_upgrades.pending_mirror_view_destructions.push_back({ unlinked_mirror_view });
-            }
-            device_data.resource_upgrades.pending_mirror_resource_destructions.push_back({ mirrored_upgraded_resource });
-         }
-         else
-         {
-            lock.unlock();
-
-            for (const uint64_t unlinked_mirror_view : unlinked_mirror_views)
-            {
-               device->destroy_resource_view({ unlinked_mirror_view });
-            }
-            device->destroy_resource({ mirrored_upgraded_resource });
-         }
-      }
-      device_data.resource_upgrades.upgraded_resources.erase(resource.handle);
-#if DEVELOPMENT
-      device_data.resource_upgrades.original_upgraded_resources_formats.erase(resource.handle);
-#endif // DEVELOPMENT
+      // Unlinks its mirror (and the mirror views) and defers their destruction to the next present, as they may still be in flight in hooks or bound on recorded lists
+      device_data.resource_upgrades.OnResourceDestroyed(resource.handle);
 
       // TODO: thread safe
       int count = 0;
@@ -8995,36 +8801,8 @@ namespace
       DeviceData& device_data = *device_data_ptr;
       std::unique_lock lock(device_data.mutex);
 
-#if DEVELOPMENT
-      device_data.resource_upgrades.original_upgraded_resource_views_formats.erase(view.handle);
-#endif
-      device_data.resource_upgrades.original_views_to_original_resources.erase(view.handle);
-
-      auto original_resource_view_to_mirrored_upgraded_resource_view = device_data.resource_upgrades.original_resource_views_to_mirrored_upgraded_resource_views.find(view.handle);
-      if (original_resource_view_to_mirrored_upgraded_resource_view != device_data.resource_upgrades.original_resource_views_to_mirrored_upgraded_resource_views.end())
-      {
-         const auto mirrored_upgraded_resource_view = original_resource_view_to_mirrored_upgraded_resource_view->second;
-         device_data.resource_upgrades.original_resource_views_to_mirrored_upgraded_resource_views.erase(original_resource_view_to_mirrored_upgraded_resource_view);
-         // No device call (get_resource_from_view) under the luma lock: this callback runs inside the D3D11
-         // runtime's final Release (destruction notifier) on an arbitrary thread, so taking the luma lock here and
-         // then calling back into the runtime inverts the lock order vs the draw path (which holds the shared luma
-         // lock while making device calls) and can deadlock. The mirror resource handle is cached at insert time.
-         reshade::api::resource mirror_resource;
-         mirror_resource.handle = 0;
-         if (auto mirror_res_it = device_data.resource_upgrades.mirror_views_to_mirror_resources.find(mirrored_upgraded_resource_view); mirror_res_it != device_data.resource_upgrades.mirror_views_to_mirror_resources.end())
-         {
-            mirror_resource.handle = mirror_res_it->second;
-            device_data.resource_upgrades.mirror_views_to_mirror_resources.erase(mirror_res_it);
-         }
-         if (auto mirror_views_it = device_data.resource_upgrades.mirror_views_by_mirror_resource.find(mirror_resource.handle); mirror_views_it != device_data.resource_upgrades.mirror_views_by_mirror_resource.end())
-         {
-            mirror_views_it->second.erase(mirrored_upgraded_resource_view);
-            if (mirror_views_it->second.empty())
-               device_data.resource_upgrades.mirror_views_by_mirror_resource.erase(mirror_views_it);
-         }
-         // Defer freeing to present: the mirror view may still be in flight. See OnDestroyResource.
-         device_data.resource_upgrades.pending_mirror_view_destructions.push_back({ mirrored_upgraded_resource_view });
-      }
+      // Unlinks its mirror view (if any) and defers its destruction to the next present, as it may still be in flight
+      device_data.resource_upgrades.OnResourceViewDestroyed(view.handle);
    }
 
    void OnPushDescriptors(
@@ -15621,7 +15399,7 @@ namespace
                      {
                         ImGui::SetTooltip("Indirect Texture Upgrades will possibly still happen, but they will not be bound, allowing you to quickly toggle between the game textures and the upgraded ones");
                      }
-                     
+
                      // TODO: add a button to also re-create all of them live (we'd need some sort of tracking for that, or to temporarily white list all PS/CS shaders to automatically upgrade textures, or actually, we can just read the source texture and re-upgrade it if we keep them in the list)
                      std::unordered_map<uint64_t, uint64_t> original_resource_views_to_mirrored_upgraded_resource_views;
                      std::unordered_map<uint64_t, ResourceUpgradeManager::IndirectUpgradedResource> original_resources_to_mirrored_upgraded_resources;
@@ -15629,6 +15407,7 @@ namespace
                      if (!device_data.resource_upgrades.original_resources_to_mirrored_upgraded_resources.empty() && ImGui::Button("Clear Indirect Upgraded Textures"))
                      {
                         lock_device_read.unlock();
+#if 1 // TODO: pick one of the two paths, or improve the one below, and delete "original_resource_views_to_mirrored_upgraded_resource_views" etc in case.
                         {
                            std::unique_lock lock_device_write(device_data.mutex);
                            original_resource_views_to_mirrored_upgraded_resource_views = device_data.resource_upgrades.original_resource_views_to_mirrored_upgraded_resource_views;
@@ -15649,6 +15428,11 @@ namespace
                         {
                            runtime->get_device()->destroy_resource({ original_resource_to_mirrored_upgraded_resource.second.mirror_handle });
                         }
+#else
+                        std::unique_lock lock_device_write(device_data.mutex);
+                        // Unlinks all the mirrors (and their views) and defers their destruction to the next present
+                        device_data.resource_upgrades.InvalidateAllIndirectUpgradedResources();
+#endif
                      }
                      // Make sure there's no views if there's no textures, something would be wrong otherwise
                      else if (device_data.resource_upgrades.original_resources_to_mirrored_upgraded_resources.empty())

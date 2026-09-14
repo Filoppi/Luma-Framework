@@ -34,8 +34,8 @@ namespace
 {
    namespace
    {
-      // Defined in "core.hpp"
-      struct AutoTextureFormatUpgradeShaderHash;
+      // Defined in "ResourceUpgradeManager" (also aliased in "core.hpp")
+      using AutoTextureFormatUpgradeShaderHash = ResourceUpgradeManager::AutoTextureFormatUpgradeShaderHash;
    }
 }
 

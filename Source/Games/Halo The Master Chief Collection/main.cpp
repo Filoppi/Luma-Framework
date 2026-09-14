@@ -712,24 +712,25 @@ namespace
          // clear old upgrades
          DeviceData& device_data = *runtime->get_device()->get_private_data<DeviceData>();
          std::unordered_map<uint64_t, uint64_t> original_resource_views_to_mirrored_upgraded_resource_views;
-         std::unordered_map<uint64_t, uint64_t> original_resources_to_mirrored_upgraded_resources;
+         std::unordered_map<uint64_t, ResourceUpgradeManager::IndirectUpgradedResource> original_resources_to_mirrored_upgraded_resources;
          std::shared_lock lock_device_read(device_data.mutex);
 
          // clear in runtime device
-         if (!device_data.original_resources_to_mirrored_upgraded_resources.empty())
+         // TODO: we now have functions to do these
+         if (!device_data.resource_upgrades.original_resources_to_mirrored_upgraded_resources.empty())
          {
             lock_device_read.unlock();
             {
                std::unique_lock lock_device_write(device_data.mutex);
-               original_resource_views_to_mirrored_upgraded_resource_views = device_data.original_resource_views_to_mirrored_upgraded_resource_views;
-               original_resources_to_mirrored_upgraded_resources = device_data.original_resources_to_mirrored_upgraded_resources;
-               device_data.original_resource_views_to_mirrored_upgraded_resource_views.clear();
-               device_data.original_resources_to_mirrored_upgraded_resources.clear();
+               original_resource_views_to_mirrored_upgraded_resource_views = device_data.resource_upgrades.original_resource_views_to_mirrored_upgraded_resource_views;
+               original_resources_to_mirrored_upgraded_resources = device_data.resource_upgrades.original_resources_to_mirrored_upgraded_resources;
+               device_data.resource_upgrades.original_resource_views_to_mirrored_upgraded_resource_views.clear();
+               device_data.resource_upgrades.original_resources_to_mirrored_upgraded_resources.clear();
             }
             for (const auto& original_resource_view_to_mirrored_upgraded_resource_view : original_resource_views_to_mirrored_upgraded_resource_views)
                runtime->get_device()->destroy_resource_view({ original_resource_view_to_mirrored_upgraded_resource_view.second });
             for (const auto& original_resource_to_mirrored_upgraded_resource : original_resources_to_mirrored_upgraded_resources)
-               runtime->get_device()->destroy_resource({ original_resource_to_mirrored_upgraded_resource.second });
+               runtime->get_device()->destroy_resource({ original_resource_to_mirrored_upgraded_resource.second.mirror_handle });
          }
       }
    }
