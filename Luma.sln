@@ -117,6 +117,7 @@ Project("{8BC9CEB8-8B4A-11D0-8D11-00A0C91BC942}") = "Mass Effect Legendary Editi
 EndProject
 Project("{8BC9CEB8-8B4A-11D0-8D11-00A0C91BC942}") = "Middle-earth Shadow of War", "Source\Games\Middle-earth Shadow of War\Middle-earth Shadow of War.vcxproj", "{17FBB4FD-8E4E-4E61-AC32-BBEBA09B8D18}"
 EndProject
+Project("{8BC9CEB8-8B4A-11D0-8D11-00A0C91BC942}") = "Need For Speed Rivals", "Source\Games\Need For Speed Rivals\Need For Speed Rivals.vcxproj", "{935A2A28-2CE7-4F7A-96AE-964AEDEDC952}"
 Project("{8BC9CEB8-8B4A-11D0-8D11-00A0C91BC942}") = "Halo The Master Chief Collection", "Source\Games\Halo The Master Chief Collection\Halo The Master Chief Collection.vcxproj", "{6A95DCDD-FD5F-4064-B12C-F6602E31FEEE}"
 Project("{8BC9CEB8-8B4A-11D0-8D11-00A0C91BC942}") = "The Witcher 2", "Source\Games\The Witcher 2\The Witcher 2.vcxproj", "{8F4A1D26-93BC-4E07-A5D1-64C2E7B9F310}"
 EndProject
@@ -871,6 +872,22 @@ Global
 		{17FBB4FD-8E4E-4E61-AC32-BBEBA09B8D18}.Test-Release|Win32.Build.0 = Test-Release|x64
 		{17FBB4FD-8E4E-4E61-AC32-BBEBA09B8D18}.Test-Release|x64.ActiveCfg = Test-Release|x64
 		{17FBB4FD-8E4E-4E61-AC32-BBEBA09B8D18}.Test-Release|x64.Build.0 = Test-Release|x64
+		{935A2A28-2CE7-4F7A-96AE-964AEDEDC952}.Development-Debug|Win32.ActiveCfg = Development-Debug|Win32
+		{935A2A28-2CE7-4F7A-96AE-964AEDEDC952}.Development-Debug|Win32.Build.0 = Development-Debug|Win32
+		{935A2A28-2CE7-4F7A-96AE-964AEDEDC952}.Development-Debug|x64.ActiveCfg = Development-Debug|x64
+		{935A2A28-2CE7-4F7A-96AE-964AEDEDC952}.Development-Debug|x64.Build.0 = Development-Debug|x64
+		{935A2A28-2CE7-4F7A-96AE-964AEDEDC952}.Development-Release|Win32.ActiveCfg = Development-Release|Win32
+		{935A2A28-2CE7-4F7A-96AE-964AEDEDC952}.Development-Release|Win32.Build.0 = Development-Release|Win32
+		{935A2A28-2CE7-4F7A-96AE-964AEDEDC952}.Development-Release|x64.ActiveCfg = Development-Release|x64
+		{935A2A28-2CE7-4F7A-96AE-964AEDEDC952}.Development-Release|x64.Build.0 = Development-Release|x64
+		{935A2A28-2CE7-4F7A-96AE-964AEDEDC952}.Publishing-Release|Win32.ActiveCfg = Publishing-Release|Win32
+		{935A2A28-2CE7-4F7A-96AE-964AEDEDC952}.Publishing-Release|Win32.Build.0 = Publishing-Release|Win32
+		{935A2A28-2CE7-4F7A-96AE-964AEDEDC952}.Publishing-Release|x64.ActiveCfg = Publishing-Release|x64
+		{935A2A28-2CE7-4F7A-96AE-964AEDEDC952}.Publishing-Release|x64.Build.0 = Publishing-Release|x64
+		{935A2A28-2CE7-4F7A-96AE-964AEDEDC952}.Test-Release|Win32.ActiveCfg = Test-Release|Win32
+		{935A2A28-2CE7-4F7A-96AE-964AEDEDC952}.Test-Release|Win32.Build.0 = Test-Release|Win32
+		{935A2A28-2CE7-4F7A-96AE-964AEDEDC952}.Test-Release|x64.ActiveCfg = Test-Release|x64
+		{935A2A28-2CE7-4F7A-96AE-964AEDEDC952}.Test-Release|x64.Build.0 = Test-Release|x64
 		{6A95DCDD-FD5F-4064-B12C-F6602E31FEEE}.Development-Debug|Win32.ActiveCfg = Development-Debug|Win32
 		{6A95DCDD-FD5F-4064-B12C-F6602E31FEEE}.Development-Debug|Win32.Build.0 = Development-Debug|Win32
 		{6A95DCDD-FD5F-4064-B12C-F6602E31FEEE}.Development-Debug|x64.ActiveCfg = Development-Debug|x64
@@ -1013,6 +1030,7 @@ Global
 		{B0DE12A4-5C7A-4E91-9F3B-08891303C0DE} = {02EA681E-C7D8-13C7-8484-4AC65E1B71E8}
 		{7D3E1C92-5A64-4B18-9F2A-1E8C4D6B0A37} = {02EA681E-C7D8-13C7-8484-4AC65E1B71E8}
 		{17FBB4FD-8E4E-4E61-AC32-BBEBA09B8D18} = {02EA681E-C7D8-13C7-8484-4AC65E1B71E8}
+		{935A2A28-2CE7-4F7A-96AE-964AEDEDC952} = {02EA681E-C7D8-13C7-8484-4AC65E1B71E8}
 		{6A95DCDD-FD5F-4064-B12C-F6602E31FEEE} = {02EA681E-C7D8-13C7-8484-4AC65E1B71E8}
 		{8F4A1D26-93BC-4E07-A5D1-64C2E7B9F310} = {02EA681E-C7D8-13C7-8484-4AC65E1B71E8}
 		{7C3E9A18-4D62-4B85-9E30-1A8F5D2C6B44} = {02EA681E-C7D8-13C7-8484-4AC65E1B71E8}

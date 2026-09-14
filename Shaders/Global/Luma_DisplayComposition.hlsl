@@ -626,5 +626,9 @@ float4 main(float4 pos : SV_Position) : SV_Target0
 	color.rgb = float3(1, 0, 0);
 #endif
 
+// #if TEST_USER_PEAK_FXAA == 0
+// 	color.rgb = min(PeakWhiteNits / sRGB_WhiteLevelNits, color.rgb);
+// #endif
+
 	return float4(color.rgb, color.a);
 }
