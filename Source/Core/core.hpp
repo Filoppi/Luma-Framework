@@ -1044,6 +1044,7 @@ namespace
       DebugDrawMode debug_draw_mode = DebugDrawMode::Custom;
       bool debug_draw_freeze_inputs = false; // Allows freezing the inputs/state of this pass, allowing you to edit the shader and seeing the results live. This is bundled with the textures debug draw feature because generally you don't need to freeze the inputs of any prior pass if not the very same one you are analyzing (or iterating upon). If the game stopped drawing the shader, debugging would also stop.
       int32_t debug_draw_view_index = 0;
+      bool debug_draw_disable_blends = false; // Allows disabling HW blends so we can debug the raw pixel shader output
       uint32_t debug_draw_options = (uint32_t)DebugDrawTextureOptionsMask::Fullscreen | (uint32_t)DebugDrawTextureOptionsMask::BackgroundPassthrough | (uint32_t)DebugDrawTextureOptionsMask::Tonemap;
       int32_t debug_draw_mip = 0;
       bool debug_draw_pipeline_instance_filter_by_thread = false; // Not true by default as it seems like quite a few games set up multiple render threads, so this conflicts between frames
@@ -7111,6 +7112,11 @@ namespace
          }
 
          pre_draw_state_stack.Cache(native_device_context, device_data.uav_max_count);
+
+         if (debug_draw_disable_blends) // TODO: we never reset these after the draw call? Potentially polluting the game's state? It'd be fine if we are draw debugging! Same for the other usages of this.
+         {
+            native_device_context->OMSetBlendState(nullptr, nullptr, 0xFFFFFFFF);
+         }
       }
 #endif
 
@@ -7294,6 +7300,11 @@ namespace
          }
 
          pre_draw_state_stack.Cache(native_device_context, device_data.uav_max_count);
+
+         if (debug_draw_disable_blends)
+         {
+            native_device_context->OMSetBlendState(nullptr, nullptr, 0xFFFFFFFF);
+         }
       }
 #endif
 
@@ -7616,6 +7627,11 @@ namespace
             pre_draw_state_stack_compute.Cache(native_device_context, device_data.uav_max_count);
          else
             pre_draw_state_stack_graphics.Cache(native_device_context, device_data.uav_max_count);
+
+         if (!is_dispatch && debug_draw_disable_blends)
+         {
+            native_device_context->OMSetBlendState(nullptr, nullptr, 0xFFFFFFFF);
+         }
       }
 #endif
 
@@ -12029,6 +12045,11 @@ namespace
                                        {
                                           device_data.debug_draw_frozen_draw_state_stack.reset();
                                        }
+                                       
+                                       ImGui::SameLine();
+                                       ImGui::BeginDisabled(debug_draw_mode != DebugDrawMode::RenderTarget);
+                                       ImGui::Checkbox("Disable Blends", &debug_draw_disable_blends);
+                                       ImGui::EndDisabled();
                                     }
 
                                     bool track_buffer_enabled = track_buffer_pipeline != 0 && track_buffer_pipeline == pipeline_pair->first;
@@ -13936,6 +13957,7 @@ namespace
                         debug_draw_mode = DebugDrawMode::Custom;
                         debug_draw_freeze_inputs = false;
                         debug_draw_view_index = 0;
+                        debug_draw_disable_blends = false;
                         debug_draw_mip = 0;
 
                         // TODO: fix. As of now this is needed or the texture would be cleared every frame and then set again. We'd need to add a separate (temporary) non clear texture mode for it
@@ -14882,6 +14904,7 @@ namespace
                      {
                         device_data.debug_draw_frozen_draw_state_stack.reset();
                      }
+                     ImGui::Checkbox("Debug Draw: Disable Blends", &debug_draw_disable_blends);
                   }
                   if (debug_draw_mode == DebugDrawMode::RenderTarget)
                   {
