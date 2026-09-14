@@ -599,10 +599,18 @@ namespace
       // Similar to "texture_upgrade_formats" but allows upgrading depth to R32_FLOAT/D32_FLOAT instead (e.g. useful in old games, especially when they allocated bits for stencil without using them)
       std::unordered_set<reshade::api::format> texture_depth_upgrade_formats;
 
+      // Map of source to target texture upgrade sizes, with the filter format too.
+      // Only advised with indirect upgrades, otherwise the viewport/scissor sizes won't be automatically updated.
+      // Width, Height, Depth/Array Layers, Samples (MS).
+      // If there's multiple matches, the first one is used.
+      // Set any of the filter values to 0 to ignore them.
+      std::vector<std::tuple<uint4, reshade::api::format, uint4>> texture_custom_dimensions_upgrades;
+
       // Automatically upgrade the formats of the textures this shader pass draws to. Generally best used on shaders that originally encoded from HDR (native rendering) to SDR. If the source textures were SDR too (UNORM), they'd need to be upgraded through other means.
       // "rtv_slots" are the RTV indexes to upgrade, "uav_slots" the UAVs (whether it's a pixel or compute shader).
       // This is meant to be used if "enable_indirect_texture_format_upgrades" is off, or if very specific custom upgrades are needed.
       // This assumes that when the upgraded texture is created (it could be at any time, if the target shader doesn't always run), the original texture values aren't relevant, because they won't be preserved.
+      // Do not remove elements from this map as there might be pointers to them around the code.
       // Requires "enable_chain_indirect_texture_format_upgrades" to work, otherwise views from the new indirect upgraded textures don't ever get mirrored.
       struct AutoTextureFormatUpgradeShaderHash
       {
@@ -857,6 +865,14 @@ namespace
    // uint8_t is enough for MAX_SHADER_DEFINES
    std::unordered_map<uint32_t, uint8_t> shader_defines_data_index;
 
+   // List of draw/dispatch callbacks to trigger based on the currently bound shader hashes, called instead of "Game::OnDrawOrDispatch()" (same signature).
+   // Not mutex protected, only set on boot (e.g. in "Game::OnInit()").
+   // Only the first matching one will be executed.
+   // Any hash within a stage will match. It's possible to set for example for vertex and pixel shader. When setting both,
+   // both become a requirement for the callback to trigger, otherwise only one will be.
+   std::vector<std::pair<ShaderHashesList<ShaderHashesCount::Multiple, ShaderHashesStages::Graphics>, DrawOrDispatchCallback>> draw_callbacks_by_shader_hashes;
+   std::vector<std::pair<ShaderHashesList<ShaderHashesCount::Multiple, ShaderHashesStages::Compute>, DrawOrDispatchCallback>> dispatch_callbacks_by_shader_hashes;
+
    // Global data (not device dependent really):
 
    // Directly from cbuffer
@@ -897,6 +913,7 @@ namespace
 #endif
    thread_local bool waiting_on_upgraded_resource_init = false;
    thread_local reshade::api::resource_desc upgraded_resource_init_desc = {};
+   thread_local reshade::api::resource_desc forced_upgraded_resource_init_desc = {};
    thread_local void* upgraded_resource_init_data = {};
    thread_local std::unordered_map<uint64_t, reshade::api::subresource_data*> upgraded_mapped_resources;
 #if LUMA_PATCH_PROVIDERS != 0
@@ -1089,6 +1106,8 @@ namespace
 #endif
    void OnDestroyPipeline(reshade::api::device* device, reshade::api::pipeline pipeline);
    reshade::api::format GetBestResourceUpgradeFormat(const reshade::api::resource_desc& desc);
+   reshade::api::format GetBestResourceViewUpgradeFormat(const reshade::api::resource_view_desc& original_view_desc, reshade::api::resource_usage usage_type, const reshade::api::resource_desc& original_desc, const reshade::api::resource_desc& upgraded_desc);
+   std::optional<reshade::api::resource_desc> GetOptionalResourceUpgradeDesc(const reshade::api::resource_desc& desc, const DeviceData& device_data, bool has_initial_data = false);
 
    // Returns true if any shader or pipeline has been replaced, meaning that the mod will at least do something (this is representative of how most, but not necessarily all, mods work)
    bool IsModActive(const DeviceData& device_data)
@@ -2797,6 +2816,7 @@ namespace
       device_data.resource_upgrades.enable_upgraded_texture_resource_copy_redirection = enable_upgraded_texture_resource_copy_redirection;
       device_data.resource_upgrades.texture_upgrade_formats = texture_upgrade_formats;
       device_data.resource_upgrades.texture_depth_upgrade_formats = texture_depth_upgrade_formats;
+      device_data.resource_upgrades.texture_custom_dimensions_upgrades = texture_custom_dimensions_upgrades;
       device_data.resource_upgrades.texture_format_upgrades_2d_size_filters = texture_format_upgrades_2d_size_filters;
       device_data.resource_upgrades.texture_format_upgrades_2d_custom_aspect_ratios = texture_format_upgrades_2d_custom_aspect_ratios;
       device_data.resource_upgrades.texture_format_upgrades_2d_custom_sizes = texture_format_upgrades_2d_custom_sizes;
@@ -3103,8 +3123,8 @@ namespace
       {
          // Release custom samplers outside the lock, as releasing them can trigger "OnDestroySampler()", which locks it again (and would hang)
          decltype(device_data.custom_sampler_by_original_sampler) samplers;
-      {
-         const std::unique_lock lock_samplers(s_mutex_samplers);
+         {
+            const std::unique_lock lock_samplers(s_mutex_samplers);
             ASSERT_ONCE(device_data.custom_sampler_by_original_sampler.empty()); // These should have been cleared already ("OnDestroySampler()")
             samplers = std::move(device_data.custom_sampler_by_original_sampler);
             device_data.custom_sampler_by_original_sampler.clear();
@@ -4897,7 +4917,7 @@ namespace
          }
       }
 
-      // Matches "reshade::addon_event::reset_command_list" (sometimes this is called instead of that)
+      // Matches "reshade::addon_event::reset_command_list" (sometimes this is called instead of that). Reshade DX11 specific.
       if (stages == reshade::api::pipeline_stage::all && pipeline.handle == 0)
       {
 #if DEVELOPMENT
@@ -4910,10 +4930,14 @@ namespace
          cmd_list_data.patch_clone_handles.clear();
       }
 
-      if ((stages & reshade::api::pipeline_stage::compute_shader) != 0)
+      bool compute_changed = false;
+      bool graphics_changed = false;
+
+      if ((stages & reshade::api::pipeline_stage::compute_shader) != 0 && cmd_list_data.pipeline_state_original_compute_shader != pipeline)
       {
          ASSERT_ONCE(stages == reshade::api::pipeline_stage::compute_shader || stages == reshade::api::pipeline_stage::all); // Make sure only one stage happens at a time (it does in DX11)
          cmd_list_data.pipeline_state_original_compute_shader = pipeline;
+         compute_changed = true;
          // Expose the clone handle for this stage (0 = no clone), gated
          // by the master switches (per-hash defaults don't gate: per-draw overrides
          // must work). File clones need the mod master, patch clones both.
@@ -4922,16 +4946,14 @@ namespace
          {
             for (uint32_t hash : cached_pipeline->shader_hashes)
             {
-               if (hash != 0)
-               {
-                  cmd_list_data.patch_clone_handles[hash] = cached_pipeline->pipeline_clone;
-               }
+               cmd_list_data.patch_clone_handles[hash] = cached_pipeline->pipeline_clone;
             }
          }
 
          if (cached_pipeline)
          {
 #if DX12
+            // Note: this makes no sense, the shader hashes should be split by stage. Only one per stage can be bound in either DX11 and 12!
             cmd_list_data.pipeline_state_original_compute_shader_hashes.compute_shaders = std::unordered_set<uint32_t>(cached_pipeline->shader_hashes.begin(), cached_pipeline->shader_hashes.end());
 #else
             cmd_list_data.pipeline_state_original_compute_shader_hashes.compute_shaders[0] = cached_pipeline->shader_hashes[0];
@@ -4948,10 +4970,11 @@ namespace
             cmd_list_data.pipeline_state_has_custom_compute_shader = false;
          }
       }
-      if ((stages & reshade::api::pipeline_stage::vertex_shader) != 0)
+      if ((stages & reshade::api::pipeline_stage::vertex_shader) != 0 && cmd_list_data.pipeline_state_original_vertex_shader != pipeline)
       {
          ASSERT_ONCE(stages == reshade::api::pipeline_stage::vertex_shader || stages == reshade::api::pipeline_stage::all); // Make sure only one stage happens at a time (it does in DX11)
          cmd_list_data.pipeline_state_original_vertex_shader = pipeline;
+         graphics_changed = true;
          // Expose the clone handle for this stage (0 = no clone), gated
          // by the master switches (per-hash defaults don't gate: per-draw overrides
          // must work). File clones need the mod master, patch clones both.
@@ -4960,10 +4983,7 @@ namespace
          {
             for (uint32_t hash : cached_pipeline->shader_hashes)
             {
-               if (hash != 0)
-               {
-                  cmd_list_data.patch_clone_handles[hash] = cached_pipeline->pipeline_clone;
-               }
+               cmd_list_data.patch_clone_handles[hash] = cached_pipeline->pipeline_clone;
             }
          }
 
@@ -4987,10 +5007,11 @@ namespace
          }
          cmd_list_data.pipeline_state_has_custom_graphics_shader = cmd_list_data.pipeline_state_has_custom_pixel_shader || cmd_list_data.pipeline_state_has_custom_vertex_shader;
       }
-      if ((stages & reshade::api::pipeline_stage::pixel_shader) != 0)
+      if ((stages & reshade::api::pipeline_stage::pixel_shader) != 0 && cmd_list_data.pipeline_state_original_pixel_shader != pipeline)
       {
          ASSERT_ONCE(stages == reshade::api::pipeline_stage::pixel_shader || stages == reshade::api::pipeline_stage::all); // Make sure only one stage happens at a time (it does in DX11)
          cmd_list_data.pipeline_state_original_pixel_shader = pipeline;
+         graphics_changed = true;
          // Expose the clone handle for this stage (0 = no clone), gated
          // by the master switches (per-hash defaults don't gate: per-draw overrides
          // must work). File clones need the mod master, patch clones both.
@@ -4999,10 +5020,7 @@ namespace
          {
             for (uint32_t hash : cached_pipeline->shader_hashes)
             {
-               if (hash != 0)
-               {
-                  cmd_list_data.patch_clone_handles[hash] = cached_pipeline->pipeline_clone;
-               }
+               cmd_list_data.patch_clone_handles[hash] = cached_pipeline->pipeline_clone;
             }
          }
 
@@ -5029,6 +5047,67 @@ namespace
             cmd_list_data.pipeline_state_has_custom_pixel_shader = false;
          }
          cmd_list_data.pipeline_state_has_custom_graphics_shader = cmd_list_data.pipeline_state_has_custom_pixel_shader || cmd_list_data.pipeline_state_has_custom_vertex_shader;
+      }
+
+      // Note: geometry shaders are missing despite of "GEOMETRY_SHADER_SUPPORT".
+      if ((stages & (reshade::api::pipeline_stage::vertex_shader | reshade::api::pipeline_stage::pixel_shader)) != 0 && graphics_changed)
+      {
+         cmd_list_data.draw_callback = nullptr;
+         for (const auto& [shader_hashes, callback] : draw_callbacks_by_shader_hashes)
+         {
+            if (callback && cmd_list_data.pipeline_state_original_graphics_shader_hashes.ContainsAll(shader_hashes))
+            {
+               cmd_list_data.draw_callback = callback;
+               break;
+            }
+         }
+
+         if (enable_ui_separation || hide_ui)
+         {
+            cmd_list_data.is_known_ui_shader_bound = cmd_list_data.pipeline_state_original_graphics_shader_hashes.Contains(shader_hashes_UI);
+         }
+         else
+         {
+            cmd_list_data.is_known_ui_shader_bound = false;
+         }
+
+#if !DX12 // They are always set all at once in DX12
+         // These only depend on pixel shaders (no vertex etc)
+         if ((stages & reshade::api::pipeline_stage::pixel_shader) != 0)
+#endif
+         {
+            cmd_list_data.auto_graphics_texture_format_upgrades = nullptr;
+            if (cmd_list_data.pipeline_state_original_pixel_shader.handle != 0)
+            {
+               const auto auto_texture_format_upgrade_shader_hashes_it = auto_texture_format_upgrade_shader_hashes.find(uint32_t(cmd_list_data.pipeline_state_original_graphics_shader_hashes.pixel_shaders[0]));
+               if (auto_texture_format_upgrade_shader_hashes_it != auto_texture_format_upgrade_shader_hashes.end())
+               {
+                  cmd_list_data.auto_graphics_texture_format_upgrades = &(auto_texture_format_upgrade_shader_hashes_it->second);
+               }
+            }
+         }
+      }
+      if ((stages & reshade::api::pipeline_stage::compute_shader) != 0 && compute_changed)
+      {
+         cmd_list_data.dispatch_callback = nullptr;
+         for (const auto& [shader_hashes, callback] : dispatch_callbacks_by_shader_hashes)
+         {
+            if (callback && cmd_list_data.pipeline_state_original_compute_shader_hashes.ContainsAll(shader_hashes))
+            {
+               cmd_list_data.dispatch_callback = callback;
+               break;
+            }
+         }
+
+         cmd_list_data.auto_compute_texture_format_upgrades = nullptr;
+         if (cmd_list_data.pipeline_state_original_compute_shader.handle != 0)
+         {
+            const auto auto_texture_format_upgrade_shader_hashes_it = auto_texture_format_upgrade_shader_hashes.find(uint32_t(cmd_list_data.pipeline_state_original_compute_shader_hashes.pixel_shaders[0]));
+            if (auto_texture_format_upgrade_shader_hashes_it != auto_texture_format_upgrade_shader_hashes.end())
+            {
+               cmd_list_data.auto_compute_texture_format_upgrades = &(auto_texture_format_upgrade_shader_hashes_it->second);
+            }
+         }
       }
 
       if (cached_pipeline)
@@ -5062,37 +5141,45 @@ namespace
          else
 #endif
          {
-            // TODO: have a high performance mode that swaps the original shader binary with the custom one on creation, so we don't have to analyze shader binding calls (probably wouldn't really speed up performance anyway).
-            // This would also help save some memory in x86 games where we keep all shaders binaries in memory ("custom_shaders_cache::code").
+            bool game_patch_default = true;
             // The game decision runs without the lock: game callbacks must not
             // take luma mutexes, and the bind below is what needs the lock.
 #if LUMA_PATCH_PROVIDERS != 0
-            const bool game_patch_default = game->OnBindPatchedShader(
+            if (cached_pipeline->clone_origin == Shader::CloneOrigin::Patch)
+            {
+               game_patch_default = game->OnBindPatchedShader(
                   *cmd_list->get_device()->get_private_data<DeviceData>(),
-                  cached_pipeline_shader_hash,
+                  (uint32_t)cached_pipeline_shader_hash,
                   (stages & reshade::api::pipeline_stage::compute_shader) != 0
                      ? reshade::api::pipeline_subobject_type::compute_shader
                      : (stages & reshade::api::pipeline_stage::vertex_shader) != 0
                         ? reshade::api::pipeline_subobject_type::vertex_shader
                         : reshade::api::pipeline_subobject_type::pixel_shader);
-#else
-            const bool game_patch_default = true;
+            }
 #endif
 
-            std::shared_lock lock(s_mutex_generic);
-
-            // Bind-time default: clone when cloned && custom_shaders_enabled &&
-            // (patch clones also need the game's per-shader decision; per-draw
-            // UseShaderVariant overrides). Readback path (game/mod bound the
-            // clone itself) keeps the bound object as-is.
-            const bool game_bound_clone = cached_pipeline->cloned && cached_pipeline->pipeline_clone.handle == pipeline.handle;
-            const bool swap_to_clone = !game_bound_clone && cached_pipeline->cloned && custom_shaders_enabled
-               && (cached_pipeline->clone_origin != Shader::CloneOrigin::Patch || allow_patches)
-               && (cached_pipeline->clone_origin != Shader::CloneOrigin::Patch || game_patch_default);
-
-            if (swap_to_clone)
+            // TODO: have a high performance mode that swaps the original shader binary with the custom one on creation, so we don't have to analyze shader binding calls (probably wouldn't really speed up performance anyway).
+            // This would also help save some memory in x86 games where we keep all shaders binaries in memory ("custom_shaders_cache::code").
+            reshade::api::pipeline pipeline_to_bind = {};
             {
-               cmd_list->bind_pipeline(stages, cached_pipeline->pipeline_clone);
+               std::shared_lock lock(s_mutex_generic);
+               // Bind-time default: clone when cloned && custom_shaders_enabled &&
+               // (patch clones also need the game's per-shader decision; per-draw
+               // UseShaderVariant overrides). Readback path (game/mod bound the
+               // clone itself) keeps the bound object as-is.
+               const bool game_bound_clone = cached_pipeline->cloned && cached_pipeline->pipeline_clone.handle == pipeline.handle;
+               const bool swap_to_clone = !game_bound_clone && cached_pipeline->cloned && custom_shaders_enabled
+                  && (cached_pipeline->clone_origin != Shader::CloneOrigin::Patch || allow_patches)
+                  && (cached_pipeline->clone_origin != Shader::CloneOrigin::Patch || game_patch_default);
+               if (swap_to_clone)
+               {
+                  pipeline_to_bind = cached_pipeline->pipeline_clone;
+               }
+            }
+            // Device calls must not happen while holding a mutex. Pipeline destruction only happens when the original pipeline is destroyed (garbage collected), which is guaranteed to not happen here, as its being bound right now (which keeps it alive).
+            if (pipeline_to_bind.handle != 0)
+            {
+               cmd_list->bind_pipeline(stages, pipeline_to_bind);
             }
          }
       }
@@ -5115,12 +5202,13 @@ namespace
    // View handle -> resource handle from our caches (no device call under the luma lock).
    // Returns 0 for views we don't know about (e.g. created before the addon loaded): callers must
    // fall back to get_resource_from_view outside the lock.
-   uint64_t GetCachedResourceFromView(const DeviceData& device_data, uint64_t view_handle)
+   uint64_t GetCachedResourceFromView(const DeviceData& device_data, uint64_t view_handle, bool original = true, bool mirrored = false, bool live_fallback = false, std::shared_lock<std::shared_mutex>* lock_device_read = nullptr, reshade::api::device* device = nullptr)
    {
-      return device_data.resource_upgrades.GetCachedResourceFromView(view_handle);
+      return device_data.resource_upgrades.GetCachedResourceFromView(view_handle, original, mirrored, live_fallback, lock_device_read, device);
    }
 
-   bool FindOrCreateIndirectUpgradedResource(reshade::api::device* device, const uint64_t in_source_resource, const uint64_t in_resource, uint64_t& out_resource, DeviceData& device_data, bool allow_create, reshade::api::resource_usage initial_state, std::shared_lock<std::shared_mutex>& lock_device_read, bool allow_scale = false, bool force_scale = false, bool leave_locked = true)
+   // "in_source_resource" is optional and allows overriding the desc to base the new resource on.
+   bool FindOrCreateIndirectUpgradedResource(reshade::api::device* device, const uint64_t in_source_resource, const uint64_t in_resource, uint64_t& out_resource, DeviceData& device_data, bool allow_create, reshade::api::resource_usage initial_state, std::shared_lock<std::shared_mutex>& lock_device_read, bool allow_scale = false, bool force_scale = false, bool leave_locked = true, reshade::api::resource_usage additional_bind_flags = reshade::api::resource_usage(0), bool* scaled = nullptr)
    {
       // Swapchain backbuffers are excluded by the caller (checked here before invoking the manager, since
       // the manager is decoupled from DeviceData's backbuffer bookkeeping).
@@ -5145,6 +5233,7 @@ namespace
       ResourceUpgradeFrameState state;
       state.render_resolution = device_data.render_resolution;
       state.output_resolution = device_data.output_resolution;
+      state.display_resolution = device_data.display_resolution;
       state.has_drawn_sr = device_data.has_drawn_sr;
 #if ENABLE_SR
       state.sr_active = device_data.sr_type != SR::Type::None && !device_data.sr_suppressed;
@@ -5155,7 +5244,7 @@ namespace
       return device_data.resource_upgrades.FindOrCreateIndirectUpgradedResource(
          device, in_source_resource, in_resource, out_resource,
          allow_create && !is_back_buffer, initial_state, lock_device_read, state,
-         should_scale, leave_locked);
+         should_scale, leave_locked, additional_bind_flags, scaled);
    }
 
    bool FindOrCreateIndirectUpgradedResourceView(reshade::api::device* device, const uint64_t in_rv, uint64_t& out_rv, DeviceData& device_data, bool allow_create, reshade::api::resource_usage usage, std::shared_lock<std::shared_mutex>& lock_device_read)
@@ -5168,24 +5257,89 @@ namespace
    {
       SKIP_UNSUPPORTED_DEVICE_API(cmd_list->get_device()->get_api());
 
-      std::vector<reshade::api::resource_view> replaced_rtvs(rtvs, rtvs + count);
+      std::vector<reshade::api::resource_view> replaced_rtvs;
       bool any_replaced = false;
+
+      CommandListData& cmd_list_data = *cmd_list->get_private_data<CommandListData>();
 
       {
          DeviceData& device_data = *cmd_list->get_device()->get_private_data<DeviceData>();
          std::shared_lock lock_device_read(device_data.mutex);
 
+         cmd_list_data.any_upgraded_ps_rtvs = false;
          for (uint32_t i = 0; i < count; i++)
          {
-            any_replaced |= FindOrCreateIndirectUpgradedResourceView(cmd_list->get_device(), rtvs[i].handle, replaced_rtvs[i].handle, device_data, enable_chain_indirect_texture_format_upgrades >= ChainTextureFormatUpgradesType::DirectDependencies, reshade::api::resource_usage::render_target, lock_device_read);
+            uint64_t replaced_rtv = rtvs[i].handle;
+            // TODO: here we don't check for direct upgrades as we do for the other states... Is it right?
+            if (FindOrCreateIndirectUpgradedResourceView(cmd_list->get_device(), rtvs[i].handle, replaced_rtv, device_data, enable_chain_indirect_texture_format_upgrades >= ChainTextureFormatUpgradesType::DirectDependencies, reshade::api::resource_usage::render_target, lock_device_read))
+            {
+               if (!cmd_list_data.any_upgraded_ps_rtvs)
+               {
+                  // Lazy allocation for performance
+                  replaced_rtvs = std::vector<reshade::api::resource_view>(rtvs, rtvs + count);
+
+                  cmd_list_data.any_upgraded_ps_rtvs = true;
+                  any_replaced = true;
+               }
+
+               replaced_rtvs[i] = {replaced_rtv};
+
+               cmd_list_data.ps_rtvs_state[i] = CommandListData::ViewState::SetAndUpgraded;
+            }
+            else
+            {
+               cmd_list_data.ps_rtvs_state[i] = rtvs[i].handle ? CommandListData::ViewState::Set : CommandListData::ViewState::NotSet;
+            }
          }
-         any_replaced |= FindOrCreateIndirectUpgradedResourceView(cmd_list->get_device(), dsv.handle, dsv.handle, device_data, enable_chain_indirect_texture_format_upgrades >= ChainTextureFormatUpgradesType::DirectDependencies, reshade::api::resource_usage::depth_stencil, lock_device_read); // Usually not needed but won't hurt
+         // Clear the rest
+         for (uint32_t i = count; i < D3D11_SIMULTANEOUS_RENDER_TARGET_COUNT; i++)
+         {
+            cmd_list_data.ps_rtvs_state[i] = CommandListData::ViewState::NotSet;
+         }
+
+         // Usually not needed (yet?) but won't hurt
+         if (FindOrCreateIndirectUpgradedResourceView(cmd_list->get_device(), dsv.handle, dsv.handle, device_data, enable_chain_indirect_texture_format_upgrades >= ChainTextureFormatUpgradesType::DirectDependencies, reshade::api::resource_usage::depth_stencil, lock_device_read))
+         {
+            cmd_list_data.ps_dsvs_state[0] = CommandListData::ViewState::SetAndUpgraded;
+            cmd_list_data.any_upgraded_ps_dsvs = true;
+            any_replaced = true;
+         }
+         else
+         {
+            cmd_list_data.ps_dsvs_state[0] = dsv.handle ? CommandListData::ViewState::Set : CommandListData::ViewState::NotSet;
+            cmd_list_data.any_upgraded_ps_dsvs = false;
+         }
       }
 
       if (any_replaced)
       {
-         cmd_list->bind_render_targets_and_depth_stencil(replaced_rtvs.size(), replaced_rtvs.data(), dsv);
+         if (cmd_list_data.any_upgraded_ps_rtvs)
+         {
+            cmd_list->bind_render_targets_and_depth_stencil(replaced_rtvs.size(), replaced_rtvs.data(), dsv);
+         }
+         else
+         {
+            cmd_list->bind_render_targets_and_depth_stencil(count, rtvs, dsv);
+         }
       }
+   }
+
+   // The game (re)bound its own viewports or scissors, so whatever we had scaled is gone, and they'll need to be scaled again (in case the bound targets are scaled).
+   // Note that our own calls on the native device context don't trigger these events, so scaling them during draw calls won't clear these flags.
+   void OnBindViewports(reshade::api::command_list* cmd_list, uint32_t first, uint32_t count, const reshade::api::viewport* viewports)
+   {
+      SKIP_UNSUPPORTED_DEVICE_API(cmd_list->get_device()->get_api());
+
+      CommandListData& cmd_list_data = *cmd_list->get_private_data<CommandListData>();
+      cmd_list_data.viewports_scaled = false;
+   }
+
+   void OnBindScissorRects(reshade::api::command_list* cmd_list, uint32_t first, uint32_t count, const reshade::api::rect* rects)
+   {
+      SKIP_UNSUPPORTED_DEVICE_API(cmd_list->get_device()->get_api());
+
+      CommandListData& cmd_list_data = *cmd_list->get_private_data<CommandListData>();
+      cmd_list_data.scissors_scaled = false;
    }
 
    enum class LumaConstantBufferType
@@ -5311,6 +5465,7 @@ namespace
          cb_luma_instance_data.CustomData3 = custom_data_3;
          cb_luma_instance_data.CustomData4 = custom_data_4;
 
+         // TODO: likely move to LumaSettings cb
          cb_luma_instance_data.RenderResolutionScale.x = device_data.render_resolution.x / device_data.output_resolution.x;
          cb_luma_instance_data.RenderResolutionScale.y = device_data.render_resolution.y / device_data.output_resolution.y;
          // Always do this relative to the current output resolution
@@ -5455,7 +5610,18 @@ namespace
       cmd_list_data.pipeline_state_has_custom_graphics_shader = false;
       cmd_list_data.pipeline_state_has_custom_compute_shader = false;
 
+      cmd_list_data.draw_callback = nullptr;
+      cmd_list_data.dispatch_callback = nullptr;
+
+      cmd_list_data.is_known_ui_shader_bound = false;
+
+      cmd_list_data.auto_graphics_texture_format_upgrades = nullptr;
+      cmd_list_data.auto_compute_texture_format_upgrades = nullptr;
+
       cmd_list_data.ResetUpgradedViews();
+      // In DX11, ReShade only resets command lists on "FinishCommandList()", which clears the deferred context state, so there's no scaled viewports/scissors bound anymore
+      cmd_list_data.viewports_scaled = false;
+      cmd_list_data.scissors_scaled = false;
 #if ENABLE_AUTO_CBUFFER_RESTORATION
       cmd_list_data.ClearOriginalConstantBuffers();
 #endif
@@ -6091,7 +6257,9 @@ namespace
       device_data.has_drawn_sr_imgui = device_data.has_drawn_sr;
 #endif // ENABLE_SR
 
-      // Free mirrors queued this frame: all command lists have executed by now.
+      // Free mirrors queued this frame: all command lists have executed by now (usually).
+      // Without this (and with inline ReShade side destructions instead), the code might crash,
+      // but the issue is likely on our side, because we keep handles as int, so they might be stale pointers after destruction in case we missed some around.
       {
          std::vector<reshade::api::resource_view> pending_views;
          std::vector<reshade::api::resource> pending_resources;
@@ -6158,7 +6326,8 @@ namespace
    // Return false to prevent the original draw call from running (e.g. if you replaced it or just want to skip it)
    // Most games (e.g. Prey, Dishonored 2) always draw in direct mode (as opposed to indirect), but uses different command lists on different threads (e.g. on Prey, that's almost only used for the shadow projection maps, in Dishonored 2, for almost every separate pass).
    // Usually there's a few compute shaders but most passes are "classic" pixel shaders.
-   bool OnDrawOrDispatch_Custom(reshade::api::command_list* cmd_list, bool is_dispatch /*= false*/, bool& updated_cbuffers, std::function<void()>* original_draw_dispatch_func = nullptr)
+   template <bool is_dispatch>
+   bool OnDrawOrDispatch_Custom(reshade::api::command_list* cmd_list, bool& updated_cbuffers, std::function<void()>* original_draw_dispatch_func = nullptr)
    {
       auto* device = cmd_list->get_device();
       ID3D11Device* native_device = (ID3D11Device*)(device->get_native());
@@ -6260,20 +6429,18 @@ namespace
 
       if (is_dispatch)
       {
-         last_drawn_shader = cmd_list_data.pipeline_state_original_compute_shader_hashes.HasAny(reshade::api::shader_stage::compute) ? Shader::Hash_NumToStr(*cmd_list_data.pipeline_state_original_compute_shader_hashes.compute_shaders.begin()) : ""; // String hash to int
+         last_drawn_shader = cmd_list_data.pipeline_state_original_compute_shader_hashes.compute_shaders[0];
          cmd_list_data.any_dispatch_done = true;
       }
       else
       {
-         last_drawn_shader = cmd_list_data.pipeline_state_original_graphics_shader_hashes.HasAny(reshade::api::shader_stage::pixel) ? Shader::Hash_NumToStr(*cmd_list_data.pipeline_state_original_graphics_shader_hashes.pixel_shaders.begin()) : ""; // String hash to int
+         last_drawn_shader = cmd_list_data.pipeline_state_original_graphics_shader_hashes.pixel_shaders[0];
          cmd_list_data.any_draw_done = true;
       }
       thread_local_cmd_list = cmd_list;
 
-#if DEVELOPMENT
       // Frame capture: entries for this draw start here (stamped post-decision below).
       const size_t trace_start_index = cmd_list_data.trace_draw_calls_data.size();
-#endif
 
       {
          // Do this before any custom code runs as the state might change
@@ -6303,17 +6470,16 @@ namespace
 
       const bool mod_active = IsModActive(device_data);
 
-      if (enable_ui_separation && mod_active)
+      if (!is_dispatch && enable_ui_separation && mod_active)
       {
          ID3D11RenderTargetView* const ui_texture_rtv_const = device_data.ui_texture_rtv.get();
-         const bool is_known_ui_shader = original_shader_hashes.Contains(shader_hashes_UI);
          // We can either provide an include list, of all the UI shaders (we check if the render target matches below),
          // or an exclude list, of all the scene post processing shaders, and then manually setting "has_drawn_main_post_processing" somewhere in your game's code (and exclude any non UI shader that possibly runs after it).
          // If the main post processing shaders didn't run, it means the scene isn't rendering, or showing anyway, so we don't need to separate the UI,
          // as it'd likely already draw correctly on the swapchain or whatever is its render target.
          // 
          // We expect the UI to draw on the immediate context, as it does in most games, if not, handle the render targets yourself for the custom case.
-         if (is_known_ui_shader || (!ui_separation_use_ui_hashes_only && device_data.has_drawn_main_post_processing && native_device_context->GetType() == D3D11_DEVICE_CONTEXT_IMMEDIATE))
+         if (cmd_list_data.is_known_ui_shader_bound || (!ui_separation_use_ui_hashes_only && device_data.has_drawn_main_post_processing && cmd_list_data.is_primary))
          {
             com_ptr<ID3D11RenderTargetView> rtv;
             native_device_context->OMGetRenderTargets(1, &rtv, nullptr);
@@ -6332,7 +6498,7 @@ namespace
                   const std::shared_lock lock(device_data.mutex);
                   targeting_swapchain = device_data.back_buffers.contains((uint64_t)rtv.get());
                }
-               if ((ui_separation_use_ui_hashes_only && is_known_ui_shader) || targeting_swapchain || (AreViewsOfSameResource(rtv.get(), device_data.ui_initial_original_rtv.get()) && rtv_desc.Texture2D.MipSlice == 0)) // Make sure it was writing to the base mip (just in case the game did weird stuff)
+               if ((ui_separation_use_ui_hashes_only && cmd_list_data.is_known_ui_shader_bound) || targeting_swapchain || (AreViewsOfSameResource(rtv.get(), device_data.ui_initial_original_rtv.get()) && rtv_desc.Texture2D.MipSlice == 0)) // Make sure it was writing to the base mip (just in case the game did weird stuff)
                {
                   device_data.ui_latest_original_rtv = rtv;
 
@@ -6388,6 +6554,10 @@ namespace
             }
          }
       }
+      else if (!is_dispatch && hide_ui && cmd_list_data.is_known_ui_shader_bound)
+      {
+         return true; // Skip draw call
+      }
 
       const bool had_drawn_main_post_processing = device_data.has_drawn_main_post_processing;
 
@@ -6407,25 +6577,45 @@ namespace
          }
       }
 
+      // Whether we might need a graphcis viewport of a dispatch size resize (scaling)
+      const bool needs_viewport_dispatch_resize = !texture_custom_dimensions_upgrades.empty();
+
       DrawOrDispatchOverrideType draw_or_dispatch_override_type = DrawOrDispatchOverrideType::None;
-      if (!original_shader_hashes.Empty() || force_indirect_texture_format_upgrades)
+      // Skip if there's no shaders bound (not particularly useful, but might help with edge cases)
+      if (!original_shader_hashes.Empty() || force_indirect_texture_format_upgrades || needs_viewport_dispatch_resize)
       {
          if (texture_format_upgrades_type == TextureFormatUpgradesType::AllowedEnabled) // Creation here still needs to go through independently of "ignore_indirect_upgraded_textures"
          {
             // Do textures indirect upgrade "inline".
             // If this was previously upgraded, they'd already have the target format and hence wouldn't get upgraded.
             // "force_indirect_texture_format_upgrades" takes priority over "auto_texture_format_upgrade_shader_hashes".
-            const auto auto_texture_format_upgrade_shader_hashes_it = auto_texture_format_upgrade_shader_hashes.find(is_dispatch ? original_shader_hashes.compute_shaders[0] : original_shader_hashes.pixel_shaders[0]); // This data is meant to be immutable
-            const bool hash_based_indirect_texture_format_upgrades = auto_texture_format_upgrade_shader_hashes_it != auto_texture_format_upgrade_shader_hashes.end();
-            // Scaling is gated by the seed's per-shader toggle; the chain inherits it via source size (best-effort).
-            // "force_scale" only bypasses the has_drawn_sr gate for command lists recorded before SR ran (deferred contexts).
-            const bool allow_scale = hash_based_indirect_texture_format_upgrades && auto_texture_format_upgrade_shader_hashes_it->second.scale;
-            const bool force_scale = cmd_list_data.force_scale;
-            while (force_indirect_texture_format_upgrades || hash_based_indirect_texture_format_upgrades) // Do "while" so we can break out of it
+            const AutoTextureFormatUpgradeShaderHash* auto_texture_format_upgrades = is_dispatch ? cmd_list_data.auto_compute_texture_format_upgrades : cmd_list_data.auto_graphics_texture_format_upgrades;
+            const bool hash_based_indirect_texture_format_upgrades = auto_texture_format_upgrades != nullptr;
+
+            bool inline_texture_upgrades = force_indirect_texture_format_upgrades || hash_based_indirect_texture_format_upgrades;
+
+            while (inline_texture_upgrades || needs_viewport_dispatch_resize) // Do "while" so we can break out of it
             {
+               // Skip the whole thing if there's no upgraded target/output views bound, we don't need it
+               if (!inline_texture_upgrades)
+               {
+                  if (!is_dispatch)
+                  {
+                     if (!cmd_list_data.any_upgraded_ps_rtvs && !cmd_list_data.any_upgraded_ps_dsvs && !cmd_list_data.any_upgraded_ps_uavs)
+                        break;
+                  }
+                  else
+                  {
+                     if (!cmd_list_data.any_upgraded_cs_uavs)
+                        break;
+                  }
+
+               }
+
                // List of dummy RTV and UAV indexes to upgrade. We set all of them, as this is for the forced upgrades branch.
                // See "D3D11_SIMULTANEOUS_RENDER_TARGET_COUNT" and "D3D11_PS_CS_UAV_REGISTER_COUNT" (theoretically we should use "D3D11_1_UAV_SLOT_COUNT" but in reality that's never going to matter).
-               const AutoTextureFormatUpgradeShaderHash dummy_texture_format_upgrade_shader_hashes_data = { {0,1,2,3,4,5,6,7}, {0,1,2,3,4,5,6,7}, false };
+               static const AutoTextureFormatUpgradeShaderHash dummy_texture_format_upgrade_shader_hashes_data = { {0,1,2,3,4,5,6,7}, {0,1,2,3,4,5,6,7}, false };
+               const AutoTextureFormatUpgradeShaderHash dummy_empty_texture_format_upgrade_shader_hashes_data = { {}, {}, false };
 
                uint64_t source_resource = 0;
                if (force_indirect_texture_format_upgrades && !hash_based_indirect_texture_format_upgrades && (is_dispatch ? cmd_list_data.any_upgraded_cs_srvs : cmd_list_data.any_upgraded_ps_srvs))
@@ -6488,35 +6678,46 @@ namespace
                if (force_indirect_texture_format_upgrades && source_resource == 0) // If we didn't find the resource we had supposedly upgraded, we can't do chain auto upgrades.
                {
                   force_indirect_texture_format_upgrades = false;
-                  if (!hash_based_indirect_texture_format_upgrades)
+                  inline_texture_upgrades = hash_based_indirect_texture_format_upgrades;
+                  if (!hash_based_indirect_texture_format_upgrades && !needs_viewport_dispatch_resize)
                      break;
                }
 
                // TODO: for the "force_indirect_texture_format_upgrades" case, ideally we'd make sure the texture is actually ever read by the shader! Otherwise we could risk upgrading based on leftover (non cleared) bindings.
-               const AutoTextureFormatUpgradeShaderHash& auto_texture_format_upgrade_shader_hashes_data = force_indirect_texture_format_upgrades ? dummy_texture_format_upgrade_shader_hashes_data : auto_texture_format_upgrade_shader_hashes_it->second;
+               const AutoTextureFormatUpgradeShaderHash& auto_texture_format_upgrade_shader_hashes_data = force_indirect_texture_format_upgrades ? dummy_texture_format_upgrade_shader_hashes_data : (hash_based_indirect_texture_format_upgrades ? *auto_texture_format_upgrades : dummy_empty_texture_format_upgrade_shader_hashes_data);
+
+               // Scaling is gated by the seed's per-shader toggle; the chain inherits it via source size (best-effort).
+               // "force_scale" only bypasses the has_drawn_sr gate for command lists recorded before SR ran (deferred contexts).
+               // TODO: why not do it with "force_indirect_texture_format_upgrades" too? Is it too generic?
+               const bool allow_scale = hash_based_indirect_texture_format_upgrades && auto_texture_format_upgrades->scale; // "auto_texture_format_upgrades" is null on the forced (chain) path
+               const bool force_scale = cmd_list_data.force_scale;
 
                bool any_changed = false;
+               bool any_changed_inline = false;
                std::shared_lock lock_device_read(device_data.mutex);
                if (!is_dispatch)
                {
                   for (UINT i = 0; i < auto_texture_format_upgrade_shader_hashes_data.rtv_slots.size() && i < D3D11_SIMULTANEOUS_RENDER_TARGET_COUNT; i++)
                   {
-                     if (rtvs[auto_texture_format_upgrade_shader_hashes_data.rtv_slots[i]] != nullptr)
+                     const uint8_t slot = auto_texture_format_upgrade_shader_hashes_data.rtv_slots[i];
+                     if (rtvs[slot] != nullptr)
                      {
-                        const uint64_t prev_resource_view = reinterpret_cast<uint64_t>(rtvs[auto_texture_format_upgrade_shader_hashes_data.rtv_slots[i]].get());
+                        const uint64_t prev_resource_view = reinterpret_cast<uint64_t>(rtvs[slot].get());
                         // Already redirected to a mirror? Nothing to upgrade, keep the bound mirror.
+#if 1 // Faster // TODO: delete the branch here and in the UAV code below once verified
+                        if (cmd_list_data.ps_rtvs_state[slot] >= CommandListData::ViewState::SetAndUpgraded)
+                        {
+                           any_changed = true;
+                           continue;
+                        }
+#else
                         if (device_data.resource_upgrades.mirror_views_to_mirror_resources.contains(prev_resource_view))
                         {
                            any_changed = true;
                            continue;
                         }
-                        uint64_t prev_resource = GetCachedResourceFromView(device_data, prev_resource_view); // No device call under the lock
-                        if (prev_resource == 0) // Unknown view (e.g. created before the addon loaded): query the device outside the lock
-                        {
-                           lock_device_read.unlock(); // Avoids deadlocks with the device
-                           prev_resource = device->get_resource_from_view({ prev_resource_view }).handle;
-                           lock_device_read.lock();
-                        }
+#endif
+                        uint64_t prev_resource = GetCachedResourceFromView(device_data, prev_resource_view, true, false, true, &lock_device_read, device);
                         uint64_t resource = prev_resource;
                         // TODO: add aspect ratio tolerance for the "force_indirect_texture_format_upgrades" case? Also check if the format and channels number make sense to be upgraded from that source
 #if DEVELOPMENT
@@ -6528,7 +6729,7 @@ namespace
                            uint64_t resource_view = prev_resource_view;
                            if (FindOrCreateIndirectUpgradedResourceView(device, prev_resource_view, resource_view, device_data, true, reshade::api::resource_usage::render_target, lock_device_read))
                            {
-                              rtvs[auto_texture_format_upgrade_shader_hashes_data.rtv_slots[i]] = reinterpret_cast<ID3D11RenderTargetView*>(resource_view);
+                              rtvs[slot] = reinterpret_cast<ID3D11RenderTargetView*>(resource_view);
                               any_changed = true;
 #if DEVELOPMENT
                               if (trace_running)
@@ -6557,6 +6758,9 @@ namespace
                                  }
                               }
 #endif
+                              any_changed_inline = true;
+                              cmd_list_data.ps_rtvs_state[slot] = CommandListData::ViewState::SetAndUpgraded;
+                              cmd_list_data.any_upgraded_ps_rtvs = true;
                               // Note: we don't need to upgrade "cmd_list_data.ps_srvs_state" here, because if a resource is bound as RTV, it can't be bound as SRV (at least in DX10/11).
                               // However, it could still be bound as SRV on the compute stage (can it? actually probably not in DX10/11),
                               // so theoretically we should upgrade "cmd_list_data.cs_srvs_state", but the chances of that are pretty low, for now we ignore it.
@@ -6564,45 +6768,60 @@ namespace
                         }
                      }
                   }
+                  if (!inline_texture_upgrades)
+                  {
+                     any_changed |= cmd_list_data.any_upgraded_ps_rtvs;
+                  }
+
+                  // "AutoTextureFormatUpgradeShaderHash" doesn't directly support specifying depth upgrades for now, but it might have already been indirect upgraded before
+                  any_changed |= cmd_list_data.any_upgraded_ps_dsvs;
                }
                for (UINT i = 0; i < auto_texture_format_upgrade_shader_hashes_data.uav_slots.size() && i < device_data.uav_max_count; i++)
                {
-                  if (uavs[auto_texture_format_upgrade_shader_hashes_data.uav_slots[i]] != nullptr)
+                  const uint8_t slot = auto_texture_format_upgrade_shader_hashes_data.uav_slots[i];
+                  if (uavs[slot] != nullptr)
                   {
-                     const uint64_t prev_resource_view = reinterpret_cast<uint64_t>(uavs[auto_texture_format_upgrade_shader_hashes_data.uav_slots[i]].get());
+                     const uint64_t prev_resource_view = reinterpret_cast<uint64_t>(uavs[slot].get());
                      // Already redirected to a mirror? Nothing to upgrade, keep the bound mirror.
+#if 1 // Faster
+                     if ((is_dispatch ? cmd_list_data.cs_uavs_state[slot] : cmd_list_data.ps_uavs_state[slot]) >= CommandListData::ViewState::SetAndUpgraded)
+                     {
+                        any_changed = true;
+                        continue;
+                     }
+#else
                      if (device_data.resource_upgrades.mirror_views_to_mirror_resources.contains(prev_resource_view))
                      {
                         any_changed = true;
                         continue;
                      }
-                     uint64_t prev_resource = GetCachedResourceFromView(device_data, prev_resource_view); // No device call under the lock
-                     if (prev_resource == 0) // Unknown view (e.g. created before the addon loaded): query the device outside the lock
-                     {
-                        lock_device_read.unlock(); // Avoids deadlocks with the device
-                        prev_resource = device->get_resource_from_view({ prev_resource_view }).handle;
-                        lock_device_read.lock();
-                     }
+#endif
+                     uint64_t prev_resource = GetCachedResourceFromView(device_data, prev_resource_view, true, false, true, &lock_device_read, device);
                      uint64_t resource = prev_resource;
                      if (FindOrCreateIndirectUpgradedResource(device, source_resource, prev_resource, resource, device_data, true, reshade::api::resource_usage::unordered_access, lock_device_read, allow_scale, force_scale) && resource != prev_resource)
                      {
                         uint64_t resource_view = prev_resource_view;
                         if (FindOrCreateIndirectUpgradedResourceView(device, prev_resource_view, resource_view, device_data, true, reshade::api::resource_usage::unordered_access, lock_device_read))
                         {
-                           uavs[auto_texture_format_upgrade_shader_hashes_data.uav_slots[i]] = reinterpret_cast<ID3D11UnorderedAccessView*>(resource_view);
+                           uavs[slot] = reinterpret_cast<ID3D11UnorderedAccessView*>(resource_view);
                            any_changed = true;
+                           any_changed_inline = true;
                            if (is_dispatch)
                            {
-                              cmd_list_data.cs_uavs_state[auto_texture_format_upgrade_shader_hashes_data.uav_slots[i]] = CommandListData::ViewState::SetAndUpgraded;
+                              cmd_list_data.cs_uavs_state[slot] = CommandListData::ViewState::SetAndUpgraded;
                               cmd_list_data.any_upgraded_cs_uavs = true;
                            }
                            else
                            {
-                              cmd_list_data.ps_uavs_state[auto_texture_format_upgrade_shader_hashes_data.uav_slots[i]] = CommandListData::ViewState::SetAndUpgraded;
+                              cmd_list_data.ps_uavs_state[slot] = CommandListData::ViewState::SetAndUpgraded;
                               cmd_list_data.any_upgraded_ps_uavs = true;
                            }
                         }
                      }
+                  }
+                  if (!inline_texture_upgrades)
+                  {
+                     any_changed |= is_dispatch ? cmd_list_data.any_upgraded_cs_uavs : cmd_list_data.any_upgraded_ps_uavs;
                   }
                }
                lock_device_read.unlock();
@@ -6615,7 +6834,7 @@ namespace
                      // If we upgrade the target textures from the source texture, make sure blending is disabled and that the viewport is fullscreen,
                      // otherwise we might not be writing to the whole screen, and we'd miss the starting color of the background (unless we copied it),
                      // so it'd make it weird/unnecessary/wrong to upgrade the target.
-                     if (!hash_based_indirect_texture_format_upgrades)
+                     if (inline_texture_upgrades)
                      {
                         com_ptr<ID3D11BlendState> blend_state;
                         native_device_context->OMGetBlendState(&blend_state, nullptr, nullptr);
@@ -6629,13 +6848,17 @@ namespace
                            }
                         }
 
-                        D3D11_VIEWPORT viewport;
-                        uint32_t num_viewports = 1;
-                        native_device_context->RSGetViewports(&num_viewports, &viewport);
-                        uint4 rt_size;
-                        DXGI_FORMAT rt_format;
-                        GetResourceInfo(rtvs[0].get(), rt_size, rt_format);
-                        ASSERT_ONCE((uint)viewport.Width == rt_size.x && (uint)viewport.Height == rt_size.y);
+                        // Don't check if we know we'll do a viewport resize below already!
+                        if (rtvs[0] && !needs_viewport_dispatch_resize && !auto_texture_format_upgrade_shader_hashes_data.scale)
+                        {
+                           D3D11_VIEWPORT viewport;
+                           uint32_t num_viewports = 1;
+                           native_device_context->RSGetViewports(&num_viewports, &viewport);
+                           uint4 rt_size;
+                           DXGI_FORMAT rt_format;
+                           GetResourceInfo(rtvs[0].get(), rt_size, rt_format);
+                           ASSERT_ONCE((uint)viewport.Width == rt_size.x && (uint)viewport.Height == rt_size.y);
+                        }
                      }
 #endif
 
@@ -6649,56 +6872,142 @@ namespace
                         }
                      }
 
-                     ID3D11RenderTargetView* const* rtvs_const = (ID3D11RenderTargetView**)std::addressof(rtvs[0]);
-                     native_device_context->OMSetRenderTargetsAndUnorderedAccessViews(valid_render_target_views_bound, rtvs_const, dsv.get(), valid_render_target_views_bound, device_data.uav_max_count - valid_render_target_views_bound, uavs_const + valid_render_target_views_bound, nullptr);
+                     // Not needed otherwise, we wouldn't have inline upgraded any texture to be replaced
+                     if (any_changed_inline)
+                     {
+                        ID3D11RenderTargetView* const* rtvs_const = (ID3D11RenderTargetView**)std::addressof(rtvs[0]);
+                        native_device_context->OMSetRenderTargetsAndUnorderedAccessViews(valid_render_target_views_bound, rtvs_const, dsv.get(), valid_render_target_views_bound, device_data.uav_max_count - valid_render_target_views_bound, uavs_const + valid_render_target_views_bound, nullptr);
+                     }
 
                      // When the replaced RTV is a scaled mirror (output resolution), scale the viewport
                      // and scissors to match so the pass renders into the full (larger) target.
                      {
                         bool any_scaled = false;
-                        for (UINT i = 0; i < valid_render_target_views_bound && !any_scaled; i++)
+                        bool all_scaled = true;
+                        uint2 original_size;
+                        uint2 scaled_size;
+                        lock_device_read.lock(); // Re-use the lock from above (it was unlocked before)
+                        for (UINT i = 0; i < valid_render_target_views_bound; i++)
                         {
                            if (rtvs[i] != nullptr)
                            {
-                              const std::shared_lock lock_device_read(device_data.mutex);
-                              if (auto mirror_it = device_data.resource_upgrades.original_resources_to_mirrored_upgraded_resources.find(GetCachedResourceFromView(device_data, reinterpret_cast<uint64_t>(rtvs[i].get()))); mirror_it != device_data.resource_upgrades.original_resources_to_mirrored_upgraded_resources.end())
-                                 any_scaled = mirror_it->second.is_scaled; // Only scaled mirrors (created at output resolution), not plain format-upgrade mirrors
+                              const uint64_t rtv_resource = GetCachedResourceFromView(device_data, reinterpret_cast<uint64_t>(rtvs[i].get()), false, true);
+                              // TODO: make a "upgraded view to IndirectUpgradedResource*" map to speed this up
+                              // We need to do two lookups to pass from an upgraded view to the original resource (back to the upgraded resource struct)
+                              if (auto mirror_it = std::ranges::find_if(device_data.resource_upgrades.original_resources_to_mirrored_upgraded_resources, [rtv_resource](const auto& pair) { return pair.second.mirror_handle == rtv_resource; }); mirror_it != device_data.resource_upgrades.original_resources_to_mirrored_upgraded_resources.end())
+                              {
+                                 any_scaled |= mirror_it->second.is_scaled; // Only scaled mirrors (created at output resolution), not plain format-upgrade mirrors
+                                 all_scaled &= mirror_it->second.is_scaled;
+                                 original_size = uint2(mirror_it->second.original_width, mirror_it->second.original_height);
+                                 scaled_size = uint2(mirror_it->second.mirror_width, mirror_it->second.mirror_height);
+#if !DEVELOPMENT // Can't break in dev as we need to check "all_scaled". This could cause "scaled_size" to end up with a different value, but all RTs should be scaled equally for this to work.
+                                 break;
+#endif
+                              }
+                              else
+                              {
+                                 all_scaled = false;
+                              }
                            }
                         }
+                        if (dsv.get())
+                        {
+                           const uint64_t dsv_resource = GetCachedResourceFromView(device_data, reinterpret_cast<uint64_t>(dsv.get()), false, true);
+                           if (auto mirror_it = std::ranges::find_if(device_data.resource_upgrades.original_resources_to_mirrored_upgraded_resources, [dsv_resource](const auto& pair) { return pair.second.mirror_handle == dsv_resource; }); mirror_it != device_data.resource_upgrades.original_resources_to_mirrored_upgraded_resources.end())
+                           {
+                              any_scaled |= mirror_it->second.is_scaled;
+                              all_scaled &= mirror_it->second.is_scaled;
+                              original_size = uint2(mirror_it->second.original_width, mirror_it->second.original_height);
+                              scaled_size = uint2(mirror_it->second.mirror_width, mirror_it->second.mirror_height);
+                           }
+                           else
+                           {
+                              all_scaled = false;
+                           }
+                        }
+                        lock_device_read.unlock();
+
+                        // TODO: scale dispatch size too in compute shaders (re-calculated from the reflected shader thread size)! Also, skip this if the new texture is smaller? A wider viewport is ok, it won't draw outside of the texture (unless there's UAV/ROV in the pixel shader?).
                         if (any_scaled)
                         {
-                           const float scale_x = device_data.output_resolution.x / device_data.render_resolution.x;
-                           const float scale_y = device_data.output_resolution.y / device_data.render_resolution.y;
+                           // If we scaled any RTV size, we also need to scale all the others and the depth/stencil size
+                           // (DX11/10 exclusive behaviour, in DX12 it runs anyway but this doesn't mean it'd work as intended).
+                           // Theoretically we should also check whether all the upgraded sizes match but that case is fairly unlikely.
+                           ASSERT_ONCE(all_scaled);
 
-                           D3D11_VIEWPORT viewports[D3D11_VIEWPORT_AND_SCISSORRECT_OBJECT_COUNT_PER_PIPELINE];
-                           UINT num_viewports = D3D11_VIEWPORT_AND_SCISSORRECT_OBJECT_COUNT_PER_PIPELINE;
-                           native_device_context->RSGetViewports(&num_viewports, viewports);
-                           for (UINT i = 0; i < num_viewports; i++)
-                           {
-                              viewports[i].TopLeftX *= scale_x;
-                              viewports[i].TopLeftY *= scale_y;
-                              viewports[i].Width    *= scale_x;
-                              viewports[i].Height   *= scale_y;
-                           }
-                           native_device_context->RSSetViewports(num_viewports, viewports);
+                           const float2 scale = float2((float)scaled_size.x / (float)original_size.x, (float)scaled_size.y / (float)original_size.y);
 
-                           D3D11_RECT scissors[D3D11_VIEWPORT_AND_SCISSORRECT_OBJECT_COUNT_PER_PIPELINE];
-                           UINT num_scissors = D3D11_VIEWPORT_AND_SCISSORRECT_OBJECT_COUNT_PER_PIPELINE;
-                           native_device_context->RSGetScissorRects(&num_scissors, scissors);
-                           for (UINT i = 0; i < num_scissors; i++)
+                           // Viewports and scissors are expected to be pixel aligned already, if they weren't, scaling and rounding them would shift the rendering by a sub pixel amount
+                           auto IsRounded = [](float value) { return value == std::floor(value); };
+
+                           // Only scale them once after the game last set them. We assume that if we scale a draw, then all other following draws should also be scaled, until the game sets a new viewport.
+                           if (!cmd_list_data.viewports_scaled)
                            {
-                              scissors[i].left   = (LONG)(scissors[i].left   * scale_x);
-                              scissors[i].top    = (LONG)(scissors[i].top    * scale_y);
-                              scissors[i].right  = (LONG)(scissors[i].right  * scale_x);
-                              scissors[i].bottom = (LONG)(scissors[i].bottom * scale_y);
+                              D3D11_VIEWPORT viewports[D3D11_VIEWPORT_AND_SCISSORRECT_OBJECT_COUNT_PER_PIPELINE];
+                              UINT num_viewports = D3D11_VIEWPORT_AND_SCISSORRECT_OBJECT_COUNT_PER_PIPELINE;
+                              native_device_context->RSGetViewports(&num_viewports, viewports);
+                              bool changed_viewports = false;
+                              for (UINT i = 0; i < num_viewports; i++)
+                              {
+                                 // Unused viewport: skip. Usually we could just break out but it could always be a later viewport is used.
+                                 if (viewports[i].Width == 0.f || viewports[i].Height == 0.f) continue;
+
+                                 // Make sure the original value was rounded, otherwise the rounding code below could be ambiguous.
+                                 ASSERT(IsRounded(viewports[i].TopLeftX) && IsRounded(viewports[i].TopLeftY) && IsRounded(viewports[i].Width) && IsRounded(viewports[i].Height));
+
+                                 // Scale the edges (not the sizes) and round them to whole pixels, so we never end up with values like 1239.999 instead of 1240.
+                                 // Re-deriving the sizes from the rounded edges also keeps adjacent viewports perfectly tiled (no gaps nor overlaps).
+                                 // Top Left would usually be 0. If it's not, then we also want to align it with the new size.
+                                 const float left   = std::round(viewports[i].TopLeftX * scale.x);
+                                 const float top    = std::round(viewports[i].TopLeftY * scale.y);
+                                 const float right  = std::round((viewports[i].TopLeftX + viewports[i].Width) * scale.x);
+                                 const float bottom = std::round((viewports[i].TopLeftY + viewports[i].Height) * scale.y);
+                                 viewports[i].TopLeftX = left;
+                                 viewports[i].TopLeftY = top;
+                                 viewports[i].Width    = right - left;
+                                 viewports[i].Height   = bottom - top;
+                                 changed_viewports = true;
+                              }
+                              if (changed_viewports)
+                              {
+                                 native_device_context->RSSetViewports(num_viewports, viewports);
+                              }
+                              cmd_list_data.viewports_scaled = true; // Even if none changed, the game will have to bind new ones before any of them could matter
                            }
-                           native_device_context->RSSetScissorRects(num_scissors, scissors);
+
+                           if (!cmd_list_data.scissors_scaled)
+                           {
+                              D3D11_RECT scissors[D3D11_VIEWPORT_AND_SCISSORRECT_OBJECT_COUNT_PER_PIPELINE];
+                              UINT num_scissors = D3D11_VIEWPORT_AND_SCISSORRECT_OBJECT_COUNT_PER_PIPELINE;
+                              native_device_context->RSGetScissorRects(&num_scissors, scissors);
+                              bool changed_scissors = false;
+                              for (UINT i = 0; i < num_scissors; i++)
+                              {
+                                 if (scissors[i].right == scissors[i].left || scissors[i].bottom == scissors[i].top) continue; // Zero sized. Skip.
+
+                                 // Scissors are already stored as (whole pixel) edges, so rounding each of them independently is enough to keep them tiled
+                                 scissors[i].left   = std::lround(scissors[i].left   * scale.x);
+                                 scissors[i].top    = std::lround(scissors[i].top    * scale.y);
+                                 scissors[i].right  = std::lround(scissors[i].right  * scale.x);
+                                 scissors[i].bottom = std::lround(scissors[i].bottom * scale.y);
+                                 changed_scissors = true;
+                              }
+                              if (changed_scissors)
+                              {
+                                 native_device_context->RSSetScissorRects(num_scissors, scissors);
+                              }
+                              cmd_list_data.scissors_scaled = true;
+                           }
                         }
                      }
                   }
                   else
                   {
-                     native_device_context->CSSetUnorderedAccessViews(0, device_data.uav_max_count, uavs_const, nullptr);
+                     // Not needed otherwise, we wouldn't have inline upgraded any texture to be replaced
+                     if (any_changed_inline)
+                     {
+                        native_device_context->CSSetUnorderedAccessViews(0, device_data.uav_max_count, uavs_const, nullptr);
+                     }
                   }
                }
                break;
@@ -6745,7 +7054,15 @@ namespace
          //TODOFT: optimize these shader searches by simply marking "CachedPipeline" with a tag on what they are (and whether they have a particular role) (also we can restrict the search to pixel shaders or compute shaders?) upfront. And move these into their own functions. Update: we optimized this enough.
 
          if (test_index == 9) return false;
-         draw_or_dispatch_override_type = game->OnDrawOrDispatch(native_device, native_device_context, cmd_list_data, device_data, stages, original_shader_hashes, is_custom_pass, updated_cbuffers, original_draw_dispatch_func);
+         // Use the specific callback if there's one, and fall back on the generic one otherwise.
+         if (const DrawOrDispatchCallback draw_or_dispatch_callback = is_dispatch ? cmd_list_data.dispatch_callback : cmd_list_data.draw_callback)
+         {
+            draw_or_dispatch_override_type = draw_or_dispatch_callback(native_device, native_device_context, cmd_list_data, device_data, stages, original_shader_hashes, is_custom_pass, updated_cbuffers, original_draw_dispatch_func);
+         }
+         else
+         {
+            draw_or_dispatch_override_type = game->OnDrawOrDispatch(native_device, native_device_context, cmd_list_data, device_data, stages, original_shader_hashes, is_custom_pass, updated_cbuffers, original_draw_dispatch_func);
+         }
 
 #if DEVELOPMENT
          // Frame capture: stamp this draw's entries with the final clone variant
@@ -7140,7 +7457,7 @@ namespace
 #endif
       bool updated_cbuffers = false;
       // TODO: add performance tracing around these
-      bool cancelled_or_replaced = OnDrawOrDispatch_Custom(cmd_list, false, updated_cbuffers, original_draw_dispatch_func);
+      bool cancelled_or_replaced = OnDrawOrDispatch_Custom<false>(cmd_list, updated_cbuffers, original_draw_dispatch_func);
 #if DEVELOPMENT
 #if 0 // TODO: We should do this manually when replacing each draw call, we don't know if it was replaced or cancelled here
       {
@@ -7330,7 +7647,7 @@ namespace
       last_draw_dispatch_data.indexed = true;
 #endif
       bool updated_cbuffers = false;
-      bool cancelled_or_replaced = OnDrawOrDispatch_Custom(cmd_list, false, updated_cbuffers, original_draw_dispatch_func);
+      bool cancelled_or_replaced = OnDrawOrDispatch_Custom<false>(cmd_list, updated_cbuffers, original_draw_dispatch_func);
 #if DEVELOPMENT
       // First run the draw call (don't delegate it to ReShade) and then copy its output
       if (wants_debug_draw)
@@ -7469,7 +7786,7 @@ namespace
       last_draw_dispatch_data.dispatch_count = uint3( group_count_x, group_count_y, group_count_z );
 #endif
       bool updated_cbuffers = false;
-      bool cancelled_or_replaced = OnDrawOrDispatch_Custom(cmd_list, true, updated_cbuffers, original_draw_dispatch_func);
+      bool cancelled_or_replaced = OnDrawOrDispatch_Custom<true>(cmd_list, updated_cbuffers, original_draw_dispatch_func);
 #if DEVELOPMENT
       // First run the draw call (don't delegate it to ReShade) and then copy its output
       if (wants_debug_draw)
@@ -7652,7 +7969,10 @@ namespace
       last_draw_dispatch_data.indexed = type == reshade::api::indirect_command::draw_indexed;
 #endif
       bool updated_cbuffers = false;
-      bool cancelled_or_replaced = OnDrawOrDispatch_Custom(cmd_list, is_dispatch, updated_cbuffers, original_draw_dispatch_func);
+      // This is the only case where we don't know whether it's a dispatch at compile time
+      bool cancelled_or_replaced = is_dispatch
+         ? OnDrawOrDispatch_Custom<true>(cmd_list, updated_cbuffers, original_draw_dispatch_func)
+         : OnDrawOrDispatch_Custom<false>(cmd_list, updated_cbuffers, original_draw_dispatch_func);
 #if DEVELOPMENT
       if (wants_debug_draw)
       {
@@ -8056,18 +8376,19 @@ namespace
    }
 
    // TODO: cache the last "almost" upgraded texture resolution to make sure that when the swapchain changes res, we didn't fail to upgrade resources before (needed even with indirect upgrades)
-   std::optional<reshade::api::format> ShouldUpgradeResource(const reshade::api::resource_desc& desc, const DeviceData& device_data, bool has_initial_data = false)
+   std::optional<reshade::api::resource_desc> GetOptionalResourceUpgradeDesc(const reshade::api::resource_desc& desc, const DeviceData& device_data, bool has_initial_data /*= false*/)
    {
       ResourceUpgradeFrameState state;
       state.render_resolution = device_data.render_resolution;
       state.output_resolution = device_data.output_resolution;
+      state.display_resolution = device_data.display_resolution;
       state.has_drawn_sr = device_data.has_drawn_sr;
 #if ENABLE_SR
       state.sr_active = device_data.sr_type != SR::Type::None && !device_data.sr_suppressed;
 #else
       state.sr_active = false;
 #endif
-      return device_data.resource_upgrades.ShouldUpgradeResource(desc, state, has_initial_data);
+      return device_data.resource_upgrades.GetOptionalResourceUpgradeDesc(desc, state, has_initial_data);
    }
 
    // Returns true if it changed the data.
@@ -8161,11 +8482,8 @@ namespace
 
          if (enable_indirect_texture_format_upgrades)
          {
-            reshade::api::format upgraded_format = GetBestResourceUpgradeFormat(desc);
-            ASSERT_ONCE(desc.texture.format != upgraded_format); // Why did we get here?
-
-            reshade::api::resource_desc upgraded_desc = desc;
-            upgraded_desc.texture.format = upgraded_format;
+            // The "desc" we got as input is not upgraded in this case
+            reshade::api::resource_desc upgraded_desc = forced_upgraded_resource_init_desc;
 
             lock.unlock(); // Avoids deadlocks with the device
 
@@ -8174,6 +8492,7 @@ namespace
             if (initial_data)
             {
                new_initial_data = *initial_data;
+               assert(upgraded_desc.texture.width == desc.texture.width && upgraded_desc.texture.height == desc.texture.height); // TODO: handle resizing too...
                if (ConvertResourceData(initial_data, new_initial_data, desc, upgraded_desc.texture.format))
                   new_initial_data_ptr = &new_initial_data;
             }
@@ -8181,8 +8500,13 @@ namespace
             reshade::api::resource mirrored_upgraded_resource;
             if (device->create_resource(upgraded_desc, new_initial_data_ptr, initial_state, &mirrored_upgraded_resource))
             {
+               forced_upgraded_resource_init_desc.texture = upgraded_desc.texture;
+
+               const bool texture_scaled = desc.texture.width != upgraded_desc.texture.width || desc.texture.height != upgraded_desc.texture.height;
+
                lock.lock();
-               device_data.resource_upgrades.original_resources_to_mirrored_upgraded_resources.emplace(resource.handle, ResourceUpgradeManager::IndirectUpgradedResource{ mirrored_upgraded_resource.handle, false, desc.texture.width, desc.texture.height, upgraded_desc.texture.width, upgraded_desc.texture.height });
+               ASSERT(!device_data.resource_upgrades.original_resources_to_mirrored_upgraded_resources.contains(resource.handle)); // The game re-used the ptr (can rarely happen), and we haven't cleared our mirrored verson yet
+               device_data.resource_upgrades.original_resources_to_mirrored_upgraded_resources.emplace(resource.handle, ResourceUpgradeManager::IndirectUpgradedResource{ mirrored_upgraded_resource.handle, texture_scaled, desc.texture.width, desc.texture.height, upgraded_desc.texture.width, upgraded_desc.texture.height });
             }
             if (new_initial_data_ptr)
                delete[] static_cast<uint8_t*>(new_initial_data_ptr->data);
@@ -8231,7 +8555,7 @@ namespace
       DeviceData& device_data = *device->get_private_data<DeviceData>();
       std::shared_lock lock(device_data.mutex); // Note: we possibly don't even need this (or well, we might want to use a different mutex)
       
-      if (std::optional<reshade::api::format> upgraded_format = ShouldUpgradeResource(desc, device_data, initial_data && initial_data->data))
+      if (std::optional<reshade::api::resource_desc> upgraded_desc = GetOptionalResourceUpgradeDesc(desc, device_data, initial_data && initial_data->data))
       {
          lock.unlock();
 
@@ -8241,46 +8565,23 @@ namespace
          last_attempted_upgraded_resource_creation_format = desc.texture.format;
 #endif
 
+         // Direct upgrade (inline).
          // Note that upgrading typeless texture could have unforeseen consequences in some games, especially when the textures are then used as unsigned int or signed int etc (e.g. Trine 5)
          if (!enable_indirect_texture_format_upgrades)
          {
-            ASSERT_ONCE(desc.texture.format != upgraded_format.value()); // Why did we get here?
-            desc.texture.format = upgraded_format.value();
-         }
-         else
-         {
-#if DEVELOPMENT && 0 // TODO: WIP size upgrades. We can't really do this without upgrading every single render target and depth/stencil texture, as all RTs need to have the same size. We'd also need to scale the viewport.
-            //desc.texture.samples = max(desc.texture.samples, 4); // Unlikely MSAA will work
-            if (indirect_upgraded_textures_size_scaling != 1.f && desc.type == reshade::api::resource_type::texture_2d)
-            {
-               // Ideally we'd either scale by 0.5 or 2, to keep them compatibile with linear sampler,
-               // and to be able to scale mips
-               desc.texture.width *= uint(indirect_upgraded_textures_size_scaling);
-               desc.texture.height *= uint(indirect_upgraded_textures_size_scaling);
-               // Make one more mip if we duplicate the size
-               if (desc.texture.levels > 1)
-               {
-                  if (indirect_upgraded_textures_size_scaling > 1.f)
-                  {
-                     desc.texture.levels++;
-                  }
-                  else
-                  {
-                     desc.texture.levels--;
-                  }
-               }
-            }
-#endif
+            desc = upgraded_desc.value();
          }
 
          waiting_on_upgraded_resource_init = true;
-         upgraded_resource_init_desc = desc; // Purposely left to the original value if "enable_indirect_texture_format_upgrades" is true
+         upgraded_resource_init_desc = desc; // Purposely left to the original value if "enable_indirect_texture_format_upgrades" is true, because we need to compare it against the direct upgraded desc we get back from reshade
+         forced_upgraded_resource_init_desc = upgraded_desc.value();
          bool converted_initial_data = false;
          // We need to convert the initial data to the new format
          if (initial_data != nullptr && !enable_indirect_texture_format_upgrades)
          {
             reshade::api::subresource_data new_initial_data = *initial_data;
-            converted_initial_data = ConvertResourceData(initial_data, new_initial_data, original_desc, upgraded_format.value());
+            assert(original_desc.texture.width == upgraded_desc.value().texture.width && original_desc.texture.height == upgraded_desc.value().texture.height); // TODO: handle resizing too...
+            converted_initial_data = ConvertResourceData(initial_data, new_initial_data, original_desc, upgraded_desc.value().texture.format);
             if (converted_initial_data)
             {
                *initial_data = new_initial_data;
@@ -8312,12 +8613,12 @@ namespace
       auto original_resource_to_mirrored_upgraded_resource = device_data.resource_upgrades.original_resources_to_mirrored_upgraded_resources.find(resource.handle);
       if (original_resource_to_mirrored_upgraded_resource != device_data.resource_upgrades.original_resources_to_mirrored_upgraded_resources.end())
       {
-         const auto original_resource_to_mirrored_upgraded_resource_ptr = original_resource_to_mirrored_upgraded_resource->second.mirror_handle;
+         const auto mirrored_upgraded_resource = original_resource_to_mirrored_upgraded_resource->second.mirror_handle;
          device_data.resource_upgrades.original_resources_to_mirrored_upgraded_resources.erase(original_resource_to_mirrored_upgraded_resource);
 
          // Invalidate stale view mappings for this mirror while the lock is held.
          std::vector<uint64_t> unlinked_mirror_views;
-         if (auto mirror_views_it = device_data.resource_upgrades.mirror_views_by_mirror_resource.find(original_resource_to_mirrored_upgraded_resource_ptr); mirror_views_it != device_data.resource_upgrades.mirror_views_by_mirror_resource.end())
+         if (auto mirror_views_it = device_data.resource_upgrades.mirror_views_by_mirror_resource.find(mirrored_upgraded_resource); mirror_views_it != device_data.resource_upgrades.mirror_views_by_mirror_resource.end())
          {
             const auto& mirror_views = mirror_views_it->second;
             for (auto view_map_it = device_data.resource_upgrades.original_resource_views_to_mirrored_upgraded_resource_views.begin(); view_map_it != device_data.resource_upgrades.original_resource_views_to_mirrored_upgraded_resource_views.end();)
@@ -8336,12 +8637,26 @@ namespace
             device_data.resource_upgrades.mirror_views_by_mirror_resource.erase(mirror_views_it);
          }
 
+         constexpr bool delayed_destruction = true;
          // Defer freeing to present: the mirror may still be in flight in hooks or bound on recorded lists.
-         for (const uint64_t unlinked_mirror_view : unlinked_mirror_views)
+         if (delayed_destruction)
          {
-            device_data.resource_upgrades.pending_mirror_view_destructions.push_back({ unlinked_mirror_view });
+            for (const uint64_t unlinked_mirror_view : unlinked_mirror_views)
+            {
+               device_data.resource_upgrades.pending_mirror_view_destructions.push_back({ unlinked_mirror_view });
+            }
+            device_data.resource_upgrades.pending_mirror_resource_destructions.push_back({ mirrored_upgraded_resource });
          }
-         device_data.resource_upgrades.pending_mirror_resource_destructions.push_back({ original_resource_to_mirrored_upgraded_resource_ptr });
+         else
+         {
+            lock.unlock();
+
+            for (const uint64_t unlinked_mirror_view : unlinked_mirror_views)
+            {
+               device->destroy_resource_view({ unlinked_mirror_view });
+            }
+            device->destroy_resource({ mirrored_upgraded_resource });
+         }
       }
       device_data.resource_upgrades.upgraded_resources.erase(resource.handle);
 #if DEVELOPMENT
@@ -8475,7 +8790,7 @@ namespace
 #if DEVELOPMENT
          bool usage_filter = usage_type == reshade::api::resource_usage::render_target || usage_type == reshade::api::resource_usage::unordered_access || usage_type == reshade::api::resource_usage::shader_resource; // This is all of the possible types anyway...
          // Note: this ignores all formats returned by "GetBestResourceViewUpgradeFormat()" except one, given that we'd need more code to check for typeless compatibility on all formats
-         if (usage_filter && ShouldUpgradeResource(resource_desc, device_data).has_value() && resource_desc.texture.format == reshade::api::format::r16g16b16a16_float)
+         if (usage_filter && GetOptionalResourceUpgradeDesc(resource_desc, device_data).has_value() && resource_desc.texture.format == reshade::api::format::r16g16b16a16_float)
          {
             switch (desc.format)
             {
@@ -8507,7 +8822,7 @@ namespace
             }
 #endif // DEVELOPMENT
 
-            if (desc.type == reshade::api::resource_view_type::unknown)
+            if (desc.type == reshade::api::resource_view_type::unknown) // TODO: only do this if the format the game provided was wrong?
             {
                if (resource_desc.type == reshade::api::resource_type::texture_3d)
                {
@@ -8517,10 +8832,12 @@ namespace
                {
                   desc.type = resource_desc.texture.samples <= 1 ? (resource_desc.texture.depth_or_layers <= 1 ? reshade::api::resource_view_type::texture_2d : ((resource_desc.flags & reshade::api::resource_flags::cube_compatible) != 0 ? (resource_desc.texture.depth_or_layers == 6 ? reshade::api::resource_view_type::texture_cube : reshade::api::resource_view_type::texture_cube_array) : reshade::api::resource_view_type::texture_2d_array)) : (resource_desc.texture.depth_or_layers <= 1 ? reshade::api::resource_view_type::texture_2d_multisample : reshade::api::resource_view_type::texture_2d_multisample_array); // We need to set it in case it was "reshade::api::resource_view_type::unknown", otherwise the format would also need to be unknown
                }
+               bool is_array = desc.type == reshade::api::resource_view_type::texture_1d_array || desc.type == reshade::api::resource_view_type::texture_2d_array || desc.type == reshade::api::resource_view_type::texture_2d_multisample_array || desc.type == reshade::api::resource_view_type::texture_cube_array;
+               bool is_cube = desc.type == reshade::api::resource_view_type::texture_cube || desc.type == reshade::api::resource_view_type::texture_cube_array;
                desc.texture.first_level = 0;
                desc.texture.levels = -1; // All levels (e.g. Dishonored 2 sets this to invalid values if the resource format was upgraded)
                desc.texture.first_layer = 0;
-               desc.texture.layers = resource_desc.texture.depth_or_layers;
+               desc.texture.layers = (is_array && !is_cube) ? resource_desc.texture.depth_or_layers : -1; // -1 is all layers (doesn't work for non cube arrays)
             }
 
             desc.format = GetBestResourceViewUpgradeFormat(desc, usage_type, resource_desc, resource_desc);
@@ -8625,9 +8942,10 @@ namespace
       DeviceData& device_data = *device->get_private_data<DeviceData>();
       std::unique_lock lock(device_data.mutex);
 
+      ASSERT_ONCE(resource.handle); // We don't ever expect views with a null resource (unsupported in DX11, creation will fail)
       // Cache the view -> resource mapping so the draw/descriptor/destroy paths never need a device call
       // (get_resource_from_view) while holding the luma mutex.
-      device_data.resource_upgrades.original_views_to_resources[view.handle] = resource.handle;
+      device_data.resource_upgrades.original_views_to_original_resources[view.handle] = resource.handle;
 
 #if DEVELOPMENT
       if (device_data.resource_upgrades.original_upgraded_resources_formats.contains(resource.handle))
@@ -8679,7 +8997,7 @@ namespace
 #if DEVELOPMENT
       device_data.resource_upgrades.original_upgraded_resource_views_formats.erase(view.handle);
 #endif
-      device_data.resource_upgrades.original_views_to_resources.erase(view.handle);
+      device_data.resource_upgrades.original_views_to_original_resources.erase(view.handle);
 
       auto original_resource_view_to_mirrored_upgraded_resource_view = device_data.resource_upgrades.original_resource_views_to_mirrored_upgraded_resource_views.find(view.handle);
       if (original_resource_view_to_mirrored_upgraded_resource_view != device_data.resource_upgrades.original_resource_views_to_mirrored_upgraded_resource_views.end())
@@ -8728,13 +9046,7 @@ namespace
       case reshade::api::descriptor_type::texture_shader_resource_view:
       {
          reshade::api::descriptor_table_update replaced_update = update;
-         // Copy the descriptor array before replacing any view: in DX11 the event's descriptor pointer aliases
-         // the game's own bind array (reshade reinterprets the original objects array), so writing mirror view
-         // handles through it would leak our pointers into the game's memory (stale-pointer hazards downstream).
-         std::vector<reshade::api::resource_view> replaced_descriptors(
-            reinterpret_cast<const reshade::api::resource_view*>(update.descriptors),
-            reinterpret_cast<const reshade::api::resource_view*>(update.descriptors) + update.count);
-         replaced_update.descriptors = replaced_descriptors.data();
+         std::vector<reshade::api::resource_view> replaced_descriptors;
          bool any_replaced = false;
          bool any_upgraded = false;
 
@@ -8744,36 +9056,88 @@ namespace
             DeviceData& device_data = *cmd_list->get_device()->get_private_data<DeviceData>();
             std::shared_lock lock_device_read(device_data.mutex);
 
-            reshade::api::resource_view* rvs = (reshade::api::resource_view*)replaced_update.descriptors;
+            const reshade::api::resource_view* original_rvs = (reshade::api::resource_view*)update.descriptors;
+            reshade::api::resource_view* replaced_rvs = nullptr; // Assigned below on creation if ever needed
             reshade::api::resource_usage resource_usage = reshade::api::resource_usage::shader_resource; // Implied by default
             if (update.type == reshade::api::descriptor_type::texture_unordered_access_view)
             {
                resource_usage = reshade::api::resource_usage::unordered_access;
             }
 
-            for (uint32_t i = 0; i < replaced_update.count; i++)
+            for (uint32_t i = 0; i < update.count; i++)
             {
-               reshade::api::resource original_resource;
-               original_resource.handle = rvs[i].handle != 0 ? GetCachedResourceFromView(device_data, rvs[i].handle) : 0; // No device call under the lock
-               if (rvs[i].handle != 0 && original_resource.handle == 0) // Unknown view (e.g. created before the addon loaded): query the device outside the lock
+               auto SetCachedViewsState = [&](CommandListData::ViewState view_state) -> void
                {
-                  lock_device_read.unlock(); // Avoids deadlocks with the device
-                  original_resource = cmd_list->get_device()->get_resource_from_view({ rvs[i].handle });
-                  lock_device_read.lock();
+                  // Flag indirect texture upgrades.
+                  // Note: if the game somehow read back a previously upgraded SRV and re-set it, we'd miss it here (we don't check for that yet, it's "slow"). See "ENABLE_GAME_PIPELINE_STATE_READBACK" for more.
+                  if ((stages & reshade::api::shader_stage::compute) != 0)
+                  {
+                     if (update.type == reshade::api::descriptor_type::texture_unordered_access_view)
+                     {
+                        cmd_list_data.cs_uavs_state[update.binding + i] = view_state;
+                     }
+                     else
+                     {
+                        cmd_list_data.cs_srvs_state[update.binding + i] = view_state;
+                     }
+                  }
+                  if ((stages & reshade::api::shader_stage::pixel) != 0)
+                  {
+                     if (update.type == reshade::api::descriptor_type::texture_unordered_access_view)
+                     {
+                        cmd_list_data.ps_uavs_state[update.binding + i] = view_state;
+                     }
+                     else
+                     {
+                        cmd_list_data.ps_srvs_state[update.binding + i] = view_state;
+                     }
+                  }
+               };
+
+               if (original_rvs[i].handle == 0)
+               {
+                  if (enable_chain_indirect_texture_format_upgrades >= ChainTextureFormatUpgradesType::DirectAndIndirectDependencies)
+                     SetCachedViewsState(CommandListData::ViewState::NotSet);
+                  continue;
                }
 
-               bool replaced = FindOrCreateIndirectUpgradedResourceView(cmd_list->get_device(), rvs[i].handle, rvs[i].handle, device_data, enable_chain_indirect_texture_format_upgrades >= ChainTextureFormatUpgradesType::DirectDependencies, resource_usage, lock_device_read);
-               any_replaced |= replaced;
+               uint64_t replaced_rv = original_rvs[i].handle;
+               bool replaced = FindOrCreateIndirectUpgradedResourceView(cmd_list->get_device(), original_rvs[i].handle, replaced_rv, device_data, enable_chain_indirect_texture_format_upgrades >= ChainTextureFormatUpgradesType::DirectDependencies, resource_usage, lock_device_read);
+               if (replaced)
+               {
+                  any_replaced = true;
+
+                  if (!replaced_rvs)
+                  {
+                     // Copy the descriptor array before replacing any view: in DX11 the event's descriptor pointer aliases
+                     // the game's own bind array (reshade reinterprets the original objects array), so writing mirror view
+                     // handles through it would leak our pointers into the game's memory (stale-pointer hazards downstream).
+                     // Do this lazily because it's very expensive.
+                     replaced_descriptors = std::vector<reshade::api::resource_view>(
+                        reinterpret_cast<const reshade::api::resource_view*>(update.descriptors),
+                        reinterpret_cast<const reshade::api::resource_view*>(update.descriptors) + update.count);
+                     replaced_update.descriptors = replaced_descriptors.data();
+                     replaced_rvs = (reshade::api::resource_view*)replaced_update.descriptors;
+                  }
+
+                  replaced_rvs[i].handle = replaced_rv;
+               }
 
                // Skip doing all the stuff below if it's not necessary
-               if (enable_chain_indirect_texture_format_upgrades < ChainTextureFormatUpgradesType::DirectAndIndirectDependencies || original_resource == 0)
+               if (enable_chain_indirect_texture_format_upgrades < ChainTextureFormatUpgradesType::DirectAndIndirectDependencies)
                   continue;
 
+               reshade::api::resource original_resource;
+               original_resource.handle = GetCachedResourceFromView(device_data, original_rvs[i].handle, true, false, true, &lock_device_read, cmd_list->get_device());
+
                bool upgraded = replaced;
-               // Also track direct upgrades, even if this is often useful, as if we have any, generally any of their render targets would automatically get upgraded, however that's not always the case in case we missed some formats, or in case we only upgrade the swapchain and it's read back (e.g. UE reads it back to do UI background blurring).
-               if (device_data.resource_upgrades.upgraded_resources.contains(original_resource.handle) || (swapchain_upgrade_type > SwapchainUpgradeType::None && device_data.back_buffers.contains(original_resource.handle)))
+               if (original_resource != 0)
                {
-                  upgraded = true;
+                  // Also track direct upgrades, even if this is often useful, as if we have any, generally any of their render targets would automatically get upgraded, however that's not always the case in case we missed some formats, or in case we only upgrade the swapchain and it's read back (e.g. UE reads it back to do UI background blurring).
+                  if (device_data.resource_upgrades.upgraded_resources.contains(original_resource.handle) || (swapchain_upgrade_type > SwapchainUpgradeType::None && device_data.back_buffers.contains(original_resource.handle)))
+                  {
+                     upgraded = true;
+                  }
                }
                any_upgraded |= upgraded;
 
@@ -8790,48 +9154,28 @@ namespace
                }
 #endif
 
-               // TODO: set these as upgraded even if we used direct texture upgrades? It's not really needed as the only purpose of these is to do chain upgrades, which are already handled with direct texture upgrades (then, if so, rename the variables to "*_indirect_upgrades_*")
-               // Note: if the game somehow read back a previously upgraded SRV and re-set it, we'd miss it here (we don't check for that yet, it's "slow")
-               if ((stages & reshade::api::shader_stage::compute) != 0)
-               {
-                  if (update.type == reshade::api::descriptor_type::texture_unordered_access_view)
-                  {
-                     cmd_list_data.cs_uavs_state[update.binding + i] = upgraded ? CommandListData::ViewState::SetAndUpgraded : CommandListData::ViewState::Set;
-                  }
-                  else
-                  {
-                     cmd_list_data.cs_srvs_state[update.binding + i] = upgraded ? CommandListData::ViewState::SetAndUpgraded : CommandListData::ViewState::Set;
-                  }
-               }
-               if ((stages & reshade::api::shader_stage::pixel) != 0)
-               {
-                  if (update.type == reshade::api::descriptor_type::texture_unordered_access_view)
-                  {
-                     cmd_list_data.ps_uavs_state[update.binding + i] = upgraded ? CommandListData::ViewState::SetAndUpgraded : CommandListData::ViewState::Set;
-                  }
-                  else
-                  {
-                     cmd_list_data.ps_srvs_state[update.binding + i] = upgraded ? CommandListData::ViewState::SetAndUpgraded : CommandListData::ViewState::Set;
-                  }
-               }
+               SetCachedViewsState(upgraded ? CommandListData::ViewState::SetAndUpgraded : CommandListData::ViewState::Set);
             }
          }
 
-         // Only needed with "enable_chain_indirect_texture_format_upgrades".
+         // Only needed with "enable_chain_indirect_texture_format_upgrades" (not read back otherwise).
          // Make sure we allow the list to be cleared if any were upgraded and they've been de-upgraded above!
-         if ((stages & reshade::api::shader_stage::compute) != 0)
+         if (enable_chain_indirect_texture_format_upgrades >= ChainTextureFormatUpgradesType::DirectAndIndirectDependencies)
          {
-            if (any_upgraded || cmd_list_data.any_upgraded_cs_srvs)
-               cmd_list_data.UpdateUpgradedCSSRVs();
-            if (any_upgraded || cmd_list_data.any_upgraded_cs_uavs)
-               cmd_list_data.UpdateUpgradedCSUAVs();
-         }
-         if ((stages & reshade::api::shader_stage::pixel) != 0)
-         {
-            if (any_upgraded || cmd_list_data.any_upgraded_ps_srvs)
-               cmd_list_data.UpdateUpgradedPSSRVs();
-            if (any_upgraded || cmd_list_data.any_upgraded_ps_uavs)
-               cmd_list_data.UpdateUpgradedPSUAVs();
+            if ((stages & reshade::api::shader_stage::compute) != 0)
+            {
+               if (any_upgraded || cmd_list_data.any_upgraded_cs_srvs)
+                  cmd_list_data.UpdateUpgradedCSSRVs();
+               if (any_upgraded || cmd_list_data.any_upgraded_cs_uavs)
+                  cmd_list_data.UpdateUpgradedCSUAVs();
+            }
+            if ((stages & reshade::api::shader_stage::pixel) != 0)
+            {
+               if (any_upgraded || cmd_list_data.any_upgraded_ps_srvs)
+                  cmd_list_data.UpdateUpgradedPSSRVs();
+               if (any_upgraded || cmd_list_data.any_upgraded_ps_uavs)
+                  cmd_list_data.UpdateUpgradedPSUAVs();
+            }
          }
 
          if (any_replaced)
@@ -9531,17 +9875,19 @@ namespace
             // No need to error out on these are the copies would have fail in the vanilla game as well
             if (source_desc.Width != target_desc.Width || source_desc.Height != target_desc.Height)
             {
+#if 0 // TODO: why was this check done? We should just stretch the textures no?
                const bool aspect_compatible = source_desc.Width > 0 && source_desc.Height > 0 && target_desc.Width > 0 && target_desc.Height > 0
                   && std::abs((float)source_desc.Width / (float)source_desc.Height - (float)target_desc.Width / (float)target_desc.Height) < 0.01f;
                if (!aspect_compatible)
                   return false;
-               // Only scale when the hash-upgrade scale chain is active; otherwise this is the game's own
+#endif
+               // Only scale when the hash-upgrade scale chain is active (and when we don't have any size upgrades); otherwise this is the game's own
                // intentional different-size copy and must pass through untouched.
                // Note: the seed mirror is created (and may be scaled) in the hash-upgrade block, which runs
                // BEFORE the game's OnDrawOrDispatch executes SR and flips has_drawn_sr. So also treat a copy
                // as scaleable when either resource is a scaled mirror, so we don't mistake the scaled seed
                // (or a chain resource derived from it) for the game's own different-size copy.
-               if (!IsScaleChainActive(device_data) && !device_data.resource_upgrades.IsScaledMirrorResource(source.handle) && !device_data.resource_upgrades.IsScaledMirrorResource(dest.handle))
+               if (!IsScaleChainActive(device_data) && texture_custom_dimensions_upgrades.empty() && !device_data.resource_upgrades.IsScaledMirrorResource(source.handle) && !device_data.resource_upgrades.IsScaledMirrorResource(dest.handle))
                   return false;
                use_scale = true;
             }
@@ -9861,7 +10207,7 @@ namespace
             GetResourceInfo(reinterpret_cast<ID3D11Resource*>(source.handle), size1, format1);
             GetResourceInfo(reinterpret_cast<ID3D11Resource*>(dest.handle), size2, format2);
             // TODO: are these even necessary anymore given that now we have "FindOrCreateIndirectUpgradedResource()"? Probably not! Though it could in case we had previously upgraded the target but not the source
-            if (!AreFormatsCopyCompatible(format1, format2))
+            if (!AreFormatsCopyCompatible(format1, format2) || size1 != size2)
             {
                bool succeded = OnCopyResource_Internal(cmd_list, source, dest, DXGI_FORMAT_UNKNOWN, true);
                ASSERT_ONCE(succeded);
@@ -9885,13 +10231,14 @@ namespace
 
       {
          bool any_replaced = false;
+         bool any_scaled = false;
 
          {
             DeviceData& device_data = *cmd_list->get_device()->get_private_data<DeviceData>();
             std::shared_lock lock_device_read(device_data.mutex);
 
-            any_replaced |= FindOrCreateIndirectUpgradedResource(cmd_list->get_device(), source.handle, source.handle, source.handle, device_data, false, reshade::api::resource_usage::copy_source, lock_device_read);
-            any_replaced |= FindOrCreateIndirectUpgradedResource(cmd_list->get_device(), source.handle, dest.handle, dest.handle, device_data, texture_format_upgrades_type == TextureFormatUpgradesType::AllowedEnabled && enable_chain_indirect_texture_format_upgrades >= ChainTextureFormatUpgradesType::DirectDependencies, reshade::api::resource_usage::copy_dest, lock_device_read, false, false, false);
+            any_replaced |= FindOrCreateIndirectUpgradedResource(cmd_list->get_device(), source.handle, source.handle, source.handle, device_data, false, reshade::api::resource_usage::copy_source, lock_device_read, false, false, true, reshade::api::resource_usage::undefined, &any_scaled);
+            any_replaced |= FindOrCreateIndirectUpgradedResource(cmd_list->get_device(), source.handle, dest.handle, dest.handle, device_data, texture_format_upgrades_type == TextureFormatUpgradesType::AllowedEnabled && enable_chain_indirect_texture_format_upgrades >= ChainTextureFormatUpgradesType::DirectDependencies, reshade::api::resource_usage::copy_dest, lock_device_read, false, false, false, reshade::api::resource_usage::undefined, &any_scaled);
             // TODO: upgrade the "cmd_list_data.ps_srvs_state" state if any resources are upgraded here, they could also be bound as SRV/UAV already.
          }
 
@@ -9908,7 +10255,9 @@ namespace
             DXGI_FORMAT format1, format2;
             GetResourceInfo(reinterpret_cast<ID3D11Resource*>(source.handle), size1, format1);
             GetResourceInfo(reinterpret_cast<ID3D11Resource*>(dest.handle), size2, format2);
-            if (!AreFormatsCopyCompatible(format1, format2) && source_subresource == 0 && dest_subresource == 0 && (!source_box || (source_box->left == 0 && source_box->top == 0 && source_box->depth() == 1)) && (!dest_box || (dest_box->left == 0 && dest_box->top == 0 && dest_box->depth() == 1)) && (!dest_box || !source_box || (source_box->width() == dest_box->width() && source_box->height() == dest_box->height() && source_box->depth() == dest_box->depth())))
+            const bool full_copy = source_subresource == 0 && dest_subresource == 0 && (!source_box || (source_box->left == 0 && source_box->top == 0 && source_box->depth() == 1)) && (!dest_box || (dest_box->left == 0 && dest_box->top == 0 && dest_box->depth() == 1)) && (!dest_box || !source_box || (source_box->width() == dest_box->width() && source_box->height() == dest_box->height() && source_box->depth() == dest_box->depth()));
+            // TODO: define source and stretch areas also based on the upgraded sizes...
+            if ((!AreFormatsCopyCompatible(format1, format2) || any_scaled) && full_copy)
             {
                bool succeded = OnCopyResource_Internal(cmd_list, source, dest, DXGI_FORMAT_UNKNOWN, true);
                ASSERT_ONCE(succeded);
@@ -9921,7 +10270,8 @@ namespace
          }
       }
 
-      if (source_subresource == 0 && dest_subresource == 0 && (!source_box || (source_box->left == 0 && source_box->top == 0 && source_box->depth() == 1)) && (!dest_box || (dest_box->left == 0 && dest_box->top == 0 && dest_box->depth() == 1)) && (!dest_box || !source_box || (source_box->width() == dest_box->width() && source_box->height() == dest_box->height() && source_box->depth() == dest_box->depth())))
+      const bool full_copy = source_subresource == 0 && dest_subresource == 0 && (!source_box || (source_box->left == 0 && source_box->top == 0 && source_box->depth() == 1)) && (!dest_box || (dest_box->left == 0 && dest_box->top == 0 && dest_box->depth() == 1)) && (!dest_box || !source_box || (source_box->width() == dest_box->width() && source_box->height() == dest_box->height() && source_box->depth() == dest_box->depth()));
+      if (full_copy)
       {
          return OnCopyResource_Internal(cmd_list, source, dest);
       }
@@ -15259,7 +15609,11 @@ namespace
                   {
                      ImGui::Checkbox("Enable Indirect Texture Format Upgrades", &enable_indirect_texture_format_upgrades);
                      static_assert(sizeof(enable_chain_indirect_texture_format_upgrades) == sizeof(int));
-                     ImGui::SliderInt("Chain Indirect Texture Format Upgrades Types", reinterpret_cast<int*>(&enable_chain_indirect_texture_format_upgrades), 0, (int)ChainTextureFormatUpgradesType::DirectAndIndirectDependencies, chain_texture_format_upgrades_type_strings[(size_t)enable_chain_indirect_texture_format_upgrades], ImGuiSliderFlags_NoInput);
+                     if (ImGui::SliderInt("Chain Indirect Texture Format Upgrades Types", reinterpret_cast<int*>(&enable_chain_indirect_texture_format_upgrades), 0, (int)ChainTextureFormatUpgradesType::DirectAndIndirectDependencies, chain_texture_format_upgrades_type_strings[(size_t)enable_chain_indirect_texture_format_upgrades], ImGuiSliderFlags_NoInput))
+                     {
+                        // Reset the state to avoid pollutation at least in the primary command list (safe during present), in the others it might matter a lot less because they are constantly reset
+                        device_data.primary_command_list_data->ResetUpgradedViews();
+                     }
                      ImGui::Checkbox("Ignore Indirect Upgraded Textures", &ignore_indirect_upgraded_textures);
                      if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
                      {
@@ -15280,7 +15634,11 @@ namespace
                            device_data.resource_upgrades.original_resource_views_to_mirrored_upgraded_resource_views.clear();
                            device_data.resource_upgrades.original_resources_to_mirrored_upgraded_resources.clear();
                            device_data.resource_upgrades.mirror_views_by_mirror_resource.clear();
+                           device_data.resource_upgrades.mirror_views_to_mirror_resources.clear();
                         }
+                        // Note: we don't delay the destruction like we do in other places, it should be safe.
+                        device_data.resource_upgrades.pending_mirror_view_destructions.clear();
+                        device_data.resource_upgrades.pending_mirror_resource_destructions.clear();
                         for (const auto& original_resource_view_to_mirrored_upgraded_resource_view : original_resource_views_to_mirrored_upgraded_resource_views)
                         {
                            runtime->get_device()->destroy_resource_view({ original_resource_view_to_mirrored_upgraded_resource_view.second });
@@ -16410,6 +16768,8 @@ BOOL APIENTRY CoreMain(HMODULE h_module, DWORD fdw_reason, LPVOID lpv_reserved)
       reshade::register_event<reshade::addon_event::bind_pipeline>(OnBindPipeline);
 
       reshade::register_event<reshade::addon_event::bind_render_targets_and_depth_stencil>(OnBindRenderTargetsAndDepthStencil);
+      reshade::register_event<reshade::addon_event::bind_viewports>(OnBindViewports);
+      reshade::register_event<reshade::addon_event::bind_scissor_rects>(OnBindScissorRects);
 
       // UE decides whether to enable upgrades at runtime (HDR config), after this registration point (its
       // DllMain reads the ReShade config after CoreMain), so install the upgrade machinery events
@@ -16543,6 +16903,8 @@ BOOL APIENTRY CoreMain(HMODULE h_module, DWORD fdw_reason, LPVOID lpv_reserved)
       reshade::unregister_event<reshade::addon_event::bind_pipeline>(OnBindPipeline);
 
       reshade::unregister_event<reshade::addon_event::bind_render_targets_and_depth_stencil>(OnBindRenderTargetsAndDepthStencil);
+      reshade::unregister_event<reshade::addon_event::bind_viewports>(OnBindViewports);
+      reshade::unregister_event<reshade::addon_event::bind_scissor_rects>(OnBindScissorRects);
 
       if (texture_format_upgrades_type > TextureFormatUpgradesType::None)
       {

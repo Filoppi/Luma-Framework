@@ -17,6 +17,8 @@
 #include <bit>
 #include <cfloat>
 #include <cstdint>
+#include <cmath>
+#include <tuple>
 #include <optional>
 #include <shared_mutex>
 #include <unordered_map>
@@ -35,6 +37,7 @@ struct ResourceUpgradeFrameState
 {
    float2 render_resolution = { 1.f, 1.f };
    float2 output_resolution = { 1.f, 1.f };
+   float2 display_resolution = { 1.f, 1.f };
    bool has_drawn_sr = false;
    bool sr_active = false; // SR configured and not suppressed
 };
@@ -49,6 +52,13 @@ inline bool ResourceUpgradeIsMipOf(uint32_t base_w, uint32_t base_h, uint32_t w,
    bool valid_w = (base_w >> (std::countr_zero(base_w) - std::countr_zero(w))) == w;
    bool valid_h = (base_h >> (std::countr_zero(base_h) - std::countr_zero(h))) == h;
    return valid_w && valid_h;
+}
+
+// Kept local to the manager to avoid utils/resource.hpp's DeviceData dependency.
+inline uint32_t ResourceUpgradeGetTextureMaxMipLevels(uint32_t width, uint32_t height = 0, uint32_t depth = 0)
+{
+   uint32_t max_dimension = max(max(width, height), depth);
+   return static_cast<uint32_t>(std::floor(std::log2(max_dimension))) + 1;
 }
 
 class ResourceUpgradeManager
@@ -95,20 +105,24 @@ public:
       // A custom aspect ratio (defaulted to 16:9, because that's the global standard).
       // It can be useful for games that don't support UltraWide or 4:3 resolutions and internally force 16:9 rendering, while having a fullscreen swapchain with black bars.
       CustomAspectRatio = 1 << 4,
+      CustomSize = 1 << 5,
       // All mip chain sizes based starting from the highest resolution between rendering and swapchain resolution (they should generally have the same aspect ratio anyway) to 1.
       // This can be useful for blur passes etc, if they used power of 2 mips, instead of simply halving the base resolution.
-      Mips = 1 << 5,
+      Mips = 1 << 6,
       // Upgrade textures cubes (of all sizes), these are sometimes used by old games to do reflections (e.g. Burnout Revenge cars reflections)
-      Cubes = 1 << 6,
+      Cubes = 1 << 7,
       // Checks the swapchain/output resolution width only (e.g. used by games that add horizontal lines, like "Thumper" or "Beyond: Two Souls").
       // These are usually hard to match to an aspect ratio without using the "CustomAspectRatio" with a manually found aspect ratio,
       // and thus mips like bloom might be missing
-      SwapchainResolutionWidth = 1 << 7,
-      SwapchainResolutionHeight = 1 << 8,
+      SwapchainResolutionWidth = 1 << 8,
+      SwapchainResolutionHeight = 1 << 9,
+      // The display resolution (useful for games that create textures before setting the swapchain size).
+      DisplayResolution = 1 << 10,
+      DisplayAspectRatio = 1 << 11,
+      // Loosen up the aspect ratio checks to multiples of 4 pixels, per axis, that's what some engines do (e.g. Unreal Engine).
+      PadTo4Px = 1 << 12,
       // Avoid upgrading 1x1 textures
-      No1Px = 1 << 9,
-      // Custom sizes (width/height pairs) to match for upgrades.
-      CustomSize = 1 << 10,
+      No1Px = 1 << 13,
       // "None" needs to be != 0, and specify all the negating flags
       None = No1Px,
    };
@@ -177,6 +191,13 @@ public:
    uint32_t texture_format_upgrades_lut_size = -1;
    LUTDimensions texture_format_upgrades_lut_dimensions = LUTDimensions::_2D;
 
+   // Map of source to target texture upgrade sizes, with the filter format too.
+   // Only advised with indirect upgrades, otherwise the viewport/scissor sizes won't be automatically updated.
+   // Width, Height, Depth/Array Layers, Samples (MS).
+   // If there's multiple matches, the first one is used.
+   // Set any of the filter values to 0 to ignore them.
+   std::vector<std::tuple<uint4, reshade::api::format, uint4>> texture_custom_dimensions_upgrades;
+
    // Automatically upgrade the formats of the textures this shader pass draws to. Generally best used on shaders that originally encoded from HDR (native rendering) to SDR. If the source textures were SDR too (UNORM), they'd need to be upgraded through other means.
    // "rtv_slots" are the RTV indexes to upgrade, "uav_slots" the UAVs (whether it's a pixel or compute shader).
    // This is meant to be used if "enable_indirect_texture_format_upgrades" is off, or if very specific custom upgrades are needed.
@@ -206,7 +227,7 @@ public:
    // View handle -> resource handle caches, so the draw/descriptor/destroy paths never need a device call
    // (get_resource_from_view) while holding the luma mutex (lock-order inversion vs D3D11 runtime locks taken in
    // destruction-notifier callbacks). Populated in OnInitResourceView / at mirror-view insert sites.
-   std::unordered_map<uint64_t, uint64_t> original_views_to_resources;      // game view -> its resource
+   std::unordered_map<uint64_t, uint64_t> original_views_to_original_resources;      // game view -> its resource
    std::unordered_map<uint64_t, uint64_t> mirror_views_to_mirror_resources; // mirror view -> mirror resource
    // Mirrors freed at present (frame boundary) instead of on original destruction, so in-flight
    // hooks/game state can never dereference a freed mirror. Guarded by `mutex`.
@@ -218,12 +239,28 @@ public:
    // ------------------------------------------------------------------
 
    // View handle -> resource handle from our caches (no device call under the lock).
-   uint64_t GetCachedResourceFromView(uint64_t view_handle) const
+   uint64_t GetCachedResourceFromView(uint64_t view_handle, bool original = true, bool mirrored = false, bool live_fallback = false, std::shared_lock<std::shared_mutex>* lock_device_read = nullptr, reshade::api::device* device = nullptr) const
    {
-      if (auto it = mirror_views_to_mirror_resources.find(view_handle); it != mirror_views_to_mirror_resources.end())
-         return it->second;
-      if (auto it = original_views_to_resources.find(view_handle); it != original_views_to_resources.end())
-         return it->second;
+      // Put the original first as it's more likely to be found
+      if (original)
+      {
+         if (auto it = original_views_to_original_resources.find(view_handle); it != original_views_to_original_resources.end())
+            return it->second;
+      }
+      if (mirrored)
+      {
+         if (auto it = mirror_views_to_mirror_resources.find(view_handle); it != mirror_views_to_mirror_resources.end())
+            return it->second;
+      }
+      if (live_fallback)
+      {
+         // Unknown view, for some reason
+         lock_device_read->unlock(); // Avoids deadlocks with the device
+         ASSERT_ONCE_MSG(false, "Why do we have untracked resources? This should not ever happen"); // TODO: delete this whole path once we verified this cannot happen
+         uint64_t resource = device->get_resource_from_view({ view_handle }).handle;
+         lock_device_read->lock();
+         return resource;
+      }
       return 0;
    }
 
@@ -350,7 +387,7 @@ public:
 
    // Decides whether a resource should be upgraded at creation time. Uses the frame state for
    // resolution/aspect-ratio filters.
-   std::optional<reshade::api::format> ShouldUpgradeResource(const reshade::api::resource_desc& desc, const ResourceUpgradeFrameState& state, bool has_initial_data = false) const;
+   std::optional<reshade::api::resource_desc> GetOptionalResourceUpgradeDesc(const reshade::api::resource_desc& desc, const ResourceUpgradeFrameState& state, bool has_initial_data = false) const;
 
    // ------------------------------------------------------------------
    // Mirror creation / lookup (migrated from core.hpp)
@@ -372,7 +409,9 @@ public:
       std::shared_lock<std::shared_mutex>& lock_device_read,
       const ResourceUpgradeFrameState& state,
       bool should_scale = false,
-      bool leave_locked = true);
+      bool leave_locked = true,
+      reshade::api::resource_usage additional_bind_flags = reshade::api::resource_usage(0),
+      bool* scaled = nullptr);
 
    bool FindOrCreateIndirectUpgradedResourceView(
       reshade::api::device* device,
