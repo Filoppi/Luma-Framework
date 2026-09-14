@@ -2845,6 +2845,8 @@ namespace
 
          cb_luma_global_settings.SwapchainSize = device_data.output_resolution;
          cb_luma_global_settings.SwapchainInvSize = float2(1.f / cb_luma_global_settings.SwapchainSize.x, 1.f / cb_luma_global_settings.SwapchainSize.y);
+         cb_luma_global_settings.RenderSize = device_data.render_resolution;
+         cb_luma_global_settings.RenderInvSize = float2(1.f / cb_luma_global_settings.RenderSize.x, 1.f / cb_luma_global_settings.RenderSize.y);
       }
 
       game->OnCreateDevice(native_device, device_data);
@@ -3328,6 +3330,8 @@ namespace
 
          cb_luma_global_settings.SwapchainSize = device_data.output_resolution;
          cb_luma_global_settings.SwapchainInvSize = float2(1.f / cb_luma_global_settings.SwapchainSize.x, 1.f / cb_luma_global_settings.SwapchainSize.y);
+         cb_luma_global_settings.RenderSize = device_data.render_resolution;
+         cb_luma_global_settings.RenderInvSize = float2(1.f / cb_luma_global_settings.RenderSize.x, 1.f / cb_luma_global_settings.RenderSize.y);
          device_data.cb_luma_global_settings_dirty = true;
       }
 
@@ -15937,6 +15941,8 @@ void Init(bool async)
 
    cb_luma_global_settings.SwapchainSize = float2(GetSystemMetrics(SM_CXSCREEN), GetSystemMetrics(SM_CYSCREEN)); // An arbitrary guess that is better than 1920x1080 or 1x1
    cb_luma_global_settings.SwapchainInvSize = float2(1.f / cb_luma_global_settings.SwapchainSize.x, 1.f / cb_luma_global_settings.SwapchainSize.y);
+   cb_luma_global_settings.RenderSize = cb_luma_global_settings.SwapchainSize;
+   cb_luma_global_settings.RenderInvSize = cb_luma_global_settings.SwapchainInvSize;
    cb_luma_global_settings.DisplayMode = DisplayModeType::HDR; // Default to HDR in case we had no prior config, it will be automatically disabled if the current display doesn't support it (when the swapchain is created, which should be guaranteed to be after)
    cb_luma_global_settings.ScenePeakWhite = default_peak_white;
    cb_luma_global_settings.ScenePaperWhite = default_paper_white;
