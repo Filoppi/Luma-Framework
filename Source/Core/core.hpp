@@ -6786,7 +6786,7 @@ namespace
       {
          // TODO: only set these if the shader data reflections told us these cbuffers are actually read, otherwise in multithreaded games, we could end up re-setting the luma data a lot of times each time another thread is first run
          SetLumaConstantBuffers(native_device_context, cmd_list_data, device_data, stages, LumaConstantBufferType::LumaSettings);
-#if !GAME_METAPHOR
+#if !GAME_METAPHOR_REFANTAZIO
          SetLumaConstantBuffers(native_device_context, cmd_list_data, device_data, stages, LumaConstantBufferType::LumaData);
 #endif
          updated_cbuffers = true;
@@ -8689,7 +8689,7 @@ namespace
       {
       default:
       break;
-#if !defined(GAME_PERSONA_5) && !defined(GAME_METAPHOR)
+#if !defined(GAME_PERSONA_5_ROYAL) && !defined(GAME_METAPHOR_REFANTAZIO)
       case reshade::api::descriptor_type::texture_unordered_access_view:
       case reshade::api::descriptor_type::texture_shader_resource_view:
       {
