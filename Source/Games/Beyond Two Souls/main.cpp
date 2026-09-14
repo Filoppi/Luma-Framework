@@ -1,7 +1,7 @@
 // ### Rename this ###
 #define GAME_TEMPLATE 1
 
-#define ENABLE_ORIGINAL_SHADERS_MEMORY_EDITS 1
+#define LUMA_PATCH_BYTECODE_SYNC 1
 
 #include "..\..\Core\core.hpp"
 
@@ -18,7 +18,7 @@ public:
 
    // Add a saturate on opaque/transparent materials
    // Without this, some materials output alphas beyond 0-1, messing up the results if the render target is FLOAT (as opposed to the original UNORM)
-   std::unique_ptr<std::byte[]> ModifyShaderByteCode(const std::byte* code, size_t& size, reshade::api::pipeline_subobject_type type, uint64_t shader_hash, const std::byte* shader_object, size_t shader_object_size) override
+   std::unique_ptr<std::byte[]> PatchShaderBytecodeSync(const std::byte* code, size_t& size, reshade::api::pipeline_subobject_type type, uint64_t shader_hash, const std::byte* shader_object, size_t shader_object_size) override
    {
       if (type != reshade::api::pipeline_subobject_type::pixel_shader) return nullptr;
 

@@ -1,12 +1,11 @@
 #define GAME_JUST_CAUSE_3 1
 
 // TODO: move SR to run before the final screen space stuff starts happening (e.g. heat distortion, bloom, blur, tonemap, etc)! Alternatively, dejitter the image before calculating bloom and dof etc?
-#define ENABLE_NGX 1
 // FSR is disabled in publishing builds, JC3 has no proper motion vectors on vegetation nor skinned meshes, hence it looks terrible on them (DLSS looks fine with them!).
 #define ENABLE_FIDELITY_SK ((DEVELOPMENT || TEST) ? 1 : 0)
 #define AUTO_ENABLE_SR 1
 
-#define ENABLE_ORIGINAL_SHADERS_MEMORY_EDITS 1
+#define LUMA_PATCH_BYTECODE_SYNC 1
 
 // Hooking a debugger crashes the game (possibly due to Steam DRM, but there's only that version, and Steamless doesn't do anything)
 #define DISABLE_AUTO_DEBUGGER 1
@@ -237,7 +236,7 @@ public:
    }
 
    // Add a saturate on materials/gbuffers
-   std::unique_ptr<std::byte[]> ModifyShaderByteCode(const std::byte* code, size_t& size, reshade::api::pipeline_subobject_type type, uint64_t shader_hash, const std::byte* shader_object, size_t shader_object_size) override
+   std::unique_ptr<std::byte[]> PatchShaderBytecodeSync(const std::byte* code, size_t& size, reshade::api::pipeline_subobject_type type, uint64_t shader_hash, const std::byte* shader_object, size_t shader_object_size) override
    {
       if (type != reshade::api::pipeline_subobject_type::pixel_shader)
          return nullptr;

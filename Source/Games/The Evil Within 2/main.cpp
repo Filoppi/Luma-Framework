@@ -1,7 +1,5 @@
 #define THE_EVIL_WITHIN_2 1
 
-#define ENABLE_NGX 1
-
 #define ENABLE_POST_DRAW_DISPATCH_CALLBACK 1
 
 #include "..\..\Core\core.hpp"

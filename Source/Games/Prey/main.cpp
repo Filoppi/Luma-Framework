@@ -1,9 +1,7 @@
 // TODO: rename mod to "Prey (2017)" if possible (VS project, shaders and code folder, define, mod name in c++ etc)
 #define GAME_PREY 1
 
-#define ENABLE_NGX 1
 #define ENABLE_NVAPI 0
-#define ENABLE_FIDELITY_SK 1
 
 #include "..\..\Core\core.hpp"
 
@@ -1414,7 +1412,7 @@ public:
                draw_data.exposure = device_data.sr_exposure.get();
                draw_data.pre_exposure = dlss_pre_exposure;
                draw_data.jitter_x = projection_jitters.x * static_cast<float>(render_width_dlss) * -0.5f;
-               draw_data.jitter_y = projection_jitters.y * static_cast<float>(render_height_dlss) * -0.5f;
+               draw_data.jitter_y = projection_jitters.y * static_cast<float>(render_height_dlss) * 0.5f;
                draw_data.reset = reset_dlss;
                draw_data.render_width = render_width_dlss;
                draw_data.render_height = render_height_dlss;
@@ -2473,6 +2471,7 @@ BOOL APIENTRY DllMain(HMODULE hModule, DWORD ul_reason_for_call, LPVOID lpReserv
          {"FORCE_MOTION_VECTORS_JITTERED", force_motion_vectors_jittered ? '1' : '0', true, false, "Forces Motion Vectors generation to include the jitters from the previous frame too, as DLSS needs\nEnabling this forces the native TAA to work as when we have DLSS enabled, making it look a little bit better (less shimmery)", 1},
      #endif
          {"ENABLE_POST_PROCESS", '1', true, false, "Allows you to disable all Post Processing (at once)", 1},
+         {"ENABLE_OBJECT_HIGHLIGHTING", '1', true, false, "Allows you to disable object highlighting", 1},
          {"ENABLE_CAMERA_MOTION_BLUR", '0', true, false, "Camera Motion Blur can look pretty botched in Prey, and can mess with DLSS/TAA, it's turned off by default in Luma (in the config files)", 1},
          {"ENABLE_COLOR_GRADING_LUT", '1', true, false, "Allows you to disable Color Grading\nDon't disable it unless you know what you are doing", 1},
          {"POST_TAA_SHARPENING_TYPE", '2', true, false, "0 - None (disabled, soft)\n1 - Vanilla (basic sharpening)\n2 - RCAS (AMD improved sharpening, default preset)\n3 - RCAS (AMD improved sharpening, strong preset)"},

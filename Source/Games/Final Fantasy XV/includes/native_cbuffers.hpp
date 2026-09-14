@@ -46,3 +46,10 @@ struct IView_Combined_cbView
   float3 PreviousViewPoint;            // Offset:  752 Size:    12
 
 };
+
+struct cbExposure
+{
+  float exposure;               // Offset:    0 Size:     4
+  float exposureScale;          // Offset:    4 Size:     4
+  float maxExposure;            // Offset:    8 Size:     4
+};

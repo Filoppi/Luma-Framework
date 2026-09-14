@@ -234,6 +234,13 @@ public:
    void OnInit(bool async) override
    {
 
+      std::vector<ShaderDefineData> game_shader_defines_data = {
+         {"ENABLE_AREA_SAMPLING", '1', true, false, "Use area sampling instead of vanilla bilinear sampling when downscaling SSAA", 1},
+         {"ENABLE_FXAA", '1', true, false, "Enable Luma's improved FXAA implementation", 1},
+      };
+      shader_defines_data.append_range(game_shader_defines_data);
+      assert(shader_defines_data.size() < MAX_SHADER_DEFINES);
+
       GetShaderDefineData(POST_PROCESS_SPACE_TYPE_HASH).SetDefaultValue('0'); // Game is not linear all the way
       GetShaderDefineData(EARLY_DISPLAY_ENCODING_HASH).SetDefaultValue('1'); 
       GetShaderDefineData(VANILLA_ENCODING_TYPE_HASH).SetDefaultValue('0'); // Game uses a 2.0 encode normally
@@ -320,6 +327,7 @@ BOOL APIENTRY DllMain(HMODULE hModule, DWORD ul_reason_for_call, LPVOID lpReserv
          auto_texture_format_upgrade_shader_hashes[std::stoul("F398A1ED", nullptr, 16)] = { {0}, {} }; // Tonemap
          auto_texture_format_upgrade_shader_hashes[std::stoul("A453ADB1", nullptr, 16)] = { {0}, {} }; // Tonemap
          auto_texture_format_upgrade_shader_hashes[std::stoul("FA7FE535", nullptr, 16)] = { {0}, {} }; // Tonemap
+         auto_texture_format_upgrade_shader_hashes[std::stoul("386FCE67", nullptr, 16)] = { {0}, {} }; // AA
       // ### Check these if textures are not upgraded ###
       texture_format_upgrades_2d_size_filters = 0 | (uint32_t)TextureFormatUpgrades2DSizeFilters::SwapchainResolution | (uint32_t)TextureFormatUpgrades2DSizeFilters::SwapchainAspectRatio;
 

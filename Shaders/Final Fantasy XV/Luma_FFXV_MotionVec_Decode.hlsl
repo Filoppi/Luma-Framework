@@ -24,6 +24,12 @@ void main(uint2 tid : SV_DispatchThreadID, uint3 gid : SV_GroupId, uint gix : SV
 		return;
 	}
 	float2 velocity = g_velocityTex[tid].xy;
+	// NOTE: FFXV reports g_gamePaused inverted: 0 = paused, 1 = running.
+	if (g_gamePaused == 0)
+	{
+		g_updatedVelocityTex[tid] = float2(0.0f, 0.0f);
+		return;
+	}
 	if(velocity.y == 1.0f)
 	{
 		float2 texCoord = float2(tid) / g_screenSize.xy;
@@ -32,5 +38,13 @@ void main(uint2 tid : SV_DispatchThreadID, uint3 gid : SV_GroupId, uint gix : SV
 		prevTS /= prevTS.w;
 		velocity = prevTS.xy - texCoord;
 	}
+	// else
+	// {
+	// 	if(abs(velocity.x) >= 4.0f)
+	// 	{
+	// 		velocity.x += (velocity.x > 0.0f) ? 4.0f : -4.0f;
+	// 	}
+	// }
+	// velocity = g_uvJitterOffset.xy * 0.5f + velocity;
 	g_updatedVelocityTex[tid] = velocity * g_screenSize.xy;
 }

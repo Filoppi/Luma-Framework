@@ -50,7 +50,8 @@ void main(
   #endif
 
   //bloom
-  r1.xyz = g_textures_1_.Sample(g_samplers_1__s, v1.zw).xyz * GS.BloomStrength;
+  // r1.xyz = g_textures_1_.Sample(g_samplers_1__s, v1.zw).xyz * GS.BloomStrength;
+      r1.xyz = Tonemap_BloomSample(g_textures_1_, g_samplers_1__s, v1.zw);
   #if CUSTOM_TESTBGSPRITES == 1
     r1.xyz = 0;
   #endif

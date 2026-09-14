@@ -1,0 +1,101 @@
+// ---- Created with 3Dmigoto v1.3.16 on Wed Jun 17 18:38:13 2026
+Texture2D<float4> t4 : register(t4); //curr
+
+Texture2D<float4> t3 : register(t3); //prev
+
+Texture2D<float4> t2 : register(t2); //motion vectors
+
+SamplerState s4_s : register(s4);
+
+SamplerState s2_s : register(s2);
+
+SamplerState s0_s : register(s0);
+
+cbuffer cb2 : register(b2)
+{
+  float4 cb2[35];
+}
+
+
+
+
+// 3Dmigoto declarations
+#define cmp -
+
+
+void main(
+  float4 v0 : SV_POSITION0,
+  float2 v1 : TEXCOORD0,
+  out float3 o0 : SV_TARGET0,
+  out float3 o1 : SV_TARGET1)
+{
+  float4 r0,r1,r2,r3,r4,r5,r6,r7;
+  uint4 bitmask, uiDest;
+  float4 fDest;
+
+  r0.xy = -cb2[34].zw + v1.xy;
+  r0.xy = t2.Sample(s0_s, r0.xy).xy; //motion vectors
+  r0.zw = float2(-0.5,-0.5) + abs(r0.xy);
+  r0.zw = saturate(r0.zw + r0.zw);
+  r0.zw = r0.zw * r0.zw;
+  r1.xy = abs(r0.xy) + abs(r0.xy);
+  r0.xy = cmp(r0.xy >= float2(0,0));
+  r1.xy = min(float2(1,1), r1.xy);
+  r1.xy = float2(4,4) * r1.xy;
+  r0.zw = r0.zw * float2(36,36) + r1.xy;
+  r0.xy = r0.xy ? r0.zw : -r0.zw;
+  r0.xy = cb2[34].zw * r0.xy;
+  r0.z = dot(r0.xy, r0.xy);
+  r1.xy = cb2[34].zw + v1.xy;
+  r1.xy = t2.Sample(s0_s, r1.xy).xy;
+  r1.zw = float2(-0.5,-0.5) + abs(r1.xy);
+  r1.zw = saturate(r1.zw + r1.zw);
+  r1.zw = r1.zw * r1.zw;
+  r2.xy = abs(r1.xy) + abs(r1.xy);
+  r1.xy = cmp(r1.xy >= float2(0,0));
+  r2.xy = min(float2(1,1), r2.xy);
+  r2.xy = float2(4,4) * r2.xy;
+  r1.zw = r1.zw * float2(36,36) + r2.xy;
+  r1.xy = r1.xy ? r1.zw : -r1.zw;
+  r1.xy = cb2[34].zw * r1.xy;
+  r0.w = dot(r1.xy, r1.xy);
+  r0.z = cmp(r0.z < r0.w);
+  r0.xy = r0.zz ? r0.xy : r1.xy;
+  r0.zw = v1.xy + -r0.xy;
+  r0.xy = cb2[34].xy * r0.xy;
+  r0.x = dot(r0.xy, r0.xy);
+  r0.x = sqrt(r0.x);
+  r0.x = saturate(40 + -r0.x);
+  r0.yzw = t3.Sample(s2_s, r0.zw).xyz;
+  r1.xyzw = cb2[34].zwzw * float4(-0.5,0.5,0.5,-0.5) + v1.xyxy;
+  r2.xyz = t4.Sample(s4_s, r1.xy).xyz;
+  r1.xyz = t4.Sample(s4_s, r1.zw).xyz;
+  r3.xyz = min(r2.xyz, r1.xyz);
+  r4.xyzw = cb2[34].zwzw * float4(-0.5,-0.5,0.5,0.5) + v1.xyxy;
+  r5.xyz = t4.Sample(s4_s, r4.zw).xyz;
+  r4.xyz = t4.Sample(s4_s, r4.xy).xyz;
+  r3.xyz = min(r5.xyz, r3.xyz);
+  r6.xyz = t4.Sample(s4_s, v1.xy).xyz;
+  r7.xyz = min(r6.xyz, r4.xyz);
+  r3.xyz = min(r7.xyz, r3.xyz);
+  r0.yzw = max(r3.xyz, r0.yzw);
+  r3.xyz = max(r2.xyz, r1.xyz);
+  r2.xyz = r4.xyz + r2.xyz;
+  r4.xyz = max(r6.xyz, r4.xyz);
+  r1.xyz = r2.xyz + r1.xyz;
+  r1.xyz = r1.xyz + r5.xyz;
+  r2.xyz = max(r3.xyz, r5.xyz);
+  r2.xyz = max(r4.xyz, r2.xyz);
+  r0.yzw = min(r2.xyz, r0.yzw);
+  r0.yzw = r0.yzw + -r6.xyz;
+  r1.xyz = r1.xyz * float3(0.25,0.25,0.25) + -r6.xyz;
+  r1.xyz = float3(10,10,10) * abs(r1.xyz);
+  r1.xyz = min(float3(1,1,1), r1.xyz);
+  r1.w = cb2[0].z + -cb2[0].y;
+  r1.xyz = r1.xyz * r1.www + cb2[0].yyy;
+  r1.xyz = r1.xyz * r0.xxx;
+  r0.xyz = r1.xyz * r0.yzw + r6.xyz;
+  o0.xyz = r0.xyz;
+  o1.xyz = r0.xyz;
+  return;
+}

@@ -1,8 +1,13 @@
 #pragma once
 
 #include <d3d11_4.h>
+#include <filesystem>
+#include <string>
 #include <unordered_map>
 #include <vector>
+
+#include <deps/stb/stb_image.h>
+
 #include "com_ptr.h"
 #include "math.h"
 
@@ -397,6 +402,109 @@ struct ManagedResources
     std::unordered_map<uint32_t, ComPtr<ID3D11DomainShader>> domain_shaders;
     std::unordered_map<uint32_t, ComPtr<ID3D11GeometryShader>> geometry_shaders;
     std::unordered_map<uint32_t, ComPtr<ID3D11HullShader>> hull_shaders;
+
+    // Loads a 2D texture array from a PNG frame sequence
+    // (<texture_directory>/<texture_file_prefix>_0.png, ...) into
+    // "textures_2d"/"shader_resource_views" (keyed by texture_hash).
+    bool LoadTexture2DArray(ID3D11Device* device, const std::filesystem::path& texture_directory, const char* texture_file_prefix, uint32_t texture_hash)
+    {
+        if (!device || texture_file_prefix == nullptr || *texture_file_prefix == '\0' || !std::filesystem::is_directory(texture_directory))
+        {
+            return false;
+        }
+
+        std::vector<std::vector<uint8_t>> frames;
+        int expected_width = 0;
+        int expected_height = 0;
+        for (uint32_t index = 0;; ++index)
+        {
+            const std::filesystem::path file_path = texture_directory / (std::string(texture_file_prefix) + "_" + std::to_string(index) + ".png");
+            if (!std::filesystem::is_regular_file(file_path))
+            {
+                if (index == 0)
+                {
+                    return false;
+                }
+                break;
+            }
+
+            int width = 0;
+            int height = 0;
+            int channels = 0;
+            stbi_uc* pixels = stbi_load(file_path.string().c_str(), &width, &height, &channels, STBI_rgb_alpha);
+            if (!pixels)
+            {
+                return false;
+            }
+
+            if (index == 0)
+            {
+                expected_width = width;
+                expected_height = height;
+            }
+            else if (width != expected_width || height != expected_height)
+            {
+                stbi_image_free(pixels);
+                return false;
+            }
+
+            const size_t pixel_count = static_cast<size_t>(width) * static_cast<size_t>(height) * 4;
+            frames.push_back(std::vector<uint8_t>(pixels, pixels + pixel_count));
+            stbi_image_free(pixels);
+        }
+
+        if (frames.empty())
+        {
+            return false;
+        }
+
+        D3D11_TEXTURE2D_DESC texture_desc = {};
+        texture_desc.Width = static_cast<UINT>(expected_width);
+        texture_desc.Height = static_cast<UINT>(expected_height);
+        texture_desc.MipLevels = 1;
+        texture_desc.ArraySize = static_cast<UINT>(frames.size());
+        texture_desc.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
+        texture_desc.SampleDesc.Count = 1;
+        texture_desc.Usage = D3D11_USAGE_IMMUTABLE;
+        texture_desc.BindFlags = D3D11_BIND_SHADER_RESOURCE;
+
+        std::vector<D3D11_SUBRESOURCE_DATA> subresources;
+        subresources.reserve(frames.size());
+        for (const auto& frame : frames)
+        {
+            D3D11_SUBRESOURCE_DATA subresource = {};
+            subresource.pSysMem = frame.data();
+            subresource.SysMemPitch = static_cast<UINT>(expected_width) * 4u;
+            subresource.SysMemSlicePitch = 0;
+            subresources.push_back(subresource);
+        }
+
+        ComPtr<ID3D11Texture2D> texture;
+        HRESULT hr = device->CreateTexture2D(&texture_desc, subresources.data(), texture.put());
+        if (FAILED(hr) || !texture)
+        {
+            return false;
+        }
+
+        D3D11_SHADER_RESOURCE_VIEW_DESC srv_desc = {};
+        srv_desc.Format = texture_desc.Format;
+        srv_desc.ViewDimension = D3D11_SRV_DIMENSION_TEXTURE2DARRAY;
+        srv_desc.Texture2DArray.MostDetailedMip = 0;
+        srv_desc.Texture2DArray.MipLevels = texture_desc.MipLevels;
+        srv_desc.Texture2DArray.FirstArraySlice = 0;
+        srv_desc.Texture2DArray.ArraySize = texture_desc.ArraySize;
+
+        ComPtr<ID3D11ShaderResourceView> srv;
+        hr = device->CreateShaderResourceView(texture.get(), &srv_desc, srv.put());
+        if (FAILED(hr) || !srv)
+        {
+            return false;
+        }
+
+        textures_2d[texture_hash] = texture;
+        shader_resource_views[texture_hash] = srv;
+        return true;
+    }
 };
 
 // TODO: Move this somewhere else.

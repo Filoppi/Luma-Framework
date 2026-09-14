@@ -1,14 +1,13 @@
 #define GAME_GRANBLUE_FANTASY_RELINK 1
 
-#define ENABLE_NGX 1
-#define ENABLE_FIDELITY_SK 1
 #define JITTER_PHASES 8
 #define PATCH_JITTER_TABLE_INIT
 #define PATCH_SCENE_BUFFER 0
 #define ENABLE_UI_VIEWPORT_SCALING_HOOK 0
+#define ENABLE_UI_SCALING 0
 #define ENABLE_POST_DRAW_DISPATCH_CALLBACK 1
 #define CHECK_GRAPHICS_API_COMPATIBILITY 1
-#define V2_0_3
+#define V2_0_5
 
 #include <d3d11.h>
 #include "..\..\Core\core.hpp"
@@ -505,13 +504,17 @@ public:
          return override_type;
       }
 
-      // UI phase detection and redirect to output-resolution texture.
-      // Skipped at render_scale == 1 — no upscaling means no compositing needed.
+#if ENABLE_UI_SCALING
+      // UI phase detection — sets cmd_list_data.force_scale to trigger scaled mirror creation.
+      // The auto_texture_format_upgrade_shader_hashes entry for UI Background Downscale
+      // has scale=true, so DetectUIPhase detecting UI will trigger the scaling.
       if (render_scale != 1.f && !IsTAARunningThisFrame() && DetectUIPhase(device_data, native_device_context, original_shader_hashes))
       {
-         RedirectUIDrawToScaledTarget(native_device_context, device_data, game_device_data);
+         // RedirectUIDrawToScaledTarget disabled — UI scaling now handled by indirect upgrade system.
       }
+#endif
 
+#if ENABLE_UI_SCALING
       // Capture Output for deferred-context replay only.
       // Immediate-context output draws run natively, with an optional source SRV override
       // when UI was redirected to the scaled composition target.
@@ -546,6 +549,7 @@ public:
          }
          return DrawOrDispatchOverrideType::None;
       }
+#endif
       return DrawOrDispatchOverrideType::None;
    }
 
@@ -571,6 +575,7 @@ public:
          secondary_child->QueryInterface(secondary_native_cmd_list.put());
       }
 
+#if ENABLE_UI_SCALING
       const bool is_finish_command_list = source_deferred_ctx != nullptr;
       if (is_finish_command_list)
       {
@@ -580,6 +585,7 @@ public:
             game_device_data.ui_scale.ui_finish_command_list.store(native_cmd_list.get(), std::memory_order_release);
          }
       }
+#endif
 
       if (native_device_context)
       {
@@ -589,6 +595,7 @@ public:
          ComPtr<ID3D11CommandList> native_command_list;
          native_command_list = secondary_native_cmd_list;
 
+#if ENABLE_UI_SCALING
          if (native_command_list &&
              native_command_list.get() == game_device_data.ui_scale.ui_finish_command_list.load(std::memory_order_acquire))
          {
@@ -611,6 +618,7 @@ public:
             game_device_data.ui_scale.output_pending.store(false, std::memory_order_release);
             // ui_output_state_stack.Restore(native_device_context.get());
          }
+#endif
 
          if (native_command_list.get() == game_device_data.remainder_command_list.load(std::memory_order_acquire) && game_device_data.partial_command_list.get() != nullptr)
          {
@@ -1416,23 +1424,34 @@ BOOL APIENTRY DllMain(HMODULE hModule, DWORD ul_reason_for_call, LPVOID lpReserv
       shader_hashes_CutsceneOverlayModulate.vertex_shaders.emplace(std::stoul("4741FB87", nullptr, 16));
       shader_hashes_Output.pixel_shaders.emplace(std::stoul("F55707D4", nullptr, 16));
       shader_hashes_Bloom.pixel_shaders.emplace(std::stoul("1C5F92B9", nullptr, 16));
+#if ENABLE_UI_SCALING
       shader_hashes_UIBackgroundDownscale.pixel_shaders.emplace(std::stoul("C4013554", nullptr, 16));
+#endif
 
       swapchain_format_upgrade_type = TextureFormatUpgradesType::AllowedEnabled;
       swapchain_upgrade_type = SwapchainUpgradeType::scRGB;
       texture_format_upgrades_type = TextureFormatUpgradesType::AllowedEnabled;
 
       texture_upgrade_formats = {
-         // reshade::api::format::r11g11b10_float,
-         reshade::api::format::r8g8b8a8_typeless
+          reshade::api::format::r11g11b10_float,
+          reshade::api::format::r10g10b10a2_unorm,
+          reshade::api::format::r8g8b8a8_typeless
       };
-      texture_format_upgrades_2d_size_filters = 0 | (uint32_t)TextureFormatUpgrades2DSizeFilters::SwapchainResolution | (uint32_t)TextureFormatUpgrades2DSizeFilters::SwapchainAspectRatio;
-      enable_chain_indirect_texture_format_upgrades = ChainTextureFormatUpgradesType::DirectDependencies;
+      texture_format_upgrades_2d_size_filters = 0 | (uint32_t)TextureFormatUpgrades2DSizeFilters::No1Px | (uint32_t)TextureFormatUpgrades2DSizeFilters::SwapchainResolution | (uint32_t)TextureFormatUpgrades2DSizeFilters::SwapchainAspectRatio;
+      // Disable chain upgrades — Granblue uses direct RTV→SRV reads between PP passes,
+      // and SR handles the render→output upscale. UI scaling uses auto_texture_format_upgrade_shader_hashes
+      // with force_scale set during recording (DetectUIPhase).
+      //enable_chain_indirect_texture_format_upgrades = ChainTextureFormatUpgradesType::DirectDependencies;
 
+#if ENABLE_UI_SCALING
+      // UI Background Downscale: format upgrade + scale to output resolution.
+      // force_scale is set in DetectUIPhase when UI phase is detected on this command list.
+      auto_texture_format_upgrade_shader_hashes[std::stoul("C4013554", nullptr, 16)] = {{0}, {}}; // UI Background Downscale
+#endif
       // auto_texture_format_upgrade_shader_hashes[std::stoul("4E1187FF", nullptr, 16)] = {{0}, {}}; // Downscale Bloom
       // auto_texture_format_upgrade_shader_hashes[std::stoul("1C5F92B9", nullptr, 16)] = {{0}, {}}; // Bloom
       // auto_texture_format_upgrade_shader_hashes[std::stoul("60F0256B", nullptr, 16)] = {{0}, {}}; // Tonemap
-      auto_texture_format_upgrade_shader_hashes[std::stoul("478E345C", nullptr, 16)] = {{1}, {}}; // TAA
+      //auto_texture_format_upgrade_shader_hashes[std::stoul("478E345C", nullptr, 16)] = {{1}, {}}; // TAA
 #if DEVELOPMENT
       forced_shader_names.emplace(std::stoul("897DB2C0", nullptr, 16), "Outline Prefilter");
       forced_shader_names.emplace(std::stoul("DA85F5BB", nullptr, 16), "OutlineCS (depth)");

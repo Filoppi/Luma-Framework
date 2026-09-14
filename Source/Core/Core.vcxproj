@@ -175,7 +175,7 @@
       <RuntimeTypeInfo>true</RuntimeTypeInfo>
       <PreprocessorDefinitions>%(PreprocessorDefinitions);SOLUTION_DIR=R"($(SolutionDir))";WIN32;_WINDOWS;DEVELOPMENT=1</PreprocessorDefinitions>
       <UseStandardPreprocessor>true</UseStandardPreprocessor>
-      <AdditionalOptions>%(AdditionalOptions) /utf-8 /Zc:strictStrings /Zc:threadSafeInit</AdditionalOptions>
+      <AdditionalOptions>%(AdditionalOptions) /utf-8 /Zc:strictStrings /Zc:threadSafeInit /bigobj</AdditionalOptions>
       <FunctionLevelLinking>
       </FunctionLevelLinking>
       <MultiProcessorCompilation>true</MultiProcessorCompilation>
@@ -391,7 +391,7 @@
       <RuntimeTypeInfo>true</RuntimeTypeInfo>
       <PreprocessorDefinitions>%(PreprocessorDefinitions);SOLUTION_DIR=R"($(SolutionDir))";WIN32;_WINDOWS;DEVELOPMENT=1</PreprocessorDefinitions>
       <UseStandardPreprocessor>true</UseStandardPreprocessor>
-      <AdditionalOptions>%(AdditionalOptions) /utf-8 /Zc:strictStrings /Zc:threadSafeInit</AdditionalOptions>
+      <AdditionalOptions>%(AdditionalOptions) /utf-8 /Zc:strictStrings /Zc:threadSafeInit /bigobj</AdditionalOptions>
       <FunctionLevelLinking>
       </FunctionLevelLinking>
       <MultiProcessorCompilation>true</MultiProcessorCompilation>
@@ -618,6 +618,7 @@
     <ClInclude Include="includes\instance_data.h" />
     <ClInclude Include="includes\managed_resources.h" />
     <ClInclude Include="includes\overlay_log.h" />
+    <ClInclude Include="includes\patch.hpp" />
     <ClInclude Include="includes\math.h" />
     <ClInclude Include="includes\matrix.h" />
     <ClInclude Include="includes\recursive_shared_mutex.h" />

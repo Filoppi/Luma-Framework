@@ -1,5 +1,6 @@
 #define LUT_3D 1
 
+#include "Includes/GameCBuffers.hlsl"
 #include "../Includes/ColorGradingLUT.hlsl"
 #include "../Includes/Tonemap.hlsl"
 
@@ -99,11 +100,49 @@ StructuredBuffer<postfx_luminance_autoexposure_t> ro_postfx_luminance_buffautoex
 // 3Dmigoto declarations
 #define cmp -
 
-#define FIX_RAISED_BLACKS 1
+#define FIX_RAISED_BLACKS 0
 
-static const float bloomStrength = 1.0;
-static const float lensDirtStrength = 1.0;
-static const float colorGradeLUTStrength = 1.0;
+static const float colorGradeLUTStrength = 1.f;
+
+// Neutral tonemap used here only as a linear-domain range compressor for LUT input coordinates.
+float NeutwoTonemap(float x, float peak)
+{
+  float denominatorSquared = mad(x, x, peak * peak);
+  return peak * x * rsqrt(denominatorSquared);
+}
+
+float3 NeutwoTonemapPerChannel(float3 color, float peak)
+{
+  return float3(
+    NeutwoTonemap(color.r, peak),
+    NeutwoTonemap(color.g, peak),
+    NeutwoTonemap(color.b, peak));
+}
+
+float3 NeutwoTonemapPerChannelBT2020(float3 color, float peak)
+{
+  color = BT709_To_BT2020(color);
+  color = NeutwoTonemapPerChannel(color, peak);
+  return BT2020_To_BT709(color);
+}
+
+float3 SampleLUTWithNeutwoMaxChannelScale(Texture3D<float4> lut, SamplerState samplerState, float3 inputColor, uint lutSize, float peak)
+{
+  // DH2's tonemap/color-grade path is linear. Keep both the compression and the inverse expansion in linear space.
+  float maxChannel = max(max(abs(inputColor.r), abs(inputColor.g)), abs(inputColor.b));
+  float newMaxChannel = NeutwoTonemap(maxChannel, peak);
+  float lutScale = maxChannel != 0 ? (newMaxChannel / maxChannel) : 1.f;
+
+  float3 lutInputColor = inputColor * lutScale;
+  //float3 lutInputColor = saturate(inputColor);
+
+  float3 lutOutputColor = SampleLUT(lut, samplerState, lutInputColor, lutSize);
+
+  //return lutOutputColor;
+
+  // Preserve LUT black lift instead of scaling it up with the HDR range inversion.
+  return safeDivision(lutOutputColor, lutScale, 0);
+}
 
 float3 applyUserTonemap(float3 inputColor)
 {
@@ -112,7 +151,7 @@ float3 applyUserTonemap(float3 inputColor)
     //float3 gammaCorrectedColor = renodx::color::correct::GammaSafe(inputColor);
     const float paperWhite = LumaSettings.GamePaperWhiteNits / sRGB_WhiteLevelNits;
     const float peakWhite = LumaSettings.PeakWhiteNits / sRGB_WhiteLevelNits;
-		return Tonemap_DICE(inputColor * paperWhite, peakWhite) / paperWhite;
+    return NeutwoTonemapPerChannelBT2020(inputColor * paperWhite, peakWhite) / paperWhite;
     //tonemapped = renodx::color::correct::GammaSafe(tonemapped, true);
   }
   else
@@ -157,6 +196,41 @@ float3 vanillaTonemap_Inverse(float3 inputColor, float4 tonemappingCoeffs0 /*= c
         outputColor.b = outputColor1.b;
     return outputColor;
 }
+
+  float vanillaTonemap_Eval(float inputColor, float4 tonemappingCoeffs)
+  {
+    return ((tonemappingCoeffs.x * inputColor) + tonemappingCoeffs.z) / ((tonemappingCoeffs.y * inputColor) + tonemappingCoeffs.w);
+  }
+
+  float vanillaTonemap_Derivative(float inputColor, float4 tonemappingCoeffs)
+  {
+    float denominator = (tonemappingCoeffs.y * inputColor) + tonemappingCoeffs.w;
+    return ((tonemappingCoeffs.x * tonemappingCoeffs.w) - (tonemappingCoeffs.y * tonemappingCoeffs.z)) / (denominator * denominator);
+  }
+
+  float vanillaTonemap_ExtendedChannel(float inputColor, float4 tonemappingCoeffs0, float4 tonemappingCoeffs1)
+  {
+    // The vanilla rational curve has no finite mathematical inflection point, so use the engine's
+    // low/high coefficient transition as the effective knee and extend the high side by its tangent.
+    float extensionPoint = cb_postfx_tonemapping_tonemappingparms.x;
+
+    if (inputColor < extensionPoint)
+    {
+      return vanillaTonemap_Eval(inputColor, tonemappingCoeffs0);
+    }
+
+    float pivotValue = vanillaTonemap_Eval(extensionPoint, tonemappingCoeffs1);
+    float pivotSlope = vanillaTonemap_Derivative(extensionPoint, tonemappingCoeffs1);
+    return pivotValue + (inputColor - extensionPoint) * pivotSlope;
+  }
+
+  float3 vanillaTonemap_Extended(float3 inputColor, float4 tonemappingCoeffs0 /*= cb_postfx_tonemapping_tonemappingcoeffs0*/, float4 tonemappingCoeffs1 /*= cb_postfx_tonemapping_tonemappingcoeffs1*/)
+  {
+    return float3(
+      vanillaTonemap_ExtendedChannel(inputColor.r, tonemappingCoeffs0, tonemappingCoeffs1),
+      vanillaTonemap_ExtendedChannel(inputColor.g, tonemappingCoeffs0, tonemappingCoeffs1),
+      vanillaTonemap_ExtendedChannel(inputColor.b, tonemappingCoeffs0, tonemappingCoeffs1));
+  }
 
 // This doesn't seem to make much sense given that TAA was running before tonemapping and storing its history on a linear (R11G11B10F) texture.
 // My guess is that they first wrote TAA on a R8G8B8A8 UNORM texture, and hence applied gamma and tonemap to it, and then converted to storing it in linear space and forgot about it.
@@ -221,12 +295,7 @@ void main(
   {
     r1.xy = cb_resolutionscale.xy * v0.xy;
     r1.z = cmp(0 < cb_postfx_lensdirt_usedefault.x);
-    
-    if (lensDirtStrength == 0)
-    {
-      r1.z = false; // skip dirty lens effect
-    }
-    
+
     if (r1.z != 0)
     {
       r1.zw = cb_subpixeloffset.xy + v0.xy;
@@ -237,7 +306,7 @@ void main(
       r3.xyz = ro_postfx_bloom_lensdirt_from.SampleLevel(smp_linearclamp_s, r1.zw, 0).xyz;
       r4.xyz = ro_postfx_bloom_lensdirt_to.SampleLevel(smp_linearclamp_s, r1.zw, 0).xyz;
       r4.xyz = r4.xyz + -r3.xyz;
-      r2.xyz = cb_postfx_bloom_lensdirt_blendweight * r4.xyz * lensDirtStrength + r3.xyz;
+      r2.xyz = cb_postfx_bloom_lensdirt_blendweight * r4.xyz + r3.xyz;
     }
     r1.z = cmp(0 < cb_env_bloom_veil_strength);
     if (r1.z != 0)
@@ -246,19 +315,13 @@ void main(
       r4.xyz = r3.xyz * r0.www;
       r3.xyz = cb_usecompressedhdrbuffers ? r4.xyz : r3.xyz;
 
-      float3 vanillaBloom = cb_env_bloom_veil_strength * r3.xyz;
-      r3.xyz = bloomStrength * cb_env_bloom_veil_strength * r3.xyz;  // bloom strength
-
-      if (bloomStrength != 1)
-      {
-        float vanillaBloomLum = GetLuminance(vanillaBloom);
-        r3.xyz = lerp(vanillaBloom.rgb, r3.xyz, saturate(vanillaBloomLum/0.18f));
-      }
-      
-      r4.xyz = cb_postfx_bloom_lensdirt_strength * r2.xyz * lensDirtStrength; // lens dirt
+      r3.xyz = cb_env_bloom_veil_strength * r3.xyz;
+      r4.xyz = cb_postfx_bloom_lensdirt_strength * r2.xyz * LumaSettings.GameSettings.LensDirtStrength;
       r3.xyz = r4.xyz * r3.xyz + r3.xyz;
-      r0.xyz = r3.xyz + r0.xyz;
+      r0.xyz = r3.xyz * LumaSettings.GameSettings.BloomStrength + r0.xyz;
     }
+    // Lens dirt also modulates the flare texture below. Scale it separately from the bloom modulation.
+    r2.xyz *= LumaSettings.GameSettings.LensDirtStrength;
     r1.zw = float2(-0.5,-0.5) + v0.xy;
     r2.w = cb_viewmatrix._m02 + cb_viewmatrix._m21;
     sincos(r2.w, r3.x, r4.x);
@@ -317,7 +380,7 @@ void main(
     r3.xyz = r1.xyz * r0.www;
     r1.xyz = cb_usecompressedhdrbuffers ? r3.xyz : r1.xyz;
     r2.xyz = r2.xyz * float3(0.800000012,0.800000012,0.800000012) + float3(0.200000003,0.200000003,0.200000003);
-    r0.xyz = r1.xyz * r2.xyz + r0.xyz;
+    r0.xyz = r1.xyz * r2.xyz * LumaSettings.GameSettings.LensFlareStrength + r0.xyz;
   }
   r0.xyz = v0.zzz * r0.xyz; // auto exposure
   float3 untonemapped = r0.xyz;
@@ -332,24 +395,11 @@ void main(
 #endif
 
   float3 outputColor;
-  float3 vanillaTonemap_ = vanillaTonemap(untonemapped, tonemappingCoeffs0, tonemappingCoeffs1); // TODO: remove _
-  
-#if 0 // apply color grading to vanillaTonemap so blending doesn't break sliders
-  //case: if (LumaSettings.DisplayMode >= 1)
-  float3 adjustedVanillaTonemap = renodx::color::grade::UserColorGrading(
-        vanillaTonemap_,
-        injectedData.colorGradeExposure,
-        1.f,                                // highlight only applies to HDR color
-        injectedData.colorGradeShadows,
-        injectedData.colorGradeContrast,
-        injectedData.colorGradeSaturation,
-        injectedData.colorGradeBlowout);
-#else
-  float3 adjustedVanillaTonemap = vanillaTonemap_;
-#endif
   
   if (LumaSettings.DisplayMode == 1) // HDR / DICE
   {
+    float3 extendedVanillaTonemap = vanillaTonemap_Extended(untonemapped, tonemappingCoeffs0, tonemappingCoeffs1);
+
 #if 0 // make HDR tonemap resemble SDR tonemap to facilitate better blending
     untonemapped = renodx::color::grade::UserColorGrading(
         untonemapped,
@@ -360,46 +410,12 @@ void main(
         injectedData.colorGradeSaturation * 1.1f,
         injectedData.colorGradeBlowout,
         injectedData.toneMapHueCorrection,
-        vanillaTonemap_);
+        extendedVanillaTonemap);
 #endif
 
-    const float SDRTMMidGrayOut = MidGray; 
-    const float SDRTMMidGrayIn = GetLuminance(vanillaTonemap_Inverse(SDRTMMidGrayOut, tonemappingCoeffs0, tonemappingCoeffs1));
-    float SDRTMMidGrayRatio = SDRTMMidGrayOut / SDRTMMidGrayIn;
-    untonemapped *= SDRTMMidGrayRatio;
-    
-    // blend HDR with SDR
-    float3 negHDR = min(0, untonemapped); // save WCG
-    untonemapped = lerp(vanillaTonemap_, max(0, untonemapped), saturate(vanillaTonemap_ / MidGray));
-    untonemapped += negHDR; // add back WCG
-    
-    LUTExtrapolationData extrapolationData = DefaultLUTExtrapolationData();
-    extrapolationData.inputColor = untonemapped.rgb;
-    extrapolationData.vanillaInputColor = vanillaTonemap_;
-
-    LUTExtrapolationSettings extrapolationSettings = DefaultLUTExtrapolationSettings();
-    extrapolationSettings.enableExtrapolation = bool(ENABLE_LUT_EXTRAPOLATION);
-    extrapolationSettings.extrapolationQuality = LUT_EXTRAPOLATION_QUALITY;
-    extrapolationSettings.lutSize = 32;
-    
-    // DH2 is all linear
-    extrapolationSettings.inputLinear = true;
-    extrapolationSettings.lutInputLinear = true;
-    extrapolationSettings.lutOutputLinear = true;
-    extrapolationSettings.outputLinear = true;
-
-    // Intermediary gamma correction through LUT
-    extrapolationSettings.transferFunctionIn = LUT_EXTRAPOLATION_TRANSFER_FUNCTION_GAMMA_2_2;
-    extrapolationSettings.transferFunctionOut = LUT_EXTRAPOLATION_TRANSFER_FUNCTION_GAMMA_2_2;
-
-    // apply extrapolated LUT to HDR
-    float3 hdrLUTOutput = SampleLUTWithExtrapolation(
-        ro_tonemapping_finalcolorcube,        // LUT
-        smp_linearclamp_s,                    // samplerState
-        extrapolationData,
-        extrapolationSettings
-    );
-    hdrLUTOutput = lerp(untonemapped, hdrLUTOutput, colorGradeLUTStrength);
+      // Apply the LUT to the output of the extended vanilla tonemap in linear space.
+      float3 hdrLUTOutput = SampleLUTWithNeutwoMaxChannelScale(ro_tonemapping_finalcolorcube, smp_linearclamp_s, extendedVanillaTonemap, 32u, 1.0);
+      hdrLUTOutput = lerp(extendedVanillaTonemap, hdrLUTOutput, colorGradeLUTStrength);
 
     // tonemap HDR Color
     float3 hdrColor = applyUserTonemap(hdrLUTOutput);
@@ -426,6 +442,22 @@ void main(
   }
   else
   {
+    float3 vanillaTonemap_ = vanillaTonemap(untonemapped, tonemappingCoeffs0, tonemappingCoeffs1); // TODO: remove _
+
+  #if 0 // apply color grading to vanillaTonemap so blending doesn't break sliders
+    //case: if (LumaSettings.DisplayMode >= 1)
+    float3 adjustedVanillaTonemap = renodx::color::grade::UserColorGrading(
+        vanillaTonemap_,
+        injectedData.colorGradeExposure,
+        1.f,                                // highlight only applies to HDR color
+        injectedData.colorGradeShadows,
+        injectedData.colorGradeContrast,
+        injectedData.colorGradeSaturation,
+        injectedData.colorGradeBlowout);
+  #else
+    float3 adjustedVanillaTonemap = vanillaTonemap_;
+  #endif
+
     float3 sdrColor = SampleLUT(ro_tonemapping_finalcolorcube, smp_linearclamp_s, adjustedVanillaTonemap, 32u);
     sdrColor = lerp(adjustedVanillaTonemap, sdrColor, colorGradeLUTStrength);
     outputColor = sdrColor;
@@ -435,6 +467,10 @@ void main(
   o0.xyz = safePow(r0.xyz, cb_env_tonemapping_gamma_brightness.x); //TODO: apply this b4 TM?
   o0.w = 1;
 
+#if DEVELOPMENT && 0 // Debug: identity check for the brightness/gamma CB.
+  // At the in-game default brightness (17) these components are 1 and the
+  // tonemapper works. Moving brightness off default makes them != 1, so these
+  // fills painted the whole 3D frame solid green/red (intro video was fine).
   if (cb_env_tonemapping_gamma_brightness.y != 1)
   {
     o0.xyz = float3(0, 1, 0);
@@ -443,10 +479,12 @@ void main(
   {
     o0.xyz = float3(1, 0, 0);
   }
-#if !FIX_RAISED_BLACKS && 0 // Test raised blacks. Happens always
+#endif
+#if DEVELOPMENT && !FIX_RAISED_BLACKS && 0 // Test raised blacks. Happens always
   if (cb_postfx_tonemapping_tonemappingcoeffs0.z != 0)
   {
     o0.xyz = float3(1, 0, 1);
   }
 #endif
+
 }

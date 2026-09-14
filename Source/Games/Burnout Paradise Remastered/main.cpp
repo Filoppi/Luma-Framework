@@ -1,6 +1,6 @@
 #define GAME_BURNOUT_PARADISE_REMASTERED 1
 
-#define ENABLE_ORIGINAL_SHADERS_MEMORY_EDITS 1
+#define LUMA_PATCH_BYTECODE_SYNC 1
 #define ENABLE_BLOOM 1
 
 #include "..\..\Core\core.hpp"
@@ -163,7 +163,7 @@ public:
    // Add a saturate on opaque/transparent materials
    // Without this, occasionally you get some white pixels for one frame (actually this still doesn't fix it, but it won't hurt to have, the actual fix seems to be in skipping bloom on pixels with INF values)
    // TODO: the white pixels seemengly still appear sometimes when driving around...
-   std::unique_ptr<std::byte[]> ModifyShaderByteCode(const std::byte* code, size_t& size, reshade::api::pipeline_subobject_type type, uint64_t shader_hash, const std::byte* shader_object, size_t shader_object_size) override
+   std::unique_ptr<std::byte[]> PatchShaderBytecodeSync(const std::byte* code, size_t& size, reshade::api::pipeline_subobject_type type, uint64_t shader_hash, const std::byte* shader_object, size_t shader_object_size) override
    {
       if (type != reshade::api::pipeline_subobject_type::pixel_shader)
          return nullptr;

@@ -22,7 +22,7 @@ bool ResolveGBFRAddresses()
    g_resolved_addresses.camera_index = base + kCameraIndex_RVA;
    g_resolved_addresses.camera_table = base + kCameraTable_RVA;
    g_resolved_addresses.taa_settings_global = base + kTAASettingsGlobal_RVA;
-#ifdef V2_0_3
+#if defined(V2_0_3) || defined(V2_0_4) || defined(V2_0_5)
    g_resolved_addresses.taa_running_flag = base + kTAARunningFlag_RVA;
    g_resolved_addresses.taa_render_scale_flag_ptr = base + kTAARenderScaleFlagPointer_RVA;
 #endif
@@ -77,8 +77,8 @@ bool TryReadCameraJitter(float2& out_jitter)
 
 void OnJitterWrite(safetyhook::Context& ctx)
 {
-#ifdef V2_0_3
-   // v2.0.3: Jitter stored in TAA component table at [rcx + 8*(phase&0x3F) + 0x28]
+#if defined(V2_0_3) || defined(V2_0_4) || defined(V2_0_5)
+   // v2.0.3+: Jitter stored in TAA component table at [rcx + 8*(phase&0x3F) + 0x28]
    // ctx.rcx = TemporalAntiAliasingComponent*, phase counter is global
    const uint8_t phase = *reinterpret_cast<const uint8_t*>(g_resolved_addresses.jitter_phase_counter);
    const uintptr_t jit_addr = ctx.rcx + 8 * (phase & 0x3F) + 0x28;
@@ -94,7 +94,7 @@ void OnJitterWrite(safetyhook::Context& ctx)
    g_hook_globals.table_jitter_valid.store(true, std::memory_order_release);
 #ifdef PATCH_JITTER_TABLE_INIT
    // Capture phase index for the init hook — source differs per version.
-#ifdef V2_0_3
+#if defined(V2_0_3) || defined(V2_0_4) || defined(V2_0_5)
    const uint8_t phase_idx = *reinterpret_cast<const uint8_t*>(g_resolved_addresses.jitter_phase_counter);
 #else
    const uint8_t phase_idx = *reinterpret_cast<const uint8_t*>(ctx.rsi + kTAAJitterPhaseIndexOffset);
@@ -177,8 +177,8 @@ bool IsTAARunningThisFrame()
 
    const bool last_known = s_last_taa_running.load(std::memory_order_acquire);
 
-#ifdef V2_0_3
-   // v2.0.3: qword_147371338 (RVA 0x7371338) is a POINTER to the TAA running flag byte.
+#if defined(V2_0_3) || defined(V2_0_4) || defined(V2_0_5)
+   // v2.0.3+: qword_147371338 is a POINTER to the TAA running flag byte.
    // Verified in TemporalAntiAliasingComponent::trans (RVA 0x215F9C0):
    //   mov rax, cs:qword_147371338  (RVA 0x7371338) — load pointer
    //   cmp byte ptr [rax], 0        — read byte at target address
@@ -227,8 +227,8 @@ bool IsTAARunningThisFrame()
 
 bool TryGetSettingsObject(uintptr_t& out_settings_obj)
 {
-#ifdef V2_0_3
-   // v2.0.3: kTAASettingsGlobal_RVA is a 16-byte xmmword buffer, not a pointer.
+#if defined(V2_0_3) || defined(V2_0_4) || defined(V2_0_5)
+   // v2.0.3+: kTAASettingsGlobal_RVA is a 16-byte xmmword buffer, not a pointer.
    // No settings object to dereference.
    out_settings_obj = 0;
    return false;

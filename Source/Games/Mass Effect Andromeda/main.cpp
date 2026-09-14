@@ -9,8 +9,7 @@
 #define DISABLE_FOCUS_LOSS_SUPPRESSION 1
 #define AVOID_INPUT_LOSS 1
 
-#define ENABLE_NGX 1
-#define ENABLE_FIDELITY_SK 1 // FSR 3 Native AA as a vendor-neutral alternative to DLAA (selectable in core's "Super Resolution" combo)
+// FSR 3 Native AA as a vendor-neutral alternative to DLAA (selectable in core's "Super Resolution" combo)
 #define GEOMETRY_SHADER_SUPPORT 0
 #define ENABLE_SMAA 1 // replaces the game's FXAA pass (FXAA AA mode) with SMAA
 // The dialogue/cutscene DOF-variant resolve is run-native-then-override via original_draw_dispatch_func,

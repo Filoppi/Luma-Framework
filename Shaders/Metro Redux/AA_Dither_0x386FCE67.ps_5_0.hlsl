@@ -8,6 +8,8 @@
 #include "../Includes/ColorGradingLUT.hlsl"
 #include "../Includes/FXAA.hlsl"
 #include "./renodx/effects.hlsl"
+#include "../Includes/Reinhard.hlsl"
+#include "../Includes/DICE.hlsl"
 
 // Enables FXAA (Luma's improved implementation)
 #ifndef ENABLE_FXAA
@@ -132,7 +134,15 @@ void main(
 
   peak = peak / diffuse_white;
 
-  float3 tonemapped_bt2020 = NeutwoPerChannel(untonemapped_bt2020, peak);
+  //float3 tonemapped_bt2020 = NeutwoPerChannel(untonemapped_bt2020, peak);
+  float3 tonemapped_bt2020 = Reinhard::ReinhardPiecewise(untonemapped_bt2020, peak, 0.22f);
+
+  // DICESettings diceSettings = DefaultDICESettings();
+  // diceSettings.InOutColorSpace = CS_BT2020;
+  // diceSettings.Type = DICE_TYPE_BY_CHANNEL_PQ;
+  // diceSettings.ShoulderStart = 0.22f;
+  // float3 tonemapped_bt2020 = DICETonemap(untonemapped_bt2020, peak, diceSettings);
+
   float3 tonemapped_bt709 = BT2020_To_BT709(tonemapped_bt2020);
 
   tonemapped_bt709 = renodx::effects::ApplyFilmGrain(tonemapped_bt709, uv, LumaSettings.GameSettings.custom_random, LumaSettings.GameSettings.custom_film_grain_strength * 0.03f);

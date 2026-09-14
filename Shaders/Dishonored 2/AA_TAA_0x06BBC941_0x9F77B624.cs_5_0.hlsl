@@ -99,16 +99,18 @@ RWTexture2D<float4> rw_taaresult : register(u1);
 
 float3 pre_tonemap(float3 color, const float exposure, const float factor)
 {
-    color = cb_usecompressedhdrbuffers ? color * factor : color;
-    color = max(0.0, color);
-    color = min(cb_env_tonemapping_white_level, color);
-    return color * exposure;
+    //color = cb_usecompressedhdrbuffers != 0 ? color * factor : color;
+    //color = max(0.0, color);
+    //color = min(cb_env_tonemapping_white_level, color);
+    //return color * exposure;
+
+    return color;
 }
 
 float3 post_tonemap(float3 color, const float exposure, const float factor)
 {
-    color *= rcp(exposure);
-    color = cb_usecompressedhdrbuffers ? color * rcp(factor) : color;
+    //color *= rcp(exposure);
+    //color = cb_usecompressedhdrbuffers != 0 ? color * rcp(factor) : color;
     return color;
 }
 

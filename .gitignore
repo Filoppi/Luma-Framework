@@ -40,6 +40,10 @@
 *.vcxproj.user
 Source/Games/**/vcpkg_installed/**
 
+# JetBrains
+.idea/
+*.DotSettings.user
+
 # Compiled, Disassembled and Dumped Shaders
 *.cso
 **/Dump*/**.asm
@@ -57,3 +61,9 @@ deploy-*.ps1
 *.log
 
 # Forced not ignored (e.g. !./Source/Core/Luma.vcxproj)
+
+# Visual Studio per-user files
+*.vcxproj.user
+
+# Shader disassembly dumps
+*.asm

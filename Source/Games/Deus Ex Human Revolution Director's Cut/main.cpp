@@ -3,7 +3,7 @@
 // Note: if we dropped support for the Gold Filter Restoration mod, we could remove this too
 #define ENABLE_GAME_PIPELINE_STATE_READBACK 1
 
-#define ENABLE_ORIGINAL_SHADERS_MEMORY_EDITS 1
+#define LUMA_PATCH_BYTECODE_SYNC 1
 
 #define ENABLE_SMAA 1
 
@@ -352,7 +352,7 @@ public:
    // All materials color/lighting shaders in this game have a saturate at the end, that always gets bundled with a multiply+add instruction.
    // There's also luminance calculations for the alpha buffer, presumably for FXAA (in case it was used), or bloom (contained on alpha), but they were based of BT.601 instead of BT.709.
    // Given that there's possibly hundreds of them, we live patch them.
-   std::unique_ptr<std::byte[]> ModifyShaderByteCode(const std::byte* code, size_t& size, reshade::api::pipeline_subobject_type type, uint64_t shader_hash, const std::byte* shader_object, size_t shader_object_size) override
+   std::unique_ptr<std::byte[]> PatchShaderBytecodeSync(const std::byte* code, size_t& size, reshade::api::pipeline_subobject_type type, uint64_t shader_hash, const std::byte* shader_object, size_t shader_object_size) override
    {
       if (type != reshade::api::pipeline_subobject_type::pixel_shader) return nullptr;
 

@@ -11,8 +11,6 @@
 // invisible and blocks the loader (ReShade times out the addon load -> error 1114).
 #define DISABLE_AUTO_DEBUGGER 1
 
-#define ENABLE_NGX 0
-#define ENABLE_FIDELITY_SK 0
 #define GEOMETRY_SHADER_SUPPORT 0
 #define ENABLE_SMAA 1
 

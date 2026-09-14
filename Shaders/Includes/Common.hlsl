@@ -39,6 +39,8 @@ cbuffer LumaData : register(LUMA_DATA_CB_INDEX)
     // This can be used instead of "CV_ScreenSize" in passes where "CV_ScreenSize" would have been
     // replaced with 1 because DLSS SR upscaled the image earlier in the rendering.
     float2 PreviousRenderResolutionScale;
+    // 1 when the current pass is in the scaling zone (SR upscaled early, pass still at render-res).
+    uint RenderScaleActive;
 
     CB::LumaGameData GameData;
   } LumaData : packoffset(c0);

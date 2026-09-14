@@ -8,11 +8,10 @@
 #define ENABLE_DRAW_DISPATCH_DATA_CACHE 1
 #define ENABLE_POST_DRAW_DISPATCH_CALLBACK 1
 
-#define ENABLE_NGX 1
-#define ENABLE_FIDELITY_SK 1  // This is to force feature level 11.1
+// FSR is enabled to force feature level 11.1
 #define DEBUG_LOG 0
 
-//#define ENABLE_ORIGINAL_SHADERS_MEMORY_EDITS 1
+//#define LUMA_PATCH_BYTECODE_SYNC 1
 
 #include "..\..\Core\core.hpp"
 

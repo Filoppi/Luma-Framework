@@ -5,9 +5,7 @@
 #define GAME_TEMPLATE 1
 
 // Define all the global "core" defines before including its files:
-// Enable these to be able to use DLSS's or FSR's code
-#define ENABLE_NGX 0
-#define ENABLE_FIDELITY_SK 0
+// DLSS/FSR are toggled via the "Luma Properties" page in the project properties (UseLumaNGX/UseLumaFSR).
 #define GEOMETRY_SHADER_SUPPORT 0
 
 // Instead of "manually" including the "core" library, we simply include its main code file (which is a header).

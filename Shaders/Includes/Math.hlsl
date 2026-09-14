@@ -22,6 +22,33 @@ static const float3x3 IdentityMatrix = float3x3(
     0.0f, 1.0f, 0.0f,
     0.0f, 0.0f, 1.0f);
 
+// HLSL 2021 added select(), but DX11 shaders are compiled with FXC/HLSL 2015.
+// Keep these overloads out of DXC builds whose language version already provides the intrinsic.
+#if !defined(__HLSL_VERSION) || __HLSL_VERSION < 2021
+float select(bool condition, float trueValue, float falseValue)
+{
+  return condition ? trueValue : falseValue;
+}
+float2 select(bool2 condition, float2 trueValue, float2 falseValue)
+{
+  return float2(condition.x ? trueValue.x : falseValue.x,
+                condition.y ? trueValue.y : falseValue.y);
+}
+float3 select(bool3 condition, float3 trueValue, float3 falseValue)
+{
+  return float3(condition.x ? trueValue.x : falseValue.x,
+                condition.y ? trueValue.y : falseValue.y,
+                condition.z ? trueValue.z : falseValue.z);
+}
+float4 select(bool4 condition, float4 trueValue, float4 falseValue)
+{
+  return float4(condition.x ? trueValue.x : falseValue.x,
+                condition.y ? trueValue.y : falseValue.y,
+                condition.z ? trueValue.z : falseValue.z,
+                condition.w ? trueValue.w : falseValue.w);
+}
+#endif
+
 float average(float3 color)
 {
 	return (color.x + color.y + color.z) / 3.f;
@@ -268,11 +295,11 @@ bool cubeCoordinatesIntersection(out float3 intersection, float3 coordinates, fl
 // Mirror + repeat
 float2 MirrorUV(float2 uv)
 {
-#if 1
+#if 0
 	float2 modded = fmod( uv, 2.0 );
 	modded += ( modded < 0 ) ? 2.0 : 0.0; // Ensure positive values
   return ( modded <= 1.0 ) ? modded : ( 2.0 - modded );
-#else // TODO: cheaper version?
+#else // Cheaper version
   return 1.0 - abs(frac(uv * 0.5) * 2.0 - 1.0);
 #endif
 }

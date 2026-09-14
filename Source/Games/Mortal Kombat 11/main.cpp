@@ -1,8 +1,6 @@
 
 #define GAME_MORTAL_KOMBAT_11 1
 
-#define ENABLE_NGX 1
-
 #include "..\..\Core\core.hpp"
 
 // TODO: Fix this globaly? Define NOMINMAX before including windows.h.
