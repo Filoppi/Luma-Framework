@@ -3,5 +3,12 @@
   <ItemGroup>
     <ClCompile Include="main.cpp" />
     <ClCompile Include="..\..\Core\unity_build.cpp" />
+    <ClCompile Include="includes\safetyhook.cpp" />
+    <ClCompile Include="includes\Zydis.c" />
+  </ItemGroup>
+  <ItemGroup>
+    <ClInclude Include="includes\cbuffers.h" />
+    <ClInclude Include="includes\safetyhook.hpp" />
+    <ClInclude Include="includes\Zydis.h" />
   </ItemGroup>
 </Project>

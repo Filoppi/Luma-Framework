@@ -931,6 +931,7 @@ float3 EmulateShadowOffset(float3 Color, float3 Offset, bool LinearInOut = true,
 		alpha = lerp(alpha, 1.0, saturate((abs(Offset) - center) * range));
 
 	Color += Offset * alpha;
+
 	return Color;
 }
 
@@ -940,10 +941,18 @@ float3 EmulateShadowOffset(float3 Color, float3 Offset, bool LinearInOut = true,
 // if we start from a negative red value (which would expand the gamut on blue/green),
 // we don't want to further push the negative red value out (lower it),
 // but increase it (bring it closer to 0) by dividing it, which will do its job of making the color more red.
-// Do not use this if the scale is "uniform" and meant to simply do brightness scaling, because that should be a normal multiplication.
-float3 MultiplyExtendedGamutColor(float3 Color, float3 Scale)
+// With the "Advanced" flag, we split the tint in scale and rgb ratio (chrominance) so that uniform/greyscale tints would still apply as normal multiplications, without flipping on negative color channels.
+float3 MultiplyExtendedGamutColor(float3 Color, float3 Scale, bool Enabled = true, bool Advanced = false)
 {
-	return (Color >= 0.0 || Scale == 0.0) ? (Color * Scale) : (Color / Scale);
+	if (!Enabled)
+		return Color * Scale;
+	if (!Advanced || any(Scale < 0.0)) // A "Scale" with negative components (very unlikely) could make its average 0, invalidating the formulate below 
+		return float3((Color.x >= 0.0 || Scale.x == 0.0) ? (Color.x * Scale.x) : (Color.x / Scale.x), (Color.y >= 0.0 || Scale.y == 0.0) ? (Color.y * Scale.y) : (Color.y / Scale.y), (Color.z >= 0.0 || Scale.z == 0.0) ? (Color.z * Scale.z) : (Color.z / Scale.z));
+	float neutralScale = dot(Scale, 1.0 / 3.0);
+	float3 chromaScale = neutralScale != 0.0 ? (Scale / neutralScale) : 1.0;
+	Color = float3((Color.x >= 0.0 || Scale.x == 0.0) ? (Color.x * chromaScale.x) : (Color.x / chromaScale.x), (Color.y >= 0.0 || Scale.y == 0.0) ? (Color.y * chromaScale.y) : (Color.y / chromaScale.y), (Color.z >= 0.0 || Scale.z == 0.0) ? (Color.z * chromaScale.z) : (Color.z / chromaScale.z));
+	Color *= neutralScale;
+	return Color;
 }
 
 #endif // SRC_COLOR_HLSL

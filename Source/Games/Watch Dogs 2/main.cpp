@@ -1,6 +1,5 @@
 #define GAME_WATCH_DOGS_2 1
 
-#define ENABLE_NGX 1
 // Hooking a debugger is forbidden
 #define DISABLE_AUTO_DEBUGGER 1
 #define DEBUG_LOG 0
@@ -10,7 +9,7 @@
 #define AVOID_INPUT_LOSS 1
 #define DISABLE_SWAPCHAIN_FLIP_MODEL 1
 
-#define ENABLE_ORIGINAL_SHADERS_MEMORY_EDITS 1
+#define LUMA_PATCH_BYTECODE_SYNC 1
 
 #include "..\..\Core\core.hpp"
 #include "includes\shader_patches.h"
@@ -430,7 +429,7 @@ public:
 #endif
    }
    
-   std::unique_ptr<std::byte[]> ModifyShaderByteCode(const std::byte* code, size_t& size, reshade::api::pipeline_subobject_type type, uint64_t shader_hash, const std::byte* shader_object, size_t shader_object_size) override
+   std::unique_ptr<std::byte[]> PatchShaderBytecodeSync(const std::byte* code, size_t& size, reshade::api::pipeline_subobject_type type, uint64_t shader_hash, const std::byte* shader_object, size_t shader_object_size) override
    {
       if (type == reshade::api::pipeline_subobject_type::vertex_shader)
       {
@@ -453,16 +452,23 @@ public:
          
          word_t instruction_operand_register; // we don't know register so use wildcard byte pattern
          
+         static constexpr uint32_t luma_data_cb_prev_vrp_register = (offsetof(CB::LumaInstanceData, GameData) + offsetof(CB::LumaGameData, PreviousViewRotProjectionMatrix)) / sizeof(float4);
+         static constexpr uint32_t luma_data_cb_prev_camera_register = (offsetof(CB::LumaInstanceData, GameData) + offsetof(CB::LumaGameData, PreviousCameraPosition)) / sizeof(float4);
+         static constexpr uint32_t luma_data_cb_registers_count = sizeof(CB::LumaInstanceDataPadded) / sizeof(float4);
+
          std::vector<uint8_t> appended_patch = {
             0x00, 0x00, 0x00, 0x09, // length(9)
             0x72, 0x00, 0x10, 0x00, 0x00, 0x00, 0x00, 0x00, //add r0.xyz
             0x46, 0x02, 0x10, 0x00, 0x00, 0x00, 0x00, 0x00, //r0.xyzx
             0x46, 0x82, 0x20, 0x80, 0x41, 0x00, 0x00, 0x00, //-cb__index__.xyzx
-            0x0B, 0x00, 0x00, 0x00, 0x0B, 0x00, 0x00, 0x00, //11[11]
+            static_cast<uint8_t>(luma_data_cbuffer_index), 0x00, 0x00, 0x00, //cb11
+            static_cast<uint8_t>(luma_data_cb_prev_camera_register), 0x00, 0x00, 0x00, //[12] (GameData.PreviousCameraPosition)
          };
          
          std::vector<uint8_t> appended_patch_cb = {
-            0x59, 0x00, 0x00, 0x04, 0x46, 0x8E, 0x20, 0x00, 0x0B, 0x00, 0x00, 0x00, 0x0C, 0x00, 0x00, 0x00, //dcl_constantbuffer cb11[16], immediateIndexed
+            0x59, 0x00, 0x00, 0x04, 0x46, 0x8E, 0x20, 0x00,
+            static_cast<uint8_t>(luma_data_cbuffer_index), 0x00, 0x00, 0x00,
+            static_cast<uint8_t>(luma_data_cb_registers_count), 0x00, 0x00, 0x00, //dcl_constantbuffer cb11[17], immediateIndexed
          };
          
          std::vector<std::byte*> matches;
@@ -507,23 +513,23 @@ public:
                std::memcpy(new_code.get() + appended_patch_cb.size() + insert_pos, appended_patch.data(), appended_patch.size());
                // Copy the rest (including the return instruction)
                std::memcpy(new_code.get() + appended_patch_cb.size() + insert_pos + appended_patch.size(), code + insert_pos, size - insert_pos);
+
+               const uint8_t cb_prev_vrp_row_0[8] = {
+                  static_cast<uint8_t>(luma_data_cbuffer_index), 0x00, 0x00, 0x00,   // cb11
+                  static_cast<uint8_t>(luma_data_cb_prev_vrp_register + 0), 0x00, 0x00, 0x00
+               };
+               const uint8_t cb_prev_vrp_row_1[8] = {
+                  static_cast<uint8_t>(luma_data_cbuffer_index), 0x00, 0x00, 0x00,   // cb11
+                  static_cast<uint8_t>(luma_data_cb_prev_vrp_register + 1), 0x00, 0x00, 0x00
+               };
+               const uint8_t cb_prev_vrp_row_3[8] = {
+                  static_cast<uint8_t>(luma_data_cbuffer_index), 0x00, 0x00, 0x00,   // cb11
+                  static_cast<uint8_t>(luma_data_cb_prev_vrp_register + 3), 0x00, 0x00, 0x00
+               };
                
-               static const uint8_t cb_07_bytes[8] = {
-                  0x0B, 0x00, 0x00, 0x00,   // cb11
-                  0x07, 0x00, 0x00, 0x00    // [7]
-               };
-               static const uint8_t cb_08_bytes[8] = {
-                  0x0B, 0x00, 0x00, 0x00,   // cb11
-                  0x08, 0x00, 0x00, 0x00    // [8]
-               };
-               static const uint8_t cb_10_bytes[8] = {
-                  0x0B, 0x00, 0x00, 0x00,   // cb11
-                  0x0A, 0x00, 0x00, 0x00    // [10]
-               };
-               
-               std::memcpy(new_code.get() + appended_patch_cb.size() + insert_pos + appended_patch.size() + 44, cb_07_bytes, 8);
-               std::memcpy(new_code.get() + appended_patch_cb.size() + insert_pos + appended_patch.size() + 76, cb_08_bytes, 8);
-               std::memcpy(new_code.get() + appended_patch_cb.size() + insert_pos + appended_patch.size() + 108, cb_10_bytes, 8);
+               std::memcpy(new_code.get() + appended_patch_cb.size() + insert_pos + appended_patch.size() + 44, cb_prev_vrp_row_0, 8);
+               std::memcpy(new_code.get() + appended_patch_cb.size() + insert_pos + appended_patch.size() + 76, cb_prev_vrp_row_1, 8);
+               std::memcpy(new_code.get() + appended_patch_cb.size() + insert_pos + appended_patch.size() + 108, cb_prev_vrp_row_3, 8);
                
                size += appended_patch.size() + appended_patch_cb.size();
             }

@@ -1079,7 +1079,7 @@ static void RunLatePostProcessPasses(
          settings_data.render_width = static_cast<uint>(device_data.render_resolution.x);
          settings_data.render_height = static_cast<uint>(device_data.render_resolution.y);
          settings_data.dynamic_resolution = false;
-         settings_data.hdr = cb_luma_global_settings.DisplayMode == DisplayModeType::HDR ? true : tonemap_after_taa;
+         settings_data.hdr = tonemap_after_taa ? true : cb_luma_global_settings.DisplayMode == DisplayModeType::HDR;
          settings_data.auto_exposure = true;
          settings_data.inverted_depth = false;
          // Granblue MVs are unjittered (g_ProjectionOffset cancels jitter in the PS)
@@ -1090,10 +1090,12 @@ static void RunLatePostProcessPasses(
          sr_implementations[device_data.sr_type]->UpdateSettings(sr_instance_data, native_device_context, settings_data);
       }
 
-      // Prepare SR draw data
-      {
-         bool reset_sr = device_data.force_reset_sr || game_device_data.output_changed;
-         device_data.force_reset_sr = false;
+       // Prepare SR draw data
+       {
+           // v2.0.3+: check the dedicated TAA reset flag via TryReadTAAResetFlag (SEH-safe)
+           bool taa_reset_flag = TryReadTAAResetFlag();
+          bool reset_sr = device_data.force_reset_sr || game_device_data.output_changed || taa_reset_flag;
+          device_data.force_reset_sr = false;
          float jitter_x = game_device_data.table_jitter.x;
          float jitter_y = game_device_data.table_jitter.y;
 #if TEST || DEVELOPMENT

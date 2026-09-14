@@ -1,7 +1,5 @@
 #define GAME_GREEDFALL 1
 
-#define ENABLE_NGX 1
-
 #include "..\..\Core\core.hpp"
 
 namespace

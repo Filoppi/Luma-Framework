@@ -19,6 +19,8 @@
 // Enable to stop "You can now attach the debugger" popup.
 #define DISABLE_AUTO_DEBUGGER 0
 
+// DLSS/FSR are toggled via the "Luma Properties" page in the project properties (UseLumaNGX/UseLumaFSR).
+
 // Instead of "manually" including the "core" library, we simply include its main code file (which is a header).
 // The library in itself is standalone, as in, it compiles fine and could directly be used as a template addon etc if built as dll but,
 // there's a major limitation in how libraries dependencies work by nature, and that is that you can only make
@@ -32,8 +34,6 @@
 //
 // To compile in different modes (e.g. "DEVELOPMENT", "TEST" etc see "global_defines.h").
 #include "..\..\Core\core.hpp"
-
-// For DLSS and FSR support, open the project settings in Visual Studio, go to the Luma tab, and enable their respective libraries. You will then be able to use them.
 
 struct TemplateGameDeviceData final : public GameDeviceData
 {

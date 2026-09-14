@@ -1,8 +1,6 @@
 
 #define GAME_KINGDOM_COME_DELIVERANCE 1
 
-#define ENABLE_NGX 1
-
 #define ENABLE_POST_DRAW_DISPATCH_CALLBACK 1
 
 #include "..\..\Core\core.hpp"

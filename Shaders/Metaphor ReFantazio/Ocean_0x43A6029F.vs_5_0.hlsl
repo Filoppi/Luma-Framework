@@ -1,0 +1,158 @@
+cbuffer GFD_VSCONST_TRANSFORM : register(b1)
+{
+	float4x4 mtxLocalToWorld : packoffset(c0);
+	float4x4 mtxLocalToWorldViewProj : packoffset(c4);
+	float4x4 mtxLocalToWorldViewProjPrev : packoffset(c8);
+	float4x4 mtxModelToLocal : packoffset(c12);
+}
+
+cbuffer GFD_VSCONST_VIEWPROJ : register(b2)
+{
+	float4x4 mtxViewProj : packoffset(c0);
+	float4x4 mtxView : packoffset(c4);
+	float4x4 mtxInvView : packoffset(c8);
+	float3 eyePosition : packoffset(c12);
+	float fovy : packoffset(c12.w);
+}
+
+cbuffer GFD_VSCONST_OCEAN_PREV_DATA : register(b5)
+{
+    float4x4 mtxLocalToWorldPrev;
+    float4x4 mtxViewProjPrev;
+	float4 TexShiftPrev;
+}
+
+cbuffer GFD_VSCONST_OCEAN : register(b7)
+{
+	float4x4 mtxInvLocalToWorld : packoffset(c0);
+	float2 TexShift : packoffset(c4);
+	float TCScale : packoffset(c4.z);
+	float WaterWidthScale : packoffset(c4.w);
+	float WaterHeightScale : packoffset(c5);
+	float VertexPitch : packoffset(c5.y);
+}
+
+SamplerState linearWrapSampler_s : register(s1);
+Texture2D<float4> waterTexture : register(t0);
+
+void main(
+	float3 v0 : POSITION0,
+	out float4 o0 : SV_POSITION0,
+	out float3 o1 : NORMAL0,
+	out float4 o2 : TEXCOORD0,
+	out float4 o3 : TEXCOORD1,
+	out float4 o4 : TEXCOORD2,
+	out float4 o5 : TEXCOORD3,
+	out float4 o6 : TEXCOORD4,
+	out float4 o7 : TEXCOORD5)
+{
+	float4 r0,r1,r2,r3,r4;
+	uint4 bitmask, uiDest;
+	float4 fDest;
+
+	r0.xy = float2(-1,1) * TexShift.xy;
+	r1.xyz = v0.xyz;
+	r1.w = 1;
+	r2.x = dot(r1.xyzw, mtxLocalToWorld._m00_m10_m20_m30);
+	r2.z = dot(r1.xyzw, mtxLocalToWorld._m02_m12_m22_m32);
+	r0.zw = TCScale * r2.xz;
+	r2.yw = r0.zw * float2(0.00273437495,0.00273437495) + r0.xy;
+	r0.xy = r0.zw * float2(0.00535937492,0.00535937492) + r0.xy;
+	r3.xyz = waterTexture.SampleLevel(linearWrapSampler_s, r0.xy, 0).xyw;
+	r4.xyz = waterTexture.SampleLevel(linearWrapSampler_s, r2.yw, 0).xyw;
+	r0.x = -0.5 + r4.z;
+	r2.yw = r4.xy * float2(2,2) + float2(-1,-1);
+	r4.xy = r0.zw * float2(0.001953125,0.001953125) + TexShift.xy;
+	r4.xyz = waterTexture.SampleLevel(linearWrapSampler_s, r4.xy, 0).xyw;
+	r0.y = -0.5 + r4.z;
+	r4.xy = r4.xy * float2(2,2) + float2(-1,-1);
+	r2.yw = r2.yw * float2(0.649999976,0.649999976) + r4.xy;
+	r0.x = r0.x * 0.649999976 + r0.y;
+	r4.xy = r0.zw * float2(0.00382812484,0.00382812484) + TexShift.xy;
+	r0.yz = r0.zw * float2(0.00750312489,0.00750312489) + TexShift.xy;
+	r0.yzw = waterTexture.SampleLevel(linearWrapSampler_s, r0.yz, 0).xyw;
+	r4.xyz = waterTexture.SampleLevel(linearWrapSampler_s, r4.xy, 0).xyw;
+	r3.w = -0.5 + r4.z;
+	r4.xy = r4.xy * float2(2,2) + float2(-1,-1);
+	r2.yw = r4.xy * float2(0.422499955,0.422499955) + r2.yw;
+	r0.x = r3.w * 0.422499955 + r0.x;
+	r3.z = -0.5 + r3.z;
+	r3.xy = r3.xy * float2(2,2) + float2(-1,-1);
+	r2.yw = r3.xy * float2(0.274624974,0.274624974) + r2.yw;
+	r0.x = r3.z * 0.274624974 + r0.x;
+	r0.w = -0.5 + r0.w;
+	r0.yz = r0.yz * float2(2,2) + float2(-1,-1);
+	r3.xz = r0.yz * float2(0.178506225,0.178506225) + r2.yw;
+	r0.x = r0.w * 0.178506225 + r0.x;
+	r0.y = dot(r1.xyzw, mtxLocalToWorld._m01_m11_m21_m31);
+	r0.y = r0.x * WaterHeightScale + r0.y;
+	r3.y = 4;
+	r2.y = dot(r3.xyz, r3.xyz);
+	r4.y = rsqrt(r2.y);
+	r4.xz = r4.yy * r3.xz;
+	o1.xyz = float3(1,4,1) * r4.xyz;
+	r0.xz = -r4.xz * WaterWidthScale + r2.xz;
+	r0.w = dot(r1.xyzw, mtxLocalToWorld._m03_m13_m23_m33);
+	r2.x = dot(r0.xyzw, mtxViewProj._m00_m10_m20_m30);
+	r2.y = dot(r0.xyzw, mtxViewProj._m01_m11_m21_m31);
+	r2.z = dot(r0.xyzw, mtxViewProj._m02_m12_m22_m32);
+	r2.w = dot(r0.xyzw, mtxViewProj._m03_m13_m23_m33);
+	o2.xyzw = r0.xyzw;
+	o5.xyz = eyePosition.xyz + -r0.xyz;
+	o4.xy = float2(0.013888889,0.013888889) * r0.xz;
+	o0.xyzw = r2.xyzw;
+	o6.xyzw = r2.xyzw;
+	o3.x = dot(r1.xyzw, mtxModelToLocal._m00_m10_m20_m30);
+	o3.y = dot(r1.xyzw, mtxModelToLocal._m01_m11_m21_m31);
+	o3.z = dot(r1.xyzw, mtxModelToLocal._m02_m12_m22_m32);
+	o3.w = dot(r1.xyzw, mtxModelToLocal._m03_m13_m23_m33);
+	
+	r0.xy = float2(-1,1) * TexShiftPrev.xy;
+	r1.xyz = v0.xyz;
+	r1.w = 1;
+	r2.x = dot(r1.xyzw, mtxLocalToWorldPrev._m00_m10_m20_m30);
+	r2.z = dot(r1.xyzw, mtxLocalToWorldPrev._m02_m12_m22_m32);
+	r0.zw = TCScale * r2.xz;
+	r2.yw = r0.zw * float2(0.00273437495,0.00273437495) + r0.xy;
+	r0.xy = r0.zw * float2(0.00535937492,0.00535937492) + r0.xy;
+	r3.xyz = waterTexture.SampleLevel(linearWrapSampler_s, r0.xy, 0).xyw;
+	r4.xyz = waterTexture.SampleLevel(linearWrapSampler_s, r2.yw, 0).xyw;
+	r0.x = -0.5 + r4.z;
+	r2.yw = r4.xy * float2(2,2) + float2(-1,-1);
+	r4.xy = r0.zw * float2(0.001953125,0.001953125) + TexShiftPrev.xy;
+	r4.xyz = waterTexture.SampleLevel(linearWrapSampler_s, r4.xy, 0).xyw;
+	r0.y = -0.5 + r4.z;
+	r4.xy = r4.xy * float2(2,2) + float2(-1,-1);
+	r2.yw = r2.yw * float2(0.649999976,0.649999976) + r4.xy;
+	r0.x = r0.x * 0.649999976 + r0.y;
+	r4.xy = r0.zw * float2(0.00382812484,0.00382812484) + TexShiftPrev.xy;
+	r0.yz = r0.zw * float2(0.00750312489,0.00750312489) + TexShiftPrev.xy;
+	r0.yzw = waterTexture.SampleLevel(linearWrapSampler_s, r0.yz, 0).xyw;
+	r4.xyz = waterTexture.SampleLevel(linearWrapSampler_s, r4.xy, 0).xyw;
+	r3.w = -0.5 + r4.z;
+	r4.xy = r4.xy * float2(2,2) + float2(-1,-1);
+	r2.yw = r4.xy * float2(0.422499955,0.422499955) + r2.yw;
+	r0.x = r3.w * 0.422499955 + r0.x;
+	r3.z = -0.5 + r3.z;
+	r3.xy = r3.xy * float2(2,2) + float2(-1,-1);
+	r2.yw = r3.xy * float2(0.274624974,0.274624974) + r2.yw;
+	r0.x = r3.z * 0.274624974 + r0.x;
+	r0.w = -0.5 + r0.w;
+	r0.yz = r0.yz * float2(2,2) + float2(-1,-1);
+	r3.xz = r0.yz * float2(0.178506225,0.178506225) + r2.yw;
+	r0.x = r0.w * 0.178506225 + r0.x;
+	r0.y = dot(r1.xyzw, mtxLocalToWorldPrev._m01_m11_m21_m31);
+	r0.y = r0.x * WaterHeightScale + r0.y;
+	r3.y = 4;
+	r2.y = dot(r3.xyz, r3.xyz);
+	r4.y = rsqrt(r2.y);
+	r4.xz = r4.yy * r3.xz;
+	r0.xz = -r4.xz * WaterWidthScale + r2.xz;
+	r0.w = dot(r1.xyzw, mtxLocalToWorldPrev._m03_m13_m23_m33);
+	r2.x = dot(r0.xyzw, mtxViewProjPrev._m00_m10_m20_m30);
+	r2.y = dot(r0.xyzw, mtxViewProjPrev._m01_m11_m21_m31);
+	r2.z = dot(r0.xyzw, mtxViewProjPrev._m02_m12_m22_m32);
+	r2.w = dot(r0.xyzw, mtxViewProjPrev._m03_m13_m23_m33);
+	o7.xyzw = r2.xyzw;
+	return;
+}

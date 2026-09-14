@@ -1,0 +1,140 @@
+version: 1
+steps:
+  # Step 1: Replace the z-computation chain (ishl→iadd→ftoi→and) with
+  #         a mov of the frame counter (cb1[139].y) into z + a new and
+  #         (mask 127,127,31) that matches the 128x128x32 STBN array.
+  #         Family A/B (dither discard / hair): the temporal sample counter
+  #         is summed via iadd; only the trailing AND is rewritten here.
+  - kind: apply_rule
+    name: fix_dither
+    rewrite_mode: replace_range
+    range_start_offset: 3
+    range_end_offset: 3
+    required: false
+    rule:
+      match:
+        - opcode: ishl
+          operands:
+            - type: temp
+            - type: constant_buffer
+              capture: temporal_samples
+            - type: immediate32
+              immediates_u32: [3]
+        - opcode: iadd
+        - opcode: ftoi
+        - opcode: and
+          operands:
+            - type: temp
+              capture: noise_coord_dest
+            - type: temp
+              capture: noise_coord_src
+            - type: immediate32
+              immediates_u32: [63, 63, 63, 0]
+      emit:
+        - opcode: mov
+          operands:
+            - type: temp
+              capture: noise_coord_dest
+              components: {selection_mode: mask, value: z}
+            - type: constant_buffer
+              capture: temporal_samples
+              components: {selection_mode: select, value: y }
+        - opcode: and
+          operands:
+            - type: temp
+              capture: noise_coord_dest
+            - type: temp
+              capture: noise_coord_src
+            - type: immediate32
+              immediates_u32: [127, 127, 31, 0]
+
+  # Step 1b: Same rewrite for the SampleGrad family (ishl→ftoi→and, no iadd
+  #          — the temporal sample counter is not summed there). Covers the
+  #          ~164 SampleGrad shaders (dithered UV-set blend) that the phase
+  #          rule above cannot match.
+  - kind: apply_rule
+    name: fix_dither_nophase
+    rewrite_mode: replace_range
+    range_start_offset: 2
+    range_end_offset: 2
+    required: false
+    rule:
+      match:
+        - opcode: ishl
+          operands:
+            - type: temp
+            - type: constant_buffer
+              capture: temporal_samples
+            - type: immediate32
+              immediates_u32: [3]
+        - opcode: ftoi
+        - opcode: and
+          operands:
+            - type: temp
+              capture: noise_coord_dest
+            - type: temp
+              capture: noise_coord_src
+            - type: immediate32
+              immediates_u32: [63, 63, 63, 0]
+      emit:
+        - opcode: mov
+          operands:
+            - type: temp
+              capture: noise_coord_dest
+              components: {selection_mode: mask, value: z}
+            - type: constant_buffer
+              capture: temporal_samples
+              components: {selection_mode: select, value: y }
+        - opcode: and
+          operands:
+            - type: temp
+              capture: noise_coord_dest
+            - type: temp
+              capture: noise_coord_src
+            - type: immediate32
+              immediates_u32: [127, 127, 31, 0]
+
+  # Step 2: Add a texture2darray resource declaration for the noise texture
+  - kind: add_resource
+    name: add_noise_texture
+    required: true
+    condition:
+      or:
+        - is: fix_dither
+        - is: fix_dither_nophase
+    textures:
+      - handle: noise_texture
+        reverse_bind: true
+        dimension: texture2darray
+
+  # Step 3: Patch the LD instruction to use the new noise_texture binding
+  - kind: apply_rule
+    name: patch_ld
+    required: true
+    condition:
+      or: 
+        - is: fix_dither
+        - is: fix_dither_nophase
+    rewrite_mode: replace
+    rule:
+      match:
+        - opcode: ld
+          operands:
+            - type: temp
+              capture: ld_dest
+            - type: temp
+              capture: ld_coords
+            - type: resource
+              indices:
+                - immediate_lo: 0
+              capture: ld_resource
+      emit:
+        - opcode: ld
+          operands:
+            - type: temp
+              capture: ld_dest
+            - type: temp
+              capture: ld_coords
+            - type: resource
+              handle: { name: noise_texture }
+              capture: ld_resource

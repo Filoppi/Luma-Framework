@@ -44,6 +44,7 @@ void main(float4 v0: SV_Position0, float2 v1: TEXCOORD0, out float4 o0: SV_Targe
    float4 r0, r1, r2;
 
    r0.xyz = g_TextureSceneColorHDR.Sample(g_TextureSceneColorHDRSampler_s, v1).xyz;
+   r0.xyz = max(0, r0.xyz);
 #if TONEMAP_AFTER_TAA
    if (LumaSettings.GameSettings.IsTAARunning)
    {

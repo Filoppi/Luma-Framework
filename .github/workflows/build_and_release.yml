@@ -8,8 +8,8 @@ on:
 
 jobs:
   build:
-    runs-on: windows-2022
-    # runs-on: windows-2025-vs2026
+    # runs-on: windows-2022
+    runs-on: windows-2025-vs2026
     strategy:
       matrix:
         config: [Development-Debug, Development-Release, Test-Release, Publishing-Release]
@@ -20,36 +20,28 @@ jobs:
       with:
         submodules: recursive
         fetch-depth: 0
-
+        
     - name: Setup MSBuild
       uses: microsoft/setup-msbuild@v1.1.2
 
-    - name: Clone vcpkg
-      run: git clone https://github.com/microsoft/vcpkg.git
-
-    - name: Bootstrap vcpkg
-      run: .\vcpkg\bootstrap-vcpkg.bat
-
-    # Exclusively for Prey (which is x64). Ideally it should find the vcpkg.json automatically
-    - name: Install vcpkg packages
-      run: |
-        .\vcpkg\vcpkg install --triplet x64-windows --x-manifest-root=./Source/Games/Prey
-        #.\vcpkg\vcpkg install --triplet x86-windows --x-manifest-root=./Source/Games/Prey
-      continue-on-error: true
-
     - name: Integrate vcpkg with MSBuild
-      run: .\vcpkg\vcpkg integrate install
+      shell: pwsh
+      run: '& "$env:VCPKG_INSTALLATION_ROOT\vcpkg.exe" integrate install'
 
     # This requires the git directory to be added to the PATH Windows environment variables, to properly set up versioning information
     - name: Build ReShade.sln Release
       run: |
-        msbuild "Source\External\reshade\ReShade.sln" /p:Configuration="Release" /p:Platform="64-bit"
-        msbuild "Source\External\reshade\ReShade.sln" /p:Configuration="Release" /p:Platform="32-bit"
+        msbuild "Source\External\reshade\ReShade.sln" /p:Configuration="Release" /p:Platform="64-bit" /p:PlatformToolset=v145
+        msbuild "Source\External\reshade\ReShade.sln" /p:Configuration="Release" /p:Platform="32-bit" /p:PlatformToolset=v145
       continue-on-error: true
       
     - name: Build Luma.sln ${{ matrix.config }}-${{ matrix.platform }}
+      shell: pwsh
       run: |
         msbuild Luma.sln /p:Configuration=${{ matrix.config }} /p:Platform=${{ matrix.platform }} /p:DefineConstants="REMOTE_BUILD=1"
+        if ($LASTEXITCODE -ne 0) {
+          Write-Host "::warning::MSBuild reported errors for ${{ matrix.config }}-${{ matrix.platform }} - the projects that failed to compile will be excluded from packaging/release (see the 'Create ZIP' step for the exact list)."
+        }
       continue-on-error: true # if only one or a few games failed to build, we should still build and package+release the other # TODO: add code to avoid doing an empty release if they all failed to build
 
     - name: Create ZIP per addon with matching shaders
@@ -60,16 +52,57 @@ jobs:
       run: |
         # Scan vcxproj files to find projects that use NGX (DLSS)
         $ngxProjects = @()
+        $coreFastNoiseProjects = @()
+        $dxpProjects = @()
         $vcxprojFiles = Get-ChildItem -Path "Source/Games" -Filter "*.vcxproj" -Recurse
         foreach ($vcxproj in $vcxprojFiles) {
           $content = Get-Content $vcxproj.FullName -Raw
-          if ($content -match 'nvsdk_ngx') {
-            $projectName = [System.IO.Path]::GetFileNameWithoutExtension($vcxproj.Name)
+          $projectName = [System.IO.Path]::GetFileNameWithoutExtension($vcxproj.Name)
+          if ($content -match '<UseLumaNGX>\s*true\s*</UseLumaNGX>') {
             $ngxProjects += $projectName
-            Write-Host "Found NGX project: $projectName"
+            Write-Host "Found NGX feature-enabled project: $projectName"
+          }
+          if ($content -match '<UseLumaFastNoise>\s*true\s*</UseLumaFastNoise>') {
+            $coreFastNoiseProjects += $projectName
+            Write-Host "Found Core FAST texture opt-in project: $projectName"
+          }
+          if ($content -match '<UseLumaDXP>\s*true\s*</UseLumaDXP>') {
+            $dxpProjects += $projectName
+            Write-Host "Found DXP project: $projectName"
           }
         }
         Write-Host "NGX projects: $($ngxProjects -join ', ')"
+        Write-Host "Core FAST texture projects: $($coreFastNoiseProjects -join ', ')"
+        Write-Host "DXP projects: $($dxpProjects -join ', ')"
+
+        # Expected addons for this cell (from Luma.sln) - missing ones failed to build
+        $solCfg = "${{ matrix.config }}|${{ matrix.platform }}"
+        $slnProjects = @{}
+        $projectLinePattern = '^Project\("\{[^"]+\}"\) = "([^"]+)", "([^"]+\.vcxproj)", "\{([^"]+)\}"'
+        foreach ($line in (Get-Content "Luma.sln")) {
+          if ($line -match $projectLinePattern) {
+            $slnProjects[$Matches[3]] = @{ Name = $Matches[1]; Vcxproj = $Matches[2] }
+          }
+        }
+        $buildLinePattern = '^\s*\{([^}]+)\}\.' + [regex]::Escape($solCfg) + '\.Build\.0\s*=\s*(.+)$'
+        $expectedAddons = @()
+        foreach ($line in (Get-Content "Luma.sln")) {
+          if ($line -match $buildLinePattern) {
+            $guid = $Matches[1]
+            $mappedCfg = $Matches[2].Trim()
+            if ($mappedCfg -ne $solCfg -or -not $slnProjects.ContainsKey($guid)) { continue }
+            $proj = $slnProjects[$guid]
+            $vcxPath = Join-Path (Get-Location) $proj.Vcxproj
+            if (-not (Test-Path $vcxPath)) { continue }
+            $vcxContent = Get-Content $vcxPath -Raw
+            if ($vcxContent -match '<ConfigurationType>StaticLibrary</ConfigurationType>') { continue }
+            $projName = $proj.Name
+            if ($vcxContent -match '<ProjectName>([^<]+)</ProjectName>') { $projName = $Matches[1] }
+            $projName = $projName -replace '&amp;', '&' -replace '&lt;', '<' -replace '&gt;', '>' -replace '&quot;', '"'
+            $expectedAddons += "Luma-$projName.addon"
+          }
+        }
+        Write-Host "Projects expected for this configuration: $($expectedAddons.Count)"
         
         # Find the addon file in the build folder (adjust path accordingly)
         $addonDir = "Binaries\${{ matrix.platform }}-${{ matrix.config }}"
@@ -82,7 +115,16 @@ jobs:
         }
 
         "skip_upload=false" >> $env:GITHUB_OUTPUT
-        
+
+        $builtAddons = @($addonFiles | ForEach-Object { $_.Name })
+        $missingAddons = @($expectedAddons | Where-Object { $builtAddons -notcontains $_ })
+        if ($missingAddons.Count -gt 0) {
+          $missingProjects = $missingAddons | ForEach-Object { $_ -replace '^Luma-', '' -replace '\.addon$', '' }
+          $warningMessage = "Projects that failed to build (excluded from this release): $($missingProjects -join ', ')"
+          Write-Host ("::warning::" + ($warningMessage -replace '%', '%25' -replace ',', '%2C' -replace ':', '%3A'))
+        }
+
+        $packagedCount = 0
         foreach ($addonFile in $addonFiles) {
           if (-not $addonFile) {
             Write-Host "Addon file not found, it's likely this configuration isn't present for this project. Skipping."
@@ -137,111 +179,25 @@ jobs:
           #  Write-Host "Note that Prey automated packaging isn't the whole Luma mod, that needs manual packaging as it comes with extra files."
           #}
 
-          # Create a temp directory
-          $tempDir = "temp_package"
-          Remove-Item -Recurse -Force $tempDir -ErrorAction SilentlyContinue
-          New-Item -ItemType Directory -Path "$tempDir/Luma" -Force | Out-Null
-
-          # Copy shaders folder contents into Data subfolder
-          Copy-Item -Path "Shaders/*" -Destination "$tempDir/Luma" -Recurse
-
-          # Allowed subdirectories
-          $allowedDirs = @("Global", "Includes", $projectName)
-          
-          # Allowed file extensions
-          $allowedExtensions = @(".hlsl", ".hlsli")
-
-          # Full path to the copied Shaders folder
-          $shaderRoot = Join-Path $tempDir "Luma"
-
-          # Remove disallowed folders (e.g. shaders for other mods) immediately inside $shaderRoot
-          Get-ChildItem -Path $shaderRoot -Directory | ForEach-Object {
-            if ($allowedDirs -notcontains $_.Name) {
-                Write-Host "Removing disallowed folder: $($_.FullName)"
-                Remove-Item $_.FullName -Recurse -Force
-            } elseif (-not "${{ matrix.config }}".StartsWith("Development")) {
-              # Inside allowed folders, delete specific subfolders that we don't need for non dev builds
-              $foldersToDelete = @("Unused", "Dev", "Sample")
-              foreach ($folder in $foldersToDelete) {
-                $target = Join-Path $_.FullName $folder
-                if (Test-Path $target) {
-                  Write-Host "Removing subfolder from allowed dir: $target"
-                  Remove-Item $target -Recurse -Force
-                }
-              }
-            }
+          # Package with the shared script (single source of truth with local packaging):
+          # it copies the shaders mount, filters to this project, bundles the runtime
+          # DLLs (d3dcompiler_47, ReShade as dxgi.dll, NGX DLSS) and zips next to the
+          # addon or into -OutDir. dxcompiler.dll is intentionally not shipped (SM5-only).
+          pwsh -ExecutionPolicy Bypass -File "Scripts/package.ps1" -Project $projectName -Config "${{ matrix.config }}" -Platform "${{ matrix.platform }}" -OutDir "."
+          if ($LASTEXITCODE -ne 0) {
+            Write-Host "::warning::Packaging failed for '$projectName' - it will be excluded from this release."
+            continue
           }
+          $packagedCount++
 
-          # Get all files under the copied Shaders folder
-          Get-ChildItem -Path $shaderRoot -Recurse -File | ForEach-Object {
-            $relativePath = [System.IO.Path]::GetRelativePath($shaderRoot, $_.FullName)
-            # Extract top-level directory (first segment)
-            $topDir = ($relativePath -split '[\\/]', 2)[0]
-            #Write-Host "Checking file: $($_.Name), Extension: $($_.Extension), TopDir: $topDir"
-
-            # Check if it's a .hlsl/hlsli file in an allowed directory
-            #if ( $allowedExtensions -notcontains $_.Extension.ToLower() -or ($allowedDirs -notcontains $topDir)) {
-            if ($allowedExtensions -notcontains $_.Extension.ToLower()) {
-              #Write-Host "Removing: $($_.FullName)"
-              Remove-Item $_.FullName -Force
-            }
-          }
-          
-          # Copy shaders folder contents into Data subfolder
-          # Note: ideally these should be updated once in a while, I got them from "C:\Program Files (x86)\Windows Kits\10\Redist\D3D\...", which seemengly had the latest version for redistribution (the one in System32 doesn't seem to be for that, even if it'd probably work)
-          if ("${{ matrix.platform }}" -eq "Win32") {
-            Copy-Item -Path "Shaders/Decompiler/d3dcompiler_47_x32.dll" -Destination "$tempDir/Luma"
-          }
-          else {
-            Copy-Item -Path "Shaders/Decompiler/d3dcompiler_47.dll" -Destination "$tempDir/Luma"
-          }
-
-          # Bundle in ReShade files (assuming DX10/11/12), for simplicity (to avoid users from having to download it separately, and being able to distribute the right version for luma, possibly even a custom one) (ReShade should automatically generate configs, or re-use the ones that were there)
-          # Note: these might be submitted to the repository directly, manually, to avoid re-building them every time on the build machine, wasting time and power.
-          if ("${{ matrix.platform }}" -eq "Win32") {
-            $rsSrc = "Source/External/reshade/bin/Win32/Release/ReShade32.dll"
-          } else {
-            $rsSrc = "Source/External/reshade/bin/x64/Release/ReShade64.dll"
-          }
-
-          if (Test-Path $rsSrc) {
-            $rsDst = Join-Path $tempDir "dxgi.dll"
-            Copy-Item -Path $rsSrc -Destination $rsDst -Force
-            Write-Host "Copied ReShade to $rsDst"
-          } else {
-            Write-Host "ReShade file not found at $rsSrc — skipping"
-          }
-
-          # Add DLSS for the projects that need it based on vcxproj analysis
-          if ($ngxProjects -contains $projectName) {
-            # Source path for NGX DLSS DLL
-            
-            if (("${{ matrix.config }}" -eq "Development-Debug") -or ("${{ matrix.config }}" -eq "Development-Release")) {
-              $ngxSrc = "Source/External/NGX/bin/dev/nvngx_dlss.dll"
-            } else {
-              $ngxSrc = "Source/External/NGX/bin/rel/nvngx_dlss.dll"
-            }
-
-            # Destination in the root of $tempDir, keeping original name
-            if (Test-Path $ngxSrc) {
-              Copy-Item -Path $ngxSrc -Destination $tempDir -Force
-            } else {
-              Write-Host "NGX DLSS DLL not found at $ngxSrc — skipping"
-            }
-          }
-
-          # Copy addon file to temp root (and rename it)
-          Copy-Item -Path $addonFile.FullName -Destination (Join-Path $tempDir $cleanFileName)
-
-          # Create zip with addon and renamed Shaders folder
-          Compress-Archive -Path "$tempDir/*" -DestinationPath "$zipName" -Force
-
-          # Optional: clean up
-          Remove-Item -Recurse -Force $tempDir
-
-          Write-Host "Mod packaged: $projectName"
           #"zipfile=$zipName" >> $env:GITHUB_OUTPUT
           #"skip_upload=false" >> $env:GITHUB_OUTPUT
+        }
+
+        # Skip the upload if nothing was packaged (last write wins on GITHUB_OUTPUT)
+        if ($packagedCount -eq 0) {
+          Write-Host "::warning::No projects were packaged successfully for ${{ matrix.config }}-${{ matrix.platform }} - skipping the upload for this configuration."
+          "skip_upload=true" >> $env:GITHUB_OUTPUT
         }
 
     - name: Upload ZIP

@@ -1,0 +1,74 @@
+// ---- Created with 3Dmigoto v1.3.16 on Tue Sep 02 15:46:09 2025
+
+cbuffer PsCommon : register(b0)
+{
+  float4 g_depth_params : packoffset(c0);
+  float4 g_spread_scale : packoffset(c1);
+  float4 g_depth_params2 : packoffset(c2);
+  float4 g_texcoord_offset_for_upsample : packoffset(c3);
+  int4 g_dof_param : packoffset(c4);
+}
+
+SamplerState g_sampler_s : register(s0);
+Texture2D<float4> g_depth : register(t0);
+
+
+// 3Dmigoto declarations
+#define cmp -
+
+// depth precompute mask for dof
+// TODO: unverified if decompiled correctly!
+void main(
+  float4 v0 : SV_POSITION0,
+  float4 v1 : TEXCOORD0,
+  out float2 o0 : SV_Target0)
+{
+  float4 r0,r1,r2,r3;
+  uint4 bitmask, uiDest;
+  float4 fDest;
+
+  g_depth.GetDimensions(0, uiDest.x, uiDest.y, uiDest.z);
+  r0.xy = uiDest.xy;
+  r0.xy = (uint2)r0.xy;
+  r0.xy = float2(1,1) / r0.xy;
+  r0.z = (int)-g_dof_param.x;
+  r0.z = r0.z * 0.5 + 0.5;
+  r0.zw = r0.zz * r0.xy + v1.xy;
+  r2.y = r0.w;
+  r1.yzw = float3(0,0,0);
+  while (true) {
+    r2.z = cmp((int)r1.w >= (int)g_dof_param.x);
+    if (r2.z != 0) break;
+    r2.zw = r1.yz;
+    r2.x = r0.z;
+    r3.x = 0;
+    while (true) {
+      r3.y = cmp((int)r3.x >= (int)g_dof_param.x);
+      if (r3.y != 0) break;
+      r3.y = g_depth.SampleLevel(g_sampler_s, r2.xy, 0).x;
+      r2.z = max(r3.y, r2.z);
+      r3.y = r3.y * g_depth_params.x + g_depth_params.y;
+      r3.y = 1 / r3.y;
+      r3.y = g_depth_params2.x + -r3.y;
+      r3.y = -g_depth_params2.y + abs(r3.y);
+      r3.y = max(0, r3.y);
+      r3.y = r3.y * r3.y;
+      r3.y = g_depth_params2.z * r3.y;
+      r3.y = 1.44269502 * r3.y;
+      r3.y = exp2(r3.y);
+      r3.y = 1 + -r3.y;
+      r3.y = g_depth_params2.w * r3.y;
+      r3.z = cmp(r2.w < r3.y);
+      r2.w = r3.z ? r3.y : r2.w;
+      r2.x = r2.x + r0.x;
+      r3.x = (int)r3.x + 1;
+    }
+    r1.yz = r2.zw;
+    r2.y = r2.y + r0.y;
+    r1.w = (int)r1.w + 1;
+  }
+  r0.x = r1.y * g_depth_params.x + g_depth_params.y;
+  r1.x = 1 / r0.x;
+  o0.xy = r1.xz;
+  return;
+}

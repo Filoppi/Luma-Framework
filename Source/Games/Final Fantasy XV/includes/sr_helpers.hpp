@@ -4,54 +4,6 @@
 #include <d3d11.h>
 #include "log.hpp"
 
-// Extract the exposure texture from the autoexposure pass
-// FFXV autoexposure uses slot 0 for the exposure texture
-// Returns true if the exposure texture was successfully extracted
-static bool ExtractExposureTexture(
-   ID3D11Device* native_device,
-   ID3D11DeviceContext* native_device_context,
-   GameDeviceDataFFXV& game_device_data)
-{
-   // Get the SRV from slot 0 (exposure texture in autoexposure pass)
-   ComPtr<ID3D11ShaderResourceView> exposure_srv;
-   native_device_context->CSGetShaderResources(0, 1, exposure_srv.put());
-
-   if (exposure_srv.get() == nullptr)
-      return false;
-
-   // Extract the underlying resource
-   ComPtr<ID3D11Resource> exposure_resource;
-   exposure_srv->GetResource(exposure_resource.put());
-   if (exposure_resource.get() == nullptr)
-      return false;
-   // get description, create new texture if needed with same desc and copy data
-   if (game_device_data.exposure_texture.get() == nullptr)
-   {
-      ComPtr<ID3D11Texture2D> exposure_texture;
-      HRESULT hr = exposure_resource->QueryInterface(exposure_texture.put());
-      if (FAILED(hr))
-      {
-         return false;
-      }
-      D3D11_TEXTURE2D_DESC exposure_texture_desc;
-      exposure_texture->GetDesc(&exposure_texture_desc);
-      hr = native_device->CreateTexture2D(&exposure_texture_desc, nullptr, game_device_data.exposure_texture.put());
-      if (FAILED(hr))
-      {
-         return false;
-      }
-      Log_Debug(
-         reshade::log::level::info,
-         std::format("Created exposure texture: {}x{}, format={}",
-            exposure_texture_desc.Width,
-            exposure_texture_desc.Height,
-            static_cast<uint32_t>(exposure_texture_desc.Format)));
-   }
-   native_device_context->CopyResource(game_device_data.exposure_texture.get(), exposure_resource.get());
-
-   return true;
-}
-
 // Extract shader resources from the TAA shader state and store in game_device_data
 // FFXV TAA slots: source_color=0, depth=3, velocity=6
 // Returns true if all required resources are present and valid
@@ -325,56 +277,7 @@ static void DecodeMotionVectors(
    native_device_context->CSSetUnorderedAccessViews(0, 1, &null_uav, nullptr);
 }
 
-static void CheckAndExtractTAABuffer(reshade::api::device* device, reshade::api::resource resource)
-{
-   DeviceData& device_data = *device->get_private_data<DeviceData>();
-   auto& game_device_data = *static_cast<GameDeviceDataFFXV*>(device_data.game);
-   cbTemporalAA* const taa_cb_data = reinterpret_cast<cbTemporalAA*>(game_device_data.cb_taa_buffer_map_data);
-   // Sanity check to make sure is the right cbuffer
-   // check screensize has same aspect ratio as device_data.output_resolution
-   // check screen size zw = 1/width, zh = 1/height
-   // check bools in raw data are either 0 or 1
-   // check jitters not both 0 and smaller than 0.5 in abs value
-   const float aspect_ratio = device_data.output_resolution.x / device_data.output_resolution.y;
-   const float cb_aspect_ratio = taa_cb_data->g_screenSize.x / taa_cb_data->g_screenSize.y;
-   const bool aspect_ratio_match = std::abs(aspect_ratio - cb_aspect_ratio) < 0.01f;
-   const bool inverse_w_match = taa_cb_data->g_screenSize.z - (1.f / taa_cb_data->g_screenSize.x) < FLT_EPSILON;
-   const bool inverse_h_match = taa_cb_data->g_screenSize.w - (1.f / taa_cb_data->g_screenSize.y) < FLT_EPSILON;
-   const bool bools_valid = (taa_cb_data->g_gamePaused <= 1u) &&
-                            (taa_cb_data->g_hairUseAlphaTest <= 1u) &&
-                            (taa_cb_data->g_waterResponsiveAA <= 1u);
-   const bool jitters_valid = (std::abs(taa_cb_data->g_uvJitterOffset.x) < 0.5f && std::abs(taa_cb_data->g_uvJitterOffset.y) < 0.5f) &&
-                              (std::abs(taa_cb_data->g_uvJitterOffset.x) > 0.f || std::abs(taa_cb_data->g_uvJitterOffset.y) > 0.f);
-   if (aspect_ratio_match && inverse_w_match && inverse_h_match && bools_valid && jitters_valid)
-   {
-      game_device_data.found_taa_cb = true;
-      Log_Debug(
-         reshade::log::level::info,
-         "Found TAA constant buffer at size 256 bytes");
-      // Store a copy of the cbuffer data
-      if (!game_device_data.taa_cb_data)
-      {
-         game_device_data.taa_cb_data = std::make_unique<cbTemporalAA>();
-      }
-      std::memcpy(game_device_data.taa_cb_data.get(), taa_cb_data, sizeof(cbTemporalAA));
 
-      // Store jitters for SR - convert from UV space to pixel space
-      // DLSS/FSR expect jitters in pixel space (typically -0.5 to 0.5 range scaled by resolution)
-      game_device_data.taa_jitters.x = taa_cb_data->g_uvJitterOffset.x * taa_cb_data->g_screenSize.x;
-      game_device_data.taa_jitters.y = taa_cb_data->g_uvJitterOffset.y * taa_cb_data->g_screenSize.y;
-
-      // Store the render resolution from TAA cbuffer
-      device_data.render_resolution = {taa_cb_data->g_screenSize.x, taa_cb_data->g_screenSize.y};
-   }
-   else
-   {
-      Log_Debug(
-         reshade::log::level::info,
-         "Rejected TAA constant buffer candidate");
-   }
-   game_device_data.cb_taa_buffer_map_data = nullptr;
-   game_device_data.cb_taa_buffer = nullptr;
-}
 
 static void ExtractCameraData(DeviceData& device_data, GameDeviceDataFFXV& game_device_data, const void* view_cb_data_raw)
 {
@@ -485,6 +388,8 @@ static void CheckAndExtractPerViewGlobalsBuffer(reshade::api::device* device, re
    {
       game_device_data.found_per_view_globals = true;
 
+      // Set render resolution from view cbuffer (first time we know it in the frame)
+      device_data.render_resolution = {static_cast<float>(size.x), static_cast<float>(size.y)};
       Log_Debug(
          reshade::log::level::info,
          "Found Per-View Globals constant buffer");

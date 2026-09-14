@@ -11,9 +11,6 @@
 
 #define ENABLE_AUTO_CBUFFER_RESTORATION 1
 
-#define ENABLE_NGX 1
-#define ENABLE_FIDELITY_SK 1
-
 #include "..\..\Core\core.hpp"
 
 // TODO: Fix this globaly? Define NOMINMAX before including windows.h.

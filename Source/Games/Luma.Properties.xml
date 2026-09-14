@@ -1,0 +1,38 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Property page schema: surfaces Luma's per-game feature opt-ins as checkboxes
+     in Project Properties -> Configuration Properties -> Luma Properties.
+     When a box is checked, VS writes the matching <UseLuma...>/<LumaPackage>
+     property into the project's configuration, and the Luma.Features.props
+     conditions pick it up (feature defines, includes, libs, and the optional
+     CI-layout packaging after build). -->
+<ProjectSchemaDefinitions xmlns="http://schemas.microsoft.com/build/2009/properties" xmlns:sys="clr-namespace:System;assembly=mscorlib">
+  <Rule Name="LumaProperties" PageTemplate="generic" DisplayName="Luma Properties" Order="10">
+    <Rule.Categories>
+      <Category Name="Features" DisplayName="Features" />
+      <Category Name="Packaging" DisplayName="Packaging" />
+    </Rule.Categories>
+    <Rule.DataSource>
+      <DataSource Persistence="ProjectFile" Label="" />
+    </Rule.DataSource>
+    <BoolProperty Name="UseLumaDXP"
+                  DisplayName="DirectXShaderPatcher (DXP)"
+                  Description="Enables the DXP shader patching SDK (vcpkg dependency, dxpatcher.lib, dxcompiler.dll runtime)."
+                  Category="Features" />
+    <BoolProperty Name="UseLumaNGX"
+                  DisplayName="DLSS (NGX)"
+                  Description="Links NVIDIA NGX/DLSS and includes nvngx_dlss.dll in the package."
+                  Category="Features" />
+    <BoolProperty Name="UseLumaFSR"
+                  DisplayName="FSR (FidelityFX)"
+                  Description="Links AMD FidelityFX Super Resolution libraries."
+                  Category="Features" />
+    <BoolProperty Name="UseLumaFastNoise"
+                  DisplayName="FAST noise textures"
+                  Description="Compiles the FAST noise texture loader and packages the project-wide Global/Textures/FAST frames."
+                  Category="Features" />
+    <BoolProperty Name="LumaPackage"
+                  DisplayName="Package after build (CI layout)"
+                  Description="Runs scripts/package.ps1 after the build, producing the release zip (addon + shaders + textures + runtime DLLs) into the repo's out_package folder."
+                  Category="Packaging" />
+  </Rule>
+</ProjectSchemaDefinitions>

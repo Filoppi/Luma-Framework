@@ -1,6 +1,6 @@
 // need more info: motion blur likely requires the most patching, depth, velocity and other info are in render resolution size it also uses stale screen dimensions.
 
-#include "./common.hlsl"
+#include "Includes/Common.hlsl"
 cbuffer cbMotion : register(b0)
 {
   float4x4 g_motionMat : packoffset(c0);
@@ -79,7 +79,7 @@ void main(
   g_halfColorTex.GetDimensions(0, w, h, d);
   luma_scale_from_dims = float2(w, h) / max(float2(1.0, 1.0), g_fullscreenDims.xy);
 
-  if (LumaData.GameData.isUpscaling != 0)
+  if (LumaData.GameData.IsUpscaling != 0)
   {
     const float luma_rs = max(1.0e-6, LumaData.RenderResolutionScale.x);
     const float luma_scale_from_cb = max(luma_rs, 1.0 / luma_rs);

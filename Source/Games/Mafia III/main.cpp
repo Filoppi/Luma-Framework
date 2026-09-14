@@ -1,8 +1,5 @@
 #define GAME_MAFIA_III 1
 
-#define ENABLE_NGX 1
-#define ENABLE_FIDELITY_SK 1
-
 #include "..\..\Core\core.hpp"
 
 #if 0

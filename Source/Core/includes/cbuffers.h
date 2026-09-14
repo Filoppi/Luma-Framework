@@ -84,6 +84,9 @@ namespace CB
 
       float2 RenderResolutionScale;
       float2 PreviousRenderResolutionScale;
+      
+      uint RenderScaleActive;
+      float3 Padding1;
 
       LumaGameData GameData; // Custom games data, with a per game struct
    };

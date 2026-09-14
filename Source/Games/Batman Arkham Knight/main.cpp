@@ -1,8 +1,6 @@
 
 #define GAME_BATMAN_ARKHAM_KNIGHT 1
 
-#define ENABLE_NGX 1
-
 // TODO: Do this dynamically.
 // Offsets for patching "BuildProjectionMatrix" function are different.
 #define GAME_VERSION 1 // 1 - Steam, 2 - GOG

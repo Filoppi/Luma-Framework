@@ -70,13 +70,13 @@ RWTexture2D<float4> uav : register(u0);
 void main(uint3 dtid : SV_DispatchThreadID)
 {
 	// From the game's native TAA.
-	const float r0z = ro_postfx_luminance_buffautoexposure[cb_postfx_luminance_exposureindex.y].EngineLuminanceFactor;
-	const float r1w = cb_view_white_level * r0z; // Compression factor?
+	//const float r0z = ro_postfx_luminance_buffautoexposure[cb_postfx_luminance_exposureindex.y].EngineLuminanceFactor;
+	//const float r1w = cb_view_white_level * r0z; // Compression factor?
 
 	float4 color = uav[dtid.xy];
 
 	// As done in the game's native TAA.
-	color.rgb = cb_usecompressedhdrbuffers ? color.rgb * rcp(r1w) : color.rgb;
+	//color.rgb = cb_usecompressedhdrbuffers ? color.rgb * rcp(r1w) : color.rgb;
 
 	uav[dtid.xy] = color;
 }

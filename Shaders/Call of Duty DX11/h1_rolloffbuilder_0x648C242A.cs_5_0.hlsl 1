@@ -1,0 +1,529 @@
+cbuffer CB0 : register(b0)
+{
+    float4 cb0[8];
+};
+
+Buffer<float4> t0 : register(t0);
+
+struct ExposureData { float4 data; };
+RWStructuredBuffer<ExposureData> u0 : register(u0);
+
+groupshared float g0[128];
+
+[numthreads(128, 1, 1)]
+void main(
+    uint  vThreadIDInGroupFlattened : SV_GroupIndex,
+    uint3 vThreadGroupID            : SV_GroupID,
+    uint3 vThreadIDInGroup          : SV_GroupThreadID)
+{
+    uint  globalIdx = vThreadGroupID.x * 128u + vThreadIDInGroup.x;
+    float inRange   = (globalIdx < asuint(cb0[6].z)) ? 1.0f : 0.0f;
+    float binVal    = t0[globalIdx].y;
+    g0[vThreadIDInGroupFlattened] = inRange * binVal;
+    GroupMemoryBarrierWithGroupSync();
+
+    //debug set 0 all
+    g0[vThreadIDInGroupFlattened] = 0;
+    return;
+
+    uint stride = 1u;
+    [loop]
+    while (true)
+    {
+        if (stride >= 128u) break;
+        uint stride2 = stride << 1u;
+        if ((vThreadIDInGroupFlattened % stride2) == 0u)
+        {
+            float a = g0[vThreadIDInGroupFlattened + stride];
+            float b = g0[vThreadIDInGroupFlattened];
+            g0[vThreadIDInGroupFlattened] = a + b;
+        }
+        GroupMemoryBarrierWithGroupSync();
+        stride = stride2;
+    }
+
+    if (vThreadIDInGroupFlattened == 0u)
+    {
+        float weightedSum = g0[0];
+
+        float avgLogLuma = weightedSum * cb0[2].x;
+        float luma       = exp2(avgLogLuma);
+
+        float tonemapMidpoint;
+
+        if (cb0[2].y == 0.0f)
+        {
+            float sceneLuma;
+            if (cb0[2].w > 0.0f)
+                sceneLuma = luma / cb0[2].w;
+            else
+                sceneLuma = luma * 1000.0f;
+
+            float logMaxA = cb0[4].z - 2.84f;
+            float logMaxB = cb0[4].w - 2.84f;
+            float logMaxC = cb0[5].x - 2.84f;
+
+            float anchorA = logMaxA * 0.693147f;
+
+            float2 rgb_b5_lin  = exp2(cb0[5].yz);
+            float2 rgb_b5_norm = rgb_b5_lin * 0.18f;
+            float2 rgb_b5_g    = pow(rgb_b5_norm, 0.454545f);
+
+            float2 minLumaClamp = exp2(cb0[6].xy) * 0.18f;
+
+            float logRangeB = logMaxB * 0.693147f - anchorA;
+            float logRangeC = logMaxC * 0.693147f - anchorA;
+
+            float gammaRange = rgb_b5_g.y - rgb_b5_g.x;
+
+            float logScene   = log(sceneLuma) * 0.480453f - anchorA;
+            float normScene  = logScene / logRangeB;
+            float tBC        = logRangeC / logRangeB;
+
+            normScene = max(normScene, 0.0f);
+            float curvedScene = exp(log(normScene) * tBC);
+
+            float gammaMid = curvedScene * gammaRange + rgb_b5_g.x;
+            gammaMid = max(gammaMid, 0.0f);
+
+            gammaMid = exp(log(gammaMid) * 2.2f);
+
+            gammaMid = max(gammaMid, minLumaClamp.x);
+            tonemapMidpoint = min(gammaMid, minLumaClamp.y);
+        }
+        else
+        {
+            tonemapMidpoint = exp2(cb0[2].z) * 0.18f;
+        }
+
+        float lumaCenter = exp2(cb0[3].y - 2.84f);
+        float refLuma;
+        if (cb0[2].w > 0.0f)
+            refLuma = lumaCenter * cb0[2].w;
+        else
+            refLuma = lumaCenter * 0.001f;
+
+        float sceneKey = 0.18f / refLuma;
+
+        float prevExpLog = u0[0].data.w;
+
+        float newExpLog = log(max(sceneKey, 0.000061f));
+        float r2y       = newExpLog * 0.333024f;
+
+        bool  lumaValid  = luma > 0.000061f;
+        float blendedLog = newExpLog * 0.333024f - prevExpLog;
+        blendedLog       = blendedLog * cb0[3].w + prevExpLog;
+        float adaptedLog = lumaValid ? blendedLog : prevExpLog;
+
+        float adaptedExp = exp2(adaptedLog);
+
+        float finalExp, finalExpLog;
+        if (cb0[3].z != 0.0f)
+        {
+            finalExp    = adaptedExp;
+            finalExpLog = adaptedLog;
+        }
+        else
+        {
+            finalExp    = sceneKey;
+            finalExpLog = r2y;
+        }
+
+        float invFinalExp = 0.18f / finalExp;
+
+        float invNits;
+        if (cb0[2].w > 0.0f)
+            invNits = invFinalExp / cb0[2].w;
+        else
+            invNits = invFinalExp * 1000.0f;
+
+        float adjRaw = log(invNits + 0.000061f) * 0.693147f + 2.84f;
+        adjRaw = adjRaw - cb0[4].x;
+        adjRaw = adjRaw - 2.84f;
+        float adjExp = exp2(adjRaw);
+
+        float adjNits;
+        if (cb0[2].w > 0.0f)
+            adjNits = adjExp * cb0[2].w;
+        else
+            adjNits = adjExp * 0.001f;
+
+        float minLumaExp = exp2(cb0[4].y - 2.84f);
+        float minLumaNits;
+        if (cb0[2].w > 0.0f)
+            minLumaNits = minLumaExp * cb0[2].w;
+        else
+            minLumaNits = minLumaExp * 0.001f;
+
+        float2 invScaled = 0.18f / float2(adjNits, minLumaNits);
+        float  minScale  = min(invScaled.x, invScaled.y);
+
+        float keyScale  = minScale * 5.555555f;
+        float2 scale1   = keyScale * cb0[1].xy;
+        float2 scale0   = keyScale * cb0[0].xy;
+
+        float invMinScale = cb0[6].w / minScale;
+
+        float2 offset0 = scale0 * invMinScale + cb0[0].zw;
+        float  ratio   = offset0.x / offset0.y;
+
+        u0[0].data = float4(ratio, offset0.y, tonemapMidpoint, finalExpLog);
+
+        u0[1].data = float4(scale0, cb0[0].zw);
+
+        u0[2].data = float4(scale1, cb0[1].zw);
+
+        float linearExposure = luma * minScale;
+        u0[3].data = float4(linearExposure, linearExposure * cb0[7].x, cb0[7].y, (float)globalIdx);
+    }
+}
+
+/*
+
+//
+// Generated by Microsoft (R) HLSL Shader Compiler 10.1
+//
+//
+// Buffer Definitions: 
+//
+// cbuffer CB0
+// {
+//
+//   float4 cb0[8];                     // Offset:    0 Size:   128
+//
+// }
+//
+// Resource bind info for u0
+// {
+//
+//   struct ExposureData
+//   {
+//       
+//       float4 data;                   // Offset:    0
+//
+//   } $Element;                        // Offset:    0 Size:    16
+//
+// }
+//
+//
+// Resource Bindings:
+//
+// Name                                 Type  Format         Dim      HLSL Bind  Count
+// ------------------------------ ---------- ------- ----------- -------------- ------
+// t0                                texture  float4         buf             t0      1 
+// u0                                    UAV  struct         r/w             u0      1 
+// CB0                               cbuffer      NA          NA            cb0      1 
+//
+//
+//
+// Input signature:
+//
+// Name                 Index   Mask Register SysValue  Format   Used
+// -------------------- ----- ------ -------- -------- ------- ------
+// no Input
+//
+// Output signature:
+//
+// Name                 Index   Mask Register SysValue  Format   Used
+// -------------------- ----- ------ -------- -------- ------- ------
+// no Output
+cs_5_0
+dcl_globalFlags refactoringAllowed
+dcl_constantbuffer CB0[8], immediateIndexed
+dcl_resource_buffer (float,float,float,float) t0
+dcl_uav_structured u0, 16
+dcl_input vThreadIDInGroupFlattened
+dcl_input vThreadGroupID.x
+dcl_input vThreadIDInGroup.x
+dcl_temps 4
+dcl_tgsm_structured g0, 4, 128
+dcl_thread_group 128, 1, 1
+imad r0.x, vThreadGroupID.x, l(128), vThreadIDInGroup.x
+ult r0.y, r0.x, cb0[6].z
+ld_indexable(buffer)(float,float,float,float) r0.z, r0.xxxx, t0.yzxw
+and r0.y, r0.y, l(0x3f800000)
+mul r0.y, r0.y, r0.z
+store_structured g0.x, vThreadIDInGroupFlattened.x, l(0), r0.y
+sync_g_t
+mov r0.y, l(1)
+loop 
+  uge r0.z, r0.y, l(128)
+  if_nz r0.z
+    break 
+  endif 
+  ishl r0.z, r0.y, l(1)
+  udiv null, r0.w, vThreadIDInGroupFlattened.x, r0.z
+  if_z r0.w
+    iadd r0.w, r0.y, vThreadIDInGroupFlattened.x
+    ld_structured r0.w, r0.w, l(0), g0.xxxx
+    ld_structured r1.x, vThreadIDInGroupFlattened.x, l(0), g0.xxxx
+    add r0.w, r0.w, r1.x
+    store_structured g0.x, vThreadIDInGroupFlattened.x, l(0), r0.w
+  endif 
+  sync_g_t
+  mov r0.y, r0.z
+endloop 
+if_z vThreadIDInGroupFlattened.x
+  ld_structured r0.y, l(0), l(0), g0.xxxx
+  mul r0.y, r0.y, cb0[2].x
+  mul r0.y, r0.y, l(1.442695)
+  exp r0.y, r0.y
+  eq r0.z, cb0[2].y, l(0.000000)
+  if_nz r0.z
+    lt r0.z, l(0.000000), cb0[2].w
+    div r0.w, r0.y, cb0[2].w
+    mul r1.x, r0.y, l(1000.000000)
+    movc r0.z, r0.z, r0.w, r1.x
+    add r1.xy, cb0[4].zwzz, l(-2.840000, -2.840000, 0.000000, 0.000000)
+    add r0.w, cb0[5].x, l(-2.840000)
+    mul r1.zw, cb0[5].yyyw, l(0.000000, 0.000000, 1.442695, 1.442695)
+    exp r1.zw, r1.zzzw
+    mul r1.xzw, r1.xxzw, l(0.693147, 0.000000, 0.180000, 0.180000)
+    log r1.zw, r1.zzzw
+    mul r1.zw, r1.zzzw, l(0.000000, 0.000000, 0.454545, 0.454545)
+    exp r1.zw, r1.zzzw
+    mul r2.xy, cb0[6].xyxx, l(1.442695, 1.442695, 0.000000, 0.000000)
+    exp r2.xy, r2.xyxx
+    mul r2.xy, r2.xyxx, l(0.180000, 0.180000, 0.000000, 0.000000)
+    mad r0.w, r0.w, l(0.693147), -r1.x
+    mad r1.y, r1.y, l(0.693147), -r1.x
+    add r1.w, -r1.z, r1.w
+    log r0.z, r0.z
+    mad r0.z, r0.z, l(0.480453), -r1.x
+    div r0.zw, r0.zzzw, r1.yyyy
+    max r0.z, r0.z, l(0.000000)
+    log r0.z, r0.z
+    mul r0.z, r0.z, r0.w
+    exp r0.z, r0.z
+    mad r0.z, r0.z, r1.w, r1.z
+    max r0.z, r0.z, l(0.000000)
+    log r0.z, r0.z
+    mul r0.z, r0.z, l(2.200000)
+    exp r0.z, r0.z
+    max r0.z, r0.z, r2.x
+    min r1.y, r0.z, r2.y
+  else 
+    mul r0.z, cb0[2].z, l(1.442695)
+    exp r0.z, r0.z
+    mul r1.y, r0.z, l(0.180000)
+  endif 
+  add r0.z, cb0[3].y, l(-2.840000)
+  mul r0.z, r0.z, l(1.442695)
+  exp r0.z, r0.z
+  lt r0.w, l(0.000000), cb0[2].w
+  mul r2.x, r0.z, cb0[2].w
+  mul r0.z, r0.z, l(0.001000)
+  movc r0.z, r0.w, r2.x, r0.z
+  div r2.x, l(0.180000), r0.z
+  ld_structured_indexable(structured_buffer, stride=16)(mixed,mixed,mixed,mixed) r0.z, l(0), l(12), u0.xxxx
+  max r2.z, r2.x, l(0.000061)
+  log r2.z, r2.z
+  mul r2.y, r2.z, l(0.333024)
+  lt r2.w, l(0.000061), r0.y
+  mad r2.z, r2.z, l(0.333024), -r0.z
+  mad r2.z, r2.z, cb0[3].w, r0.z
+  movc r3.y, r2.w, r2.z, r0.z
+  mul r0.z, r3.y, l(1.442695)
+  exp r3.x, r0.z
+  ne r0.z, cb0[3].z, l(0.000000)
+  movc r1.xw, r0.zzzz, r3.xxxy, r2.xxxy
+  div r0.z, l(0.180000), r1.x
+  div r2.x, r0.z, cb0[2].w
+  mul r0.z, r0.z, l(1000.000000)
+  movc r0.z, r0.w, r2.x, r0.z
+  add r0.z, r0.z, l(0.000061)
+  log r0.z, r0.z
+  mad r0.z, r0.z, l(0.693147), l(2.840000)
+  add r0.z, r0.z, -cb0[4].x
+  add r0.z, r0.z, l(-2.840000)
+  mul r0.z, r0.z, l(1.442695)
+  exp r0.z, r0.z
+  mul r2.x, r0.z, cb0[2].w
+  mul r0.z, r0.z, l(0.001000)
+  movc r2.x, r0.w, r2.x, r0.z
+  add r0.z, cb0[4].y, l(-2.840000)
+  mul r0.z, r0.z, l(1.442695)
+  exp r0.z, r0.z
+  mul r2.z, r0.z, cb0[2].w
+  mul r0.z, r0.z, l(0.001000)
+  movc r2.y, r0.w, r2.z, r0.z
+  div r0.zw, l(0.000000, 0.000000, 0.180000, 0.180000), r2.xxxy
+  min r0.z, r0.z, r0.w
+  mul r0.w, r0.z, l(5.555555)
+  mul r2.xy, r0.wwww, cb0[1].xyxx
+  mul r3.xy, r0.wwww, cb0[0].xyxx
+  div r0.w, cb0[6].w, r0.z
+  mad r1.xz, r3.xxyx, r0.wwww, cb0[0].zzwz
+  div r1.x, r1.x, r1.z
+  store_structured u0.xyzw, l(0), l(0), r1.xzyw
+  mov r3.zw, cb0[0].zzzw
+  store_structured u0.xyzw, l(1), l(0), r3.xyzw
+  mov r2.zw, cb0[1].zzzw
+  store_structured u0.xyzw, l(2), l(0), r2.xyzw
+  mul r1.x, r0.y, r0.z
+  mul r1.y, r1.x, cb0[7].x
+  utof r1.w, r0.x
+  mov r1.z, cb0[7].y
+  store_structured u0.xyzw, l(3), l(0), r1.xyzw
+endif 
+ret 
+// Approximately 129 instruction slots used
+
+
+//
+// Generated by Microsoft (R) D3D Shader Disassembler
+//
+//
+// Input signature:
+//
+// Name                 Index   Mask Register SysValue  Format   Used
+// -------------------- ----- ------ -------- -------- ------- ------
+// no Input
+//
+// Output signature:
+//
+// Name                 Index   Mask Register SysValue  Format   Used
+// -------------------- ----- ------ -------- -------- ------- ------
+// no Output
+      0x00000000: cs_5_0
+      0x00000008: dcl_globalFlags refactoringAllowed
+      0x0000000C: dcl_constantbuffer CB0[8], immediateIndexed
+      0x0000001C: dcl_resource_buffer (float,float,float,float) t0
+      0x0000002C: dcl_uav_structured u0, 16
+      0x0000003C: dcl_input vThreadIDInGroupFlattened
+      0x00000044: dcl_input vThreadGroupID.x
+      0x0000004C: dcl_input vThreadIDInGroup.x
+      0x00000054: dcl_temps 5
+      0x0000005C: dcl_tgsm_structured g0, 4, 128
+      0x00000070: dcl_thread_group 128, 1, 1
+   0  0x00000080: imad r0.x, vThreadGroupID.x, l(128), vThreadIDInGroup.x
+   1  0x0000009C: ult r0.y, r0.x, cb0[6].z
+   2  0x000000BC: ld_indexable(buffer)(float,float,float,float) r0.x, r0.xxxx, t0.xyzw
+   3  0x000000E0: and r0.x, r0.x, r0.y
+   4  0x000000FC: store_structured g0.x, vThreadIDInGroupFlattened.x, l(0), r0.x
+   5  0x0000011C: sync_g_t
+   6  0x00000120: mov r0.x, l(1)
+   7  0x00000134: loop 
+   8  0x00000138:   uge r0.y, r0.x, l(128)
+   9  0x00000154:   breakc_nz r0.y
+  10  0x00000160:   ishl r0.y, r0.x, l(1)
+  11  0x0000017C:   udiv null, r0.z, vThreadIDInGroupFlattened.x, r0.y
+  12  0x00000198:   if_z r0.z
+  13  0x000001A4:     iadd r0.z, vThreadIDInGroupFlattened.x, r0.x
+  14  0x000001BC:     ld_structured r0.z, r0.z, l(0), g0.xxxx
+  15  0x000001E0:     ld_structured r0.w, vThreadIDInGroupFlattened.x, l(0), g0.xxxx
+  16  0x00000200:     add r0.z, r0.z, r0.w
+  17  0x0000021C:     store_structured g0.x, vThreadIDInGroupFlattened.x, l(0), r0.z
+  18  0x0000023C:   endif 
+  19  0x00000240:   sync_g_t
+  20  0x00000244:   mov r0.x, r0.y
+  21  0x00000258: endloop 
+  22  0x0000025C: if_z vThreadIDInGroupFlattened.x
+  23  0x00000264:   ld_structured r0.x, l(0), l(0), g0.xxxx
+  24  0x00000288:   mul r0.x, r0.x, cb0[2].x
+  25  0x000002A8:   mul r0.x, r0.x, l(1.442695)
+  26  0x000002C4:   exp r0.w, r0.x
+  27  0x000002D8:   if_z cb0[2].y
+  28  0x000002E8:     lt r1.x, l(0.000000), cb0[2].w
+  29  0x00000308:     div r1.y, r0.w, cb0[2].w
+  30  0x00000328:     mul r1.z, r0.w, l(1000.000000)
+  31  0x00000344:     movc r1.x, r1.x, r1.y, r1.z
+  32  0x00000368:     add r1.yz, cb0[4].zzwz, l(0.000000, -2.840000, -2.840000, 0.000000)
+  33  0x00000394:     mul r1.y, r1.y, l(0.693147)
+  34  0x000003B0:     add r1.w, cb0[5].x, l(-2.840000)
+  35  0x000003D0:     exp r2.xyz, cb0[5].yzwy
+  36  0x000003E8:     mul r2.xyz, r2.xyzx, l(0.180000, 0.180000, 0.180000, 0.000000)
+  37  0x00000410:     log r2.xyz, r2.xyzx
+  38  0x00000424:     mul r2.xyz, r2.xyzx, l(0.454545, 0.454545, 0.454545, 0.000000)
+  39  0x0000044C:     exp r2.xyz, r2.xyzx
+  40  0x00000460:     exp r3.xy, cb0[6].xyxx
+  41  0x00000478:     mul r3.xy, r3.xyxx, l(0.180000, 0.180000, 0.000000, 0.000000)
+  42  0x000004A0:     mad r1.z, r1.z, l(0.693147), -r1.y
+  43  0x000004C8:     mad r1.w, r1.w, l(0.693147), -r1.y
+  44  0x000004F0:     div r1.z, r1.z, r1.w
+  45  0x0000050C:     add r2.yz, -r2.xxxx, r2.yyzy
+  46  0x0000052C:     div r2.y, r2.y, r2.z
+  47  0x00000548:     log r2.y, r2.y
+  48  0x0000055C:     mul r2.y, r2.y, l(0.693147)
+  49  0x00000578:     log r1.z, r1.z
+  50  0x0000058C:     mul r1.z, r1.z, l(0.693147)
+  51  0x000005A8:     div r1.z, r2.y, r1.z
+  52  0x000005C4:     log r1.x, r1.x
+  53  0x000005D8:     mad r1.x, r1.x, l(0.693147), -r1.y
+  54  0x00000600:     div r1.x, r1.x, r1.w
+  55  0x0000061C:     max r1.x, r1.x, l(0.000000)
+  56  0x00000638:     log r1.x, r1.x
+  57  0x0000064C:     mul r1.x, r1.x, r1.z
+  58  0x00000668:     exp r1.x, r1.x
+  59  0x0000067C:     mad r1.x, r1.x, r2.z, r2.x
+  60  0x000006A0:     max r1.x, r1.x, l(0.000000)
+  61  0x000006BC:     log r1.x, r1.x
+  62  0x000006D0:     mul r1.x, r1.x, l(2.200000)
+  63  0x000006EC:     exp r1.x, r1.x
+  64  0x00000700:     max r1.x, r3.x, r1.x
+  65  0x0000071C:     min r1.z, r3.y, r1.x
+  66  0x00000738:   else 
+  67  0x0000073C:     exp r2.x, cb0[2].z
+  68  0x00000754:     mul r1.z, r2.x, l(0.180000)
+  69  0x00000770:   endif 
+  70  0x00000774:   add r2.x, cb0[3].y, l(-2.840000)
+  71  0x00000794:   exp r2.x, r2.x
+  72  0x000007A8:   lt r2.y, l(0.000000), cb0[2].w
+  73  0x000007C8:   mul r2.z, r2.x, cb0[2].w
+  74  0x000007E8:   mul r2.x, r2.x, l(0.001000)
+  75  0x00000804:   movc r2.x, r2.y, r2.z, r2.x
+  76  0x00000828:   div r2.x, l(0.180000), r2.x
+  77  0x00000844:   div r2.z, r1.z, r0.w
+  78  0x00000860:   movc r3.x, cb0[3].x, r2.z, r2.x
+  79  0x00000888:   max r2.x, r3.x, l(0.000061)
+  80  0x000008A4:   log r2.x, r2.x
+  81  0x000008B8:   mul r3.y, r2.x, l(0.693147)
+  82  0x000008D4:   ld_structured_indexable(structured_buffer, stride=16)(mixed,mixed,mixed,mixed) r2.z, l(0), l(12), u0.xxxx
+  83  0x00000900:   lt r2.w, l(0.000061), r0.w
+  84  0x0000091C:   mad r2.x, r2.x, l(0.693147), -r2.z
+  85  0x00000944:   mad r2.x, r2.x, cb0[3].w, r2.z
+  86  0x0000096C:   movc r4.y, r2.w, r2.x, r2.z
+  87  0x00000990:   mul r2.x, r4.y, l(1.442695)
+  88  0x000009AC:   exp r4.x, r2.x
+  89  0x000009C0:   movc r1.xw, cb0[3].zzzz, r4.xxxy, r3.xxxy
+  90  0x000009E8:   div r2.x, l(0.180000), r1.x
+  91  0x00000A04:   div r2.z, r2.x, cb0[2].w
+  92  0x00000A24:   mul r2.x, r2.x, l(1000.000000)
+  93  0x00000A40:   movc r2.x, r2.y, r2.z, r2.x
+  94  0x00000A64:   add r2.x, r2.x, l(0.000061)
+  95  0x00000A80:   log r2.x, r2.x
+  96  0x00000A94:   add r2.x, r2.x, l(2.840000)
+  97  0x00000AB0:   add r2.x, r2.x, -cb0[4].x
+  98  0x00000AD4:   add r2.x, r2.x, l(-2.840000)
+  99  0x00000AF0:   exp r2.x, r2.x
+ 100  0x00000B04:   mul r2.z, r2.x, cb0[2].w
+ 101  0x00000B24:   mul r2.x, r2.x, l(0.001000)
+ 102  0x00000B40:   movc r2.x, r2.y, r2.z, r2.x
+ 103  0x00000B64:   add r2.z, cb0[4].y, l(-2.840000)
+ 104  0x00000B84:   exp r2.z, r2.z
+ 105  0x00000B98:   mul r2.w, r2.z, cb0[2].w
+ 106  0x00000BB8:   mul r2.z, r2.z, l(0.001000)
+ 107  0x00000BD4:   movc r2.y, r2.y, r2.w, r2.z
+ 108  0x00000BF8:   div r2.xy, l(0.180000, 0.180000, 0.000000, 0.000000), r2.xyxx
+ 109  0x00000C20:   min r0.x, r2.y, r2.x
+ 110  0x00000C3C:   mul r2.x, r0.x, l(5.555555)
+ 111  0x00000C58:   mul r3.xy, r2.xxxx, cb0[1].xyxx
+ 112  0x00000C78:   mul r4.xy, r2.xxxx, cb0[0].xyxx
+ 113  0x00000C98:   div r1.x, cb0[6].w, r2.x
+ 114  0x00000CB8:   mad r2.xy, r4.xyxx, r1.xxxx, cb0[0].zwzz
+ 115  0x00000CE0:   div r1.y, r2.x, r2.y
+ 116  0x00000CFC:   store_structured u0.xyzw, l(0), l(0), r1.xyzw
+ 117  0x00000D20:   mov r4.zw, cb0[0].zzzw
+ 118  0x00000D38:   store_structured u0.xyzw, l(1), l(0), r4.xyzw
+ 119  0x00000D5C:   mov r3.zw, cb0[1].zzzw
+ 120  0x00000D74:   store_structured u0.xyzw, l(2), l(0), r3.xyzw
+ 121  0x00000D98:   mul r1.x, r0.x, r0.w
+ 122  0x00000DB4:   mul r0.y, r1.x, cb0[7].x
+ 123  0x00000DD4:   mov r0.z, cb0[7].y
+ 124  0x00000DEC:   store_structured u0.xyzw, l(3), l(0), r0.xyzw
+ 125  0x00000E10: endif 
+ 126  0x00000E14: ret 
+// Approximately 0 instruction slots used
+
+
+*/
