@@ -183,6 +183,63 @@ inline bool IsMipOf(uint32_t base_w, uint32_t base_h, uint32_t w, uint32_t h)
    return valid_w && valid_h;
 }
 
+// TODO: move to hash.h
+inline void HashCombine(uint64_t& seed, uint64_t value)
+{
+   // boost-style combine, 64-bit
+   seed ^= value + 0x9e3779b97f4a7c15ull + (seed << 6) + (seed >> 2);
+}
+template <typename T>
+inline void HashEnum(uint64_t& seed, T value)
+{
+   HashCombine(seed, static_cast<uint64_t>(value));
+}
+
+// Returns a unique hash with the resource size (and optionally the format).
+// The result is only unique within a resource type, don't mix them.
+template<typename T = ID3D11Resource>
+inline uint64_t GetResourceDescHash(const T& desc, bool format = true)
+{
+   uint64_t hash = 0;
+
+   if constexpr (std::is_same_v<T, D3D11_BUFFER_DESC>)
+   {
+      HashCombine(hash, desc.ByteWidth);
+   }
+   else
+   {
+      HashCombine(hash, desc.Width);
+      if constexpr (std::is_same_v<T, D3D11_TEXTURE2D_DESC> || std::is_same_v<T, D3D11_TEXTURE3D_DESC>)
+      {
+         HashCombine(hash, desc.Height);
+         if constexpr (std::is_same_v<T, D3D11_TEXTURE3D_DESC>)
+         {
+            HashCombine(hash, desc.Depth);
+         }
+      }
+
+      if (format)
+      {
+         HashEnum(hash, desc.Format);
+      }
+
+      if constexpr (!std::is_same_v<T, D3D11_TEXTURE3D_DESC>)
+      {
+         HashCombine(hash, desc.ArraySize);
+      }
+
+      HashCombine(hash, desc.MipLevels);
+
+      if constexpr (std::is_same_v<T, D3D11_TEXTURE2D_DESC>)
+      {
+         HashCombine(hash, desc.SampleDesc.Count);
+      }
+
+   }
+
+   return hash;
+}
+
 void GetResourceInfo(ID3D11Resource* resource, uint4& size, DXGI_FORMAT& format, std::string* type_name = nullptr, std::string* hash = nullptr, std::string* debug_name = nullptr, bool* render_target_flag = nullptr, bool* unordered_access_flag = nullptr)
 {
    size = { };
