@@ -572,10 +572,10 @@ namespace
          // The display resolution (useful for games that create textures before setting the swapchain size).
          DisplayResolution = 1 << 10,
          DisplayAspectRatio = 1 << 11,
-         // Avoid upgrading 1x1 textures
-         No1Px = 1 << 12,
          // Loosen up the aspect ratio checks to multiples of 4 pixels, per axis, that's what some engines do (e.g. Unreal Engine).
-         PadTo4Px = 1 << 13,
+         PadTo4Px = 1 << 12,
+         // Avoid upgrading 1x1 textures
+         No1Px = 1 << 13,
          // "None" needs to be != 0, and specify all the negating flags
          None = No1Px,
       };
