@@ -1,7 +1,7 @@
 #include "../Includes/Common.hlsl"
 
-#ifndef ENABLE_AUTO_HDR
-#define ENABLE_AUTO_HDR 1
+#ifndef ENABLE_HDR_BOOST
+#define ENABLE_HDR_BOOST 1
 #endif
 
 Texture2D<float> t2 : register(t2);
@@ -32,7 +32,7 @@ void main(
   r0.xyzw = cb0[3].xyzw + r0.xyzw;
   o0.xyzw = cb0[0].xyzw * r0.xyzw;
 
-#if ENABLE_AUTO_HDR
+#if ENABLE_HDR_BOOST
   // Luma: add a light AutoHDR pass on videos
   if (LumaSettings.DisplayMode == 1)
   {

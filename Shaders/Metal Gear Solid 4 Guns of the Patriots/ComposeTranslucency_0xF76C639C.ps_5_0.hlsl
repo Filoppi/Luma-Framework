@@ -4,6 +4,7 @@ Texture2D<float4> translucencyTexture : register(t1);
 SamplerState translucencySampler : register(s1);
 SamplerState sceneSampler : register(s0);
 
+// Used to compose translucent and particles with the scene (in different phases)
 void main(
   float4 v0 : SV_POSITION0,
   float4 v1 : COLOR0,
@@ -18,7 +19,7 @@ void main(
   r1.xyzw = translucencyTexture.Sample(translucencySampler, v2.xy).xyzw;
   r1.xyzw = max(r1.xyzw, 0.0); // Luma: protect against negative values
   r0.xyz = r1.w * r0.xyz;
-  r0.xyz = r0.xyz * float3(0.25,0.25,0.25) + r1.xyz;
+  r0.xyz = r0.xyz * 0.25 + r1.xyz;
   r0.w = max(r0.x, r0.y);
   r1.x = max(0.25, r0.z);
   r0.w = max(r1.x, r0.w);

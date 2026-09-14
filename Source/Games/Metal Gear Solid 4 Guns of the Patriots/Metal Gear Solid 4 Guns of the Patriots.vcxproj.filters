@@ -4,4 +4,7 @@
     <ClCompile Include="main.cpp" />
     <ClCompile Include="..\..\Core\unity_build.cpp" />
   </ItemGroup>
+  <ItemGroup>
+    <ClInclude Include="gtao.h" />
+  </ItemGroup>
 </Project>

@@ -1,21 +1,13 @@
 // SMAA implementation
 // See Demo for the reference https://github.com/iryoku/smaa
 //
-// This replaces the game's FXAA pass (0xFAB5AE7C, always active), which ran on the gamma space post process
+// This replaces the game's FXAA pass (0xFAB5AE7C, when active), which ran on the gamma space post process
 // buffer, so both the edge detection and the neighborhood blending run in gamma space too (which is what
 // SMAA's color edge detection expects anyway), and no color space conversion pass is needed.
 
 #include "../Includes/Common.hlsl"
 
-// float4(1 / width, 1 / height, width, height) of the pass render target (see "DrawSMAA()" in c++).
-// This game has no Luma game settings cbuffer, and the post process resolution isn't guaranteed to match
-// the swapchain one, so we push the render target metrics ourselves.
-cbuffer SmaaMetricsCB : register(b1)
-{
-	float4 SmaaRtMetrics;
-}
-
-#define SMAA_RT_METRICS SmaaRtMetrics
+#define SMAA_RT_METRICS float4(LumaSettings.RenderInvSize, LumaSettings.RenderSize)
 #define SMAA_PRESET_ULTRA
 #define SMAA_PREDICATION 0 // We have no depth buffer hooked up in this game
 #define SMAA_CUSTOM_SL

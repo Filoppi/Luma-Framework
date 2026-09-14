@@ -1,5 +1,9 @@
 #include "../Includes/Common.hlsl"
 
+#ifndef ENABLE_LUMA
+#define ENABLE_LUMA 1
+#endif
+
 Texture2D<float4> t3 : register(t3);
 Texture2D<float4> t2 : register(t2);
 Texture2D<float4> t1 : register(t1);
@@ -26,30 +30,50 @@ void main(
   out float4 o0 : SV_TARGET0)
 {
   float4 r0,r1;
+
   r0.xyz = t1.Sample(s1_s, w2.xy).xyz;
-  r0.xyz = r0.xyz * float3(2,2,2) + float3(-1,-1,-1);
-  r0.x = saturate(dot(cb0[7].xyz, r0.xyz));
+  r0.xyz = (r0.xyz * 2) - 1;
+  r0.x = dot(cb0[7].xyz, r0.xyz);
+#if !ENABLE_LUMA
+  r0.x = saturate(r0.x);
+#endif
+
   r0.yzw = t2.Sample(s2_s, v3.xy).xyz;
-  r0.yzw = r0.yzw * float3(2,2,2) + float3(-1,-1,-1);
-  r0.y = saturate(dot(cb0[7].xyz, r0.yzw));
+  r0.yzw = (r0.yzw * 2) - 1;
+  r0.y = dot(cb0[7].xyz, r0.yzw);
+#if !ENABLE_LUMA
+  r0.y = saturate(r0.y);
+#endif
   r0.x = r0.x + r0.y;
+
   r0.yzw = t3.Sample(s3_s, w3.xy).xyz;
-  r0.yzw = r0.yzw * float3(2,2,2) + float3(-1,-1,-1);
-  r0.y = saturate(dot(cb0[7].xyz, r0.yzw));
+  r0.yzw = (r0.yzw * 2) - 1;
+  r0.y = dot(cb0[7].xyz, r0.yzw);
+#if !ENABLE_LUMA
+  r0.y = saturate(r0.y);
+#endif
   r0.x = r0.x + r0.y;
-  r0.x = 0.333333343 * r0.x;
-  r0.x = r0.x * r0.x;
-  r0.yzw = t0.Sample(s0_s, v2.xy).xyz;
-#if 1 // Luma: fix Rec.601 luminance // TODO: calculate in linear!
-  r1.x = GetLuminance(r0.yzw);
+
+  // Average
+  r0.x *= 1.0 / 3.0;
+#if ENABLE_LUMA // TODO1: test: it might get too strong?
+  // Just clamp once at the end with Luma, it should give smoother results
+  r0.x = max(r0.x, 0.0);
+  // Invert the direction beyond 1, otherwise it'd go crazy high due to the square
+  float mipsIntensity = lerp(r0.x * r0.x, sqrt(r0.x), saturate(r0.x * r0.x));
 #else
-  r1.x = dot(r0.yzw, float3(0.300000012,0.589999974,0.109999999));
+  float mipsIntensity = r0.x * r0.x;
+#endif
+  
+  float3 baseMipColor = t0.Sample(s0_s, v2.xy).xyz;
+#if 1 // Luma: fix Rec.601 luminance // TODO: calculate in linear!
+  r1.x = GetLuminance(baseMipColor);
+#else
+  r1.x = dot(baseMipColor, float3(0.300000012,0.589999974,0.109999999));
 #endif
   r1.y = -cb0[5].w + r1.x;
   r1.x = saturate(r1.y / r1.x);
-  r1.xyz = r1.xxx * r0.yzw;
-  r1.xyz = r1.xyz * r0.xxx;
-  r0.xyz = r1.xyz * cb0[5].xxx + r0.yzw;
+  r0.xyz = baseMipColor + (r1.x * baseMipColor * mipsIntensity * cb0[5].x);
   o0.xyz = v1.xyz * r0.xyz;
   o0.w = 1;
 }

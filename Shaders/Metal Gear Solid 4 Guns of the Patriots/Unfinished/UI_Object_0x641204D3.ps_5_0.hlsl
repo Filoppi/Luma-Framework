@@ -19,7 +19,7 @@ cbuffer cb0 : register(b0)
 
 #define cmp
 
-// TODO
+// Draws 3D objects in the UI
 void main(
   float4 v0 : SV_POSITION0,
   float4 v1 : COLOR0,

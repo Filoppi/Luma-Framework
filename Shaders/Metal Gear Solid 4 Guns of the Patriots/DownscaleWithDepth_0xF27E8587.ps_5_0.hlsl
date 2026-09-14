@@ -18,7 +18,7 @@ void main(
 {
     // Reconstruct the depth UV from the destination pixel position using the
     // original 2x scale, pixel offset, and depth-buffer dimensions.
-    float2 depthUV = (position.xy * 2.0 + cb0[4].xy) / cb0[8].xy;
+    float2 depthUV = (position.xy * 2.0 + cb0[4].xy) / cb0[8].xy; // TODO1: scaling!
     float depth = DepthTexture.Sample(DepthSampler, depthUV).r;
 
     float circleOfConfusion = 0.0;

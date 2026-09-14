@@ -1,5 +1,12 @@
+#include "../Includes/Common.hlsl"
+
+#ifndef ENABLE_LUMA
+#define ENABLE_LUMA 1
+#endif
+
 #ifndef ENABLE_FINAL_FILTERING
 // Luma: disabled as I don't think this does anything good? Maybe it adds some blur to simulate AA? Or some remains to the final resolution scaling the game did
+// Update: this might be taking care of the screen resizing feature (the stuff made for CRT cropping edges)
 #define ENABLE_FINAL_FILTERING 0
 #endif
 
@@ -38,6 +45,11 @@ void main(
   {
     filteredColor = float3(1,0,1);
   }
+#endif
+    
+#if !ENABLE_LUMA
+  // Emulate UNORM
+  filteredColor = saturate(filteredColor);
 #endif
 
   filteredColor *= vertexColor.rgb;

@@ -1,59 +1,103 @@
 #include "../Includes/Common.hlsl"
 
+#ifndef ENABLE_IMPROVED_BLUR
+#define ENABLE_IMPROVED_BLUR 1
+#endif
+
+// For extra stability (still not perfect)
+#ifndef ENABLE_HIGH_QUALITY_AUTO_EXPOSURE
+#define ENABLE_HIGH_QUALITY_AUTO_EXPOSURE 0
+#endif
+
 Texture2D<float4> t0 : register(t0);
 
+// Linear clamp sampler
 SamplerState s0_s : register(s0);
 
+// This shader is called 4 times in a row, with a blend mode that is additive on rgb and "max" on a.
+// The normalization (/4) of the average luminance is supposedly done on the CPU side.
+// The first call is on the bottom left, then top left, then bottom right and then top right (or something like that). Each covers one area, to speed up reads.
 void main(
   float4 v0 : SV_POSITION0,
   float4 v1 : COLOR0,
-  float2 v2 : TEXCOORD0,
+  float2 uv : TEXCOORD0,
   out float4 o0 : SV_TARGET0)
 {
-#if 1 // Luma: fix cropped sampling in UW (e.g. in 32:9 it'd only sample the half left portion of the image, probably not intentional). This happens both in the vanilla game (with black bars) and UW mods
-  float gameAspectRatio = LumaSettings.SwapchainSize.x * LumaSettings.SwapchainInvSize.y;
-  float nativeAspectRatio = 16.0 / 9.0;
-
-  v2.x *= max(gameAspectRatio / nativeAspectRatio, 1.0);
-#endif
-#if 0 // Color output test
-  o0 = t0.Sample(s0_s, v2.xy).xyzw;
+#if 0 // Color/UV output test
+  //uv = v0.xy / 32; // Force fullscreen UVs
+  o0 = t0.Sample(s0_s, uv).xyzw;
+  //o0 = linear_to_gamma(uv.y).x;
   return;
 #endif
 
-  float4 r0,r1,r2;
-  int4 r0i;
-  r0.xy = 0.0;
-  r0i.z = 0;
-  while (true) {
-    if (r0i.z >= 4) break;
-    r0.w = (float)r0i.z;
-    r1.x = r0.w * 0.25 + v2.x;
-    r1.zw = r0.xy;
-    r0i.w = 0;
-    while (true) {
-      if (r0i.w >= 4) break;
-      r2.x = (float)r0i.w;
-      r1.y = -r2.x * 0.25 + v2.y;
-      r2.xy = float2(-0.5,0.5) + r1.xy;
-      r2.xyzw = t0.Sample(s0_s, r2.xy).xyzw;
+  float3 colorsSum = 0;
+  float maxLuminance = 0.0;
+  float sumLuminance = 0.0;
+
+#if ENABLE_IMPROVED_BLUR && ENABLE_HIGH_QUALITY_AUTO_EXPOSURE
+  static const int samples = 16;
+#elif ENABLE_IMPROVED_BLUR
+  // TODO: just generate mips of the source image up to 32x32 or something like that, it'd be faster and a perfect integration/average, completely fixing unstable auto exposure
+  // x and y loop iterations are the same as source and target are square.
+  static const int samples = 8; // 16 and 32 might be too slow
+#else
+  static const int samples = 4;
+#endif
+  static const float sampleStep = 1.0 / float(samples);
+#if ENABLE_IMPROVED_BLUR
+  // Tile each draw's UV region with one sampling footprint per output pixel.
+  float2 uvDx = ddx(uv);
+  float2 uvDy = ddy(uv);
+  float2 sampleDx = uvDx * sampleStep;
+  float2 sampleDy = uvDy * sampleStep;
+#endif
+  for (int x = 0; x < samples; ++x)
+  {
+    for (int y = 0; y < samples; ++y)
+    {
+#if ENABLE_IMPROVED_BLUR
+      float2 cellOffset = (float2(x, y) + 0.5) * sampleStep - 0.5;
+      // Prevents different draws from reading overlapping areas of the source texture, they are all only considered once. Also prevents reading outside valid areas.
+      float2 sampleUV = uv + uvDx * cellOffset.x + uvDy * cellOffset.y;
+      // Use the subcell footprint for mip selection instead of the whole output pixel. Texture has no mips.
+      float4 encoded = t0.SampleGrad(s0_s, sampleUV, sampleDx, sampleDy);
+#else
+      // The original code sampled many areas twice and was just overall very bad at averaging the source!
+      float2 sampleUV = uv + float2(-0.5 + x * sampleStep, 0.5 - y * sampleStep);
+      float4 encoded = t0.Sample(s0_s, sampleUV);
+#endif
 
       // Decode HDR
-      r2.xyz = r2.xyz / r2.w;
-      r2.xyz = float3(0.25,0.25,0.25) * r2.xyz;
+      float3 color = encoded.rgb / encoded.a * 0.25;
 
-#if 1 // Luma: fix Rec.601 luminance // TODO: calculate in linear
-      r1.y = GetLuminance(r2.xyz);
-#else
-      r1.y = dot(r2.xyz, float3(0.300000012,0.589999974,0.109999999));
+      colorsSum += color;
+
+#if ENABLE_HIGH_QUALITY_AUTO_EXPOSURE
+      // Run exposure average in linear space for higher quality.
+      // This might change the balance between shadow and light a lot, but with the exception of certain fixed screens, it'd be more accurate.
+      color = gamma_to_linear(color, GCT_POSITIVE);
 #endif
-      r1.z = max(r1.z, r1.y);
-      r1.w = r1.w + r1.y;
-      r0i.w++;
+#if 1 // Luma: fix Rec.601 luminance // TODO: calculate in linear
+      float luminance = GetLuminance(color);
+#else
+      float luminance = dot(color, float3(0.300000012,0.589999974,0.109999999));
+#endif
+      maxLuminance = max(maxLuminance, luminance);
+      sumLuminance += luminance;
     }
-    r0.xy = r1.zw;
-    r0i.z++;
   }
-  r0.y = 0.0625 * r0.y;
-  o0.xyzw = v1.xyzw * r0.yyyx;
+
+  float averageLuminance = sumLuminance / float(samples * samples);
+#if ENABLE_HIGH_QUALITY_AUTO_EXPOSURE
+  // Note that the HW blends will still blend in gamma space!
+  averageLuminance = linear_to_gamma(averageLuminance, GCT_NONE).x;
+  maxLuminance = linear_to_gamma(maxLuminance, GCT_NONE).x;
+#endif
+  float4 exposureScaling = v1; // Might be tint, unknown. Seems greyscale on rgb usually, with alpha having a different value.
+
+  o0 = exposureScaling * float4(averageLuminance.xxx, maxLuminance);
+
+#if 0 // Color output test (just to see the covered area quickly)
+  o0.xyz = colorsSum.rgb / float(samples * samples);
+#endif
 }

@@ -13,4 +13,6 @@ void main(
   r0.x = t0.Sample(s0_s, v2.xy).x;
   r0.x = -v3.x + r0.x;
   o0.x = v3.y / r0.x;
+
+  //o0.x = v3.y; // Test depth scale (25.0)
 }

@@ -1,3 +1,9 @@
+#include "../Includes/Common.hlsl"
+
+#ifndef ENABLE_LUMA
+#define ENABLE_LUMA 1
+#endif
+
 Texture2D<float4> t0 : register(t0);
 
 SamplerState s0_s : register(s0);
@@ -14,7 +20,28 @@ void main(
   out float4 o0 : SV_TARGET0)
 {
   float4 r0,r1;
-  r0.xyz = t0.Sample(s0_s, v2.xy).xzw;
+  
+  float2 uv = v2.xy;
+#if ENABLE_LUMA && 0 // Disabled as it doesn't look good here
+  // Luma: fix overlays being stretched by doing a mirror+loop around 16:9
+  float sourceAspectRatio = 16.0 / 9.0; // Assumed. Theoretically it'd need to be the default aspect ratio this target texture has when playing at 16:9, but we can't know that.
+  float2 outputPixelSize = abs(ddx(uv)) + abs(ddy(uv));
+  float targetAspectRatio = outputPixelSize.y / outputPixelSize.x;
+
+  float2 scale = 1.0;
+
+  if (targetAspectRatio >= sourceAspectRatio)
+    scale.x = targetAspectRatio / sourceAspectRatio;
+  else
+    scale.y = sourceAspectRatio / targetAspectRatio;
+    
+  // Center the UVs before scaling them
+  uv = (uv - 0.5) * scale + 0.5;
+
+  uv = MirrorUV(uv);
+#endif
+
+  r0.xyz = t0.Sample(s0_s, uv).xzw;
   r0.w = (0 >= r0.z);
   if (r0.w != 0) discard;
   r0.w = (r0.y < cb0[0].x);

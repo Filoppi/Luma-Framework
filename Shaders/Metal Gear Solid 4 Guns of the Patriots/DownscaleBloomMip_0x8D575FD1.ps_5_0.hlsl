@@ -4,6 +4,7 @@ Texture2D<float4> t0 : register(t0);
 
 SamplerState s0_s : register(s0);
 
+// 2x downscale with HDR decode/encode
 void main(
   float4 v0 : SV_POSITION0,
   float4 v1 : COLOR0,
@@ -23,23 +24,23 @@ void main(
   r2.xyzw = t0.Sample(s0_s, r2.zw).xyzw;
   r2.xyz = r2.xyz / r2.www;
   r3.xyz = r3.xyz / r3.www;
-  r3.xyz = float3(0.25,0.25,0.25) * r3.xyz;
-  r0.xyz = r0.xyz * float3(0.25,0.25,0.25) + r3.xyz;
-  r0.xyz = r2.xyz * float3(0.25,0.25,0.25) + r0.xyz;
+  r3.xyz = 0.25 * r3.xyz;
+  r0.xyz = r0.xyz * 0.25 + r3.xyz;
+  r0.xyz = r2.xyz * 0.25 + r0.xyz;
   r2.xyzw = r1.xyxy * float4(0.353553385,-0.353553385,-0.129409522,-0.482962906) + v2.xyxy;
   r1.xyzw = r1.xyxy * float4(-0.482962906,-0.129409522,-0.353553385,0.353553385) + v2.xyxy;
   r3.xyzw = t0.Sample(s0_s, r2.xy).xyzw;
   r2.xyzw = t0.Sample(s0_s, r2.zw).xyzw;
   r2.xyz = r2.xyz / r2.www;
   r3.xyz = r3.xyz / r3.www;
-  r0.xyz = r3.xyz * float3(0.25,0.25,0.25) + r0.xyz;
-  r0.xyz = r2.xyz * float3(0.25,0.25,0.25) + r0.xyz;
+  r0.xyz = r3.xyz * 0.25 + r0.xyz;
+  r0.xyz = r2.xyz * 0.25 + r0.xyz;
   r2.xyzw = t0.Sample(s0_s, r1.xy).xyzw;
   r1.xyzw = t0.Sample(s0_s, r1.zw).xyzw;
   r1.xyz = r1.xyz / r1.www;
   r2.xyz = r2.xyz / r2.www;
-  r0.xyz = r2.xyz * float3(0.25,0.25,0.25) + r0.xyz;
-  r0.xyz = r1.xyz * float3(0.25,0.25,0.25) + r0.xyz;
+  r0.xyz = r2.xyz * 0.25 + r0.xyz;
+  r0.xyz = r1.xyz * 0.25 + r0.xyz;
   r0.xyz = v1.xyz * r0.xyz;
   r0.xyz = float3(0.142857149,0.142857149,0.142857149) * r0.xyz;
   r0.w = max(r0.x, r0.y);
