@@ -116,7 +116,7 @@ struct DrawStateStack
          device_context->CSGetUnorderedAccessViews(0, state->uav_num, &state->unordered_access_views[0]);
 #if ENABLE_SHADER_CLASS_INSTANCES
          device_context->CSGetShader(&state->cs, &state->cs_instances[0], &state->cs_instances_count);
-         ASSERT_ONCE(state->vs_instances_count == 0 && state->cs_instances_count == 0);
+         ASSERT_ONCE(state->cs_instances_count == 0); // Make sure they are never used
 #else
          device_context->CSGetShader(&state->cs, nullptr, 0);
 #endif
@@ -370,22 +370,30 @@ void AddTraceDrawCallData(std::vector<TraceDrawCallData>& trace_draw_calls_data,
       {
          rv->GetResource(&resource);
 
-         const bool upgraded = device_data.original_resources_to_mirrored_upgraded_resources.contains((uint64_t)resource.get()) || device_data.upgraded_resources.contains((uint64_t)resource.get()) || (/*swapchain_upgrade_type > SwapchainUpgradeType::None &&*/ device_data.back_buffers.contains((uint64_t)resource.get())); // TODO: expose "swapchain_upgrade_type" here or something like that
+         const bool upgraded = device_data.resource_upgrades.original_resources_to_mirrored_upgraded_resources.contains((uint64_t)resource.get()) || device_data.resource_upgrades.upgraded_resources.contains((uint64_t)resource.get()) || (/*swapchain_upgrade_type > SwapchainUpgradeType::None &&*/ device_data.back_buffers.contains((uint64_t)resource.get())); // TODO: expose "swapchain_upgrade_type" here or something like that
+         const bool scaled = [&]() {
+            auto it = device_data.resource_upgrades.original_resources_to_mirrored_upgraded_resources.find((uint64_t)resource.get());
+            return it != device_data.resource_upgrades.original_resources_to_mirrored_upgraded_resources.end() && it->second.is_scaled;
+         }();
 
          using ViewType = std::remove_pointer_t<decltype(rv)>;
          // Note: depth/stencil views are ignored for now
          if constexpr (std::is_same_v<ViewType, ID3D11ShaderResourceView>)
          {
             trace_draw_call_data.any_input_resources_format_upgraded |= upgraded;
+            trace_draw_call_data.any_input_resources_scaled |= scaled;
          }
          else if constexpr (std::is_same_v<ViewType, ID3D11RenderTargetView>)
          {
             trace_draw_call_data.any_output_resources_format_upgraded |= upgraded;
+            trace_draw_call_data.any_output_resources_scaled |= scaled;
          }
          else if constexpr (std::is_same_v<ViewType, ID3D11UnorderedAccessView>)
          {
             trace_draw_call_data.any_input_resources_format_upgraded |= upgraded;
             trace_draw_call_data.any_output_resources_format_upgraded |= upgraded;
+            trace_draw_call_data.any_input_resources_scaled |= scaled;
+            trace_draw_call_data.any_output_resources_scaled |= scaled;
          }
       }
    };
@@ -939,32 +947,34 @@ void SetViewportFullscreen(ID3D11DeviceContext* device_context, uint2 size = {})
          return;
       }
 
-#if DEVELOPMENT
-      // Scissors are often set after viewports in games (e.g. Prey), so check them separately.
-      // We need to make sure that all the draw calls after SR upscaling run at full resolution and not rendering resolution.
-      com_ptr<ID3D11RasterizerState> state;
-      device_context->RSGetState(&state);
-      if (state.get())
-      {
-         D3D11_RASTERIZER_DESC state_desc;
-         state->GetDesc(&state_desc);
-         if (state_desc.ScissorEnable)
-         {
-            D3D11_RECT scissor_rects[D3D11_VIEWPORT_AND_SCISSORRECT_OBJECT_COUNT_PER_PIPELINE];
-            UINT scissor_rects_num = 0;
-            // This will get the number of scissor rects used
-            device_context->RSGetScissorRects(&scissor_rects_num, nullptr);
-            ASSERT_ONCE(scissor_rects_num == 1); // Possibly innocuous as long as it's > 0, but we should only ever have one viewport and one RT!
-            device_context->RSGetScissorRects(&scissor_rects_num, &scissor_rects[0]);
-
-            // If this ever triggered, we'd need to replace scissors too after SR upscaling (and make them full resolution).
-            ASSERT_ONCE(scissor_rects[0].left == 0 && scissor_rects[0].top == 0 && scissor_rects[0].right == render_target_texture_2d_desc.Width && scissor_rects[0].bottom == render_target_texture_2d_desc.Height);
-         }
-      }
-#endif // DEVELOPMENT
-
       size.x = render_target_texture_2d_desc.Width;
       size.y = render_target_texture_2d_desc.Height;
+   }
+
+   // A render-resolution scissor clips a fullscreen viewport to the top-left subregion.
+   // Keep scissor and viewport coverage in sync whenever this helper expands a target for SR.
+   com_ptr<ID3D11RasterizerState> state;
+   device_context->RSGetState(&state);
+   if (state.get())
+   {
+      D3D11_RASTERIZER_DESC state_desc;
+      state->GetDesc(&state_desc);
+      if (state_desc.ScissorEnable)
+      {
+         UINT scissor_rects_num = 0;
+         device_context->RSGetScissorRects(&scissor_rects_num, nullptr);
+         scissor_rects_num = min(scissor_rects_num, UINT(D3D11_VIEWPORT_AND_SCISSORRECT_OBJECT_COUNT_PER_PIPELINE));
+         if (scissor_rects_num > 0)
+         {
+            D3D11_RECT scissor_rects[D3D11_VIEWPORT_AND_SCISSORRECT_OBJECT_COUNT_PER_PIPELINE];
+            device_context->RSGetScissorRects(&scissor_rects_num, scissor_rects);
+            for (UINT i = 0; i < scissor_rects_num; ++i)
+            {
+               scissor_rects[i] = { 0, 0, static_cast<LONG>(size.x), static_cast<LONG>(size.y) };
+            }
+            device_context->RSSetScissorRects(scissor_rects_num, scissor_rects);
+         }
+      }
    }
 
    D3D11_VIEWPORT viewports[D3D11_VIEWPORT_AND_SCISSORRECT_OBJECT_COUNT_PER_PIPELINE];
@@ -1625,28 +1635,10 @@ void DrawBloom(ID3D11Device* device, ID3D11DeviceContext* device_context, Device
    auto& managed_resources = device_data.managed_resources;
 
    // TODO: Reorganize this better.
-   static std::vector<ID3D11RenderTargetView*> rtv_mips_x(nmips);
-   static std::vector<ID3D11ShaderResourceView*> srv_mips_x(nmips);
-   static std::vector<ID3D11RenderTargetView*> rtv_mips_y(nmips);
-   static std::vector<ID3D11ShaderResourceView*> srv_mips_y(nmips);
-
-#if DEVELOPMENT
-   static int last_nmips = nmips;
-   if (nmips != last_nmips)
-   {
-      ResetCOMArray(rtv_mips_x);
-      ResetCOMArray(srv_mips_x);
-      ResetCOMArray(rtv_mips_y);
-      ResetCOMArray(srv_mips_y);
-
-      rtv_mips_x.resize(nmips);
-      srv_mips_x.resize(nmips);
-      rtv_mips_y.resize(nmips);
-      srv_mips_y.resize(nmips);
-
-      last_nmips = nmips;
-   }
-#endif
+   static std::vector<ID3D11RenderTargetView*> rtv_mips_x;
+   static std::vector<ID3D11ShaderResourceView*> srv_mips_x;
+   static std::vector<ID3D11RenderTargetView*> rtv_mips_y;
+   static std::vector<ID3D11ShaderResourceView*> srv_mips_y;
 
    // Backup IA.
    D3D11_PRIMITIVE_TOPOLOGY primitive_topology_original;
@@ -1697,6 +1689,28 @@ void DrawBloom(ID3D11Device* device, ID3D11DeviceContext* device_context, Device
 
    const auto scene_width = tex_desc.Width;
    const auto scene_height = tex_desc.Height;
+
+   // The bloom mips are sized from the scene; reset them when the scene size or mip count changes
+   // Needed for proper support of the new resource scaling feature.
+   static UINT last_scene_width = 0;
+   static UINT last_scene_height = 0;
+   static int last_nmips = -1;
+   if (nmips != last_nmips || scene_width != last_scene_width || scene_height != last_scene_height)
+   {
+      ResetCOMArray(rtv_mips_x);
+      ResetCOMArray(srv_mips_x);
+      ResetCOMArray(rtv_mips_y);
+      ResetCOMArray(srv_mips_y);
+
+      rtv_mips_x.resize(nmips);
+      srv_mips_x.resize(nmips);
+      rtv_mips_y.resize(nmips);
+      srv_mips_y.resize(nmips);
+
+      last_nmips = nmips;
+      last_scene_width = scene_width;
+      last_scene_height = scene_height;
+   }
 
    const UINT x_mip0_width = tex_desc.Width / 2;
    const UINT x_mip0_height = tex_desc.Height;

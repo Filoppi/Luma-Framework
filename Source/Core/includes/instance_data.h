@@ -3,8 +3,10 @@
 #include <algorithm>
 #include <array>
 #include <atomic>
+#include <condition_variable>
 #include <cstddef>
 #include <cstdint>
+#include <deque>
 #include <map>
 #include <memory>
 #include <shared_mutex>
@@ -17,6 +19,12 @@
 #include <vector>
 
 #include "managed_resources.h"
+#include "patch.hpp"
+#include "debug.h"
+#include "resource_upgrades.hpp"
+#if LUMA_USE_DXP
+#include "recipes.h"
+#endif
 
 // Forward declarations
 struct GameDeviceData;
@@ -103,6 +111,11 @@ struct TraceDrawCallData
    uint64_t pipeline_handles = 0; // The actual list of pipelines that run within the traced frame (within this deferred command list, and then merged into the immediate one later)
    ShaderHashesList shader_hashes;
 #endif
+
+   // Which shader variant actually ran for this draw (post-decision in
+   // OnDrawOrDispatch_Custom). Frame capture only.
+   Shader::ShaderVariant clone_variant = Shader::ShaderVariant::Original;
+   bool patch_enabled = false;
 
    // The original command list (can be useful to have later)
    com_ptr<ID3D11DeviceContext> command_list = nullptr;
@@ -207,6 +220,8 @@ struct TraceDrawCallData
    // TODO: these might not always be filled up!
    bool any_input_resources_format_upgraded = false;
    bool any_output_resources_format_upgraded = false;
+   bool any_input_resources_scaled = false;
+   bool any_output_resources_scaled = false;
 
    bool IsRTVValid(size_t index) const { return rtv_format[index] != DXGI_FORMAT_UNKNOWN && rtv_format[index] != DXGI_FORMAT(-1); }
    bool IsSRVValid(size_t index) const { return srv_format[index] != DXGI_FORMAT_UNKNOWN && srv_format[index] != DXGI_FORMAT(-1); }
@@ -235,9 +250,18 @@ struct __declspec(uuid("90d9d05b-fdf5-44ee-8650-3bfd0810667a")) CommandListData
    // Only used when checking for "ChainTextureFormatUpgradesType::DirectAndIndirectDependencies", as it might be disabled at runtime.
    uint enable_chain_indirect_texture_format_upgrades = 0; // TODO: ChainTextureFormatUpgradesType
 
+   // Force resource scaling to output resolution for this command list (set during recording).
+   // Used when has_drawn_sr isn't available during recording, potential issue if sr fails to draw.
+   bool force_scale = false;
+
+
    reshade::api::pipeline pipeline_state_original_compute_shader = reshade::api::pipeline(0);
    reshade::api::pipeline pipeline_state_original_vertex_shader = reshade::api::pipeline(0);
    reshade::api::pipeline pipeline_state_original_pixel_shader = reshade::api::pipeline(0);
+
+   // Patch clone handles (hash → clone pipeline). Original handle is always
+   // derivable from pipeline_state_original_*_shader (the bound pipeline).
+   std::unordered_map<uint32_t, reshade::api::pipeline> patch_clone_handles;
 
    Shader::ShaderHashesList<OneShaderPerPipeline> pipeline_state_original_graphics_shader_hashes;
    Shader::ShaderHashesList<OneShaderPerPipeline> pipeline_state_original_compute_shader_hashes;
@@ -245,6 +269,41 @@ struct __declspec(uuid("90d9d05b-fdf5-44ee-8650-3bfd0810667a")) CommandListData
    bool pipeline_state_has_custom_pixel_shader = false;
    bool pipeline_state_has_custom_graphics_shader = false;
    bool pipeline_state_has_custom_compute_shader = false;
+
+   // ============================================================================
+   // Patch variant API (game-facing). Per-context/per-bind state.
+   // ============================================================================
+
+   // Switch between original and patched shader for a given hash.
+   // "stages" selects which original handle to use (vertex/pixel/compute).
+   void UseShaderVariant(ID3D11DeviceContext* native_device_context, uint32_t shader_hash,
+      reshade::api::shader_stage stages, Shader::ShaderVariant variant)
+   {
+      auto it = patch_clone_handles.find(shader_hash);
+      if (it == patch_clone_handles.end()) return;
+
+      reshade::api::pipeline bound_pipeline;
+      if ((stages & reshade::api::shader_stage::vertex) != 0)
+         bound_pipeline = pipeline_state_original_vertex_shader;
+      else if ((stages & reshade::api::shader_stage::pixel) != 0)
+         bound_pipeline = pipeline_state_original_pixel_shader;
+      else if ((stages & reshade::api::shader_stage::compute) != 0)
+         bound_pipeline = pipeline_state_original_compute_shader;
+      else
+         return;
+
+      uint64_t handle = (variant == Shader::ShaderVariant::Patched)
+         ? it->second.handle
+         : bound_pipeline.handle;
+      if (handle == 0) return;
+
+      if ((stages & reshade::api::shader_stage::vertex) != 0)
+         native_device_context->VSSetShader(reinterpret_cast<ID3D11VertexShader*>(handle), nullptr, 0);
+      else if ((stages & reshade::api::shader_stage::pixel) != 0)
+         native_device_context->PSSetShader(reinterpret_cast<ID3D11PixelShader*>(handle), nullptr, 0);
+      else if ((stages & reshade::api::shader_stage::compute) != 0)
+         native_device_context->CSSetShader(reinterpret_cast<ID3D11ComputeShader*>(handle), nullptr, 0);
+   }
 
    enum ViewState
    {
@@ -377,26 +436,62 @@ struct __declspec(uuid("90d9d05b-fdf5-44ee-8650-3bfd0810667a")) CommandListData
 
 struct __declspec(uuid("cfebf6d4-d184-4e1a-ac14-09d088e560ca")) DeviceData
 {
-   // Only for "swapchains", "back_buffers" and "upgraded_resources" (and related) and "modified_shaders_byte_code".
+   // Only for "swapchains", "back_buffers" and "upgraded_resources" (and related) and "patch_context".
    // Device object creation etc is usually single threaded anyway, except for the destructor.
    std::shared_mutex mutex;
 
    std::thread thread_auto_loading;
    std::atomic<bool> thread_auto_loading_running = false;
 
-   std::unordered_set<uint64_t> upgraded_resources; // All the directly upgraded resources, excluding the swapchains backbuffers, as they are created internally by DX
-#if DEVELOPMENT
-   std::unordered_map<uint64_t, reshade::api::format> original_upgraded_resources_formats; // Maps the original resource to its direct upgraded format. These include the swapchain buffers too!
-   std::unordered_map<uint64_t, std::pair<uint64_t, reshade::api::format>> original_upgraded_resource_views_formats; // All the views for direct upgraded resources, with the resource and the original resource view format
-#endif
-   std::unordered_map<uint64_t, uint64_t> original_resources_to_mirrored_upgraded_resources; // TODO: convert/copy the initial/current data from the source texture when created. Also rename to "indirect_upgraded"
-   std::unordered_map<uint64_t, uint64_t> original_resource_views_to_mirrored_upgraded_resource_views;
+   // TODO(Patch module): move the patch_context member below and this async clone
+   // machinery (AsyncCloneEntry + the LUMA_PATCH_PROVIDERS-gated members) into
+   // patch.hpp once the include-order rework lands (see core.hpp dispatch TODO).
+#if LUMA_PATCH_PROVIDERS & (LUMA_PATCH_PROVIDER_BYTECODE_ASYNC | LUMA_PATCH_PROVIDER_RECIPE_ASYNC)
+   // Unified async clone entry: mode 1 populates subobjects+layout (created at
+   // present boundary), mode 2 populates pipeline_clone (created by worker).
+   // Only one of the two paths is active per build configuration.
+   struct AsyncCloneEntry
+   {
+      uint64_t pipeline_handle = 0;
+      // Mode 1: subobjects built by worker, pipeline created at present boundary
+      reshade::api::pipeline_subobject* subobjects = nullptr;
+      uint32_t subobject_count = 0;
+      reshade::api::pipeline_layout layout = {};
+      // Mode 2: pipeline already compiled by worker
+      reshade::api::pipeline pipeline_clone = {};
+      // Shared
+      reshade::api::device* device = nullptr;
+      uint32_t shader_hash = 0; // shader the clone was built for (verify at publish)
+      Shader::CloneOrigin clone_origin = Shader::CloneOrigin::None; // what the clone was built from (recorded by the worker)
+   };
+   // Lock-free ready queue. Single worker thread — atomic pointer is sufficient,
+   // no mutex needed. Worker publishes to the queue (reads pointer, creates if
+   // null, writes). Render thread drains at OnPresent via atomic exchange.
+   struct AsyncReadyQueue
+   {
+      std::deque<AsyncCloneEntry> items;
+   };
+   std::atomic<AsyncReadyQueue*> async_ready_queue{nullptr};
 
-#if ENABLE_ORIGINAL_SHADERS_MEMORY_EDITS
-   // Edited shaders byte code + size + MD5 hash by (original) shader hash.
-   // We cache these in memory forever just because with ReShade handling their destruction on the spot between the pipeline (shader) creation and init function isn't "possible",
-   // and it can be called from multiple threads so we need to protect it.
-   std::unordered_map<uint32_t, std::tuple<std::unique_ptr<std::byte[]>, size_t, Hash::MD5::Digest>> modified_shaders_byte_code;
+   std::atomic<bool> async_shutdown = false;
+   std::mutex async_jobs_mutex;
+   std::condition_variable async_jobs_cv;
+   uint64_t async_queue_version = 0;
+#endif // async providers
+
+   // Resource upgrade / mirroring state and configuration (see resource_upgrades.hpp).
+   // Owns the mirror bookkeeping and upgrade/scale configuration; core.hpp passes the frame's
+   // resolution/SR state into its methods. Migrated subsystem-by-subsystem.
+   ResourceUpgradeManager resource_upgrades;
+
+#if LUMA_PATCH_PROVIDERS != 0
+   // Stored shader patches (both bytecode and recipe methods) + per-method
+   // processed markers. See Patch::PatchContext.
+   Patch::PatchContext patch_context;
+#endif
+
+#if LUMA_USE_DXP
+   Recipes recipes;
 #endif
 
    std::unordered_set<reshade::api::swapchain*> swapchains;
@@ -551,10 +646,19 @@ struct __declspec(uuid("cfebf6d4-d184-4e1a-ac14-09d088e560ca")) DeviceData
 #endif
 
    // TODO: make changes thread safe
+   // Render resolution without padding.
    float2 render_resolution = { 1, 1 };
    float2 previous_render_resolution = { 1, 1 };
-   // Note: this is the "display"/swapchain res
+   // Note: this is the window/swapchain res
    float2 output_resolution = { 1, 1 };
+   float2 display_resolution = { 1, 1 };
+
+   // Last frame's scale-relevant state, used to detect when indirect mirrors (and anything else tied to
+   // the render scale) must be invalidated because the render resolution or SR selection changed.
+   float2 last_render_resolution = { 1, 1 };
+#if ENABLE_SR
+   SR::Type last_sr_type = SR::Type::None;
+#endif
 
    // Live settings (set by the code, not directly by users):
    float default_user_peak_white = default_peak_white;

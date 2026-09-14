@@ -111,5 +111,8 @@
     <ClInclude Include="includes\managed_resources.h">
       <Filter>Includes</Filter>
     </ClInclude>
+    <ClInclude Include="includes\patch.hpp">
+      <Filter>Includes</Filter>
+    </ClInclude>
   </ItemGroup>
 </Project>

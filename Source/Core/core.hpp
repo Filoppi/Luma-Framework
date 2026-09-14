@@ -112,9 +112,9 @@
 #ifndef ENABLE_GAME_PIPELINE_STATE_READBACK
 #define ENABLE_GAME_PIPELINE_STATE_READBACK 0
 #endif // ENABLE_GAME_PIPELINE_STATE_READBACK
-#ifndef ENABLE_ORIGINAL_SHADERS_MEMORY_EDITS
-#define ENABLE_ORIGINAL_SHADERS_MEMORY_EDITS 0
-#endif // ENABLE_ORIGINAL_SHADERS_MEMORY_EDITS
+#ifndef ENABLE_FAST_NOISE_TEXTURES
+#define ENABLE_FAST_NOISE_TEXTURES 0
+#endif // ENABLE_FAST_NOISE_TEXTURES
 #ifndef ENABLE_POST_DRAW_DISPATCH_CALLBACK
 #define ENABLE_POST_DRAW_DISPATCH_CALLBACK 0
 #endif // ENABLE_POST_DRAW_DISPATCH_CALLBACK
@@ -151,6 +151,10 @@ constexpr bool OneShaderPerPipeline = true;
 // This might not disable all shaders dumping related code, but it disables enough to remove any performance cost
 #ifndef ALLOW_SHADERS_DUMPING
 #define ALLOW_SHADERS_DUMPING (DEVELOPMENT || TEST)
+#endif
+// Separate gate for dumping patched (modified) shaders
+#ifndef ALLOW_SHADER_PATCHES_DUMPING
+#define ALLOW_SHADER_PATCHES_DUMPING 0
 #endif
 
 // Only enable this if needed, given that it adds a lot of unnecessary checks for most games
@@ -217,6 +221,138 @@ using namespace Luma;
 using namespace Shader;
 using namespace Math;
 
+#if LUMA_PATCH_PROVIDERS != 0
+namespace Patch
+{
+   // TODO(Patch module): these dispatch functions are declared in patch.hpp but
+   // defined here because they need the complete Game/DeviceData types, which
+   // would create a circular include (instance_data.h includes patch.hpp). Move
+   // them into a dedicated header (e.g. includes/patch_dispatch.hpp included
+   // after instance_data.h/game.h) when the header order is reworked.
+
+   // Runs the sync providers for one shader and stores any patch produced.
+   // Returns the stored patch (reused or fresh), or nullptr if none. Attempted
+   // providers are marked processed on any definitive outcome (patched or
+   // no-patch-needed — deterministic per method+hash, so they are never re-run
+   // for the same shader). "providers" is the game's effective provider mask.
+   std::shared_ptr<PatchedShaderData> PatchShaderSync(Game& game, DeviceData& device_data, const ShaderPatchRequest& request, const ByteCodeView& view, uint32_t providers)
+   {
+      const uint32_t shader_hash = request.shader_hash;
+
+      // 1. Reuse an already stored patch (previous sync or async outcome).
+      if (auto stored = device_data.patch_context.GetShaderData(shader_hash); stored)
+      {
+         return stored;
+      }
+
+      // 2. Bytecode sync provider (manual wins on conflicts).
+#if LUMA_PATCH_BYTECODE_SYNC
+      if ((providers & LUMA_PATCH_PROVIDER_BYTECODE_SYNC) != 0 && !device_data.patch_context.IsProcessed(Method::Bytecode, shader_hash))
+      {
+         size_t new_byte_code_size = view.valid ? view.bytecode_size : 0;
+         std::unique_ptr<std::byte[]> patched_byte_code = game.PatchShaderBytecodeSync(reinterpret_cast<const std::byte*>(view.bytecode), new_byte_code_size, request.type, shader_hash, request.shader_container, request.shader_container_size);
+         if (patched_byte_code && new_byte_code_size != 0 && view.valid)
+         {
+            auto data = std::make_shared<PatchedShaderData>();
+            data->method = Method::Bytecode;
+            data->code = BuildPatchedContainer(request.shader_container, request.shader_container_size, view.bytecode_offset, patched_byte_code.get(), new_byte_code_size);
+            if (!data->code.empty())
+            {
+               data->md5 = *reinterpret_cast<const Hash::MD5::Digest*>(data->code.data() + offsetof(DXBCHeader, hash));
+               device_data.patch_context.StorePatched(shader_hash, std::move(data));
+               return device_data.patch_context.GetShaderData(shader_hash);
+            }
+         }
+         device_data.patch_context.SetProcessed(Method::Bytecode, shader_hash);
+      }
+#endif
+
+      // 3. Recipe sync provider.
+#if LUMA_PATCH_RECIPE_SYNC
+      if ((providers & LUMA_PATCH_PROVIDER_RECIPE_SYNC) != 0 && !device_data.patch_context.IsProcessed(Method::Recipe, shader_hash))
+      {
+         auto patch_report = game.PatchShaderRecipeSync(device_data, request);
+         if (patch_report && !patch_report->output_bytes.empty())
+         {
+            auto data = std::make_shared<PatchedShaderData>();
+            data->method = Method::Recipe;
+            data->code = std::move(patch_report->output_bytes);
+            data->report = std::move(*patch_report);
+            device_data.patch_context.StorePatched(shader_hash, std::move(data));
+            return device_data.patch_context.GetShaderData(shader_hash);
+         }
+         device_data.patch_context.SetProcessed(Method::Recipe, shader_hash);
+      }
+#endif
+
+      return nullptr;
+   }
+
+   // Runs the declared async providers for one job (bytecode first, then
+   // recipe: manual wins on conflicts). Stores the result and marks the
+   // provider processed on any definitive outcome. Returns true if a patch
+   // was stored.
+   bool ProcessAsyncPatchJob(Game& game, DeviceData& device_data, PatchJob& job, uint32_t providers)
+   {
+      if (device_data.patch_context.HasPatch(job.shader_hash))
+      {
+         return false;
+      }
+
+      const ByteCodeView view = FindShaderByteCode(job.shader_container.data(), job.shader_container.size());
+
+      // Bytecode async provider (manual wins on conflicts).
+#if LUMA_PATCH_BYTECODE_ASYNC
+      if ((providers & LUMA_PATCH_PROVIDER_BYTECODE_ASYNC) != 0 && !device_data.patch_context.IsProcessed(Method::Bytecode, job.shader_hash))
+      {
+         size_t new_byte_code_size = view.valid ? view.bytecode_size : 0;
+         std::unique_ptr<std::byte[]> patched_byte_code = game.PatchShaderBytecodeAsync(reinterpret_cast<const std::byte*>(view.bytecode), new_byte_code_size, job.type, job.shader_hash, reinterpret_cast<const std::byte*>(job.shader_container.data()), job.shader_container.size());
+         if (patched_byte_code && new_byte_code_size != 0 && view.valid)
+         {
+            auto data = std::make_shared<PatchedShaderData>();
+            data->method = Method::Bytecode;
+            data->code = BuildPatchedContainer(job.shader_container.data(), job.shader_container.size(), view.bytecode_offset, patched_byte_code.get(), new_byte_code_size);
+            if (!data->code.empty())
+            {
+               data->md5 = *reinterpret_cast<const Hash::MD5::Digest*>(data->code.data() + offsetof(DXBCHeader, hash));
+               device_data.patch_context.StorePatched(job.shader_hash, std::move(data));
+               return true;
+            }
+         }
+         device_data.patch_context.SetProcessed(Method::Bytecode, job.shader_hash);
+      }
+#endif // LUMA_PATCH_BYTECODE_ASYNC
+
+      // Recipe async provider.
+#if LUMA_PATCH_RECIPE_ASYNC
+      if ((providers & LUMA_PATCH_PROVIDER_RECIPE_ASYNC) != 0 && !device_data.patch_context.IsProcessed(Method::Recipe, job.shader_hash))
+      {
+         ShaderPatchRequest request{};
+         request.type = job.type;
+         request.shader_hash = job.shader_hash;
+         request.shader_container = reinterpret_cast<const std::byte*>(job.shader_container.data());
+         request.shader_container_size = job.shader_container.size();
+         request.shader_container_owned = &job.shader_container;
+
+         auto patch_report = game.PatchShaderRecipeAsync(device_data, request);
+         if (patch_report && !patch_report->output_bytes.empty())
+         {
+            auto data = std::make_shared<PatchedShaderData>();
+            data->method = Method::Recipe;
+            data->code = std::move(patch_report->output_bytes);
+            data->report = std::move(*patch_report);
+            device_data.patch_context.StorePatched(job.shader_hash, std::move(data));
+            return true;
+         }
+         device_data.patch_context.SetProcessed(Method::Recipe, job.shader_hash);
+      }
+#endif
+
+      return false;
+   }
+} // namespace Patch
+#endif // LUMA_PATCH_PROVIDERS != 0
+
 namespace
 {
    constexpr uint32_t HASH_CHARACTERS_LENGTH = 8;
@@ -272,7 +408,10 @@ namespace
    constexpr
 #endif 
    bool custom_shaders_enabled = true;
-#if ENABLE_ORIGINAL_SHADERS_MEMORY_EDITS
+   // Master switch for patch clones only (files bypass it); also gates the exposed
+   // handle, so per-draw toggles no-op too. DEV/TEST UI only.
+   bool allow_patches = true;
+#if (LUMA_PATCH_PROVIDERS & (LUMA_PATCH_PROVIDER_BYTECODE_SYNC | LUMA_PATCH_PROVIDER_RECIPE_SYNC)) && !LUMA_PATCH_SYNC_MODE_CLONE
    bool strip_original_shaders_debug_data = false;
 #endif
    bool use_os_reference_white_level = true;
@@ -372,8 +511,7 @@ namespace
       // Textures
       //
 
-      // Only needed by "texture_format_upgrades_2d_custom_aspect_ratios" at the moment (if changed after initialization)
-      std::shared_mutex s_mutex_texture_upgrades;
+
 
       // Global texture format upgrades setting. Required by all other settings below.
       // Only swap between allowed enabled/disabled after init
@@ -404,6 +542,7 @@ namespace
       // Redirect incompatible copies between UNORM and FLOAT textures to a custom pixel shader that would do the same (not globally compatible).
       // This can happen if the game uses a temp texture that isn't either a render target nor is unordered access, so we don't upgrade it.
       bool enable_upgraded_texture_resource_copy_redirection = true; // TODO: delete given that we now have "enable_indirect_texture_format_upgrades"
+      // Initialize freshly created mirrors with the original's current content (converted when needed).
       // TODO: Add a warning for textures we missed upgrading if the swapchain resolution changed later.
       enum class TextureFormatUpgrades2DSizeFilters : uint32_t
       {
@@ -421,23 +560,31 @@ namespace
          // A custom aspect ratio (defaulted to 16:9, because that's the global standard).
          // It can be useful for games that don't support UltraWide or 4:3 resolutions and internally force 16:9 rendering, while having a fullscreen swapchain with black bars.
          CustomAspectRatio = 1 << 4,
+         CustomSize = 1 << 5, 
          // All mip chain sizes based starting from the highest resolution between rendering and swapchain resolution (they should generally have the same aspect ratio anyway) to 1.
          // This can be useful for blur passes etc, if they used power of 2 mips, instead of simply halving the base resolution.
-         Mips = 1 << 5,
+         Mips = 1 << 6,
          // Upgrade textures cubes (of all sizes), these are sometimes used by old games to do reflections (e.g. Burnout Revenge cars reflections)
-         Cubes = 1 << 6,
+         Cubes = 1 << 7,
          // Checks the swapchain/output resolution width only (e.g. used by games that add horizontal lines, like "Thumper" or "Beyond: Two Souls").
          // These are usually hard to match to an aspect ratio without using the "CustomAspectRatio" with a manually found aspect ratio,
          // and thus mips like bloom might be missing
-         SwapchainResolutionWidth = 1 << 7,
-         SwapchainResolutionHeight = 1 << 8,
+         SwapchainResolutionWidth = 1 << 8,
+         SwapchainResolutionHeight = 1 << 9,
+         // The display resolution (useful for games that create textures before setting the swapchain size).
+         DisplayResolution = 1 << 10,
+         DisplayAspectRatio = 1 << 11,
          // Avoid upgrading 1x1 textures
-         No1Px = 1 << 9,
+         No1Px = 1 << 12,
+         // Loosen up the aspect ratio checks to multiples of 4 pixels, per axis, that's what some engines do (e.g. Unreal Engine).
+         PadTo4Px = 1 << 13,
          // "None" needs to be != 0, and specify all the negating flags
          None = No1Px,
       };
       uint32_t texture_format_upgrades_2d_size_filters = 0 | (uint32_t)TextureFormatUpgrades2DSizeFilters::SwapchainResolution | (uint32_t)TextureFormatUpgrades2DSizeFilters::SwapchainAspectRatio;
       std::unordered_set<float> texture_format_upgrades_2d_custom_aspect_ratios = { 16.f / 9.f };
+      // Custom sizes (width/height pairs) to match for upgrades.
+      std::vector<uint2> texture_format_upgrades_2d_custom_sizes;
       // Most games do resolution scaling properly, with a maximum aspect ratio offset of 1 pixel, though occasionally it goes to 2 pixels of difference.
       // Set to 0 to only accept 100% matching aspect ratio.
       uint32_t texture_format_upgrades_2d_aspect_ratio_pixel_threshold = 1;
@@ -455,11 +602,17 @@ namespace
       std::unordered_set<reshade::api::format> texture_depth_upgrade_formats;
 
       // Automatically upgrade the formats of the textures this shader pass draws to. Generally best used on shaders that originally encoded from HDR (native rendering) to SDR. If the source textures were SDR too (UNORM), they'd need to be upgraded through other means.
-      // First pair value is the RTVs indexes to upgrade, the second one the UAVs (whether it's a pixel or compute shader).
+      // "rtv_slots" are the RTV indexes to upgrade, "uav_slots" the UAVs (whether it's a pixel or compute shader).
       // This is meant to be used if "enable_indirect_texture_format_upgrades" is off, or if very specific custom upgrades are needed.
       // This assumes that when the upgraded texture is created (it could be at any time, if the target shader doesn't always run), the original texture values aren't relevant, because they won't be preserved.
       // Requires "enable_chain_indirect_texture_format_upgrades" to work, otherwise views from the new indirect upgraded textures don't ever get mirrored.
-      std::unordered_map<uint32_t, std::pair<std::vector<uint8_t>, std::vector<uint8_t>>> auto_texture_format_upgrade_shader_hashes;
+      struct AutoTextureFormatUpgradeShaderHash
+      {
+         std::vector<uint8_t> rtv_slots;
+         std::vector<uint8_t> uav_slots;
+         bool scale = false; // When the hash-upgrade scale chain is active (SR upscaled early this frame), the mirror for this shader is created at output resolution instead of render resolution.
+      };
+      std::unordered_map<uint32_t, AutoTextureFormatUpgradeShaderHash> auto_texture_format_upgrade_shader_hashes;
 
       //
       // UI
@@ -491,6 +644,9 @@ namespace
       DXGI_FORMAT ui_separation_format = DXGI_FORMAT_UNKNOWN;
       // Optionally add the UI shaders to this list, to make sure they draw to a separate render target for proper HDR composition
       ShaderHashesList shader_hashes_UI;
+      // If true, only shaders in "shader_hashes_UI" are redirected to the separate UI render target.
+      // Otherwise, any draw after main post-processing that targets the same render target is treated as UI unless excluded.
+      bool ui_separation_use_ui_hashes_only = false;
       // Shaders that might be running after "has_drawn_main_post_processing" has turned true, but that are still not UI (most games don't have a fixed last shader that runs on the scene rendering before UI, e.g. FXAA might add a pass based on user settings etc), so we have to exclude them like this
       ShaderHashesList shader_hashes_UI_excluded;
       // Hides gameplay UI (or well, any UI that draws when the main scene also draws, some games always render the main scene, even behind pause or main menus).
@@ -563,6 +719,10 @@ namespace
       { CompileTimeStringHash("Copy VS"), { "Luma_Copy_VS", reshade::api::pipeline_subobject_type::vertex_shader } },
       { CompileTimeStringHash("Copy PS"), { "Luma_Copy_PS", reshade::api::pipeline_subobject_type::pixel_shader } },
 
+      // Bilinear scaling copy (same aspect, different size): separate from the point-sampled Copy PS.
+      { CompileTimeStringHash("Scale VS"), { "Luma_Scale_VS", reshade::api::pipeline_subobject_type::vertex_shader } },
+      { CompileTimeStringHash("Scale PS"), { "Luma_Scale_PS", reshade::api::pipeline_subobject_type::pixel_shader } },
+
       { CompileTimeStringHash("Display Composition"), { "Luma_DisplayComposition", reshade::api::pipeline_subobject_type::pixel_shader } },
       
       { CompileTimeStringHash("Copy RGB Max 0 A Sat"), { "Luma_Copy_PS", reshade::api::pipeline_subobject_type::pixel_shader, nullptr, nullptr, { { "RGB_MAX_0", "1" }, { "A_SAT", "1" } } } },
@@ -622,6 +782,8 @@ namespace
    {
       // Newly loaded shaders that still need to be (auto) dumped, by shader hash
       std::unordered_set<uint32_t> shaders_to_dump;
+      // Patched shaders that need to be dumped (separate from raw shaders to avoid dumping unpatched binary)
+      std::unordered_set<uint32_t> patched_shaders_to_dump;
       // All the shaders we have already dumped, by shader hash
       std::unordered_set<uint32_t> dumped_shaders;
       std::unordered_set<uint32_t> meta_stored_shaders;
@@ -630,6 +792,29 @@ namespace
       std::unordered_map<uint32_t, std::filesystem::path> dumped_shaders_meta_paths;
       uint32_t shader_cache_count = 0;
 #endif
+      // Sets live_patched_* fields on a cached shader so the debug UI can
+      // display the patched bytecode.
+#if DEVELOPMENT && LUMA_PATCH_PROVIDERS != 0
+      inline void SetLivePatchedShaderInfo(CachedShader* cached_shader, uint32_t shader_hash,
+                                        const uint8_t* code, uint32_t size)
+      {
+         if (!cached_shader || !code || size == 0)
+            return;
+         cached_shader->live_patched_owned_data.assign(code, code + size);
+         cached_shader->live_patched_data = cached_shader->live_patched_owned_data.data();
+         cached_shader->live_patched_size = size;
+         cached_shader->live_patched_disasm.clear();
+      }
+#endif // DEVELOPMENT && LUMA_PATCH_PROVIDERS != 0
+
+      // Queues a patched shader for dump
+#if ALLOW_SHADER_PATCHES_DUMPING && LUMA_PATCH_PROVIDERS != 0
+      inline void QueuePatchedShaderForDump(uint32_t shader_hash)
+      {
+         const std::lock_guard<std::recursive_mutex> lock_dumping(s_mutex_dumping);
+         patched_shaders_to_dump.emplace(shader_hash);
+      }
+#endif // ALLOW_SHADER_PATCHES_DUMPING && LUMA_PATCH_PROVIDERS != 0
    }
 
    std::string shaders_compilation_errors; // errors and warning log
@@ -690,6 +875,11 @@ namespace
    bool last_pressed_unload = false;
    bool needs_unload_shaders = false;
    bool needs_load_shaders = false; // Load/compile or reload/recompile shaders, no need to default it to true, we have "auto_load" for that
+   bool needs_unload_patches = false; // Patch clones only (preserved, not destroyed; see UnloadPatches)
+   bool needs_load_patches = false;
+   // Sticky "patches unloaded" state (parallel to "last_pressed_unload" for files):
+   // no patch cloning for new pipelines while unloaded.
+   bool patches_unloaded = false;
 
    // There's only one swapchain and one device in most games (e.g. Prey), but the game changes its configuration from different threads.
    // A new device+swapchain can be created if the user resets the settings as the old one is still rendering (or is it?).
@@ -710,12 +900,120 @@ namespace
    thread_local reshade::api::resource_desc upgraded_resource_init_desc = {};
    thread_local void* upgraded_resource_init_data = {};
    thread_local std::unordered_map<uint64_t, reshade::api::subresource_data*> upgraded_mapped_resources;
-#if ENABLE_ORIGINAL_SHADERS_MEMORY_EDITS
+#if LUMA_PATCH_PROVIDERS != 0
    // Temporary cache of the live patched shader that points at the original shader
    thread_local const void* last_live_patched_original_shader_code = {};
    thread_local size_t last_live_patched_original_shader_size = {};
    // The actual current pre-calculated shader hash (of the live patched shader, if it was)
    thread_local uint64_t last_live_patched_shader_hash = -1;
+#endif
+   // TODO(Patch module): the job collection below (pipeline cache iteration +
+   // queue gate) belongs in the Patch module but depends on core.hpp's globals
+   // (s_mutex_generic, pipeline_cache_destruction_mutex). Move to the module
+   // once those are extracted.
+#if LUMA_PATCH_PROVIDERS & (LUMA_PATCH_PROVIDER_BYTECODE_ASYNC | LUMA_PATCH_PROVIDER_RECIPE_ASYNC)
+   void GeneratePatchedShadersAsync(DeviceData& device_data, const std::unordered_set<uint64_t>& pipelines_filter)
+   {
+      std::vector<Patch::PatchJob> patch_jobs;
+      // One job per shader per cycle: many pipelines share a shader hash, and
+      // the IsProcessed markers aren't set until jobs run (after collection). A
+      // local set is used instead of a persistent "Processing" state — it dies
+      // with the call, so a stale marker can never block a shader.
+      std::unordered_set<uint32_t> queued_shader_hashes;
+
+      {
+         std::shared_lock lock_pipeline_destroy(device_data.pipeline_cache_destruction_mutex);
+         const std::shared_lock lock_generic(s_mutex_generic);
+
+         for (uint64_t pipeline_handle : pipelines_filter)
+         {
+            auto cached_pipeline_it = device_data.pipeline_cache_by_pipeline_handle.find(pipeline_handle);
+            if (cached_pipeline_it == device_data.pipeline_cache_by_pipeline_handle.end() || cached_pipeline_it->second == nullptr)
+            {
+               continue;
+            }
+
+            const Shader::CachedPipeline* cached_pipeline = cached_pipeline_it->second;
+            uint32_t shader_hash = cached_pipeline->shader_hashes[0];
+
+            // Queue gate: nothing to do if a patch already exists, or if every
+            // declared async provider already reached a definitive outcome
+            // (patched or no-patch-needed) for this shader.
+            if (device_data.patch_context.HasPatch(shader_hash))
+            {
+               continue;
+            }
+
+            bool any_declared_async_unprocessed = false;
+            if ((LUMA_PATCH_PROVIDERS & LUMA_PATCH_PROVIDER_BYTECODE_ASYNC) != 0 && !device_data.patch_context.IsProcessed(Patch::Method::Bytecode, shader_hash))
+            {
+               any_declared_async_unprocessed = true;
+            }
+            if ((LUMA_PATCH_PROVIDERS & LUMA_PATCH_PROVIDER_RECIPE_ASYNC) != 0 && !device_data.patch_context.IsProcessed(Patch::Method::Recipe, shader_hash))
+            {
+               any_declared_async_unprocessed = true;
+            }
+            if (!any_declared_async_unprocessed)
+            {
+               continue;
+            }
+
+            for (uint32_t i = 0; i < cached_pipeline->subobject_count; ++i)
+            {
+               const auto& subobject = cached_pipeline->subobjects_cache[i];
+               switch (subobject.type)
+               {
+#if GEOMETRY_SHADER_SUPPORT
+               case reshade::api::pipeline_subobject_type::geometry_shader:
+#endif
+               case reshade::api::pipeline_subobject_type::vertex_shader:
+               case reshade::api::pipeline_subobject_type::compute_shader:
+               case reshade::api::pipeline_subobject_type::pixel_shader:
+               {
+                  const auto* shader_desc = static_cast<const reshade::api::shader_desc*>(subobject.data);
+                  if (shader_desc == nullptr || shader_desc->code == nullptr || shader_desc->code_size < sizeof(DXBCHeader))
+                  {
+                     break;
+                  }
+
+                  const auto* shader_header = reinterpret_cast<const DXBCHeader*>(shader_desc->code);
+                  if (memcmp(shader_header->format_name, "DXBC", 4) != 0 || shader_header->file_size != shader_desc->code_size)
+                  {
+                     break;
+                  }
+
+                  if (!queued_shader_hashes.emplace(shader_hash).second)
+                  {
+                     break; // Already queued this cycle
+                  }
+
+                  Patch::PatchJob patch_job;
+                  patch_job.shader_hash = shader_hash;
+                  patch_job.type = subobject.type;
+                  patch_job.shader_container.assign(static_cast<const uint8_t*>(shader_desc->code), static_cast<const uint8_t*>(shader_desc->code) + shader_desc->code_size);
+
+                  const Patch::ByteCodeView view = Patch::FindShaderByteCode(patch_job.shader_container.data(), patch_job.shader_container.size());
+                  if (!view.valid)
+                  {
+                     break;
+                  }
+                  patch_job.bytecode_offset = view.bytecode_offset;
+
+                  patch_jobs.emplace_back(std::move(patch_job));
+                  break;
+               }
+               default:
+                  break;
+               }
+            }
+         }
+      }
+
+      for (auto& patch_job : patch_jobs)
+      {
+         Patch::ProcessAsyncPatchJob(*game, device_data, patch_job, LUMA_PATCH_PROVIDERS);
+      }
+   }
 #endif
 #if ENABLE_DRAW_DISPATCH_DATA_CACHE || DEVELOPMENT
    thread_local DrawDispatchData last_draw_dispatch_data = {};
@@ -779,8 +1077,16 @@ namespace
 
    // Forward declares:
    void DumpShader(uint32_t shader_hash);
+#if ALLOW_SHADER_PATCHES_DUMPING && LUMA_PATCH_PROVIDERS != 0
+   void DumpPatchedShader(uint32_t shader_hash);
+#endif
    void AutoDumpShaders();
+#if LUMA_PATCH_PROVIDERS & (LUMA_PATCH_PROVIDER_BYTECODE_ASYNC | LUMA_PATCH_PROVIDER_RECIPE_ASYNC)
    void AutoLoadShaders(DeviceData* device_data);
+   void NotifyAsyncCloneQueue(DeviceData& device_data);
+   void ProcessAsyncCloneBatch(DeviceData& device_data, const std::unordered_set<uint64_t>& pipelines);
+   std::vector<uint32_t> PublishReadyAsyncClones(DeviceData& device_data);
+#endif
    void OnDestroyPipeline(reshade::api::device* device, reshade::api::pipeline pipeline);
    reshade::api::format GetBestResourceUpgradeFormat(const reshade::api::resource_desc& desc);
 
@@ -855,6 +1161,33 @@ namespace
       return shaders_path;
    }
 
+   // Textures live inside the shader mount (e.g. game/Luma/Core/Textures, game/Luma/<Game>/Textures),
+   // so they resolve from the exact same root the shaders resolve from — packaging and
+   // mounting stay a single folder.
+   std::filesystem::path GetTexturesRootPath()
+   {
+      return GetShadersRootPath();
+   }
+
+   void LoadTexture2DArrays(ID3D11Device* native_device, DeviceData& device_data)
+   {
+      if (!native_device)
+      {
+         return;
+      }
+
+#if ENABLE_FAST_NOISE_TEXTURES
+      // Project-level entries are gated by their feature prop (e.g. UseLumaFastNoise ->
+      // ENABLE_FAST_NOISE_TEXTURES) so builds that don't need them skip them.
+      const std::filesystem::path textures_root = GetTexturesRootPath();
+      if (!device_data.managed_resources.LoadTexture2DArray(native_device, textures_root / "Global" / "Textures" / "FAST", "vector2_uniform_gauss1_0_Gauss10_separate05", "FAST Noise"_h))
+      {
+         reshade::log::message(reshade::log::level::error, "Failed to load managed texture 'FAST Noise'");
+         ASSERT_ONCE(false);
+      }
+#endif
+   }
+
    // TODO: if this was ever too slow (it is, at least in dev builds because they use the shader folder with all the games), given we iterate through the shader folder which also contains (possibly hundreds of) dumps and our built binaries,
    // we could split it up in 3 main branches (shaders code, shaders binaries and shaders dump).
    // Alternatively we could make separate iterators for each main shaders folder, however, we've now gotten it fast enough.
@@ -871,7 +1204,7 @@ namespace
          // Return true on all first folders in the shaders directory (so, the first folder for each mod, and the global/include folders),
          // except the includes and other special folders, otherwise it might try to compile shaders in them (unwanted).
          // TODO: specify these directories somewhere globally, and also maybe rename out includes from ".hlsl" to ".h" or ".hlsli" or something
-         if (entry_directory != (shader_directory / "Includes") && entry_directory != (shader_directory / "Decompiler") && entry_directory.parent_path() == shader_directory)
+         if (entry_directory != (shader_directory / "Includes") && entry_directory != (shader_directory / "Decompiler") && entry_directory != (shader_directory / "Textures") && entry_directory.parent_path() == shader_directory)
          {
             return true;
          }
@@ -930,8 +1263,10 @@ namespace
       }
    }
 
-   // Ambiguous name but this one clears the pipeline
-   bool ClearCustomShader(DeviceData& device_data, CachedPipeline* cached_pipeline, bool clean_custom_shader = true)
+   // Ambiguous name but this one clears the pipeline. "destroy_clone" keeps the
+   // clone object alive (patch-only clones survive unloads); the caller is then
+   // responsible for its lifetime (OnDestroyPipeline destroys it).
+   bool ClearCustomShader(DeviceData& device_data, CachedPipeline* cached_pipeline, bool clean_custom_shader = true, bool destroy_clone = true)
    {
       if (clean_custom_shader) // A bit hacky for this to be here, should ideally be moved
       {
@@ -940,13 +1275,16 @@ namespace
             ClearCustomShader(shader_hash);
          }
       }
-      
+
       if (!cached_pipeline->cloned) return false;
 
       cached_pipeline->cloned = false; // This stops the cloned pipeline from being used in the next frame, allowing us to destroy it
       device_data.cloned_pipeline_count--;
       device_data.cloned_pipelines_changed = true;
-      cached_pipeline->pipeline_clone = {0};
+      if (destroy_clone)
+      {
+         cached_pipeline->pipeline_clone = {0};
+      }
       return true;
    }
 
@@ -968,10 +1306,22 @@ namespace
             if (cached_pipeline == nullptr || (!pipelines_filter.empty() && !pipelines_filter.contains(cached_pipeline->pipeline.handle))) continue;
 
             auto pipeline_clone_handle = cached_pipeline->pipeline_clone.handle;
+            // "Unload Shaders" keeps its original semantics: destroy every clone
+            // (files and patches); patches have their own preserving "Unload Patches".
             if (ClearCustomShader(device_data, cached_pipeline, clean_custom_shader))
             {
                device_data.pipeline_cache_by_pipeline_clone_handle.erase(pipeline_clone_handle);
+               // Preserved patch clones aren't "cloned" anymore; destroy any surviving clone object too.
+               if (pipeline_clone_handle != 0)
+               {
+                  pipelines_to_destroy[pipeline_clone_handle] = cached_pipeline->device;
+               }
+            }
+            else if (pipeline_clone_handle != 0)
+            {
+               device_data.pipeline_cache_by_pipeline_clone_handle.erase(pipeline_clone_handle);
                pipelines_to_destroy[pipeline_clone_handle] = cached_pipeline->device;
+               cached_pipeline->pipeline_clone = {0};
             }
          }
       }
@@ -988,6 +1338,117 @@ namespace
             pair.second->destroy_pipeline(reshade::api::pipeline{pair.first});
          }
       }
+   }
+
+#if LUMA_PATCH_PROVIDERS != 0
+   // Whether a pipeline needs patch work: a stored patch exists, or a declared
+   // async provider is unresolved for it (no-match is terminal).
+   bool ShouldQueuePatchPipeline(const DeviceData& device_data, uint32_t shader_hash)
+   {
+      if (device_data.patch_context.HasPatch(shader_hash)) return true;
+      if ((LUMA_PATCH_PROVIDERS & LUMA_PATCH_PROVIDER_BYTECODE_ASYNC) != 0 && !device_data.patch_context.IsProcessed(Patch::Method::Bytecode, shader_hash)) return true;
+      if ((LUMA_PATCH_PROVIDERS & LUMA_PATCH_PROVIDER_RECIPE_ASYNC) != 0 && !device_data.patch_context.IsProcessed(Patch::Method::Recipe, shader_hash)) return true;
+      return false;
+   }
+#endif
+
+   // Unloads only patch clones (files untouched): unregisters them but keeps the
+   // objects alive, so "Reload Patches" is instant. Per-draw toggles no-op while
+   // unloaded (no patched handle exposed).
+   void UnloadPatches(DeviceData& device_data)
+   {
+      patches_unloaded = true; // Also prevents new pipelines from being queued for patch cloning
+      const std::unique_lock lock(s_mutex_generic);
+      for (auto& pair : device_data.pipeline_cache_by_pipeline_handle)
+      {
+         Shader::CachedPipeline* cached_pipeline = pair.second;
+         if (cached_pipeline == nullptr || cached_pipeline->clone_origin != Shader::CloneOrigin::Patch) continue;
+         const auto pipeline_clone_handle = cached_pipeline->pipeline_clone.handle;
+         if (ClearCustomShader(device_data, cached_pipeline, false, false)) // Preserve the clone object
+         {
+            device_data.pipeline_cache_by_pipeline_clone_handle.erase(pipeline_clone_handle);
+         }
+      }
+   }
+
+   // Re-enables patches: re-registers the preserved clones and re-queues
+   // stored-but-uncloned pipelines (destroyed by a full "Unload Shaders").
+   void ReloadPatches(DeviceData& device_data)
+   {
+      patches_unloaded = false;
+      {
+         const std::unique_lock lock(s_mutex_generic);
+         for (auto& pair : device_data.pipeline_cache_by_pipeline_handle)
+         {
+            Shader::CachedPipeline* cached_pipeline = pair.second;
+            if (cached_pipeline == nullptr || cached_pipeline->cloned || cached_pipeline->clone_origin != Shader::CloneOrigin::Patch || cached_pipeline->pipeline_clone.handle == 0) continue;
+            cached_pipeline->cloned = true;
+            device_data.pipeline_cache_by_pipeline_clone_handle[cached_pipeline->pipeline_clone.handle] = cached_pipeline;
+            device_data.cloned_pipeline_count++;
+            device_data.cloned_pipelines_changed = true;
+         }
+      }
+
+#if LUMA_PATCH_PROVIDERS & (LUMA_PATCH_PROVIDER_BYTECODE_ASYNC | LUMA_PATCH_PROVIDER_RECIPE_ASYNC)
+      // Stored-but-uncloned pipelines go through the async worker (providers may
+      // not have run while unloaded, hence the same predicate as the queue gate).
+      {
+         std::unordered_set<uint64_t> to_reload;
+         {
+            const std::shared_lock lock(s_mutex_generic);
+            for (auto& pair : device_data.pipeline_cache_by_pipeline_handle)
+            {
+               Shader::CachedPipeline* cached_pipeline = pair.second;
+               if (cached_pipeline == nullptr || cached_pipeline->cloned || cached_pipeline->pipeline_clone.handle != 0 || cached_pipeline->shader_hashes.size() == 0) continue;
+               if (ShouldQueuePatchPipeline(device_data, cached_pipeline->shader_hashes[0]))
+               {
+                  to_reload.emplace(cached_pipeline->pipeline.handle);
+               }
+            }
+         }
+         if (!to_reload.empty())
+         {
+            const std::unique_lock lock_loading(s_mutex_loading);
+            for (uint64_t handle : to_reload)
+            {
+               device_data.pipelines_to_reload.emplace(handle);
+            }
+            NotifyAsyncCloneQueue(device_data);
+         }
+      }
+#endif
+   }
+
+   // Registered patch clones count (for the "Unload Patches" button title).
+   uint32_t CountPatchedClones(const DeviceData& device_data)
+   {
+      uint32_t count = 0;
+      const std::shared_lock lock(s_mutex_generic);
+      for (auto& pair : device_data.pipeline_cache_by_pipeline_handle)
+      {
+         const Shader::CachedPipeline* cached_pipeline = pair.second;
+         if (cached_pipeline != nullptr && cached_pipeline->cloned && cached_pipeline->clone_origin == Shader::CloneOrigin::Patch)
+         {
+            count++;
+         }
+      }
+      return count;
+   }
+
+   // Registered file clone count (for the "Unload Shaders" button title).
+   uint32_t CountFileClones(const DeviceData& device_data)
+   {
+      uint32_t count = 0;
+      const std::shared_lock lock(s_mutex_generic);
+      for (auto& pair : device_data.pipeline_cache_by_pipeline_handle)
+      {
+         const Shader::CachedPipeline* cached_pipeline = pair.second;
+         if (cached_pipeline != nullptr && cached_pipeline->cloned && cached_pipeline->clone_origin == Shader::CloneOrigin::File)
+         {
+            count++;
+         }
+      }
+      return count;
    }
 
    // Expects "s_mutex_loading" to make sure we don't try to compile/load any other files we are currently deleting
@@ -2013,7 +2474,6 @@ namespace
       }
    }
 
-   // Optionally compiles all the shaders we have in our data folder and links them with the game rendering pipelines
    void LoadCustomShaders(DeviceData& device_data, const std::unordered_set<uint64_t>& pipelines_filter = std::unordered_set<uint64_t>(), bool recompile_shaders = true)
    {
 #if _DEBUG && LOG_VERBOSE
@@ -2039,10 +2499,8 @@ namespace
       // Clear all previously loaded custom shaders
       UnloadCustomShaders(device_data, pipelines_filter, false, &pipelines_to_destroy);
 
-      std::vector<std::tuple<CachedPipeline*, uint32_t, const CachedCustomShader*>> pipelines_to_clone;
-#if DEVELOPMENT
+      std::vector<CachedPipeline*> pipelines_to_clone;
       std::unordered_set<uint64_t> iterated_pipelines;
-#endif
 
       const std::shared_lock lock_loading(s_mutex_loading);
 
@@ -2074,22 +2532,61 @@ namespace
          {
             if (cached_pipeline == nullptr) continue;
             if (!pipelines_filter.empty() && !pipelines_filter.contains(cached_pipeline->pipeline.handle)) continue;
+            if (!iterated_pipelines.emplace(cached_pipeline->pipeline.handle).second) continue;
+            pipelines_to_clone.emplace_back(cached_pipeline);
 
-#if DEVELOPMENT // A bit redundant probably
-            if (iterated_pipelines.contains(cached_pipeline->pipeline.handle)) { assert(false); continue; }
-            iterated_pipelines.emplace(cached_pipeline->pipeline.handle);
-#endif
-            pipelines_to_clone.emplace_back(std::make_tuple(cached_pipeline, shader_hash, custom_shader));
-
-            // Force clear this pipeline's clone in case it was already cloned
+            // Force clear this pipeline's clone in case it was already cloned. This
+            // full reload re-clones everything, so preserved patch clones are released here too.
             auto pipeline_clone_handle = cached_pipeline->pipeline_clone.handle;
             if (ClearCustomShader(device_data, cached_pipeline, false))
             {
                device_data.pipeline_cache_by_pipeline_clone_handle.erase(pipeline_clone_handle);
                pipelines_to_destroy[pipeline_clone_handle] = cached_pipeline->device;
             }
+            else if (pipeline_clone_handle != 0)
+            {
+               device_data.pipeline_cache_by_pipeline_clone_handle.erase(pipeline_clone_handle);
+               pipelines_to_destroy[pipeline_clone_handle] = cached_pipeline->device;
+               cached_pipeline->pipeline_clone = {0};
+            }
          }
       }
+
+#if LUMA_PATCH_PROVIDERS != 0
+      {
+         const std::shared_lock lock_device(device_data.mutex);
+         device_data.patch_context.ForEachPatchedShader([&](const uint32_t shader_hash, const Patch::PatchedShaderData&)
+         {
+            auto pipelines_pair = device_data.pipeline_caches_by_shader_hash.find(shader_hash);
+            if (pipelines_pair == device_data.pipeline_caches_by_shader_hash.end())
+            {
+               return;
+            }
+
+            for (CachedPipeline* cached_pipeline : pipelines_pair->second)
+            {
+               if (cached_pipeline == nullptr) continue;
+               if (!pipelines_filter.empty() && !pipelines_filter.contains(cached_pipeline->pipeline.handle)) continue;
+               if (!iterated_pipelines.emplace(cached_pipeline->pipeline.handle).second) continue;
+               pipelines_to_clone.emplace_back(cached_pipeline);
+
+               // Same as the file loop: destroy any surviving clone (full reload re-clones everything).
+               auto pipeline_clone_handle = cached_pipeline->pipeline_clone.handle;
+               if (ClearCustomShader(device_data, cached_pipeline, false))
+               {
+                  device_data.pipeline_cache_by_pipeline_clone_handle.erase(pipeline_clone_handle);
+                  pipelines_to_destroy[pipeline_clone_handle] = cached_pipeline->device;
+               }
+               else if (pipeline_clone_handle != 0)
+               {
+                  device_data.pipeline_cache_by_pipeline_clone_handle.erase(pipeline_clone_handle);
+                  pipelines_to_destroy[pipeline_clone_handle] = cached_pipeline->device;
+                  cached_pipeline->pipeline_clone = {0};
+               }
+            }
+         });
+      }
+#endif
 
       lock.unlock(); // Calls into the device could deadlock if the game rendering is multithreaded
 
@@ -2100,124 +2597,108 @@ namespace
 
       std::vector<std::tuple<CachedPipeline*, reshade::api::pipeline>> cloned_pipelines_data;
 
-      // "s_mutex_loading" is expected to still be locked
-      for (const auto& pipeline_to_clone : pipelines_to_clone)
-      {
-         CachedPipeline* cached_pipeline = std::get<0>(pipeline_to_clone);
-         const uint32_t shader_hash = std::get<1>(pipeline_to_clone);
-         const CachedCustomShader* custom_shader = std::get<2>(pipeline_to_clone);
+       // "s_mutex_loading" is expected to still be locked
+       for (CachedPipeline* cached_pipeline : pipelines_to_clone)
+       {
+          // Skip pipelines with a live clone: the collection can see a pipeline
+          // twice (file + patch paths, or re-queued across batches). Re-cloning
+          // overwrote pipeline_clone, leaked the old clone, and raced its
+          // ClearCustomShader destroy.
+          if (cached_pipeline->cloned)
+          {
+             continue;
+          }
+          const uint32_t subobject_count = cached_pipeline->subobject_count;
+          reshade::api::pipeline_subobject* subobjects = cached_pipeline->subobjects_cache;
+
+          // Reset the clone provenance: it describes the clone we are about to create.
+          cached_pipeline->clone_origin = Shader::CloneOrigin::None;
+
+          // Async-race note: the worker holds raw CachedPipeline* across the
+          // clone window; a concurrent OnDestroyPipeline can free the object.
 
 #if _DEBUG && LOG_VERBOSE
-         {
-            std::stringstream s;
-            s << "LoadCustomShaders(Read ";
-            s << custom_shader->code.size() << " bytes ";
-            s << " from " << custom_shader->file_path.string();
-            s << ")";
-            reshade::log::message(reshade::log::level::debug, s.str().c_str());
-         }
+          {
+             std::stringstream s;
+             s << "LoadCustomShaders(Cloning pipeline ";
+             s << reinterpret_cast<void*>(cached_pipeline->pipeline.handle);
+             s << " with " << subobject_count << " object(s)";
+             s << ")";
+             reshade::log::message(reshade::log::level::debug, s.str().c_str());
+          }
 #endif
 
-         // DX12 can use PSO objects that need to be cloned
-         const uint32_t subobject_count = cached_pipeline->subobject_count;
-         reshade::api::pipeline_subobject* subobjects = cached_pipeline->subobjects_cache;
-         reshade::api::pipeline_subobject* new_subobjects = Shader::ClonePipelineSubobjects(subobject_count, subobjects);
+          auto [pipeline_clone, injected] = Patch::ClonePipelineWithPatches(
+             cached_pipeline->device, cached_pipeline->layout,
+             subobjects, subobject_count,
+             [&device_data, cached_pipeline](
+                 const reshade::api::shader_desc* clone_desc,
+                 const reshade::api::shader_desc* orig_desc) -> std::optional<std::pair<const uint8_t*, uint32_t>>
+             {
+                const uint32_t shader_hash = Shader::BinToHash(static_cast<const uint8_t*>(orig_desc->code), orig_desc->code_size);
+
+                // Check for custom shader first
+                if (auto custom_shader_pair = custom_shaders_cache.find(shader_hash); custom_shader_pair != custom_shaders_cache.end())
+                {
+                   const CachedCustomShader* custom_shader = custom_shader_pair->second;
+                   if (custom_shader != nullptr && !custom_shader->is_luma_native && !custom_shader->code.empty())
+                   {
+                      cached_pipeline->clone_origin = Shader::CloneOrigin::File;
+#if LUMA_PATCH_PROVIDERS != 0
+                      // A cached file wins over the patched version on this
+                      // clone. Report once per shader so developers know the
+                      // patch is being shadowed (it otherwise looks broken).
+                      if (device_data.patch_context.HasPatch(shader_hash))
+                      {
+                         static std::mutex s_logged_patch_override_mutex;
+                         static std::unordered_set<uint32_t> s_logged_patch_override_hashes;
+                         const std::lock_guard lock_logged_override(s_logged_patch_override_mutex);
+                         if (s_logged_patch_override_hashes.emplace(shader_hash).second)
+                         {
+                            reshade::log::message(reshade::log::level::debug, std::format("[Patch] custom shader file overrides stored patch for shader {:08X}", shader_hash).c_str());
+                         }
+                      }
+#endif
+                      return std::make_pair(custom_shader->code.data(), static_cast<uint32_t>(custom_shader->code.size()));
+                   }
+                }
+
+                // Check for DXP/bytecode patched shader
+#if LUMA_PATCH_PROVIDERS != 0
+                if (auto patched = device_data.patch_context.GetShaderData(shader_hash); patched)
+                {
+                   cached_pipeline->clone_origin = Shader::CloneOrigin::Patch;
+                   return std::make_pair(patched->code.data(), static_cast<uint32_t>(patched->code.size()));
+                }
+#endif
+
+                return std::nullopt;
+             });
+
+          if (!injected)
+          {
+             continue;
+          }
 
 #if _DEBUG && LOG_VERBOSE
-         {
-            std::stringstream s;
-            s << "LoadCustomShaders(Cloning pipeline ";
-            s << reinterpret_cast<void*>(cached_pipeline->pipeline.handle);
-            s << " with " << subobject_count << " object(s)";
-            s << ")";
-            reshade::log::message(reshade::log::level::debug, s.str().c_str());
-         }
-         reshade::log::message(reshade::log::level::debug, "Iterating pipeline...");
+          {
+             std::stringstream s;
+             s << "Creating pipeline clone (";
+             s << "pipeline: " << reinterpret_cast<void*>(cached_pipeline->pipeline.handle);
+             s << ", layout: " << reinterpret_cast<void*>(cached_pipeline->layout.handle);
+             s << ", size: " << subobject_count;
+             s << ", " << (pipeline_clone.handle != 0 ? "OK" : "FAILED!");
+             s << ")";
+             reshade::log::message(reshade::log::level::debug, s.str().c_str());
+          }
 #endif
 
-         for (uint32_t i = 0; i < subobject_count; ++i)
-         {
-            const auto& subobject = subobjects[i];
-            switch (subobject.type)
-            {
-            case reshade::api::pipeline_subobject_type::geometry_shader:
-            case reshade::api::pipeline_subobject_type::vertex_shader:
-            case reshade::api::pipeline_subobject_type::compute_shader:
-            case reshade::api::pipeline_subobject_type::pixel_shader:
-            break;
-            default:
-            continue;
-            }
+          if (pipeline_clone.handle != 0)
+          {
+             cloned_pipelines_data.push_back(std::make_tuple(cached_pipeline, pipeline_clone));
+          }
 
-            auto& clone_subject = new_subobjects[i];
-
-            auto* clone_desc = static_cast<reshade::api::shader_desc*>(clone_subject.data);
-
-            free(const_cast<void*>(clone_desc->code));
-            clone_desc->code_size = custom_shader->code.size();
-            clone_desc->code = malloc(custom_shader->code.size());
-            ASSERT_ONCE(custom_shader->code.size() != 0);
-            std::memcpy(const_cast<void*>(clone_desc->code), custom_shader->code.data(), custom_shader->code.size());
-
-#if _DEBUG && LOG_VERBOSE
-            const auto new_hash = Shader::BinToHash(static_cast<const uint8_t*>(clone_desc->code), clone_desc->code_size);
-            {
-               std::stringstream s;
-               s << "LoadCustomShaders(Injected pipeline data";
-               s << " with " << PRINT_CRC32(new_hash);
-               s << " (" << custom_shader->code.size() << " bytes)";
-               s << ")";
-               reshade::log::message(reshade::log::level::debug, s.str().c_str());
-            }
-#endif
-         }
-
-#if _DEBUG && LOG_VERBOSE
-         {
-            std::stringstream s;
-            s << "Creating pipeline clone (";
-            s << "hash: " << PRINT_CRC32(shader_hash);
-            s << ", layout: " << reinterpret_cast<void*>(cached_pipeline->layout.handle);
-            s << ", subobject_count: " << subobject_count;
-            s << ")";
-            reshade::log::message(reshade::log::level::debug, s.str().c_str());
-         }
-#endif
-
-         reshade::api::pipeline pipeline_clone = {};
-         // For DX11, this is "D3D11Device::CreatePixelShader()" or equivalent functions
-         const bool built_pipeline_ok = cached_pipeline->device->create_pipeline(
-            cached_pipeline->layout,
-            subobject_count,
-            new_subobjects,
-            &pipeline_clone);
-#if !_DEBUG || !LOG_VERBOSE
-         if (!built_pipeline_ok)
-#endif
-         {
-            std::stringstream s;
-            s << "LoadCustomShaders(Cloned ";
-            s << reinterpret_cast<void*>(cached_pipeline->pipeline.handle);
-            s << " => " << reinterpret_cast<void*>(pipeline_clone.handle);
-            s << ", layout: " << reinterpret_cast<void*>(cached_pipeline->layout.handle);
-            s << ", size: " << subobject_count;
-            s << ", " << (built_pipeline_ok ? "OK" : "FAILED!");
-            s << ")";
-            reshade::log::message(built_pipeline_ok ? reshade::log::level::info : reshade::log::level::error, s.str().c_str());
-         }
-
-         if (built_pipeline_ok)
-         {
-            cloned_pipelines_data.push_back(std::make_tuple(cached_pipeline, pipeline_clone));
-         }
-         // Clean up unused cloned subobjects
-         else
-         {
-            ASSERT_ONCE(pipeline_clone.handle == 0);
-            DestroyPipelineSubojects(new_subobjects, subobject_count);
-            new_subobjects = nullptr;
-         }
-      }
+       }
 
       lock.lock(); // Needed for "pipeline_cache_by_pipeline_clone_handle"
 
@@ -2229,6 +2710,8 @@ namespace
          assert(!cached_pipeline->cloned && cached_pipeline->pipeline_clone.handle == 0); // We destroy the potential previous one above in "UnloadCustomShaders"
          cached_pipeline->pipeline_clone = pipeline_clone;
          cached_pipeline->cloned = true;
+         // Clones registered here come from the background AutoLoadShaders thread (async).
+         cached_pipeline->patch_application_mode = Shader::PatchApplicationMode::Async;
          // TODO: make sure the pixel shaders have the same signature (through reflections) unless the vertex shader was also changed and has a different output signature? Just to make sure random hashes didn't end up replacing an accidentally equal hash (however unlikely)
          device_data.pipeline_cache_by_pipeline_clone_handle[pipeline_clone.handle] = cached_pipeline;
          device_data.cloned_pipeline_count++;
@@ -2302,6 +2785,37 @@ namespace
       DeviceData& device_data = *device->create_private_data<DeviceData>();
       device_data.native_device = native_device;
 
+      // Compat shim: games set the global config values; the manager is the source of truth, so copy the
+      // globals into it at device init. (Phase 2 will migrate games to set the manager directly.)
+      // Note: the globals use the anonymous-namespace types, the manager has its own nested enum types,
+      // so convert explicitly.
+      device_data.resource_upgrades.texture_format_upgrades_type = static_cast<ResourceUpgradeManager::TextureFormatUpgradesType>(texture_format_upgrades_type);
+      device_data.resource_upgrades.enable_indirect_texture_format_upgrades = enable_indirect_texture_format_upgrades;
+      device_data.resource_upgrades.enable_chain_indirect_texture_format_upgrades = static_cast<ResourceUpgradeManager::ChainTextureFormatUpgradesType>(enable_chain_indirect_texture_format_upgrades);
+      device_data.resource_upgrades.ignore_indirect_upgraded_textures = ignore_indirect_upgraded_textures;
+      device_data.resource_upgrades.enable_upgraded_texture_resource_copy_redirection = enable_upgraded_texture_resource_copy_redirection;
+      device_data.resource_upgrades.texture_upgrade_formats = texture_upgrade_formats;
+      device_data.resource_upgrades.texture_depth_upgrade_formats = texture_depth_upgrade_formats;
+      device_data.resource_upgrades.texture_format_upgrades_2d_size_filters = texture_format_upgrades_2d_size_filters;
+      device_data.resource_upgrades.texture_format_upgrades_2d_custom_aspect_ratios = texture_format_upgrades_2d_custom_aspect_ratios;
+      device_data.resource_upgrades.texture_format_upgrades_2d_custom_sizes = texture_format_upgrades_2d_custom_sizes;
+      device_data.resource_upgrades.texture_format_upgrades_2d_aspect_ratio_pixel_threshold = texture_format_upgrades_2d_aspect_ratio_pixel_threshold;
+      device_data.resource_upgrades.texture_format_upgrades_lut_size = texture_format_upgrades_lut_size;
+      device_data.resource_upgrades.texture_format_upgrades_lut_dimensions = static_cast<ResourceUpgradeManager::LUTDimensions>(texture_format_upgrades_lut_dimensions);
+      device_data.resource_upgrades.auto_texture_format_upgrade_shader_hashes.clear();
+      for (const auto& [hash, def] : auto_texture_format_upgrade_shader_hashes)
+      {
+         ResourceUpgradeManager::AutoTextureFormatUpgradeShaderHash m;
+         m.rtv_slots = def.rtv_slots;
+         m.uav_slots = def.uav_slots;
+         m.scale = def.scale;
+         device_data.resource_upgrades.auto_texture_format_upgrade_shader_hashes[hash] = m;
+      }
+
+#if LUMA_USE_DXP
+      device_data.recipes.SetRootPath(shaders_path);
+#endif
+
       device_data.uav_max_count = (native_device->GetFeatureLevel() >= D3D_FEATURE_LEVEL_11_1) ? D3D11_1_UAV_SLOT_COUNT : D3D11_PS_CS_UAV_REGISTER_COUNT;
 
       native_device->GetImmediateContext(&device_data.primary_command_list);
@@ -2311,13 +2825,16 @@ namespace
          // Inherit a minimal set of states from the possible previous device. Any other state wouldn't be relevant or could be outdated, so we might as well reset all to default.
          if (!global_devices_data.empty())
          {
+            device_data.display_resolution = global_devices_data[0]->display_resolution;
             device_data.output_resolution = global_devices_data[0]->output_resolution;
             device_data.render_resolution = global_devices_data[0]->render_resolution;
          }
          // Fallback on the display resolution as default, it's the best guess we can make, most games will start fullscreen
          else
          {
-            device_data.output_resolution = float2(GetSystemMetrics(SM_CXSCREEN), GetSystemMetrics(SM_CYSCREEN));
+            // Note: we intentionally never update this, as there really isn't ever a good time to logically do so.
+            device_data.display_resolution = float2(GetSystemMetrics(SM_CXSCREEN), GetSystemMetrics(SM_CYSCREEN));
+            device_data.output_resolution = device_data.display_resolution;
             device_data.render_resolution = device_data.output_resolution;
          }
          device_data.previous_render_resolution = device_data.render_resolution;
@@ -2474,6 +2991,8 @@ namespace
 
       game->OnInitDevice(native_device, device_data);
 
+      LoadTexture2DArrays(native_device, device_data);
+
       // If we upgrade textures, make sure that MSAA DXGI_FORMAT_R16G16B16A16_FLOAT is supported on our GPU, given that it's optional.
       // Most games don't have MSAA, but it might be enforced at driver level.
       // In DX10/11/12 the swapchain doesn't support MS.
@@ -2500,6 +3019,19 @@ namespace
             CreateDeviceNativeShaders(device_data, nullptr, false);
          }
       }
+
+      // Start the persistent async clone worker at device init, before any
+      // pipeline can be created — jobs can be queued from the very first
+      // pipeline creation and the worker wakes on the first enqueue.
+#if LUMA_PATCH_PROVIDERS & (LUMA_PATCH_PROVIDER_BYTECODE_ASYNC | LUMA_PATCH_PROVIDER_RECIPE_ASYNC)
+      if (!device_data.thread_auto_loading.joinable())
+      {
+         device_data.thread_auto_loading_running = true;
+         device_data.thread_auto_loading = std::thread(AutoLoadShaders, &device_data);
+         // Run the patch worker below normal so it never hitches the render thread.
+         SetThreadPriority(static_cast<HANDLE>(device_data.thread_auto_loading.native_handle()), THREAD_PRIORITY_BELOW_NORMAL);
+      }
+#endif
    }
 
    void OnDestroyDevice(reshade::api::device* device)
@@ -2548,14 +3080,23 @@ namespace
 
       ASSERT_ONCE(device_data.swapchains.empty()); // Hopefully this is forcefully garbage collected when the device is destroyed (it is!)
 
+#if LUMA_PATCH_PROVIDERS & (LUMA_PATCH_PROVIDER_BYTECODE_ASYNC | LUMA_PATCH_PROVIDER_RECIPE_ASYNC)
       if (device_data.thread_auto_loading.joinable())
       {
+         // Stop the async worker before device teardown (see OnInitDevice).
+         {
+            const std::lock_guard lock(device_data.async_jobs_mutex);
+            device_data.async_shutdown = true;
+         }
+         device_data.async_jobs_cv.notify_all();
          device_data.thread_auto_loading.join();
          device_data.thread_auto_loading_running = false;
       }
+#endif
 
       assert(device_data.cb_per_view_global_buffer_map_data == nullptr); // It's fine (but not great) if we map wasn't unmapped before destruction (not our fault anyway)
 
+      if (enable_samplers_upgrade)
       {
          const std::unique_lock lock_samplers(s_mutex_samplers);
          ASSERT_ONCE(device_data.custom_sampler_by_original_sampler.empty()); // These should be guaranteed to have been cleared already ("OnDestroySampler()")
@@ -2728,13 +3269,13 @@ namespace
          const std::unique_lock lock(device_data.mutex);
          for (uint32_t index = 0; index < back_buffer_count; index++)
          {
-            device_data.original_upgraded_resources_formats[swapchain->get_back_buffer(index).handle] = last_attempted_upgraded_resource_creation_format;
+            device_data.resource_upgrades.original_upgraded_resources_formats[swapchain->get_back_buffer(index).handle] = last_attempted_upgraded_resource_creation_format;
          }
       }
 #endif
 
       swapchain_data.vanilla_was_linear_space = last_swapchain_linear_space || force_vanilla_swapchain_linear;
-#if !GAME_MAFIA_III // We don't care for this case, it's dev only, if we didn't do this, when we unload shaders the game would be washed out (the UI still is)
+#if !GAME_MAFIA_III && !GAME_DISHONORED_2 // We don't care for this case, it's dev only, if we didn't do this, when we unload shaders the game would be washed out (the UI still is)
       // We expect this define to be set to linear if the swapchain was already linear in Vanilla SDR (there might be code that makes such assumption)
       ASSERT_ONCE(!swapchain_data.vanilla_was_linear_space || (GetShaderDefineCompiledNumericalValue(POST_PROCESS_SPACE_TYPE_HASH) == 1));
 #endif
@@ -2992,7 +3533,7 @@ namespace
             {
                device_data.back_buffers.erase(handle);
 #if DEVELOPMENT
-               device_data.original_upgraded_resources_formats.erase(handle);
+               device_data.resource_upgrades.original_upgraded_resources_formats.erase(handle);
 #endif // DEVELOPMENT
             }
          }
@@ -3107,7 +3648,11 @@ namespace
    }
 
 #pragma optimize("t", on) // Temporarily override optimization, this function is too slow in debug otherwise (comment this out if ever needed)
-#if ENABLE_ORIGINAL_SHADERS_MEMORY_EDITS
+// Sync providers in INPLACE mode run here, before the shader is compiled: the
+// patch is applied to the shader description so D3D compiles the patched shader
+// directly (no pipeline clone, zero latency). In CLONE mode this function is
+// not compiled and sync providers run in OnInitPipeline instead.
+#if (LUMA_PATCH_PROVIDERS & (LUMA_PATCH_PROVIDER_BYTECODE_SYNC | LUMA_PATCH_PROVIDER_RECIPE_SYNC)) && !LUMA_PATCH_SYNC_MODE_CLONE
    bool OnCreatePipeline(
       reshade::api::device* device,
       reshade::api::pipeline_layout layout,
@@ -3169,12 +3714,19 @@ namespace
                CurrentShaderData current_shader_data = {};
                current_shader_data.Set(original_shader_desc->code, original_shader_desc->code_size);
 
-               // Optional
-               std::unique_ptr<std::byte[]> patched_shader_code; // Make sure to always update "current_shader_data" to the latest version of this
+               // Debug-stripped original, shared with patch_context (keyed by
+               // pre-strip hash): the cache keeps it alive for re-creations
+               // while this handler still needs it (ReShade reads shader_desc
+               // after we return) — shared_ptr expresses that dual ownership.
+               std::shared_ptr<const std::vector<uint8_t>> stripped_shader_code;
 
                uint64_t shader_luma_hash = -1;
 
                com_ptr<ID3DBlob> stripped_code_blob;
+               // TODO(Patch module): the debug-data stripping belongs in the Patch
+               // module, but d3d_stripShader is a per-TU static in
+               // utils/shader_compiler.hpp (initialized by InitShaderCompiler in
+               // core.hpp's TU), so it can't be called from another TU yet.
                // Strip debug data from the shader to unify them in games where different permutations of shaders are actually deep down identical.
                // Heavy Rain is a notorious example of this, having almost every single object in the game have its own unique shader, with the location and object name hardcoded in samplers and textures etc.
                // Given we need to fix them from issues they have when using FLOAT render targets (as opposed to the original UNORM) (e.g. NaNs and negative alpha etc),
@@ -3182,24 +3734,39 @@ namespace
                //
                // The native MD5 shader hash is already updated the by D3D strip data function.
                // TODO: instead of doing this, we could simply calculate the hash of the shader byte code section and replace them by that?
-               if (strip_original_shaders_debug_data && SUCCEEDED(d3d_stripShader(current_shader_data.code, current_shader_data.code_size, D3DCOMPILER_STRIP_REFLECTION_DATA | D3DCOMPILER_STRIP_DEBUG_INFO | D3DCOMPILER_STRIP_TEST_BLOBS /*| D3DCOMPILER_STRIP_PRIVATE_DATA*/ | D3DCOMPILER_STRIP_ROOT_SIGNATURE, &stripped_code_blob)))
+               if (strip_original_shaders_debug_data)
                {
-                  // We still need to allocate this in our persistent storage, and can't directly use "stripped_code_blob" (unless we redesigned the code)
-                  const size_t patched_shader_code_size = stripped_code_blob->GetBufferSize();
-                  patched_shader_code = std::make_unique<std::byte[]>(patched_shader_code_size);
-                  std::memcpy(patched_shader_code.get(), stripped_code_blob->GetBufferPointer(), patched_shader_code_size);
-                  stripped_code_blob.reset();
+                  const uint32_t pre_strip_hash = uint32_t(Shader::BinToHash(static_cast<const uint8_t*>(current_shader_data.code), current_shader_data.code_size));
 
-                  current_shader_data.Set(patched_shader_code.get(), patched_shader_code_size);
+                  if (std::shared_ptr<const std::vector<uint8_t>> cached_stripped = device_data.patch_context.GetStrippedContainer(pre_strip_hash); cached_stripped)
+                  {
+                     stripped_shader_code = std::move(cached_stripped);
+                  }
+                  else if (SUCCEEDED(d3d_stripShader(current_shader_data.code, current_shader_data.code_size, D3DCOMPILER_STRIP_REFLECTION_DATA | D3DCOMPILER_STRIP_DEBUG_INFO | D3DCOMPILER_STRIP_TEST_BLOBS /*| D3DCOMPILER_STRIP_PRIVATE_DATA*/ | D3DCOMPILER_STRIP_ROOT_SIGNATURE, &stripped_code_blob)))
+                  {
+                     const size_t stripped_shader_code_size = stripped_code_blob->GetBufferSize();
+                     stripped_shader_code = std::make_shared<const std::vector<uint8_t>>(static_cast<const uint8_t*>(stripped_code_blob->GetBufferPointer()), static_cast<const uint8_t*>(stripped_code_blob->GetBufferPointer()) + stripped_shader_code_size);
+                     stripped_code_blob.reset();
+                     device_data.patch_context.StoreStrippedContainer(pre_strip_hash, stripped_shader_code);
+                  }
 
-                  // Recalculate the hash after stripping, we don't want to use the "native"/original one anymore,
-                  // given that one of the reasons we strip data is to try and unify shaders that would otherwise be identical
-                  shader_luma_hash = Shader::BinToHash(static_cast<const uint8_t*>(current_shader_data.code), current_shader_data.code_size);
+                  if (stripped_shader_code)
+                  {
+                     current_shader_data.Set(stripped_shader_code->data(), stripped_shader_code->size());
+
+                     // Recalculate the hash after stripping, we don't want to use the "native"/original one anymore,
+                     // given that one of the reasons we strip data is to try and unify shaders that would otherwise be identical
+                     shader_luma_hash = Shader::BinToHash(static_cast<const uint8_t*>(current_shader_data.code), current_shader_data.code_size);
+                  }
                }
 
-               Hash::MD5::Digest* pre_patched_code_hash = nullptr;
-               bool needs_new_md5_hash = false;
                bool found_code_chunk = false;
+
+               // Patch for this shader (reused or freshly produced), shared
+               // with patch_context so shader_desc->code stays valid after this
+               // hook returns. Stored only after the DEVELOPMENT compile check
+               // passes.
+               std::shared_ptr<Patch::PatchedShaderData> applied_patch;
 
                for (uint32_t i = 0; i < current_shader_data.header->chunk_count; ++i)
                {
@@ -3221,21 +3788,6 @@ namespace
                      if (shader_luma_hash == -1)
                      {
                         shader_luma_hash = Shader::BinToHash(static_cast<const uint8_t*>(current_shader_data.code), current_shader_data.code_size);
-                     }
-
-                     // If the same shader (hash) was previous patched, just fish the previously cached data
-                     constexpr bool always_repatch_live_patched_shaders = false; // TODO: expose for dev modes in case we wanted to dynamically change the patching logic by level (however it makes little sense as we are usually not in control of how games load shaders)
-                     if (!always_repatch_live_patched_shaders)
-                     {
-                        const std::shared_lock lock_device(device_data.mutex);
-                        auto modified_shader_byte_code = device_data.modified_shaders_byte_code.find(shader_luma_hash);
-                        if (modified_shader_byte_code != device_data.modified_shaders_byte_code.end())
-                        {
-                           current_shader_data.Set(std::get<0>(modified_shader_byte_code->second).get(), std::get<1>(modified_shader_byte_code->second));
-                           pre_patched_code_hash = &std::get<2>(modified_shader_byte_code->second);
-                           needs_new_md5_hash = true;
-                           break;
-                        }
                      }
 
                      ASSERT_ONCE(!found_code_chunk); // Why does a shader byte code have two chunks that we can replace? It's supported but weird
@@ -3273,77 +3825,72 @@ namespace
                      ASSERT_ONCE(version_major >= 4 && version_major <= 6);
 #endif
                      const std::byte* byte_code = reinterpret_cast<const std::byte*>(chunk_byte_code->byte_code);
+                     const size_t byte_code_offset = byte_code - (std::byte*)current_shader_data.code;
 
-                     size_t new_byte_code_size = byte_code_size;
-                     if (std::unique_ptr<std::byte[]> patched_byte_code = game->ModifyShaderByteCode(byte_code, new_byte_code_size, subobject.type, shader_luma_hash, static_cast<const std::byte*>(current_shader_data.code), current_shader_data.code_size))
+                     // 1. Reuse an already stored patch (from a previous sync or async
+                     // outcome) in-place, without re-running any provider.
+                     applied_patch = device_data.patch_context.GetShaderData(uint32_t(shader_luma_hash));
+                     if (!applied_patch)
                      {
-                        const size_t byte_code_offset = byte_code - (std::byte*)current_shader_data.code;
-                        const bool byte_code_size_changed = new_byte_code_size != byte_code_size;
-                        const int32_t byte_code_size_diff = int32_t(new_byte_code_size) - int32_t(byte_code_size); // int32 should always be enough
-                        if (!patched_shader_code || byte_code_size_changed)
+                        // 2. Bytecode sync provider (manual wins on conflicts).
+#if LUMA_PATCH_PROVIDERS & LUMA_PATCH_PROVIDER_BYTECODE_SYNC
+                        if (!device_data.patch_context.IsProcessed(Patch::Method::Bytecode, uint32_t(shader_luma_hash)))
                         {
-                           // Allocate a new instance to patch the shader
+                           size_t new_byte_code_size = byte_code_size;
+                           if (std::unique_ptr<std::byte[]> patched_byte_code = game->PatchShaderBytecodeSync(byte_code, new_byte_code_size, subobject.type, shader_luma_hash, static_cast<const std::byte*>(current_shader_data.code), current_shader_data.code_size); patched_byte_code && new_byte_code_size != 0)
                            {
-                              size_t new_patched_shader_code_size = current_shader_data.code_size + byte_code_size_diff;
-                              std::unique_ptr<std::byte[]> new_patched_shader_code = std::make_unique<std::byte[]>(new_patched_shader_code_size); // "current_shader_data" might be pointing to "patched_shader_code" so make a new temporary one
-
-                              // Copy everything until the byte code, the actual byte code "body" is copied below
-                              std::memcpy(new_patched_shader_code.get(), current_shader_data.code, byte_code - (std::byte*)current_shader_data.code);
-
-                              // Copy anything after this chunk
-                              uint32_t old_tail_offset = current_shader_data.header->chunk_offsets[i] + chunk->chunk_size;
-                              uint32_t new_tail_offset = old_tail_offset + byte_code_size_diff;
-                              uint32_t tail_size = current_shader_data.code_size - old_tail_offset; // Should be 0 if this is the last chunk? Is there any "padding" data after?
-                              std::memcpy(new_patched_shader_code.get() + new_tail_offset, (std::byte*)current_shader_data.code + old_tail_offset, tail_size);
-
-                              patched_shader_code = std::move(new_patched_shader_code);
-                              current_shader_data.Set(patched_shader_code.get(), new_patched_shader_code_size);
-
-                              // Update the chunks to point to the new data
-                              chunk = reinterpret_cast<DXBCChunk*>((uint8_t*)current_shader_data.code + current_shader_data.header->chunk_offsets[i]);
-                              chunk_byte_code = reinterpret_cast<DXBCByteCodeChunk*>(chunk->chunk_data);
-                           }
-
-                           // Check if size changed, if it did we have to reconstruct the shader headers and chunk index as well as the replace with a new shader description for dx11
-                           if (byte_code_size_changed)
-                           {
-                              // Update sizes
-                              current_shader_data.header->file_size += byte_code_size_diff;
-                              chunk->chunk_size += byte_code_size_diff; // Chunk size
-                              ASSERT_ONCE(byte_code_size_diff % sizeof(uint32_t) == 0); // Make sure it's a multiple of DWORD (4 bytes), it's probably mandatory for it to be
-                              chunk_byte_code->chunk_size_dword += byte_code_size_diff / sizeof(uint32_t); // Byte code size in DWORD (4 bytes)
-                              // Update chunk offsets of all chunks after this one
-                              for (uint32_t j = i + 1; j < current_shader_data.header->chunk_count; ++j)
+                              auto data = std::make_shared<Patch::PatchedShaderData>();
+                              data->method = Patch::Method::Bytecode;
+                              data->code = Patch::BuildPatchedContainer(current_shader_data.code, current_shader_data.code_size, byte_code_offset, patched_byte_code.get(), new_byte_code_size);
+                              if (!data->code.empty())
                               {
-                                 current_shader_data.header->chunk_offsets[j] += byte_code_size_diff;
+                                 data->md5 = *reinterpret_cast<const Hash::MD5::Digest*>(data->code.data() + offsetof(Shader::DXBCHeader, hash));
+                                 applied_patch = data;
                               }
                            }
+                           device_data.patch_context.SetProcessed(Patch::Method::Bytecode, uint32_t(shader_luma_hash)); // Definitive outcome: never re-run for this shader.
                         }
+#endif
+                        // 3. Recipe sync provider (only if no bytecode patch was produced).
+#if LUMA_PATCH_PROVIDERS & LUMA_PATCH_PROVIDER_RECIPE_SYNC
+                        if (!applied_patch && !device_data.patch_context.IsProcessed(Patch::Method::Recipe, uint32_t(shader_luma_hash)))
+                        {
+                           Patch::ShaderPatchRequest patch_request{};
+                           patch_request.type = subobject.type;
+                           patch_request.shader_hash = uint32_t(shader_luma_hash);
+                           patch_request.shader_container = static_cast<const std::byte*>(current_shader_data.code);
+                           patch_request.shader_container_size = current_shader_data.code_size;
 
-                        // Calculate the offset relative to original code and copy the replaced byte code in it
-                        // (we don't overwrite the original shader code because it's const, ReShade or the game's memory might expect it to not change,
-                        // and plus it'd break other mods that load before us that replace shaders by hash on creation)
-                        std::memcpy(patched_shader_code.get() + byte_code_offset, patched_byte_code.get(), byte_code_size + byte_code_size_diff);
-
-                        needs_new_md5_hash = true;
+                           auto patch_report = game->PatchShaderRecipeSync(device_data, patch_request);
+                           if (patch_report && !patch_report->output_bytes.empty())
+                           {
+                              auto data = std::make_shared<Patch::PatchedShaderData>();
+                              data->method = Patch::Method::Recipe;
+                              data->code = std::move(patch_report->output_bytes);
+                              data->report = std::move(*patch_report);
+                              applied_patch = data;
+                           }
+                           device_data.patch_context.SetProcessed(Patch::Method::Recipe, uint32_t(shader_luma_hash));
+                        }
+#endif
                      }
+
+                     if (applied_patch)
+                     {
+                        // Apply in-place: point the shader description at the patched
+                        // container (kept alive by patch_context).
+                        current_shader_data.Set(applied_patch->code.data(), applied_patch->code.size());
+                     }
+
+                     break;
                   }
                }
 
                if (current_shader_data.code != original_shader_desc->code)
                {
                   ASSERT_ONCE_MSG((subobject_count == 1 || subobject_count == 2) && subobject.count == 1 && !last_live_patched_original_shader_code, "This behaviour is hardcoded to work with DX9-11, with one object (shader) per pipeline"); // input layouts have two subobjects (input layout and vertex shader)
-                  ASSERT_ONCE(!patched_shader_code.get() || patched_shader_code.get() == current_shader_data.code);
 
-                  if (needs_new_md5_hash)
-                  {
-                     // Recalculate and set the hash, otherwise the shader might fail to load (or be used later on anyway)
-                     // Official implementation is here: https://github.com/doitsujin/dxbc-spirv/blob/32866c0d0a0236b93681d25405e57a3e9d6868d3/dxbc/dxbc_container.cpp#L11
-                     // This implementation should match it 100%
-                     Hash::MD5::Digest md5_digest = pre_patched_code_hash ? *pre_patched_code_hash : Shader::CalcDXBCHash(current_shader_data.code, current_shader_data.code_size);
-                     std::memcpy(current_shader_data.header->hash, &md5_digest.data, DXBCHeader::hash_size);
-                  }
-
+                  bool can_apply = true;
 #if DEVELOPMENT // Slow, but good for prevention
                   constexpr bool verify_live_patched_shaders = true; // TODO: set false
                   if (verify_live_patched_shaders)
@@ -3363,41 +3910,40 @@ namespace
                      if (FAILED(hr))
                      {
                         assert(false);
-                        break; // Skip replacing the shader if it can't be compiled, the game would likely crash otherwise!
+                        can_apply = false;
+                        if (applied_patch)
+                        {
+                           // Never store or apply a patch that can't compile: mark
+                           // this provider's outcome as definitive (no-patch-needed)
+                           // so it isn't retried and can't poison the patch context.
+                           // Another method's provider (e.g. the recipe async path)
+                           // can still take over for this shader.
+                           device_data.patch_context.SetProcessed(applied_patch->method, uint32_t(shader_luma_hash));
+                        }
                      }
                   }
 #endif
 
-                  any_edited = true;
-
-                  // Store the original shader so it can later be accessed in ReShade's pipeline init callback (it'd still be valid as it's an external ptr, unless ReShade changed its implementation)
-                  last_live_patched_original_shader_code = original_shader_desc->code;
-                  last_live_patched_original_shader_size = original_shader_desc->code_size;
-                  last_live_patched_shader_hash = shader_luma_hash;
-
-                  // Update ReShade pointers to code and its size, so they point at the new code (that is kept alive by unique ptrs).
-                  // ReShade doesn't handle the memory of the pointer at all, it simply passes it to the native function.
-                  auto* shader_desc = static_cast<reshade::api::shader_desc*>(subobjects[i].data);
-                  shader_desc->code = current_shader_data.code;
-                  shader_desc->code_size = current_shader_data.code_size;
-
-                  // Cache the newly patched
-                  if (patched_shader_code.get())
+                  if (can_apply)
                   {
-                     const std::unique_lock lock_device(device_data.mutex);
-
-                     // Allocate in chunks to avoid constant allocations
-                     constexpr size_t reserve_size = 32; // Conservative value
-                     size_t size_distance = device_data.modified_shaders_byte_code.size() % reserve_size;
-                     if (size_distance == 0)
+                     // Store only after the patch is proven compilable (kept alive by patch_context).
+                     if (applied_patch)
                      {
-                        device_data.modified_shaders_byte_code.reserve(device_data.modified_shaders_byte_code.size() + reserve_size);
+                        device_data.patch_context.StorePatched(uint32_t(shader_luma_hash), applied_patch);
                      }
 
-                     auto& modified_shader_byte_code = device_data.modified_shaders_byte_code[uint32_t(shader_luma_hash)];
-                     std::get<0>(modified_shader_byte_code) = std::move(patched_shader_code); // Equal to "current_shader_data.code"
-                     std::get<1>(modified_shader_byte_code) = current_shader_data.code_size;
-                     std::get<2>(modified_shader_byte_code) = *reinterpret_cast<const Hash::MD5::Digest*>(current_shader_data.header->hash);
+                     any_edited = true;
+
+                     // Store the original shader so it can later be accessed in ReShade's pipeline init callback (it'd still be valid as it's an external ptr, unless ReShade changed its implementation)
+                     last_live_patched_original_shader_code = original_shader_desc->code;
+                     last_live_patched_original_shader_size = original_shader_desc->code_size;
+                     last_live_patched_shader_hash = shader_luma_hash;
+
+                     // Update ReShade pointers to code and its size, so they point at the new code (that is kept alive by patch_context, or the stripped container above).
+                     // ReShade doesn't handle the memory of the pointer at all, it simply passes it to the native function.
+                     auto* shader_desc = static_cast<reshade::api::shader_desc*>(subobjects[i].data);
+                     shader_desc->code = current_shader_data.code;
+                     shader_desc->code_size = current_shader_data.code_size;
                   }
                }
 
@@ -3409,7 +3955,8 @@ namespace
 
       return any_edited;
    }
-#endif // ENABLE_ORIGINAL_SHADERS_MEMORY_EDITS
+#endif // INPLACE sync providers
+
 
    void OnInitPipeline(
       reshade::api::device* device,
@@ -3467,7 +4014,7 @@ namespace
             ASSERT_ONCE(subobject_count == 1 || subobject_count == 2); // input layouts have two subobjects (input layout and vertex shader)
 #endif
             ASSERT_ONCE(subobject.count == 1);
-#if ENABLE_ORIGINAL_SHADERS_MEMORY_EDITS
+#if LUMA_PATCH_PROVIDERS != 0
             if (last_live_patched_shader_hash != -1)
             {
                precalculated_shader_hash = last_live_patched_shader_hash;
@@ -3502,9 +4049,7 @@ namespace
                constexpr bool always_clear_live_patched_shaders = false; // TODO: expose
                if (always_clear_live_patched_shaders)
                {
-                  DeviceData& device_data = *device->get_private_data<DeviceData>();
-                  const std::unique_lock lock_device(device_data.mutex);
-                  device_data.modified_shaders_byte_code.clear();
+                  // TODO: clear the stored patches for the cleared shaders (patch_context)
                }
             }
 #endif
@@ -3532,8 +4077,17 @@ namespace
 #endif
       };
 
+      // INPLACE sync patches were applied to the shader description at creation
+      // time (see OnCreatePipeline): this pipeline's shader object is the
+      // patched one, no clone involved.
+      if (live_patched_shader_code != nullptr)
+      {
+         cached_pipeline->patch_application_mode = Shader::PatchApplicationMode::Inplace;
+      }
+
       bool found_replaceable_shader = false;
       bool found_custom_shader_file = false;
+      bool found_sync_patch_this_pipeline = false;
 
       DeviceData& device_data = *device->get_private_data<DeviceData>();
 
@@ -3561,6 +4115,33 @@ namespace
                // TODO: when out of "DEVELOPMENT" or "TEST" builds, we could early out before cloning the pipeline based on whether "custom_shaders_cache.contains(shader_hash)" is true. That'd avoid some stutters on shader loading. Note that below we might modify even shaders that we don't replace so consider that too.
                // TODO: use the native DX hash stored at the beginning of shaders binaries? It might not always be reliable though. It's too late anyway now, all of our hashes are in content.
                uint32_t shader_hash = (precalculated_shader_hash != -1) ? uint32_t(precalculated_shader_hash) : Shader::BinToHash(static_cast<const uint8_t*>(original_shader_desc->code), original_shader_desc->code_size);
+
+#if (LUMA_PATCH_PROVIDERS & (LUMA_PATCH_PROVIDER_BYTECODE_SYNC | LUMA_PATCH_PROVIDER_RECIPE_SYNC)) && LUMA_PATCH_SYNC_MODE_CLONE
+               // Sync providers in CLONE mode run here, at pipeline init: the
+               // patch is stored and the pipeline is cloned with it (swapped in
+               // at bind time). In INPLACE mode sync runs in OnCreatePipeline
+               // instead and this block is not compiled.
+               {
+                  const std::shared_lock lock_device(device_data.mutex);
+                  if (!device_data.patch_context.HasPatch(shader_hash))
+                  {
+                     Patch::ShaderPatchRequest patch_request{};
+                     patch_request.type = subobject.type;
+                     patch_request.shader_hash = shader_hash;
+                     patch_request.shader_container = static_cast<const std::byte*>(original_shader_desc->code);
+                     patch_request.shader_container_size = original_shader_desc->code_size;
+
+                     const Patch::ByteCodeView view = Patch::FindShaderByteCode(original_shader_desc->code, original_shader_desc->code_size);
+                     if (Patch::PatchShaderSync(*game, device_data, patch_request, view, LUMA_PATCH_PROVIDERS))
+                     {
+                        found_sync_patch_this_pipeline = true;
+#if DEVELOPMENT
+                        reshade::log::message(reshade::log::level::debug, std::format("[Patch] Shader {:08X} patched via sync path", shader_hash).c_str());
+#endif
+                     }
+                  }
+               }
+#endif
 
 #if ALLOW_SHADERS_DUMPING || DEVELOPMENT
                {
@@ -3598,8 +4179,6 @@ namespace
 
 #if DEVELOPMENT
                      shader_cache_count++;
-                     cached_shader->live_patched_data = live_patched_shader_code;
-                     cached_shader->live_patched_size = live_patched_shader_size;
 #endif // DEVELOPMENT
                      shader_cache[shader_hash] = cached_shader;
 #if ALLOW_SHADERS_DUMPING
@@ -3691,6 +4270,13 @@ namespace
 #endif // DEVELOPMENT
 #endif // ALLOW_SHADERS_DUMPING
                   }
+
+#if DEVELOPMENT && LUMA_PATCH_PROVIDERS != 0
+                  if (live_patched_shader_code != nullptr)
+                  {
+                     SetLivePatchedShaderInfo(cached_shader, shader_hash, static_cast<const uint8_t*>(live_patched_shader_code), static_cast<uint32_t>(live_patched_shader_size));
+                  }
+#endif // DEVELOPMENT && LUMA_PATCH_PROVIDERS != 0
 
                   // Try with native DX11 reflections first, they are much faster than disassembly
                   if (!found_reflections)
@@ -4061,23 +4647,104 @@ namespace
          }
       }
 
+      // Clone pipeline with injected sync patches (if any found)
+#if (LUMA_PATCH_PROVIDERS & (LUMA_PATCH_PROVIDER_BYTECODE_SYNC | LUMA_PATCH_PROVIDER_RECIPE_SYNC)) && LUMA_PATCH_SYNC_MODE_CLONE
+      if (found_sync_patch_this_pipeline)
+      {
+         auto [pipeline_clone, injected] = Patch::ClonePipelineWithPatches(
+            device, layout, subobjects_cache, subobject_count,
+            [&device_data](
+                const reshade::api::shader_desc*,
+                const reshade::api::shader_desc* orig_desc) -> std::optional<std::pair<const uint8_t*, uint32_t>>
+            {
+               uint32_t hash = Shader::BinToHash(static_cast<const uint8_t*>(orig_desc->code), orig_desc->code_size);
+               if (auto shader_data = device_data.patch_context.GetShaderData(hash); shader_data)
+                  return std::make_pair(shader_data->code.data(), static_cast<uint32_t>(shader_data->code.size()));
+               return std::nullopt;
+            });
+
+         if (injected && pipeline_clone.handle != 0)
+         {
+            cached_pipeline->pipeline_clone = pipeline_clone;
+            cached_pipeline->cloned = true;
+            cached_pipeline->patch_application_mode = Shader::PatchApplicationMode::Sync;
+            // Sync clones are patch-only by construction (files go through the load path).
+            cached_pipeline->clone_origin = Shader::CloneOrigin::Patch;
+            device_data.pipeline_cache_by_pipeline_clone_handle[pipeline_clone.handle] = cached_pipeline;
+            device_data.cloned_pipeline_count++;
+            device_data.cloned_pipelines_changed = true;
+
+#if DEVELOPMENT
+            reshade::log::message(reshade::log::level::debug, std::format("[Patch] Sync-patched pipeline {:x} -> clone {:x}", pipeline.handle, pipeline_clone.handle).c_str());
+#endif
+
+#if DEVELOPMENT && LUMA_PATCH_PROVIDERS != 0
+            // Update live patch debug info for all patched shaders in this pipeline
+            {
+               const std::lock_guard<std::recursive_mutex> lock_dumping(s_mutex_dumping);
+               for (uint32_t i = 0; i < subobject_count; ++i)
+               {
+                  const auto& subobject = subobjects[i];
+                  if (subobject.type != reshade::api::pipeline_subobject_type::pixel_shader
+                      && subobject.type != reshade::api::pipeline_subobject_type::vertex_shader
+                      && subobject.type != reshade::api::pipeline_subobject_type::compute_shader
+#if GEOMETRY_SHADER_SUPPORT
+                      && subobject.type != reshade::api::pipeline_subobject_type::geometry_shader
+#endif
+                      ) continue;
+
+                  auto* desc = static_cast<reshade::api::shader_desc*>(subobjects_cache[i].data);
+                  uint32_t hash = Shader::BinToHash(static_cast<const uint8_t*>(desc->code), desc->code_size);
+                  if (auto shader_data = device_data.patch_context.GetShaderData(hash); shader_data)
+                  {
+                     if (auto it = shader_cache.find(hash); it != shader_cache.end() && it->second)
+                     {
+                        SetLivePatchedShaderInfo(it->second, hash, shader_data->code.data(), static_cast<uint32_t>(shader_data->code.size()));
+                     }
+                  }
+               }
+            }
+#endif
+         }
+      }
+#endif // CLONE sync mode
+
       // Automatically load any custom shaders that might have been bound to this pipeline.
       // To avoid this slowing down everything, we only do it if we detect the user already had a matching shader in its custom shaders folder.
       if (auto_load && !last_pressed_unload && found_custom_shader_file)
       {
-         // Immediately cloning and replacing the pipeline might be unsafe, we might need to delay it to the next frame.
-         // NOTE: this is totally fine to be done immediately (inline) in DX11, it's only unsafe in DX12.
-         // TODO: maybe this is always completely fine independently of the API? Maybe the problem was calling device functions concurrently as we lock global mutexes, causing deadlocks.
-         if (precompile_custom_shaders)
-         {
-            LoadCustomShaders(device_data, { pipeline.handle }, !precompile_custom_shaders);
-         }
-         else
+#if LUMA_PATCH_PROVIDERS & (LUMA_PATCH_PROVIDER_BYTECODE_ASYNC | LUMA_PATCH_PROVIDER_RECIPE_ASYNC)
+         // File-based custom shaders are deferred to the async worker rather
+         // than cloned here: this hook runs on the game's creation thread while
+         // the worker clones the same queue, and two threads cloning in parallel
+         // tore clone state (corrupt pipeline -> GPU faults). The worker batches
+         // and completes at the present boundary.
+         const std::unique_lock lock_loading(s_mutex_loading);
+         device_data.pipelines_to_reload.emplace(pipeline.handle);
+         NotifyAsyncCloneQueue(device_data);
+#else
+         // No async worker in this build: load/clone inline at creation (the
+         // original behavior for custom shader files).
+         LoadCustomShaders(device_data, { pipeline.handle }, !precompile_custom_shaders);
+#endif
+      }
+
+
+#if LUMA_PATCH_PROVIDERS & (LUMA_PATCH_PROVIDER_BYTECODE_ASYNC | LUMA_PATCH_PROVIDER_RECIPE_ASYNC)
+      // Patches are automatic: queueing must not depend on the "Auto Load
+      // Shaders" checkbox (a user tool for their own files), only on the unloaded
+      // state. Note: the clone lambda injects cached files on these clones too, so
+      // a file overrides a patch regardless of the checkbox.
+      if (!found_sync_patch_this_pipeline && live_patched_shader_code == nullptr && cached_pipeline->shader_hashes.size() > 0 && !patches_unloaded)
+      {
+         if (ShouldQueuePatchPipeline(device_data, cached_pipeline->shader_hashes[0]))
          {
             const std::unique_lock lock_loading(s_mutex_loading);
             device_data.pipelines_to_reload.emplace(pipeline.handle);
          }
       }
+      NotifyAsyncCloneQueue(device_data);
+#endif
    }
 #pragma optimize("", on) // Restore the previous state
 
@@ -4123,16 +4790,21 @@ namespace
 #endif
 
                // Destroy our cloned version of the pipeline (and leave the original intact, because the life time is not handled by us)
-               if (cached_pipeline->cloned)
+               // Preserved patch clones (kept across unloads) can have "cloned == false"
+               // while still owning the object — destroy by handle presence.
+               if (cached_pipeline->cloned || cached_pipeline->pipeline_clone.handle != 0)
                {
-                  cached_pipeline->cloned = false;
+                  if (cached_pipeline->cloned)
+                  {
+                     cached_pipeline->cloned = false;
+                     device_data.cloned_pipeline_count--;
+                  }
                   assert(cached_pipeline->device == device);
                   pipelines_to_destroy.push_back(cached_pipeline->pipeline_clone.handle);
                   device_data.pipeline_cache_by_pipeline_clone_handle.erase(cached_pipeline->pipeline_clone.handle);
 #if 0 // Redundant
                   cached_pipeline->pipeline_clone.handled = 0;
 #endif
-                  device_data.cloned_pipeline_count--;
                   device_data.cloned_pipelines_changed = true;
                }
                delete cached_pipeline;
@@ -4181,6 +4853,7 @@ namespace
       CommandListData& cmd_list_data = *cmd_list->get_private_data<CommandListData>();
 
       const Shader::CachedPipeline* cached_pipeline = nullptr;
+      uint32_t cached_pipeline_shader_hash = 0;
 
       if (pipeline.handle != 0)
       {
@@ -4205,6 +4878,11 @@ namespace
 #endif
             ASSERT_ONCE(cached_pipeline != nullptr); // Why can't we find the shader?
          }
+
+         if (cached_pipeline != nullptr)
+         {
+            cached_pipeline_shader_hash = cached_pipeline->shader_hashes[0];
+         }
       }
 
       // Matches "reshade::addon_event::reset_command_list" (sometimes this is called instead of that)
@@ -4216,12 +4894,28 @@ namespace
          cmd_list_data.any_draw_done = false;
          cmd_list_data.any_dispatch_done = false;
 #endif
+         // Nothing is bound anymore: clear the variant handles/trackers (only valid while bound).
+         cmd_list_data.patch_clone_handles.clear();
       }
 
       if ((stages & reshade::api::pipeline_stage::compute_shader) != 0)
       {
          ASSERT_ONCE(stages == reshade::api::pipeline_stage::compute_shader || stages == reshade::api::pipeline_stage::all); // Make sure only one stage happens at a time (it does in DX11)
          cmd_list_data.pipeline_state_original_compute_shader = pipeline;
+         // Expose the clone handle for this stage (0 = no clone), gated
+         // by the master switches (per-hash defaults don't gate: per-draw overrides
+         // must work). File clones need the mod master, patch clones both.
+         if (cached_pipeline && cached_pipeline->cloned && custom_shaders_enabled
+             && (cached_pipeline->clone_origin != Shader::CloneOrigin::Patch || allow_patches))
+         {
+            for (uint32_t hash : cached_pipeline->shader_hashes)
+            {
+               if (hash != 0)
+               {
+                  cmd_list_data.patch_clone_handles[hash] = cached_pipeline->pipeline_clone;
+               }
+            }
+         }
 
          if (cached_pipeline)
          {
@@ -4246,6 +4940,20 @@ namespace
       {
          ASSERT_ONCE(stages == reshade::api::pipeline_stage::vertex_shader || stages == reshade::api::pipeline_stage::all); // Make sure only one stage happens at a time (it does in DX11)
          cmd_list_data.pipeline_state_original_vertex_shader = pipeline;
+         // Expose the clone handle for this stage (0 = no clone), gated
+         // by the master switches (per-hash defaults don't gate: per-draw overrides
+         // must work). File clones need the mod master, patch clones both.
+         if (cached_pipeline && cached_pipeline->cloned && custom_shaders_enabled
+             && (cached_pipeline->clone_origin != Shader::CloneOrigin::Patch || allow_patches))
+         {
+            for (uint32_t hash : cached_pipeline->shader_hashes)
+            {
+               if (hash != 0)
+               {
+                  cmd_list_data.patch_clone_handles[hash] = cached_pipeline->pipeline_clone;
+               }
+            }
+         }
 
          if (cached_pipeline)
          {
@@ -4271,6 +4979,20 @@ namespace
       {
          ASSERT_ONCE(stages == reshade::api::pipeline_stage::pixel_shader || stages == reshade::api::pipeline_stage::all); // Make sure only one stage happens at a time (it does in DX11)
          cmd_list_data.pipeline_state_original_pixel_shader = pipeline;
+         // Expose the clone handle for this stage (0 = no clone), gated
+         // by the master switches (per-hash defaults don't gate: per-draw overrides
+         // must work). File clones need the mod master, patch clones both.
+         if (cached_pipeline && cached_pipeline->cloned && custom_shaders_enabled
+             && (cached_pipeline->clone_origin != Shader::CloneOrigin::Patch || allow_patches))
+         {
+            for (uint32_t hash : cached_pipeline->shader_hashes)
+            {
+               if (hash != 0)
+               {
+                  cmd_list_data.patch_clone_handles[hash] = cached_pipeline->pipeline_clone;
+               }
+            }
+         }
 
 #if DEVELOPMENT
          cmd_list_data.temp_custom_depth_stencil = cached_pipeline ? cached_pipeline->custom_depth_stencil : ShaderCustomDepthStencilType::None;
@@ -4330,8 +5052,33 @@ namespace
          {
             // TODO: have a high performance mode that swaps the original shader binary with the custom one on creation, so we don't have to analyze shader binding calls (probably wouldn't really speed up performance anyway).
             // This would also help save some memory in x86 games where we keep all shaders binaries in memory ("custom_shaders_cache::code").
+            // The game decision runs without the lock: game callbacks must not
+            // take luma mutexes, and the bind below is what needs the lock.
+#if LUMA_PATCH_PROVIDERS != 0
+            const bool game_patch_default = game->OnBindPatchedShader(
+                  *cmd_list->get_device()->get_private_data<DeviceData>(),
+                  cached_pipeline_shader_hash,
+                  (stages & reshade::api::pipeline_stage::compute_shader) != 0
+                     ? reshade::api::pipeline_subobject_type::compute_shader
+                     : (stages & reshade::api::pipeline_stage::vertex_shader) != 0
+                        ? reshade::api::pipeline_subobject_type::vertex_shader
+                        : reshade::api::pipeline_subobject_type::pixel_shader);
+#else
+            const bool game_patch_default = true;
+#endif
+
             std::shared_lock lock(s_mutex_generic);
-            if (cached_pipeline->cloned && custom_shaders_enabled)
+
+            // Bind-time default: clone when cloned && custom_shaders_enabled &&
+            // (patch clones also need the game's per-shader decision; per-draw
+            // UseShaderVariant overrides). Readback path (game/mod bound the
+            // clone itself) keeps the bound object as-is.
+            const bool game_bound_clone = cached_pipeline->cloned && cached_pipeline->pipeline_clone.handle == pipeline.handle;
+            const bool swap_to_clone = !game_bound_clone && cached_pipeline->cloned && custom_shaders_enabled
+               && (cached_pipeline->clone_origin != Shader::CloneOrigin::Patch || allow_patches)
+               && (cached_pipeline->clone_origin != Shader::CloneOrigin::Patch || game_patch_default);
+
+            if (swap_to_clone)
             {
                cmd_list->bind_pipeline(stages, cached_pipeline->pipeline_clone);
             }
@@ -4353,163 +5100,56 @@ namespace
 #endif
    }
 
-   // This function takes a "source resource", which would be the reason we are creating this new resource, because a copy (or anything else like that) from a source to a target had the target not upgraded to the same format
-   bool FindOrCreateIndirectUpgradedResource(reshade::api::device* device, const uint64_t in_source_resource, const uint64_t in_resource, uint64_t& out_resource, DeviceData& device_data, bool allow_create, reshade::api::resource_usage initial_state, std::shared_lock<std::shared_mutex>& lock_device_read, bool leave_locked = true)
+   // View handle -> resource handle from our caches (no device call under the luma lock).
+   // Returns 0 for views we don't know about (e.g. created before the addon loaded): callers must
+   // fall back to get_resource_from_view outside the lock.
+   uint64_t GetCachedResourceFromView(const DeviceData& device_data, uint64_t view_handle)
    {
-      bool replaced = false;
+      return device_data.resource_upgrades.GetCachedResourceFromView(view_handle);
+   }
 
-      auto original_resource_to_mirrored_upgraded_resource = device_data.original_resources_to_mirrored_upgraded_resources.find(in_resource);
-      if (original_resource_to_mirrored_upgraded_resource != device_data.original_resources_to_mirrored_upgraded_resources.end())
+   bool FindOrCreateIndirectUpgradedResource(reshade::api::device* device, const uint64_t in_source_resource, const uint64_t in_resource, uint64_t& out_resource, DeviceData& device_data, bool allow_create, reshade::api::resource_usage initial_state, std::shared_lock<std::shared_mutex>& lock_device_read, bool allow_scale = false, bool force_scale = false, bool leave_locked = true)
+   {
+      // Swapchain backbuffers are excluded by the caller (checked here before invoking the manager, since
+      // the manager is decoupled from DeviceData's backbuffer bookkeeping).
+      const bool is_back_buffer = device_data.back_buffers.contains(in_resource);
+
+      // Compute the scale policy here in core.hpp (not the manager):
+      //  - Seed (in_source_resource == 0): scale if the seed's scale toggle is set AND SR is active.
+      //  - Chain (in_source_resource != 0): scale once SR has actually drawn this frame.
+      //  - force_scale bypasses the has_drawn_sr gate for command lists recorded before SR ran (deferred contexts).
+      bool should_scale = force_scale;
+      if (in_source_resource == 0)
       {
-         out_resource = original_resource_to_mirrored_upgraded_resource->second;
-         replaced = true;
+#if ENABLE_SR
+         should_scale = should_scale || (allow_scale && device_data.sr_type != SR::Type::None && !device_data.sr_suppressed);
+#else
+         should_scale = should_scale || (allow_scale && false);
+#endif
       }
-      // Ignore all swapchain textures, we can't directly upgrade these (even in case they weren't directly upgraded), given that it's the ultimate target and somehow we'll need to write the values in it // TODO: not true, we could still swap its texture and then copy it back on the og swapchain on presentation
-      else if (allow_create && in_resource != 0 && !device_data.upgraded_resources.contains(in_resource) && !device_data.back_buffers.contains(in_resource))
-      {
-         lock_device_read.unlock(); // Avoids deadlocks with the device
+      else
+         should_scale = should_scale || device_data.has_drawn_sr;
 
-         reshade::api::resource mirrored_upgraded_resource;
-         reshade::api::resource_desc source_desc = device->get_resource_desc({in_resource});
-         reshade::api::resource_desc target_desc = source_desc;
-         bool needs_upgraded_resource;
-         if (in_source_resource)
-         {
-            source_desc = device->get_resource_desc({in_source_resource});
+      ResourceUpgradeFrameState state;
+      state.render_resolution = device_data.render_resolution;
+      state.output_resolution = device_data.output_resolution;
+      state.has_drawn_sr = device_data.has_drawn_sr;
+#if ENABLE_SR
+      state.sr_active = device_data.sr_type != SR::Type::None && !device_data.sr_suppressed;
+#else
+      state.sr_active = false;
+#endif
 
-            float min_aspect_ratio = target_desc.texture.width <= target_desc.texture.height ? ((float)(target_desc.texture.width - texture_format_upgrades_2d_aspect_ratio_pixel_threshold) / (float)target_desc.texture.height) : ((float)target_desc.texture.width / (float)(target_desc.texture.height + texture_format_upgrades_2d_aspect_ratio_pixel_threshold));
-            float max_aspect_ratio = target_desc.texture.width <= target_desc.texture.height ? ((float)(target_desc.texture.width + texture_format_upgrades_2d_aspect_ratio_pixel_threshold) / (float)target_desc.texture.height) : ((float)target_desc.texture.width / (float)(target_desc.texture.height - texture_format_upgrades_2d_aspect_ratio_pixel_threshold));
-            float target_aspect_ratio = (float)source_desc.texture.width / (float)source_desc.texture.height;
-            bool is_2x_square = target_desc.texture.width == 2 && target_desc.texture.height == 2;
-            bool is_1x_square = target_desc.texture.width == 1 && target_desc.texture.height == 1;
-            bool aspect_ratio_filter = source_desc.type == reshade::api::resource_type::texture_2d && !is_2x_square && !is_1x_square && target_aspect_ratio >= (min_aspect_ratio - FLT_EPSILON) && target_aspect_ratio <= (max_aspect_ratio + FLT_EPSILON); // Note: we don't check the aspect ratio on the depth, we only do it on 2D textures. We also ignore 1x1 and 2x2 for extra safety
-            bool size_filter = source_desc.texture.width == target_desc.texture.width && source_desc.texture.height == target_desc.texture.height && source_desc.texture.depth_or_layers == target_desc.texture.depth_or_layers;
-            size_filter |= aspect_ratio_filter;
-            //size_filter |= source_desc.type == reshade::api::resource_type::texture_2d && target_desc.texture.width == uint(device_data.output_resolution.x + 0.5) && target_desc.texture.height == uint(device_data.output_resolution.y + 0.5); // Force upgrade if it's equal to the swapchain resolution, this pass could be one that converts from a constrained to a fullscreen aspect ratio
-
-            // Avoid upgrading textures that don't have the same number of channels (unless they'd now have more!), we wouldn't want to automatically turn 1 channel to 4 channel textures.
-            // Also prevent upgrades if the size isn't compatible (aspect ratio matching).
-            // And don't upgrade int formats for now, they could only cause troubles.
-            // See "enable_chain_indirect_texture_format_upgrades" for more.
-            needs_upgraded_resource = !AreFormatsCopyCompatible(DXGI_FORMAT(source_desc.texture.format), DXGI_FORMAT(target_desc.texture.format))
-               && IsRGBAFormat(DXGI_FORMAT(source_desc.texture.format), true) == IsRGBAFormat(DXGI_FORMAT(target_desc.texture.format), true)
-               && !IsIntFormat(DXGI_FORMAT(target_desc.texture.format))
-               && size_filter;
-
-            size_filter |= aspect_ratio_filter;
-            // TODO: instead of checking the formats for compatibility, also check if the source was upgraded and in that case force the target to be upgraded (faster checks)
-            if (needs_upgraded_resource)
-            {
-               target_desc.texture.format = source_desc.texture.format;
-            }
-         }
-         else // Upgrade format
-         {
-            target_desc.texture.format = GetBestResourceUpgradeFormat(source_desc);
-            needs_upgraded_resource = source_desc.texture.format != target_desc.texture.format;
-         }
-         needs_upgraded_resource &= target_desc.type != reshade::api::resource_type::buffer; // Filter out false positives (UAVs can be buffers)
-         // TODO: optionally copy the content of "in_resource"?
-         if (needs_upgraded_resource && device->create_resource(target_desc, nullptr, initial_state, &mirrored_upgraded_resource))
-         {
-            std::unique_lock lock_device_write(device_data.mutex);
-            if (!device_data.original_resources_to_mirrored_upgraded_resources.contains(in_resource))
-            {
-               device_data.original_resources_to_mirrored_upgraded_resources[in_resource] = mirrored_upgraded_resource.handle;
-               out_resource = mirrored_upgraded_resource.handle;
-            }
-            else // Destroy it if it was accidentally created at the same time by another thread
-            {
-               out_resource = device_data.original_resources_to_mirrored_upgraded_resources[in_resource];
-               lock_device_write.unlock(); // Not really necessary, reshade "destroy_resource" simply clears a com ptr
-               device->destroy_resource(mirrored_upgraded_resource);
-            }
-
-            replaced = true;
-         }
-         else if (needs_upgraded_resource)
-         {
-            ASSERT_ONCE_MSG(false, "Failed to create an indirect upgraded texture");
-         }
-
-         if (leave_locked)
-            lock_device_read.lock();
-      }
-
-      // Let the upgrades happen above, but ignore the override
-      if (ignore_indirect_upgraded_textures)
-      {
-         if (out_resource)
-         out_resource = in_resource;
-         return false;
-      }
-
-      return replaced;
+      return device_data.resource_upgrades.FindOrCreateIndirectUpgradedResource(
+         device, in_source_resource, in_resource, out_resource,
+         allow_create && !is_back_buffer, initial_state, lock_device_read, state,
+         should_scale, leave_locked);
    }
 
    bool FindOrCreateIndirectUpgradedResourceView(reshade::api::device* device, const uint64_t in_rv, uint64_t& out_rv, DeviceData& device_data, bool allow_create, reshade::api::resource_usage usage, std::shared_lock<std::shared_mutex>& lock_device_read)
    {
-      bool replaced = false;
-
-      // See if we already have a indirect resource view mapped to this resource view
-      auto original_resource_view_to_mirrored_upgraded_resource_view = device_data.original_resource_views_to_mirrored_upgraded_resource_views.find(in_rv);
-      if (original_resource_view_to_mirrored_upgraded_resource_view != device_data.original_resource_views_to_mirrored_upgraded_resource_views.end())
-      {
-         replaced = true;
-         out_rv = original_resource_view_to_mirrored_upgraded_resource_view->second;
-      }
-      // Otherwise, create it.
-      // For example, sometimes we upgrade resources after creation and we can't know all the views that were previously created for the original resource (well, we could cache them on creation based on the list of formats we ever upgrade, if ever...),
-      // so we need to create a mirrored upgraded view for every view it had.
-      // TODO: just cache all the views for any resource we might ever upgrade later (e.g. through "auto_texture_format_upgrade_shader_hashes"), as mentioned above, so we could skip many of these checks.
-      else if (allow_create && in_rv != 0 && !device_data.original_resources_to_mirrored_upgraded_resources.empty())
-      {
-         reshade::api::resource resource = device->get_resource_from_view({ in_rv }); // Note: this is likely fine to be done under a luma mutex... but it's a risk, as all device calls are
-         auto original_resource_to_mirrored_upgraded_resource = device_data.original_resources_to_mirrored_upgraded_resources.find(resource.handle);
-         if (original_resource_to_mirrored_upgraded_resource != device_data.original_resources_to_mirrored_upgraded_resources.end())
-         {
-            const auto original_resource_to_mirrored_upgraded_resource_ptr = original_resource_to_mirrored_upgraded_resource->second;
-
-            lock_device_read.unlock(); // Avoids deadlocks with the device
-
-            reshade::api::resource_view_desc resource_view_desc = device->get_resource_view_desc({ in_rv });
-            resource_view_desc.format = reshade::api::format::unknown; // Null the format so it's determined automatically. All the formats returned by "GetBestResourceUpgradeFormat()" are not typeless, so we can make views of (almost) all of them directly.
-
-            reshade::api::resource_view mirrored_upgraded_resource_view;
-            if (device->create_resource_view({original_resource_to_mirrored_upgraded_resource_ptr}, usage, resource_view_desc, &mirrored_upgraded_resource_view))
-            {
-               std::unique_lock lock_device_write(device_data.mutex);
-               if (!device_data.original_resource_views_to_mirrored_upgraded_resource_views.contains(in_rv))
-               {
-                  device_data.original_resource_views_to_mirrored_upgraded_resource_views[in_rv] = mirrored_upgraded_resource_view.handle;
-                  out_rv = mirrored_upgraded_resource_view.handle;
-               }
-               else // Destroy it if it was accidentally created at the same time by another thread
-               {
-                  out_rv = device_data.original_resource_views_to_mirrored_upgraded_resource_views[in_rv];
-                  lock_device_write.unlock(); // Not really necessary, reshade "destroy_resource" simply clears a com ptr
-                  device->destroy_resource_view(mirrored_upgraded_resource_view);
-               }
-               replaced = true;
-            }
-            else
-            {
-               ASSERT_ONCE_MSG(false, "Failed to create an indirect upgraded texture view (maybe some format mismatch)");
-            }
-
-            lock_device_read.lock();
-         }
-      }
-
-      // Let the upgrades happen above, but ignore the override
-      if (ignore_indirect_upgraded_textures)
-      {
-         if (out_rv)
-         out_rv = in_rv;
-         return false;
-      }
-
-      return replaced;
+      return device_data.resource_upgrades.FindOrCreateIndirectUpgradedResourceView(
+         device, in_rv, out_rv, allow_create, usage, lock_device_read);
    }
 
    void OnBindRenderTargetsAndDepthStencil(reshade::api::command_list* cmd_list, uint32_t count, const reshade::api::resource_view* rtvs, reshade::api::resource_view dsv)
@@ -4544,6 +5184,20 @@ namespace
       LumaData,
       LumaUIData
    };
+
+   // True when the hash-upgrade scale chain is active this frame: a scale-enabled seed exists and SR
+   // upscaled early. Everything scale-specific (the shader flag probe and scaled copies) is gated on this.
+   bool IsScaleChainActive(const DeviceData& device_data)
+   {
+      if (!device_data.has_drawn_sr)
+         return false;
+      for (const auto& entry : auto_texture_format_upgrade_shader_hashes)
+      {
+         if (entry.second.scale)
+            return true;
+      }
+      return false;
+   }
 
    void SetLumaConstantBuffers(ID3D11DeviceContext* native_device_context, CommandListData& cmd_list_data, DeviceData& device_data, reshade::api::shader_stage stages, LumaConstantBufferType type, uint32_t custom_data_1 = 0, uint32_t custom_data_2 = 0, float custom_data_3 = 0.f, float custom_data_4 = 0.f, bool do_safety_checks = true)
    {
@@ -4650,6 +5304,37 @@ namespace
          // Always do this relative to the current output resolution
          cb_luma_instance_data.PreviousRenderResolutionScale.x = device_data.previous_render_resolution.x / device_data.output_resolution.x;
          cb_luma_instance_data.PreviousRenderResolutionScale.y = device_data.previous_render_resolution.y / device_data.output_resolution.y;
+
+         // The shader applies the render scale only in the scaling zone: the hash-upgrade scale chain is
+         // active (SR upscaled early) AND this pass still renders below output resolution (same aspect).
+         // The RTV probe below only runs when a scale chain actually exists, to keep the common path cheap.
+         bool render_scale_active = IsScaleChainActive(device_data);
+         if (render_scale_active)
+         {
+            com_ptr<ID3D11RenderTargetView> rtv;
+            native_device_context->OMGetRenderTargets(1, &rtv, nullptr);
+            if (rtv)
+            {
+               com_ptr<ID3D11Resource> rtv_resource;
+               rtv->GetResource(&rtv_resource);
+               com_ptr<ID3D11Texture2D> rtv_texture;
+               if (SUCCEEDED(rtv_resource->QueryInterface(&rtv_texture)))
+               {
+                  D3D11_TEXTURE2D_DESC rtv_desc;
+                  rtv_texture->GetDesc(&rtv_desc);
+                  const float aspect = (float)rtv_desc.Width / (float)rtv_desc.Height;
+                  const float out_aspect = device_data.output_resolution.x / device_data.output_resolution.y;
+                  render_scale_active = (rtv_desc.Width < device_data.output_resolution.x || rtv_desc.Height < device_data.output_resolution.y)
+                     && std::abs(aspect / out_aspect - 1.0f) < 0.01f;
+               }
+               else
+                  render_scale_active = false;
+            }
+            else
+               render_scale_active = false;
+         }
+
+         cb_luma_instance_data.RenderScaleActive = render_scale_active ? 1u : 0u;
 
          game->UpdateLumaInstanceDataCB(cb_luma_instance_data, cmd_list_data, device_data);
 
@@ -4968,6 +5653,7 @@ namespace
       constexpr bool needs_debug_draw_texture = false;
 #endif
       // TODO: add "TEST_SDR_HDR_SPLIT_VIEW_MODE" and "TEST_2X_ZOOM" as drawing conditions etc
+
       if (!force_disable_display_composition && (needs_debug_draw_texture || needs_reencoding || needs_gamma_correction || ui_needs_scaling || ui_needs_composition || needs_gamut_mapping))
       {
          const std::shared_lock lock_shader_objects(s_mutex_shader_objects);
@@ -5393,7 +6079,48 @@ namespace
       device_data.has_drawn_sr_imgui = device_data.has_drawn_sr;
 #endif // ENABLE_SR
 
+      // Free mirrors queued this frame: all command lists have executed by now.
+      {
+         std::vector<reshade::api::resource_view> pending_views;
+         std::vector<reshade::api::resource> pending_resources;
+         {
+            std::unique_lock lock(device_data.mutex);
+            pending_views = std::move(device_data.resource_upgrades.pending_mirror_view_destructions);
+            pending_resources = std::move(device_data.resource_upgrades.pending_mirror_resource_destructions);
+         }
+         for (const reshade::api::resource_view view : pending_views)
+         {
+            queue->get_device()->destroy_resource_view(view);
+         }
+         for (const reshade::api::resource resource : pending_resources)
+         {
+            queue->get_device()->destroy_resource(resource);
+         }
+      }
+
       game->OnPresent(native_device, device_data);
+
+      // Invalidate indirect mirrors when the scale-relevant state changed this frame (render resolution or
+      // SR selection). Mirrors are queued and freed at the start of the NEXT present, before any seed/chain
+      // mirror is recreated at the new scale. The decision lives here in core.hpp (not the manager), since
+      // other things may also need cleanup based on this change.
+      {
+         const bool render_changed = device_data.render_resolution.x != device_data.last_render_resolution.x
+            || device_data.render_resolution.y != device_data.last_render_resolution.y;
+#if ENABLE_SR
+         const bool sr_changed = device_data.sr_type != device_data.last_sr_type;
+#else
+         const bool sr_changed = false;
+#endif
+         if (render_changed || sr_changed)
+         {
+            device_data.resource_upgrades.InvalidateAllIndirectUpgradedResources();
+            device_data.last_render_resolution = device_data.render_resolution;
+#if ENABLE_SR
+            device_data.last_sr_type = device_data.sr_type;
+#endif
+         }
+      }
 
 #if DEVELOPMENT
       {
@@ -5531,6 +6258,11 @@ namespace
       }
       thread_local_cmd_list = cmd_list;
 
+#if DEVELOPMENT
+      // Frame capture: entries for this draw start here (stamped post-decision below).
+      const size_t trace_start_index = cmd_list_data.trace_draw_calls_data.size();
+#endif
+
       {
          // Do this before any custom code runs as the state might change
          const std::shared_lock lock_trace(s_mutex_trace); // TODO: it's not safe to lock global mutexes that might have already been locked by other concurrent functions, while also calling functions in the device or primary device context (in DX11) (because they have their own locks inside that might cause deadlocks!). The solution here would be to cache the data upfront and then lock a mutex to add it to our array. This might be safe if the game threading was already safe though, I'm not 100% sure.
@@ -5543,14 +6275,14 @@ namespace
             ASSERT_ONCE(native_device_context);
             if (is_dispatch)
             {
-               AddTraceDrawCallData(cmd_list_data.trace_draw_calls_data, device_data, native_device_context, cmd_list_data.pipeline_state_original_compute_shader.handle, shader_cache, last_draw_dispatch_data, device_data.original_resource_views_to_mirrored_upgraded_resource_views);
+               AddTraceDrawCallData(cmd_list_data.trace_draw_calls_data, device_data, native_device_context, cmd_list_data.pipeline_state_original_compute_shader.handle, shader_cache, last_draw_dispatch_data, device_data.resource_upgrades.original_resource_views_to_mirrored_upgraded_resource_views);
             }
             else
             {
-               AddTraceDrawCallData(cmd_list_data.trace_draw_calls_data, device_data, native_device_context, cmd_list_data.pipeline_state_original_vertex_shader.handle, shader_cache, last_draw_dispatch_data, device_data.original_resource_views_to_mirrored_upgraded_resource_views);
+               AddTraceDrawCallData(cmd_list_data.trace_draw_calls_data, device_data, native_device_context, cmd_list_data.pipeline_state_original_vertex_shader.handle, shader_cache, last_draw_dispatch_data, device_data.resource_upgrades.original_resource_views_to_mirrored_upgraded_resource_views);
                if (cmd_list_data.pipeline_state_original_pixel_shader.handle != 0) // Somehow this can happen (e.g. query tests don't require pixel shaders)
                {
-                  AddTraceDrawCallData(cmd_list_data.trace_draw_calls_data, device_data, native_device_context, cmd_list_data.pipeline_state_original_pixel_shader.handle, shader_cache, last_draw_dispatch_data, device_data.original_resource_views_to_mirrored_upgraded_resource_views);
+                  AddTraceDrawCallData(cmd_list_data.trace_draw_calls_data, device_data, native_device_context, cmd_list_data.pipeline_state_original_pixel_shader.handle, shader_cache, last_draw_dispatch_data, device_data.resource_upgrades.original_resource_views_to_mirrored_upgraded_resource_views);
                }
             }
          }
@@ -5562,13 +6294,14 @@ namespace
       if (enable_ui_separation && mod_active)
       {
          ID3D11RenderTargetView* const ui_texture_rtv_const = device_data.ui_texture_rtv.get();
+         const bool is_known_ui_shader = original_shader_hashes.Contains(shader_hashes_UI);
          // We can either provide an include list, of all the UI shaders (we check if the render target matches below),
          // or an exclude list, of all the scene post processing shaders, and then manually setting "has_drawn_main_post_processing" somewhere in your game's code (and exclude any non UI shader that possibly runs after it).
          // If the main post processing shaders didn't run, it means the scene isn't rendering, or showing anyway, so we don't need to separate the UI,
          // as it'd likely already draw correctly on the swapchain or whatever is its render target.
          // 
          // We expect the UI to draw on the immediate context, as it does in most games, if not, handle the render targets yourself for the custom case.
-         if ((device_data.has_drawn_main_post_processing && native_device_context->GetType() == D3D11_DEVICE_CONTEXT_IMMEDIATE) || original_shader_hashes.Contains(shader_hashes_UI))
+         if (is_known_ui_shader || (!ui_separation_use_ui_hashes_only && device_data.has_drawn_main_post_processing && native_device_context->GetType() == D3D11_DEVICE_CONTEXT_IMMEDIATE))
          {
             com_ptr<ID3D11RenderTargetView> rtv;
             native_device_context->OMGetRenderTargets(1, &rtv, nullptr);
@@ -5587,7 +6320,7 @@ namespace
                   const std::shared_lock lock(device_data.mutex);
                   targeting_swapchain = device_data.back_buffers.contains((uint64_t)rtv.get());
                }
-               if (targeting_swapchain || (AreViewsOfSameResource(rtv.get(), device_data.ui_initial_original_rtv.get()) && rtv_desc.Texture2D.MipSlice == 0)) // Make sure it was writing to the base mip (just in case the game did weird stuff)
+               if ((ui_separation_use_ui_hashes_only && is_known_ui_shader) || targeting_swapchain || (AreViewsOfSameResource(rtv.get(), device_data.ui_initial_original_rtv.get()) && rtv_desc.Texture2D.MipSlice == 0)) // Make sure it was writing to the base mip (just in case the game did weird stuff)
                {
                   device_data.ui_latest_original_rtv = rtv;
 
@@ -5632,6 +6365,16 @@ namespace
                }
             }
          }
+         else if (ui_separation_use_ui_hashes_only)
+         {
+            com_ptr<ID3D11RenderTargetView> rtv;
+            native_device_context->OMGetRenderTargets(1, &rtv, nullptr);
+            if (rtv && rtv == ui_texture_rtv_const)
+            {
+               native_device_context->OMSetRenderTargets(1, &device_data.ui_latest_original_rtv, nullptr);
+               device_data.ui_latest_original_rtv = nullptr;
+            }
+         }
       }
 
       const bool had_drawn_main_post_processing = device_data.has_drawn_main_post_processing;
@@ -5662,11 +6405,15 @@ namespace
             // "force_indirect_texture_format_upgrades" takes priority over "auto_texture_format_upgrade_shader_hashes".
             const auto auto_texture_format_upgrade_shader_hashes_it = auto_texture_format_upgrade_shader_hashes.find(is_dispatch ? original_shader_hashes.compute_shaders[0] : original_shader_hashes.pixel_shaders[0]); // This data is meant to be immutable
             const bool hash_based_indirect_texture_format_upgrades = auto_texture_format_upgrade_shader_hashes_it != auto_texture_format_upgrade_shader_hashes.end();
+            // Scaling is gated by the seed's per-shader toggle; the chain inherits it via source size (best-effort).
+            // "force_scale" only bypasses the has_drawn_sr gate for command lists recorded before SR ran (deferred contexts).
+            const bool allow_scale = hash_based_indirect_texture_format_upgrades && auto_texture_format_upgrade_shader_hashes_it->second.scale;
+            const bool force_scale = cmd_list_data.force_scale;
             while (force_indirect_texture_format_upgrades || hash_based_indirect_texture_format_upgrades) // Do "while" so we can break out of it
             {
                // List of dummy RTV and UAV indexes to upgrade. We set all of them, as this is for the forced upgrades branch.
                // See "D3D11_SIMULTANEOUS_RENDER_TARGET_COUNT" and "D3D11_PS_CS_UAV_REGISTER_COUNT" (theoretically we should use "D3D11_1_UAV_SLOT_COUNT" but in reality that's never going to matter).
-               const std::pair<std::vector<uint8_t>, std::vector<uint8_t>> dummy_texture_format_upgrade_shader_hashes_data = {{0,1,2,3,4,5,6,7}, {0,1,2,3,4,5,6,7}};
+               const AutoTextureFormatUpgradeShaderHash dummy_texture_format_upgrade_shader_hashes_data = { {0,1,2,3,4,5,6,7}, {0,1,2,3,4,5,6,7}, false };
 
                uint64_t source_resource = 0;
                if (force_indirect_texture_format_upgrades && !hash_based_indirect_texture_format_upgrades && (is_dispatch ? cmd_list_data.any_upgraded_cs_srvs : cmd_list_data.any_upgraded_ps_srvs))
@@ -5734,27 +6481,70 @@ namespace
                }
 
                // TODO: for the "force_indirect_texture_format_upgrades" case, ideally we'd make sure the texture is actually ever read by the shader! Otherwise we could risk upgrading based on leftover (non cleared) bindings.
-               const std::pair<std::vector<uint8_t>, std::vector<uint8_t>>& auto_texture_format_upgrade_shader_hashes_data = force_indirect_texture_format_upgrades ? dummy_texture_format_upgrade_shader_hashes_data : auto_texture_format_upgrade_shader_hashes_it->second;
+               const AutoTextureFormatUpgradeShaderHash& auto_texture_format_upgrade_shader_hashes_data = force_indirect_texture_format_upgrades ? dummy_texture_format_upgrade_shader_hashes_data : auto_texture_format_upgrade_shader_hashes_it->second;
 
                bool any_changed = false;
                std::shared_lock lock_device_read(device_data.mutex);
                if (!is_dispatch)
                {
-                  for (UINT i = 0; i < auto_texture_format_upgrade_shader_hashes_data.first.size() && i < D3D11_SIMULTANEOUS_RENDER_TARGET_COUNT; i++)
+                  for (UINT i = 0; i < auto_texture_format_upgrade_shader_hashes_data.rtv_slots.size() && i < D3D11_SIMULTANEOUS_RENDER_TARGET_COUNT; i++)
                   {
-                     if (rtvs[auto_texture_format_upgrade_shader_hashes_data.first[i]] != nullptr)
+                     if (rtvs[auto_texture_format_upgrade_shader_hashes_data.rtv_slots[i]] != nullptr)
                      {
-                        const uint64_t prev_resource_view = reinterpret_cast<uint64_t>(rtvs[auto_texture_format_upgrade_shader_hashes_data.first[i]].get());
-                        const uint64_t prev_resource = device->get_resource_from_view({ prev_resource_view }).handle; // TODO: these can cause deadlocks in the device code due to "lock_device_read", cache the view/resource ptrs or something
+                        const uint64_t prev_resource_view = reinterpret_cast<uint64_t>(rtvs[auto_texture_format_upgrade_shader_hashes_data.rtv_slots[i]].get());
+                        // Already redirected to a mirror? Nothing to upgrade, keep the bound mirror.
+                        if (device_data.resource_upgrades.mirror_views_to_mirror_resources.contains(prev_resource_view))
+                        {
+                           any_changed = true;
+                           continue;
+                        }
+                        uint64_t prev_resource = GetCachedResourceFromView(device_data, prev_resource_view); // No device call under the lock
+                        if (prev_resource == 0) // Unknown view (e.g. created before the addon loaded): query the device outside the lock
+                        {
+                           lock_device_read.unlock(); // Avoids deadlocks with the device
+                           prev_resource = device->get_resource_from_view({ prev_resource_view }).handle;
+                           lock_device_read.lock();
+                        }
                         uint64_t resource = prev_resource;
                         // TODO: add aspect ratio tolerance for the "force_indirect_texture_format_upgrades" case? Also check if the format and channels number make sense to be upgraded from that source
-                        if (FindOrCreateIndirectUpgradedResource(device, source_resource, prev_resource, resource, device_data, true, reshade::api::resource_usage::render_target, lock_device_read) && resource != prev_resource)
+#if DEVELOPMENT
+                        const bool seed_draw_before = hash_based_indirect_texture_format_upgrades && allow_scale;
+                        const uint64_t seed_res_before = prev_resource;
+#endif
+                        if (FindOrCreateIndirectUpgradedResource(device, source_resource, prev_resource, resource, device_data, true, reshade::api::resource_usage::render_target, lock_device_read, allow_scale, force_scale) && resource != prev_resource)
                         {
                            uint64_t resource_view = prev_resource_view;
                            if (FindOrCreateIndirectUpgradedResourceView(device, prev_resource_view, resource_view, device_data, true, reshade::api::resource_usage::render_target, lock_device_read))
                            {
-                              rtvs[auto_texture_format_upgrade_shader_hashes_data.first[i]] = reinterpret_cast<ID3D11RenderTargetView*>(resource_view);
+                              rtvs[auto_texture_format_upgrade_shader_hashes_data.rtv_slots[i]] = reinterpret_cast<ID3D11RenderTargetView*>(resource_view);
                               any_changed = true;
+#if DEVELOPMENT
+                              if (trace_running)
+                              {
+                                 // Diagnostic: log when a hash-based (seed) RTV is redirected to a mirror, and at what size.
+                                 if (seed_draw_before)
+                                 {
+                                    D3D11_TEXTURE2D_DESC orig_desc{}, mirror_desc{};
+                                    if (auto it = device_data.resource_upgrades.original_resources_to_mirrored_upgraded_resources.find(seed_res_before); it != device_data.resource_upgrades.original_resources_to_mirrored_upgraded_resources.end())
+                                    {
+                                       if (auto m = reinterpret_cast<ID3D11Resource*>(it->second.mirror_handle); m)
+                                       {
+                                          com_ptr<ID3D11Texture2D> mt; if (SUCCEEDED(m->QueryInterface(&mt))) mt->GetDesc(&mirror_desc);
+                                       }
+                                    }
+                                    if (auto o = reinterpret_cast<ID3D11Resource*>(seed_res_before); o)
+                                    {
+                                       com_ptr<ID3D11Texture2D> ot; if (SUCCEEDED(o->QueryInterface(&ot))) ot->GetDesc(&orig_desc);
+                                    }
+                                    char buf[256];
+                                    std::snprintf(buf, sizeof(buf), "[LumaScale] SEED RTV redirected hash=%08X orig=%ux%u mirror=%ux%u has_drawn_sr=%d allow_scale=%d",
+                                       (uint32_t)original_shader_hashes.pixel_shaders[0],
+                                       orig_desc.Width, orig_desc.Height, mirror_desc.Width, mirror_desc.Height,
+                                       device_data.has_drawn_sr ? 1 : 0, allow_scale ? 1 : 0);
+                                    reshade::log::message(reshade::log::level::info, buf);
+                                 }
+                              }
+#endif
                               // Note: we don't need to upgrade "cmd_list_data.ps_srvs_state" here, because if a resource is bound as RTV, it can't be bound as SRV (at least in DX10/11).
                               // However, it could still be bound as SRV on the compute stage (can it? actually probably not in DX10/11),
                               // so theoretically we should upgrade "cmd_list_data.cs_srvs_state", but the chances of that are pretty low, for now we ignore it.
@@ -5763,28 +6553,40 @@ namespace
                      }
                   }
                }
-               for (UINT i = 0; i < auto_texture_format_upgrade_shader_hashes_data.second.size() && i < device_data.uav_max_count; i++)
+               for (UINT i = 0; i < auto_texture_format_upgrade_shader_hashes_data.uav_slots.size() && i < device_data.uav_max_count; i++)
                {
-                  if (uavs[auto_texture_format_upgrade_shader_hashes_data.second[i]] != nullptr)
+                  if (uavs[auto_texture_format_upgrade_shader_hashes_data.uav_slots[i]] != nullptr)
                   {
-                     const uint64_t prev_resource_view = reinterpret_cast<uint64_t>(uavs[auto_texture_format_upgrade_shader_hashes_data.second[i]].get());
-                     const uint64_t prev_resource = device->get_resource_from_view({prev_resource_view}).handle;
+                     const uint64_t prev_resource_view = reinterpret_cast<uint64_t>(uavs[auto_texture_format_upgrade_shader_hashes_data.uav_slots[i]].get());
+                     // Already redirected to a mirror? Nothing to upgrade, keep the bound mirror.
+                     if (device_data.resource_upgrades.mirror_views_to_mirror_resources.contains(prev_resource_view))
+                     {
+                        any_changed = true;
+                        continue;
+                     }
+                     uint64_t prev_resource = GetCachedResourceFromView(device_data, prev_resource_view); // No device call under the lock
+                     if (prev_resource == 0) // Unknown view (e.g. created before the addon loaded): query the device outside the lock
+                     {
+                        lock_device_read.unlock(); // Avoids deadlocks with the device
+                        prev_resource = device->get_resource_from_view({ prev_resource_view }).handle;
+                        lock_device_read.lock();
+                     }
                      uint64_t resource = prev_resource;
-                     if (FindOrCreateIndirectUpgradedResource(device, source_resource, prev_resource, resource, device_data, true, reshade::api::resource_usage::unordered_access, lock_device_read) && resource != prev_resource)
+                     if (FindOrCreateIndirectUpgradedResource(device, source_resource, prev_resource, resource, device_data, true, reshade::api::resource_usage::unordered_access, lock_device_read, allow_scale, force_scale) && resource != prev_resource)
                      {
                         uint64_t resource_view = prev_resource_view;
                         if (FindOrCreateIndirectUpgradedResourceView(device, prev_resource_view, resource_view, device_data, true, reshade::api::resource_usage::unordered_access, lock_device_read))
                         {
-                           uavs[auto_texture_format_upgrade_shader_hashes_data.second[i]] = reinterpret_cast<ID3D11UnorderedAccessView*>(resource_view);
+                           uavs[auto_texture_format_upgrade_shader_hashes_data.uav_slots[i]] = reinterpret_cast<ID3D11UnorderedAccessView*>(resource_view);
                            any_changed = true;
                            if (is_dispatch)
                            {
-                              cmd_list_data.cs_uavs_state[auto_texture_format_upgrade_shader_hashes_data.second[i]] = CommandListData::ViewState::SetAndUpgraded;
+                              cmd_list_data.cs_uavs_state[auto_texture_format_upgrade_shader_hashes_data.uav_slots[i]] = CommandListData::ViewState::SetAndUpgraded;
                               cmd_list_data.any_upgraded_cs_uavs = true;
                            }
                            else
                            {
-                              cmd_list_data.ps_uavs_state[auto_texture_format_upgrade_shader_hashes_data.second[i]] = CommandListData::ViewState::SetAndUpgraded;
+                              cmd_list_data.ps_uavs_state[auto_texture_format_upgrade_shader_hashes_data.uav_slots[i]] = CommandListData::ViewState::SetAndUpgraded;
                               cmd_list_data.any_upgraded_ps_uavs = true;
                            }
                         }
@@ -5837,6 +6639,50 @@ namespace
 
                      ID3D11RenderTargetView* const* rtvs_const = (ID3D11RenderTargetView**)std::addressof(rtvs[0]);
                      native_device_context->OMSetRenderTargetsAndUnorderedAccessViews(valid_render_target_views_bound, rtvs_const, dsv.get(), valid_render_target_views_bound, device_data.uav_max_count - valid_render_target_views_bound, uavs_const + valid_render_target_views_bound, nullptr);
+
+                     // When the replaced RTV is a scaled mirror (output resolution), scale the viewport
+                     // and scissors to match so the pass renders into the full (larger) target.
+                     {
+                        bool any_scaled = false;
+                        for (UINT i = 0; i < valid_render_target_views_bound && !any_scaled; i++)
+                        {
+                           if (rtvs[i] != nullptr)
+                           {
+                              const std::shared_lock lock_device_read(device_data.mutex);
+                              if (auto mirror_it = device_data.resource_upgrades.original_resources_to_mirrored_upgraded_resources.find(GetCachedResourceFromView(device_data, reinterpret_cast<uint64_t>(rtvs[i].get()))); mirror_it != device_data.resource_upgrades.original_resources_to_mirrored_upgraded_resources.end())
+                                 any_scaled = mirror_it->second.is_scaled; // Only scaled mirrors (created at output resolution), not plain format-upgrade mirrors
+                           }
+                        }
+                        if (any_scaled)
+                        {
+                           const float scale_x = device_data.output_resolution.x / device_data.render_resolution.x;
+                           const float scale_y = device_data.output_resolution.y / device_data.render_resolution.y;
+
+                           D3D11_VIEWPORT viewports[D3D11_VIEWPORT_AND_SCISSORRECT_OBJECT_COUNT_PER_PIPELINE];
+                           UINT num_viewports = D3D11_VIEWPORT_AND_SCISSORRECT_OBJECT_COUNT_PER_PIPELINE;
+                           native_device_context->RSGetViewports(&num_viewports, viewports);
+                           for (UINT i = 0; i < num_viewports; i++)
+                           {
+                              viewports[i].TopLeftX *= scale_x;
+                              viewports[i].TopLeftY *= scale_y;
+                              viewports[i].Width    *= scale_x;
+                              viewports[i].Height   *= scale_y;
+                           }
+                           native_device_context->RSSetViewports(num_viewports, viewports);
+
+                           D3D11_RECT scissors[D3D11_VIEWPORT_AND_SCISSORRECT_OBJECT_COUNT_PER_PIPELINE];
+                           UINT num_scissors = D3D11_VIEWPORT_AND_SCISSORRECT_OBJECT_COUNT_PER_PIPELINE;
+                           native_device_context->RSGetScissorRects(&num_scissors, scissors);
+                           for (UINT i = 0; i < num_scissors; i++)
+                           {
+                              scissors[i].left   = (LONG)(scissors[i].left   * scale_x);
+                              scissors[i].top    = (LONG)(scissors[i].top    * scale_y);
+                              scissors[i].right  = (LONG)(scissors[i].right  * scale_x);
+                              scissors[i].bottom = (LONG)(scissors[i].bottom * scale_y);
+                           }
+                           native_device_context->RSSetScissorRects(num_scissors, scissors);
+                        }
+                     }
                   }
                   else
                   {
@@ -5888,6 +6734,46 @@ namespace
 
          if (test_index == 9) return false;
          draw_or_dispatch_override_type = game->OnDrawOrDispatch(native_device, native_device_context, cmd_list_data, device_data, stages, original_shader_hashes, is_custom_pass, updated_cbuffers, original_draw_dispatch_func);
+
+#if DEVELOPMENT
+         // Frame capture: stamp this draw's entries with the final clone variant
+         // (the game's calls ran in the callback above), even when the draw was
+         // cancelled/replaced.
+         {
+            const std::shared_lock lock_trace(s_mutex_trace);
+            if (trace_running)
+            {
+               const std::unique_lock lock_trace_2(cmd_list_data.mutex_trace);
+               for (size_t i = trace_start_index; i < cmd_list_data.trace_draw_calls_data.size(); ++i)
+               {
+                  auto& entry = cmd_list_data.trace_draw_calls_data[i];
+                  if (entry.type != TraceDrawCallData::TraceDrawCallType::Shader) continue;
+                  // Determine patch_enabled from shader hash, clone_variant from bound handle.
+                  uint32_t shader_hash = 0;
+                  if (entry.pipeline_handle == cmd_list_data.pipeline_state_original_vertex_shader.handle)
+                  {
+                     entry.clone_variant = Shader::ShaderVariant::Original;
+                     if (!cmd_list_data.pipeline_state_original_graphics_shader_hashes.vertex_shaders.empty())
+                        shader_hash = *cmd_list_data.pipeline_state_original_graphics_shader_hashes.vertex_shaders.begin();
+                  }
+                  else if (entry.pipeline_handle == cmd_list_data.pipeline_state_original_pixel_shader.handle)
+                  {
+                     entry.clone_variant = Shader::ShaderVariant::Original;
+                     if (!cmd_list_data.pipeline_state_original_graphics_shader_hashes.pixel_shaders.empty())
+                        shader_hash = *cmd_list_data.pipeline_state_original_graphics_shader_hashes.pixel_shaders.begin();
+                  }
+                  else if (entry.pipeline_handle == cmd_list_data.pipeline_state_original_compute_shader.handle)
+                  {
+                     entry.clone_variant = Shader::ShaderVariant::Original;
+                     if (!cmd_list_data.pipeline_state_original_compute_shader_hashes.compute_shaders.empty())
+                        shader_hash = *cmd_list_data.pipeline_state_original_compute_shader_hashes.compute_shaders.begin();
+                  }
+                  entry.patch_enabled = !shader_hash ? false : cmd_list_data.patch_clone_handles.contains(shader_hash);
+               }
+            }
+         }
+#endif
+
          if (draw_or_dispatch_override_type != DrawOrDispatchOverrideType::None)
          {
             // The pass was cancelled, there's no point in doing anything more
@@ -5900,7 +6786,9 @@ namespace
       {
          // TODO: only set these if the shader data reflections told us these cbuffers are actually read, otherwise in multithreaded games, we could end up re-setting the luma data a lot of times each time another thread is first run
          SetLumaConstantBuffers(native_device_context, cmd_list_data, device_data, stages, LumaConstantBufferType::LumaSettings);
+#if !GAME_METAPHOR_REFANTAZIO
          SetLumaConstantBuffers(native_device_context, cmd_list_data, device_data, stages, LumaConstantBufferType::LumaData);
+#endif
          updated_cbuffers = true;
       }
 
@@ -7136,176 +8024,16 @@ namespace
    // TODO: cache the last "almost" upgraded texture resolution to make sure that when the swapchain changes res, we didn't fail to upgrade resources before (needed even with indirect upgrades)
    std::optional<reshade::api::format> ShouldUpgradeResource(const reshade::api::resource_desc& desc, const DeviceData& device_data, bool has_initial_data = false)
    {
-      if (texture_format_upgrades_type < TextureFormatUpgradesType::AllowedEnabled)
-      {
-         return std::nullopt;
-      }
-
-      const bool is_rt_or_ua = (desc.usage & (reshade::api::resource_usage::render_target | reshade::api::resource_usage::unordered_access)) != 0;
-      // Convoluted check to test if the resource is "D3D11_USAGE_DEFAULT" (the only usage type that can be both used as SRV, and be the target of a CopyResource(), otherwise we'd never need to upgrade them).
-      // We also check the initial data for extra safety, in case this was a "static" content texture that accidentally wasn't created as immutable.
-      // This is needed by "Thumper", and possibly "Watch Dogs 2".
-      const bool is_writable_sr = (desc.usage & reshade::api::resource_usage::shader_resource) != 0 && desc.heap == reshade::api::memory_heap::gpu_only && !has_initial_data && (desc.flags & reshade::api::resource_flags::immutable) == 0;
-
-      const bool is_depth = (desc.usage & reshade::api::resource_usage::depth_stencil) != 0;
-
-      if ((!(is_rt_or_ua || ((enable_chain_indirect_texture_format_upgrades >= ChainTextureFormatUpgradesType::DirectDependencies) ? is_writable_sr : false))
-               || !texture_upgrade_formats.contains(desc.texture.format))
-            && (!is_depth || !texture_depth_upgrade_formats.contains(desc.texture.format)))
-      {
-         return std::nullopt;
-      }
-
-      // At least in DX11, any resource that isn't exclusively accessible by the GPU, can't be set as output (render target/unordered access).
-		// These probably wouldn't have the RT/UA usage flags set anyway, or they'd fail on creation if they did.
-      if (desc.heap != reshade::api::memory_heap::gpu_only)
-      {
-         ASSERT_ONCE(desc.heap != reshade::api::memory_heap::unknown && desc.heap != reshade::api::memory_heap::custom); // Unexpected heap types
-         return std::nullopt;
-      }
-
-      const bool is_cube = (desc.flags & reshade::api::resource_flags::cube_compatible) != 0 && (desc.texture.depth_or_layers % 6) == 0 && desc.texture.depth_or_layers != 0;
-
-      // Note: we can't fully exclude texture 2D arrays here, because they might still have 1 layer
-      bool type_and_size_filter = desc.type == reshade::api::resource_type::texture_2d && (desc.texture.depth_or_layers == 1 || is_cube);
-
-      if (texture_format_upgrades_2d_size_filters != (uint32_t)TextureFormatUpgrades2DSizeFilters::All)
-      {
-         bool size_filter = false;
-
-         if ((texture_format_upgrades_2d_size_filters & (uint32_t)TextureFormatUpgrades2DSizeFilters::SwapchainResolution) != 0)
-         {
-            size_filter |= desc.texture.width == device_data.output_resolution.x && desc.texture.height == device_data.output_resolution.y;
-         }
-         if ((texture_format_upgrades_2d_size_filters & (uint32_t)TextureFormatUpgrades2DSizeFilters::SwapchainResolutionWidth) != 0)
-         {
-            size_filter |= desc.texture.width == device_data.output_resolution.x;
-         }
-         if ((texture_format_upgrades_2d_size_filters & (uint32_t)TextureFormatUpgrades2DSizeFilters::SwapchainResolutionHeight) != 0)
-         {
-            size_filter |= desc.texture.height == device_data.output_resolution.y;
-         }
-         if ((texture_format_upgrades_2d_size_filters & (uint32_t)TextureFormatUpgrades2DSizeFilters::RenderResolution) != 0)
-         {
-            size_filter |= desc.texture.width == device_data.render_resolution.x && desc.texture.height == device_data.render_resolution.y;
-         }
-         // Flipped condition, given we already allowed them above in "type_and_size_filter"
-         if ((texture_format_upgrades_2d_size_filters & (uint32_t)TextureFormatUpgrades2DSizeFilters::Cubes) == 0)
-         {
-            size_filter &= !is_cube;
-         }
-         // No limits on the size, we can assume it was square
-         else
-         {
-            size_filter |= is_cube;
-         }
-
-         // Always scale from the smallest dimension, as that gives up more threshold, depending on how the devs scaled down textures (they can use multiple rounding models)
-         float min_aspect_ratio = desc.texture.width <= desc.texture.height ? ((float)(desc.texture.width - texture_format_upgrades_2d_aspect_ratio_pixel_threshold) / (float)desc.texture.height) : ((float)desc.texture.width / (float)(desc.texture.height + texture_format_upgrades_2d_aspect_ratio_pixel_threshold));
-         float max_aspect_ratio = desc.texture.width <= desc.texture.height ? ((float)(desc.texture.width + texture_format_upgrades_2d_aspect_ratio_pixel_threshold) / (float)desc.texture.height) : ((float)desc.texture.width / (float)(desc.texture.height - texture_format_upgrades_2d_aspect_ratio_pixel_threshold));
-         bool generating_manual_mips = false;
-#if DEVELOPMENT
-         if ((texture_format_upgrades_2d_size_filters & (uint32_t)TextureFormatUpgrades2DSizeFilters::SwapchainAspectRatio) != 0
-            || (texture_format_upgrades_2d_size_filters & (uint32_t)TextureFormatUpgrades2DSizeFilters::RenderAspectRatio) != 0
-            || (texture_format_upgrades_2d_size_filters & (uint32_t)TextureFormatUpgrades2DSizeFilters::CustomAspectRatio) != 0)
-         {
-            static thread_local UINT last_texture_width = desc.texture.width;
-            static thread_local UINT last_texture_height = desc.texture.height;
-            // If this was a chain of downscaling, don't send a warning! This is just a heuristics based check... The creation order might have been random, or inverted (from smaller to bigger mips).
-            // Note that this isn't thread safe but whatever
-            if (max(desc.texture.width, desc.texture.height) == 1)
-            {
-               generating_manual_mips = (last_texture_width / 2) == desc.texture.width && (last_texture_height / 2) == desc.texture.height;
-            }
-            last_texture_width = desc.texture.width;
-            last_texture_height = desc.texture.height;
-         }
-#endif
-         if ((texture_format_upgrades_2d_size_filters & (uint32_t)TextureFormatUpgrades2DSizeFilters::SwapchainAspectRatio) != 0)
-         {
-            float target_aspect_ratio = (float)device_data.output_resolution.x / (float)device_data.output_resolution.y;
-            bool aspect_ratio_filter = target_aspect_ratio >= (min_aspect_ratio - FLT_EPSILON) && target_aspect_ratio <= (max_aspect_ratio + FLT_EPSILON);
-            size_filter |= aspect_ratio_filter;
-#if DEVELOPMENT
-            ASSERT_ONCE_MSG(!aspect_ratio_filter || max(desc.texture.width, desc.texture.height) > 1 || generating_manual_mips || ((texture_format_upgrades_2d_size_filters & (uint32_t)TextureFormatUpgrades2DSizeFilters::No1Px) != 0), "Upgrading 1x1 resource by aspect ratio, this is possibly unwanted"); // TODO: add a min size for upgrades? Like >1 or >32 on the smallest axis? Or ... scan if the allocations shrink in size over time
-#endif
-         }
-         if ((texture_format_upgrades_2d_size_filters & (uint32_t)TextureFormatUpgrades2DSizeFilters::RenderAspectRatio) != 0)
-         {
-            float target_aspect_ratio = (float)device_data.render_resolution.x / (float)device_data.render_resolution.y;
-            bool aspect_ratio_filter = target_aspect_ratio >= (min_aspect_ratio - FLT_EPSILON) && target_aspect_ratio <= (max_aspect_ratio + FLT_EPSILON);
-            size_filter |= aspect_ratio_filter;
-#if DEVELOPMENT
-            ASSERT_ONCE_MSG(!aspect_ratio_filter || max(desc.texture.width, desc.texture.height) > 1 || generating_manual_mips || ((texture_format_upgrades_2d_size_filters & (uint32_t)TextureFormatUpgrades2DSizeFilters::No1Px) != 0), "Upgrading 1x1 resource by aspect ratio, this is possibly unwanted");
-#endif
-         }
-         if ((texture_format_upgrades_2d_size_filters & (uint32_t)TextureFormatUpgrades2DSizeFilters::CustomAspectRatio) != 0)
-         {
-            const std::shared_lock lock_texture_upgrades(s_mutex_texture_upgrades);
-            for (auto texture_format_upgrades_2d_custom_aspect_ratio : texture_format_upgrades_2d_custom_aspect_ratios)
-            {
-               float target_aspect_ratio = texture_format_upgrades_2d_custom_aspect_ratio;
-               bool aspect_ratio_filter = target_aspect_ratio >= (min_aspect_ratio - FLT_EPSILON) && target_aspect_ratio <= (max_aspect_ratio + FLT_EPSILON);
-               size_filter |= aspect_ratio_filter;
-#if DEVELOPMENT
-               ASSERT_ONCE_MSG(!aspect_ratio_filter || max(desc.texture.width, desc.texture.height) > 1 || generating_manual_mips || ((texture_format_upgrades_2d_size_filters & (uint32_t)TextureFormatUpgrades2DSizeFilters::No1Px) != 0), "Upgrading 1x1 resource by aspect ratio, this is possibly unwanted");
+      ResourceUpgradeFrameState state;
+      state.render_resolution = device_data.render_resolution;
+      state.output_resolution = device_data.output_resolution;
+      state.has_drawn_sr = device_data.has_drawn_sr;
+#if ENABLE_SR
+      state.sr_active = device_data.sr_type != SR::Type::None && !device_data.sr_suppressed;
 #else
-               if (size_filter) break;
+      state.sr_active = false;
 #endif
-            }
-         }
-
-         if ((texture_format_upgrades_2d_size_filters & (uint32_t)TextureFormatUpgrades2DSizeFilters::No1Px) != 0)
-         {
-            size_filter &= desc.texture.width != 1 || desc.texture.height != 1;
-         }
-
-         if ((texture_format_upgrades_2d_size_filters & (uint32_t)TextureFormatUpgrades2DSizeFilters::Mips) != 0)
-         {
-            float2 max_resolution = device_data.output_resolution.y >= device_data.render_resolution.y ? device_data.output_resolution : device_data.render_resolution;
-            size_filter |= IsMipOf(max_resolution.x, max_resolution.y, desc.texture.width, desc.texture.height);
-         }
-
-         type_and_size_filter &= size_filter;
-      }
-
-      if (is_depth)
-      {
-         if (type_and_size_filter)
-         {
-            return GetBestResourceUpgradeFormat(desc);
-         }
-         return std::nullopt;
-      }
-
-      switch (texture_format_upgrades_lut_dimensions)
-      {
-      case LUTDimensions::_1D:
-      {
-         // For 1D, "texture_format_upgrades_lut_size" is the whole width (usually they extend in width)
-         type_and_size_filter |= desc.type == reshade::api::resource_type::texture_1d && desc.texture.width == texture_format_upgrades_lut_size && desc.texture.height == 1 && desc.texture.depth_or_layers == 1 && desc.texture.levels == 1;
-         break;
-      }
-      default:
-      case LUTDimensions::_2D:
-      {
-         // For 2D, "texture_format_upgrades_lut_size" is the height, usually they extend in width and that's squared
-         type_and_size_filter |= desc.type == reshade::api::resource_type::texture_2d && desc.texture.width == (texture_format_upgrades_lut_size * texture_format_upgrades_lut_size) && desc.texture.height == texture_format_upgrades_lut_size && desc.texture.depth_or_layers == 1 && desc.texture.levels == 1;
-         break;
-      }
-      case LUTDimensions::_3D:
-      {
-         // For 3D, all the dimensions usually match
-         type_and_size_filter |= desc.type == reshade::api::resource_type::texture_3d && desc.texture.width == texture_format_upgrades_lut_size && desc.texture.height == texture_format_upgrades_lut_size && desc.texture.depth_or_layers == texture_format_upgrades_lut_size && desc.texture.levels == 1;
-         break;
-      }
-      }
-
-      if (type_and_size_filter)
-      {
-         return GetBestResourceUpgradeFormat(desc);
-      }
-      return std::nullopt;
+      return device_data.resource_upgrades.ShouldUpgradeResource(desc, state, has_initial_data);
    }
 
    // Returns true if it changed the data.
@@ -7374,6 +8102,7 @@ namespace
 
       DeviceData& device_data = *device->get_private_data<DeviceData>();
       std::unique_lock lock(device_data.mutex);
+
       if (waiting_on_upgraded_resource_init)
       {
          // If this happened, some resource creation failed an "OnInitResource()" was never called after "OnCreateResource()".
@@ -7419,16 +8148,16 @@ namespace
             if (device->create_resource(upgraded_desc, new_initial_data_ptr, initial_state, &mirrored_upgraded_resource))
             {
                lock.lock();
-               device_data.original_resources_to_mirrored_upgraded_resources.emplace(resource.handle, mirrored_upgraded_resource.handle);
+               device_data.resource_upgrades.original_resources_to_mirrored_upgraded_resources.emplace(resource.handle, ResourceUpgradeManager::IndirectUpgradedResource{ mirrored_upgraded_resource.handle, false, desc.texture.width, desc.texture.height, upgraded_desc.texture.width, upgraded_desc.texture.height });
             }
             if (new_initial_data_ptr)
                delete[] static_cast<uint8_t*>(new_initial_data_ptr->data);
          }
          else
          {
-            device_data.upgraded_resources.emplace(resource.handle);
+            device_data.resource_upgrades.upgraded_resources.emplace(resource.handle);
 #if DEVELOPMENT
-            device_data.original_upgraded_resources_formats[resource.handle] = last_attempted_upgraded_resource_creation_format;
+            device_data.resource_upgrades.original_upgraded_resources_formats[resource.handle] = last_attempted_upgraded_resource_creation_format;
 #endif
          }
          waiting_on_upgraded_resource_init = false;
@@ -7546,18 +8275,43 @@ namespace
       if (&device_data == nullptr)
          return;
       std::unique_lock lock(device_data.mutex);
-      auto original_resource_to_mirrored_upgraded_resource = device_data.original_resources_to_mirrored_upgraded_resources.find(resource.handle);
-      if (original_resource_to_mirrored_upgraded_resource != device_data.original_resources_to_mirrored_upgraded_resources.end())
+      auto original_resource_to_mirrored_upgraded_resource = device_data.resource_upgrades.original_resources_to_mirrored_upgraded_resources.find(resource.handle);
+      if (original_resource_to_mirrored_upgraded_resource != device_data.resource_upgrades.original_resources_to_mirrored_upgraded_resources.end())
       {
-         const auto original_resource_to_mirrored_upgraded_resource_ptr = original_resource_to_mirrored_upgraded_resource->second;
-         device_data.original_resources_to_mirrored_upgraded_resources.erase(original_resource_to_mirrored_upgraded_resource);
-         lock.unlock(); // Avoids deadlocks with the device
-         device->destroy_resource({ original_resource_to_mirrored_upgraded_resource_ptr });
-         lock.lock();
+         const auto original_resource_to_mirrored_upgraded_resource_ptr = original_resource_to_mirrored_upgraded_resource->second.mirror_handle;
+         device_data.resource_upgrades.original_resources_to_mirrored_upgraded_resources.erase(original_resource_to_mirrored_upgraded_resource);
+
+         // Invalidate stale view mappings for this mirror while the lock is held.
+         std::vector<uint64_t> unlinked_mirror_views;
+         if (auto mirror_views_it = device_data.resource_upgrades.mirror_views_by_mirror_resource.find(original_resource_to_mirrored_upgraded_resource_ptr); mirror_views_it != device_data.resource_upgrades.mirror_views_by_mirror_resource.end())
+         {
+            const auto& mirror_views = mirror_views_it->second;
+            for (auto view_map_it = device_data.resource_upgrades.original_resource_views_to_mirrored_upgraded_resource_views.begin(); view_map_it != device_data.resource_upgrades.original_resource_views_to_mirrored_upgraded_resource_views.end();)
+            {
+               if (mirror_views.contains(view_map_it->second))
+               {
+                  unlinked_mirror_views.push_back(view_map_it->second);
+                  device_data.resource_upgrades.mirror_views_to_mirror_resources.erase(view_map_it->second);
+                  view_map_it = device_data.resource_upgrades.original_resource_views_to_mirrored_upgraded_resource_views.erase(view_map_it);
+               }
+               else
+               {
+                  ++view_map_it;
+               }
+            }
+            device_data.resource_upgrades.mirror_views_by_mirror_resource.erase(mirror_views_it);
+         }
+
+         // Defer freeing to present: the mirror may still be in flight in hooks or bound on recorded lists.
+         for (const uint64_t unlinked_mirror_view : unlinked_mirror_views)
+         {
+            device_data.resource_upgrades.pending_mirror_view_destructions.push_back({ unlinked_mirror_view });
+         }
+         device_data.resource_upgrades.pending_mirror_resource_destructions.push_back({ original_resource_to_mirrored_upgraded_resource_ptr });
       }
-      device_data.upgraded_resources.erase(resource.handle);
+      device_data.resource_upgrades.upgraded_resources.erase(resource.handle);
 #if DEVELOPMENT
-      device_data.original_upgraded_resources_formats.erase(resource.handle);
+      device_data.resource_upgrades.original_upgraded_resources_formats.erase(resource.handle);
 #endif // DEVELOPMENT
 
       // TODO: thread safe
@@ -7604,7 +8358,7 @@ namespace
          && redirect_empty_resource_views_to_swapchain
          // Don't check for multisample textures, they can't be used on the swapchain and they likely weren't used by any games
          && (desc.type == reshade::api::resource_view_type::unknown || desc.type == reshade::api::resource_view_type::texture_2d)
-         && desc.texture.level_count == 1
+         && desc.texture.levels == 1
          // All valid swapchain formats
          && (desc.format == reshade::api::format::unknown || desc.format == reshade::api::format::r8g8b8a8_unorm_srgb || desc.format == reshade::api::format::b8g8r8a8_unorm_srgb || desc.format == reshade::api::format::r8g8b8a8_unorm || desc.format == reshade::api::format::b8g8r8a8_unorm || desc.format == reshade::api::format::r10g10b10a2_unorm))
       {
@@ -7630,9 +8384,9 @@ namespace
          {
 #if DEVELOPMENT
             last_attempted_upgraded_resource_view_creation_view_format = desc.format;
-            if (last_attempted_upgraded_resource_view_creation_view_format == reshade::api::format::unknown && device_data.original_upgraded_resources_formats.contains(resource.handle))
+            if (last_attempted_upgraded_resource_view_creation_view_format == reshade::api::format::unknown && device_data.resource_upgrades.original_upgraded_resources_formats.contains(resource.handle))
             {
-               last_attempted_upgraded_resource_view_creation_view_format = device_data.original_upgraded_resources_formats[resource.handle];
+               last_attempted_upgraded_resource_view_creation_view_format = device_data.resource_upgrades.original_upgraded_resources_formats[resource.handle];
             }
 #endif // DEVELOPMENT
 
@@ -7640,7 +8394,7 @@ namespace
             {
                desc.type = resource_desc.texture.samples <= 1 ? (resource_desc.texture.depth_or_layers <= 1 ? reshade::api::resource_view_type::texture_2d : ((resource_desc.flags & reshade::api::resource_flags::cube_compatible) != 0 ? (resource_desc.texture.depth_or_layers == 6 ? reshade::api::resource_view_type::texture_cube : reshade::api::resource_view_type::texture_cube_array) : reshade::api::resource_view_type::texture_2d_array)) : (resource_desc.texture.depth_or_layers <= 1 ? reshade::api::resource_view_type::texture_2d_multisample : reshade::api::resource_view_type::texture_2d_multisample_array);
             }
-            desc.texture.level_count = 1; // "Deus Ex: Human Revolution - Director's Cut" sets this to 0 (at least when we upgrade the swapchain texture), it might be fine, but the DX11 docs only talk about setting it to -1 to use all levels (which are always 1 for swapchain textures anyway)
+            desc.texture.levels = 1; // "Deus Ex: Human Revolution - Director's Cut" sets this to 0 (at least when we upgrade the swapchain texture), it might be fine, but the DX11 docs only talk about setting it to -1 to use all levels (which are always 1 for swapchain textures anyway)
             // Redirect typeless formats (not even sure they are supported, but it won't hurt to check)
             switch (resource_desc.texture.format)
             {
@@ -7700,22 +8454,22 @@ namespace
             case reshade::api::format::unknown:
             {
                // Happens when the call didn't provide a "DESC", creating a default view (because if we reached here, the texture is 16bpc float)
-               ASSERT_ONCE(device_data.upgraded_resources.contains(resource.handle));
+               ASSERT_ONCE(device_data.resource_upgrades.upgraded_resources.contains(resource.handle));
                break;
             }
             }
          }
 #endif
 
-         if (device_data.upgraded_resources.contains(resource.handle))
+         if (device_data.resource_upgrades.upgraded_resources.contains(resource.handle))
          {
 #if DEVELOPMENT
             last_attempted_upgraded_resource_view_creation_view_format = desc.format;
             // Note: if it's unknown, it usually means the game wanted to auto create a view. But it could also mean they dynamically created views based on the current resource format, and that code failed to find a valid view format for upgraded textures,
             // however if that was the case, it'd be hard to explain why all games still create resources even when upgrading textures.
-            if (last_attempted_upgraded_resource_view_creation_view_format == reshade::api::format::unknown && device_data.original_upgraded_resources_formats.contains(resource.handle))
+            if (last_attempted_upgraded_resource_view_creation_view_format == reshade::api::format::unknown && device_data.resource_upgrades.original_upgraded_resources_formats.contains(resource.handle))
             {
-               last_attempted_upgraded_resource_view_creation_view_format = device_data.original_upgraded_resources_formats[resource.handle];
+               last_attempted_upgraded_resource_view_creation_view_format = device_data.resource_upgrades.original_upgraded_resources_formats[resource.handle];
             }
 #endif // DEVELOPMENT
 
@@ -7730,9 +8484,9 @@ namespace
                   desc.type = resource_desc.texture.samples <= 1 ? (resource_desc.texture.depth_or_layers <= 1 ? reshade::api::resource_view_type::texture_2d : ((resource_desc.flags & reshade::api::resource_flags::cube_compatible) != 0 ? (resource_desc.texture.depth_or_layers == 6 ? reshade::api::resource_view_type::texture_cube : reshade::api::resource_view_type::texture_cube_array) : reshade::api::resource_view_type::texture_2d_array)) : (resource_desc.texture.depth_or_layers <= 1 ? reshade::api::resource_view_type::texture_2d_multisample : reshade::api::resource_view_type::texture_2d_multisample_array); // We need to set it in case it was "reshade::api::resource_view_type::unknown", otherwise the format would also need to be unknown
                }
                desc.texture.first_level = 0;
-               desc.texture.level_count = -1; // All levels (e.g. Dishonored 2 sets this to invalid values if the resource format was upgraded)
+               desc.texture.levels = -1; // All levels (e.g. Dishonored 2 sets this to invalid values if the resource format was upgraded)
                desc.texture.first_layer = 0;
-               desc.texture.layer_count = resource_desc.texture.depth_or_layers;
+               desc.texture.layers = resource_desc.texture.depth_or_layers;
             }
 
             desc.format = GetBestResourceViewUpgradeFormat(desc, usage_type, resource_desc, resource_desc);
@@ -7749,9 +8503,9 @@ namespace
       const std::shared_lock lock(device_data.mutex);
       if (desc.format != upgraded_format)
       {
-         ASSERT_ONCE(!device_data.upgraded_resources.contains(resource.handle)); // Why did we get here in this case?
+         ASSERT_ONCE(!device_data.resource_upgrades.upgraded_resources.contains(resource.handle)); // Why did we get here in this case?
       }
-      if (device_data.upgraded_resources.contains(resource.handle))
+      if (device_data.resource_upgrades.upgraded_resources.contains(resource.handle))
       {
          ID3D11Resource* native_resource = reinterpret_cast<ID3D11Resource*>(resource.handle);
          ID3D11Texture2D* texture_2d = nullptr;
@@ -7798,9 +8552,9 @@ namespace
             texture_1d->Release();
 
          last_attempted_upgraded_resource_view_creation_view_format = desc.format;
-         if (last_attempted_upgraded_resource_view_creation_view_format == reshade::api::format::unknown && device_data.original_upgraded_resources_formats.contains(resource.handle))
+         if (last_attempted_upgraded_resource_view_creation_view_format == reshade::api::format::unknown && device_data.resource_upgrades.original_upgraded_resources_formats.contains(resource.handle))
          {
-            last_attempted_upgraded_resource_view_creation_view_format = device_data.original_upgraded_resources_formats[resource.handle];
+            last_attempted_upgraded_resource_view_creation_view_format = device_data.resource_upgrades.original_upgraded_resources_formats[resource.handle];
          }
          if (desc.type == reshade::api::resource_view_type::unknown)
          {
@@ -7837,21 +8591,25 @@ namespace
       DeviceData& device_data = *device->get_private_data<DeviceData>();
       std::unique_lock lock(device_data.mutex);
 
+      // Cache the view -> resource mapping so the draw/descriptor/destroy paths never need a device call
+      // (get_resource_from_view) while holding the luma mutex.
+      device_data.resource_upgrades.original_views_to_resources[view.handle] = resource.handle;
+
 #if DEVELOPMENT
-      if (device_data.original_upgraded_resources_formats.contains(resource.handle))
+      if (device_data.resource_upgrades.original_upgraded_resources_formats.contains(resource.handle))
       {
          // Only the last attempted creation would matter
-         device_data.original_upgraded_resource_views_formats.emplace(
+         device_data.resource_upgrades.original_upgraded_resource_views_formats.emplace(
             view.handle, // Key
             std::make_pair(resource.handle, last_attempted_upgraded_resource_view_creation_view_format) // Value
          );
       }
 #endif
 
-      auto original_resource_to_mirrored_upgraded_resource = device_data.original_resources_to_mirrored_upgraded_resources.find(resource.handle);
-      if (original_resource_to_mirrored_upgraded_resource != device_data.original_resources_to_mirrored_upgraded_resources.end())
+      auto original_resource_to_mirrored_upgraded_resource = device_data.resource_upgrades.original_resources_to_mirrored_upgraded_resources.find(resource.handle);
+      if (original_resource_to_mirrored_upgraded_resource != device_data.resource_upgrades.original_resources_to_mirrored_upgraded_resources.end())
       {
-         const auto original_resource_to_mirrored_upgraded_resource_ptr = original_resource_to_mirrored_upgraded_resource->second;
+         const auto original_resource_to_mirrored_upgraded_resource_ptr = original_resource_to_mirrored_upgraded_resource->second.mirror_handle;
          lock.unlock(); // Avoids deadlocks with the device
 
          const reshade::api::resource_desc original_resource_desc = device->get_resource_desc(resource);
@@ -7864,7 +8622,9 @@ namespace
          if (device->create_resource_view({original_resource_to_mirrored_upgraded_resource_ptr}, usage_type, upgraded_desc, &mirrored_upgraded_resource_view))
          {
             lock.lock();
-            device_data.original_resource_views_to_mirrored_upgraded_resource_views[view.handle] = mirrored_upgraded_resource_view.handle;
+            device_data.resource_upgrades.original_resource_views_to_mirrored_upgraded_resource_views[view.handle] = mirrored_upgraded_resource_view.handle;
+            device_data.resource_upgrades.mirror_views_by_mirror_resource[original_resource_to_mirrored_upgraded_resource_ptr].emplace(mirrored_upgraded_resource_view.handle);
+            device_data.resource_upgrades.mirror_views_to_mirror_resources[mirrored_upgraded_resource_view.handle] = original_resource_to_mirrored_upgraded_resource_ptr;
          }
       }
    }
@@ -7876,22 +8636,41 @@ namespace
    {
       SKIP_UNSUPPORTED_DEVICE_API(device->get_api());
 
-      DeviceData& device_data = *device->get_private_data<DeviceData>();
-      if (&device_data == nullptr) // TODO: this can happen if DX destroyed the device before any of its resource views. We should store a list of devices that have had their destructor called, and thus have lost the device data.
+      DeviceData* device_data_ptr = device->get_private_data<DeviceData>();
+      if (!device_data_ptr) // Can happen if DX destroyed the device before any of its resource views. We should store a list of devices that have had their destructor called, and thus have lost the device data.
          return;
+      DeviceData& device_data = *device_data_ptr;
       std::unique_lock lock(device_data.mutex);
 
 #if DEVELOPMENT
-      device_data.original_upgraded_resource_views_formats.erase(view.handle);
+      device_data.resource_upgrades.original_upgraded_resource_views_formats.erase(view.handle);
 #endif
+      device_data.resource_upgrades.original_views_to_resources.erase(view.handle);
 
-      auto original_resource_view_to_mirrored_upgraded_resource_view = device_data.original_resource_views_to_mirrored_upgraded_resource_views.find(view.handle);
-      if (original_resource_view_to_mirrored_upgraded_resource_view != device_data.original_resource_views_to_mirrored_upgraded_resource_views.end())
+      auto original_resource_view_to_mirrored_upgraded_resource_view = device_data.resource_upgrades.original_resource_views_to_mirrored_upgraded_resource_views.find(view.handle);
+      if (original_resource_view_to_mirrored_upgraded_resource_view != device_data.resource_upgrades.original_resource_views_to_mirrored_upgraded_resource_views.end())
       {
          const auto mirrored_upgraded_resource_view = original_resource_view_to_mirrored_upgraded_resource_view->second;
-         device_data.original_resource_views_to_mirrored_upgraded_resource_views.erase(original_resource_view_to_mirrored_upgraded_resource_view);
-         lock.unlock(); // Avoids deadlocks with the device
-         device->destroy_resource_view({ mirrored_upgraded_resource_view });
+         device_data.resource_upgrades.original_resource_views_to_mirrored_upgraded_resource_views.erase(original_resource_view_to_mirrored_upgraded_resource_view);
+         // No device call (get_resource_from_view) under the luma lock: this callback runs inside the D3D11
+         // runtime's final Release (destruction notifier) on an arbitrary thread, so taking the luma lock here and
+         // then calling back into the runtime inverts the lock order vs the draw path (which holds the shared luma
+         // lock while making device calls) and can deadlock. The mirror resource handle is cached at insert time.
+         reshade::api::resource mirror_resource;
+         mirror_resource.handle = 0;
+         if (auto mirror_res_it = device_data.resource_upgrades.mirror_views_to_mirror_resources.find(mirrored_upgraded_resource_view); mirror_res_it != device_data.resource_upgrades.mirror_views_to_mirror_resources.end())
+         {
+            mirror_resource.handle = mirror_res_it->second;
+            device_data.resource_upgrades.mirror_views_to_mirror_resources.erase(mirror_res_it);
+         }
+         if (auto mirror_views_it = device_data.resource_upgrades.mirror_views_by_mirror_resource.find(mirror_resource.handle); mirror_views_it != device_data.resource_upgrades.mirror_views_by_mirror_resource.end())
+         {
+            mirror_views_it->second.erase(mirrored_upgraded_resource_view);
+            if (mirror_views_it->second.empty())
+               device_data.resource_upgrades.mirror_views_by_mirror_resource.erase(mirror_views_it);
+         }
+         // Defer freeing to present: the mirror view may still be in flight. See OnDestroyResource.
+         device_data.resource_upgrades.pending_mirror_view_destructions.push_back({ mirrored_upgraded_resource_view });
       }
    }
 
@@ -7910,10 +8689,18 @@ namespace
       {
       default:
       break;
+#if !defined(GAME_PERSONA_5_ROYAL) && !defined(GAME_METAPHOR_REFANTAZIO)
       case reshade::api::descriptor_type::texture_unordered_access_view:
       case reshade::api::descriptor_type::texture_shader_resource_view:
       {
          reshade::api::descriptor_table_update replaced_update = update;
+         // Copy the descriptor array before replacing any view: in DX11 the event's descriptor pointer aliases
+         // the game's own bind array (reshade reinterprets the original objects array), so writing mirror view
+         // handles through it would leak our pointers into the game's memory (stale-pointer hazards downstream).
+         std::vector<reshade::api::resource_view> replaced_descriptors(
+            reinterpret_cast<const reshade::api::resource_view*>(update.descriptors),
+            reinterpret_cast<const reshade::api::resource_view*>(update.descriptors) + update.count);
+         replaced_update.descriptors = replaced_descriptors.data();
          bool any_replaced = false;
          bool any_upgraded = false;
 
@@ -7932,7 +8719,14 @@ namespace
 
             for (uint32_t i = 0; i < replaced_update.count; i++)
             {
-               reshade::api::resource original_resource = rvs[i].handle != 0 ? cmd_list->get_device()->get_resource_from_view({ rvs[i].handle }) : reshade::api::resource{0}; // TODO: fix this, we shouldn't call it due to "lock_device_read"
+               reshade::api::resource original_resource;
+               original_resource.handle = rvs[i].handle != 0 ? GetCachedResourceFromView(device_data, rvs[i].handle) : 0; // No device call under the lock
+               if (rvs[i].handle != 0 && original_resource.handle == 0) // Unknown view (e.g. created before the addon loaded): query the device outside the lock
+               {
+                  lock_device_read.unlock(); // Avoids deadlocks with the device
+                  original_resource = cmd_list->get_device()->get_resource_from_view({ rvs[i].handle });
+                  lock_device_read.lock();
+               }
 
                bool replaced = FindOrCreateIndirectUpgradedResourceView(cmd_list->get_device(), rvs[i].handle, rvs[i].handle, device_data, enable_chain_indirect_texture_format_upgrades >= ChainTextureFormatUpgradesType::DirectDependencies, resource_usage, lock_device_read);
                any_replaced |= replaced;
@@ -7943,11 +8737,24 @@ namespace
 
                bool upgraded = replaced;
                // Also track direct upgrades, even if this is often useful, as if we have any, generally any of their render targets would automatically get upgraded, however that's not always the case in case we missed some formats, or in case we only upgrade the swapchain and it's read back (e.g. UE reads it back to do UI background blurring).
-               if (device_data.upgraded_resources.contains(original_resource.handle) || (swapchain_upgrade_type > SwapchainUpgradeType::None && device_data.back_buffers.contains(original_resource.handle)))
+               if (device_data.resource_upgrades.upgraded_resources.contains(original_resource.handle) || (swapchain_upgrade_type > SwapchainUpgradeType::None && device_data.back_buffers.contains(original_resource.handle)))
                {
                   upgraded = true;
                }
                any_upgraded |= upgraded;
+
+#if DEVELOPMENT
+               if (trace_running && original_resource.handle != 0 && device_data.resource_upgrades.HasMirror(original_resource.handle))
+               {
+                  // Diagnostic: a downstream shader is binding an SRV of a mirrored resource (e.g. the TAA
+                  // seed output). Log whether it was recognized as upgraded (which drives chain propagation).
+                  char buf[192];
+                  std::snprintf(buf, sizeof(buf), "[LumaScale] SRV bind of mirrored res=%llx replaced=%d upgraded=%d is_scaled=%d",
+                     (unsigned long long)original_resource.handle, replaced ? 1 : 0, upgraded ? 1 : 0,
+                     device_data.resource_upgrades.IsScaledMirrorResource(original_resource.handle) ? 1 : 0);
+                  reshade::log::message(reshade::log::level::info, buf);
+               }
+#endif
 
                // TODO: set these as upgraded even if we used direct texture upgrades? It's not really needed as the only purpose of these is to do chain upgrades, which are already handled with direct texture upgrades (then, if so, rename the variables to "*_indirect_upgrades_*")
                // Note: if the game somehow read back a previously upgraded SRV and re-set it, we'd miss it here (we don't check for that yet, it's "slow")
@@ -7999,6 +8806,7 @@ namespace
          }
          break;
       }
+#endif
       case reshade::api::descriptor_type::constant_buffer:
       {
          for (uint32_t i = 0; i < update.count; i++)
@@ -8063,11 +8871,15 @@ namespace
          auto* device = cmd_list->get_device();
          DeviceData& device_data = *device->get_private_data<DeviceData>();
 
-#if 1 // Optimization hack (it's currently fine with ReShade's code, that data is created on the spot and never used again)
-         reshade::api::descriptor_table_update& custom_update = const_cast<reshade::api::descriptor_table_update&>(update);
-#else
+         // Copy the sampler array before replacing any sampler: reshade
+         // reinterprets the game's own bind array as the descriptor pointer (the same
+         // aliasing as the SRV/UAV case above), so an in-place write would leak custom
+         // sampler handles into the game's memory.
          reshade::api::descriptor_table_update custom_update = update;
-#endif
+         std::vector<reshade::api::sampler> replaced_samplers(
+            reinterpret_cast<const reshade::api::sampler*>(update.descriptors),
+            reinterpret_cast<const reshade::api::sampler*>(update.descriptors) + update.count);
+         custom_update.descriptors = replaced_samplers.data();
          bool any_modified = false;
          std::shared_lock shared_lock_samplers(s_mutex_samplers);
          for (uint32_t i = 0; i < update.count; i++)
@@ -8265,8 +9077,8 @@ namespace
       bool needs_conversion = false;
       {
          const std::shared_lock lock(device_data.mutex);
-         needs_downgrade = device_data.upgraded_resources.contains(resource.handle); // TODO: also check the swapchain for stuff like this... We should add it to this list!
-         needs_conversion = needs_downgrade || device_data.original_resources_to_mirrored_upgraded_resources.contains(resource.handle);
+         needs_downgrade = device_data.resource_upgrades.upgraded_resources.contains(resource.handle); // TODO: also check the swapchain for stuff like this... We should add it to this list!
+         needs_conversion = needs_downgrade || device_data.resource_upgrades.original_resources_to_mirrored_upgraded_resources.contains(resource.handle);
       }
       // If this happened, we need to upgrade the data passed in to match the new format!
       // This happens in Dishonored 2 and Thief on boot, to update videos or splash screens.
@@ -8304,8 +9116,8 @@ namespace
          uint64_t indirect_upgraded_resource = 0;
          {
             const std::shared_lock lock(device_data.mutex);
-            direct_upgraded = device_data.upgraded_resources.contains(resource.handle);
-            indirect_upgraded_resource = MapFindOrDefaultValue(device_data.original_resources_to_mirrored_upgraded_resources, resource.handle, 0); // The indirect upgraded resource is guaranteed to be kept alive if the base one also is
+            direct_upgraded = device_data.resource_upgrades.upgraded_resources.contains(resource.handle);
+            indirect_upgraded_resource = MapFindOrDefaultValue(device_data.resource_upgrades.original_resources_to_mirrored_upgraded_resources, resource.handle, ResourceUpgradeManager::IndirectUpgradedResource{}).mirror_handle; // The indirect upgraded resource is guaranteed to be kept alive if the base one also is
          }
 
          // If we have an indirect upgrade, create an upgraded version of the data and map it in the indirect upgraded texture
@@ -8334,9 +9146,9 @@ namespace
 #if DEVELOPMENT
             {
                const std::shared_lock lock(device_data.mutex);
-               if (device_data.original_upgraded_resources_formats.contains(resource.handle))
+               if (device_data.resource_upgrades.original_upgraded_resources_formats.contains(resource.handle))
                {
-                  original_desc.texture.format = device_data.original_upgraded_resources_formats[resource.handle];
+                  original_desc.texture.format = device_data.resource_upgrades.original_upgraded_resources_formats[resource.handle];
                   ASSERT_ONCE(original_desc.texture.format == reshade::api::format::r8g8b8a8_unorm); // Cache "original_upgraded_resources_formats" outside of development too if this happens! It probably will at some point!
                }
             }
@@ -8402,7 +9214,7 @@ namespace
       reshade::api::resource_desc upgraded_desc;
       {
          std::shared_lock lock_device_read(device_data.mutex);
-         if (device_data.upgraded_resources.contains(resource.handle)) // This cannot be a swapchain texture, they can't be written by the CPU
+         if (device_data.resource_upgrades.upgraded_resources.contains(resource.handle)) // This cannot be a swapchain texture, they can't be written by the CPU
          {
             lock_device_read.unlock(); // Avoid deadlocks with device
             upgraded_desc = device->get_resource_desc(resource);
@@ -8411,18 +9223,18 @@ namespace
             // TODO: stop randomly guessing the format and actually cache it aside! Note that some games might dynamically pre-convert the data to match the upgraded target format, however, that's unlikely
             original_desc.texture.format = reshade::api::format::r8g8b8a8_unorm;
 #if DEVELOPMENT
-            if (device_data.original_upgraded_resources_formats.contains(resource.handle))
+            if (device_data.resource_upgrades.original_upgraded_resources_formats.contains(resource.handle))
             {
-               original_desc.texture.format = device_data.original_upgraded_resources_formats[resource.handle];
+               original_desc.texture.format = device_data.resource_upgrades.original_upgraded_resources_formats[resource.handle];
                ASSERT_ONCE(original_desc.texture.format == reshade::api::format::r8g8b8a8_unorm); // Cache "original_upgraded_resources_formats" outside of development too if this happens! It probably will at some point!
             }
 #endif
             convert_data = true;
          }
-         auto original_resource_to_mirrored_upgraded_resource = device_data.original_resources_to_mirrored_upgraded_resources.find(resource.handle);
-         if (!ignore_indirect_upgraded_textures && original_resource_to_mirrored_upgraded_resource != device_data.original_resources_to_mirrored_upgraded_resources.end())
+         auto original_resource_to_mirrored_upgraded_resource = device_data.resource_upgrades.original_resources_to_mirrored_upgraded_resources.find(resource.handle);
+         if (!ignore_indirect_upgraded_textures && original_resource_to_mirrored_upgraded_resource != device_data.resource_upgrades.original_resources_to_mirrored_upgraded_resources.end())
          {
-            const auto original_resource_to_mirrored_upgraded_resource_ptr = original_resource_to_mirrored_upgraded_resource->second;
+            const auto original_resource_to_mirrored_upgraded_resource_ptr = original_resource_to_mirrored_upgraded_resource->second.mirror_handle;
             lock_device_read.unlock(); // Avoid deadlocks with device
             upgraded_desc = device->get_resource_desc({ original_resource_to_mirrored_upgraded_resource_ptr });
             original_desc = device->get_resource_desc(resource);
@@ -8471,8 +9283,8 @@ namespace
       
       DeviceData& device_data = *cmd_list->get_device()->get_private_data<DeviceData>();
       std::shared_lock lock(device_data.mutex);
-      auto original_resource_view_to_mirrored_upgraded_resource_view = device_data.original_resource_views_to_mirrored_upgraded_resource_views.find(dsv.handle);
-      if (!ignore_indirect_upgraded_textures && original_resource_view_to_mirrored_upgraded_resource_view != device_data.original_resource_views_to_mirrored_upgraded_resource_views.end())
+      auto original_resource_view_to_mirrored_upgraded_resource_view = device_data.resource_upgrades.original_resource_views_to_mirrored_upgraded_resource_views.find(dsv.handle);
+      if (!ignore_indirect_upgraded_textures && original_resource_view_to_mirrored_upgraded_resource_view != device_data.resource_upgrades.original_resource_views_to_mirrored_upgraded_resource_views.end())
       {
          const auto original_resource_view_to_mirrored_upgraded_resource_view_ptr = original_resource_view_to_mirrored_upgraded_resource_view->second;
          lock.unlock(); // Avoids deadlock with the device
@@ -8512,8 +9324,8 @@ namespace
 
       DeviceData& device_data = *cmd_list->get_device()->get_private_data<DeviceData>();
       std::shared_lock lock(device_data.mutex);
-      auto original_resource_view_to_mirrored_upgraded_resource_view = device_data.original_resource_views_to_mirrored_upgraded_resource_views.find(rtv.handle);
-      if (!ignore_indirect_upgraded_textures && original_resource_view_to_mirrored_upgraded_resource_view != device_data.original_resource_views_to_mirrored_upgraded_resource_views.end())
+      auto original_resource_view_to_mirrored_upgraded_resource_view = device_data.resource_upgrades.original_resource_views_to_mirrored_upgraded_resource_views.find(rtv.handle);
+      if (!ignore_indirect_upgraded_textures && original_resource_view_to_mirrored_upgraded_resource_view != device_data.resource_upgrades.original_resource_views_to_mirrored_upgraded_resource_views.end())
       {
          const auto original_resource_view_to_mirrored_upgraded_resource_view_ptr = original_resource_view_to_mirrored_upgraded_resource_view->second;
          lock.unlock(); // Avoids deadlock with the device
@@ -8553,8 +9365,8 @@ namespace
 
       DeviceData& device_data = *cmd_list->get_device()->get_private_data<DeviceData>();
       std::shared_lock lock(device_data.mutex);
-      auto original_resource_view_to_mirrored_upgraded_resource_view = device_data.original_resource_views_to_mirrored_upgraded_resource_views.find(uav.handle);
-      if (!ignore_indirect_upgraded_textures && original_resource_view_to_mirrored_upgraded_resource_view != device_data.original_resource_views_to_mirrored_upgraded_resource_views.end())
+      auto original_resource_view_to_mirrored_upgraded_resource_view = device_data.resource_upgrades.original_resource_views_to_mirrored_upgraded_resource_views.find(uav.handle);
+      if (!ignore_indirect_upgraded_textures && original_resource_view_to_mirrored_upgraded_resource_view != device_data.resource_upgrades.original_resource_views_to_mirrored_upgraded_resource_views.end())
       {
          const auto original_resource_view_to_mirrored_upgraded_resource_view_ptr = original_resource_view_to_mirrored_upgraded_resource_view->second;
          lock.unlock(); // Avoids deadlock with the device
@@ -8606,8 +9418,8 @@ namespace
 
       DeviceData& device_data = *cmd_list->get_device()->get_private_data<DeviceData>();
       std::shared_lock lock(device_data.mutex);
-      auto original_resource_view_to_mirrored_upgraded_resource_view = device_data.original_resource_views_to_mirrored_upgraded_resource_views.find(uav.handle);
-      if (!ignore_indirect_upgraded_textures && original_resource_view_to_mirrored_upgraded_resource_view != device_data.original_resource_views_to_mirrored_upgraded_resource_views.end())
+      auto original_resource_view_to_mirrored_upgraded_resource_view = device_data.resource_upgrades.original_resource_views_to_mirrored_upgraded_resource_views.find(uav.handle);
+      if (!ignore_indirect_upgraded_textures && original_resource_view_to_mirrored_upgraded_resource_view != device_data.resource_upgrades.original_resource_views_to_mirrored_upgraded_resource_views.end())
       {
          const auto original_resource_view_to_mirrored_upgraded_resource_view_ptr = original_resource_view_to_mirrored_upgraded_resource_view->second;
          lock.unlock(); // Avoids deadlock with the device
@@ -8657,7 +9469,7 @@ namespace
       std::shared_lock device_read_lock(device_data.mutex);
       // Skip if none of the resources match our upgraded ones.
       // This should always be fine, unless the game used the upgraded resource desc to automatically determine other textures (so we try to catch for that in development)
-      if (!forced && !device_data.upgraded_resources.contains(source.handle) && !device_data.upgraded_resources.contains(dest.handle) && (swapchain_upgrade_type == SwapchainUpgradeType::None || (!device_data.back_buffers.contains(source.handle) && !device_data.back_buffers.contains(dest.handle))))
+      if (!forced && !device_data.resource_upgrades.upgraded_resources.contains(source.handle) && !device_data.resource_upgrades.upgraded_resources.contains(dest.handle) && (swapchain_upgrade_type == SwapchainUpgradeType::None || (!device_data.back_buffers.contains(source.handle) && !device_data.back_buffers.contains(dest.handle))))
       {
 #if !DEVELOPMENT
          return false;
@@ -8666,6 +9478,7 @@ namespace
       }
       device_read_lock.unlock();
 
+      bool use_scale = false;
       ID3D11Resource* source_resource = reinterpret_cast<ID3D11Resource*>(source.handle);
       com_ptr<ID3D11Texture2D> source_resource_texture;
       HRESULT hr = source_resource->QueryInterface(&source_resource_texture);
@@ -8683,7 +9496,21 @@ namespace
 
             // No need to error out on these are the copies would have fail in the vanilla game as well
             if (source_desc.Width != target_desc.Width || source_desc.Height != target_desc.Height)
-               return false;
+            {
+               const bool aspect_compatible = source_desc.Width > 0 && source_desc.Height > 0 && target_desc.Width > 0 && target_desc.Height > 0
+                  && std::abs((float)source_desc.Width / (float)source_desc.Height - (float)target_desc.Width / (float)target_desc.Height) < 0.01f;
+               if (!aspect_compatible)
+                  return false;
+               // Only scale when the hash-upgrade scale chain is active; otherwise this is the game's own
+               // intentional different-size copy and must pass through untouched.
+               // Note: the seed mirror is created (and may be scaled) in the hash-upgrade block, which runs
+               // BEFORE the game's OnDrawOrDispatch executes SR and flips has_drawn_sr. So also treat a copy
+               // as scaleable when either resource is a scaled mirror, so we don't mistake the scaled seed
+               // (or a chain resource derived from it) for the game's own different-size copy.
+               if (!IsScaleChainActive(device_data) && !device_data.resource_upgrades.IsScaledMirrorResource(source.handle) && !device_data.resource_upgrades.IsScaledMirrorResource(dest.handle))
+                  return false;
+               use_scale = true;
+            }
             if (source_desc.ArraySize != target_desc.ArraySize || source_desc.MipLevels != target_desc.MipLevels)
                return false;
 
@@ -8770,15 +9597,14 @@ namespace
                   }
                }
 
-               // These are not supported at the moment
                if (target_desc.ArraySize != 1 || target_desc.SampleDesc.Count != 1 || target_desc.MipLevels != 1)
                {
                   ASSERT_ONCE_MSG(false, "Unsupported resource desc in redirected resource copy");
                   return false;
                }
 
-               com_ptr<ID3D11VertexShader> vs;
-               com_ptr<ID3D11PixelShader> ps;
+               com_ptr<ID3D11VertexShader> vs_copy, vs_scale;
+               com_ptr<ID3D11PixelShader> ps_copy, ps_scale;
                com_ptr<ID3D11Texture2D> temp_copy_source_texture;
                com_ptr<ID3D11Texture2D> temp_copy_target_texture;
                {
@@ -8787,14 +9613,20 @@ namespace
                   temp_copy_target_texture = device_data.temp_copy_target_texture;
 
                   const std::shared_lock lock(s_mutex_shader_objects);
-                  vs = device_data.native_vertex_shaders[CompileTimeStringHash("Copy VS")];
-                  ps = device_data.native_pixel_shaders[CompileTimeStringHash("Copy PS")];
+                  vs_copy = device_data.native_vertex_shaders[CompileTimeStringHash("Copy VS")];
+                  ps_copy = device_data.native_pixel_shaders[CompileTimeStringHash("Copy PS")];
+                  vs_scale = device_data.native_vertex_shaders[CompileTimeStringHash("Scale VS")];
+                  ps_scale = device_data.native_pixel_shaders[CompileTimeStringHash("Scale PS")];
                   device_read_lock.unlock();
                }
-               if (vs == nullptr || ps == nullptr)
+               if (use_scale && (vs_scale == nullptr || ps_scale == nullptr))
+               {
+                  ASSERT_ONCE_MSG(false, "The Luma Scale VS/PS shaders failed to be found/compiled");
+                  return false;
+               }
+               if (!use_scale && (vs_copy == nullptr || ps_copy == nullptr))
                {
                   ASSERT_ONCE_MSG(false, "The Copy Resource Luma native shaders failed to be found (they have either been unloaded or failed to compile, or simply missing in the files)");
-                  // We can't continue, drawing with empty shaders would crash or skip the call
                   return false;
                }
 
@@ -8822,7 +9654,6 @@ namespace
                   }
                   proxy_source_resource_texture = temp_copy_source_texture;
                }
-               com_ptr<ID3D11ShaderResourceView> source_resource_texture_view;
                D3D11_SHADER_RESOURCE_VIEW_DESC source_srv_desc;
                source_srv_desc.Format = source_desc.Format;
                // Redirect typeless and sRGB formats to classic UNORM, the "copy resource" functions wouldn't distinguish between these, as they copy by byte.
@@ -8850,8 +9681,6 @@ namespace
                source_srv_desc.ViewDimension = D3D11_SRV_DIMENSION::D3D11_SRV_DIMENSION_TEXTURE2D;
                source_srv_desc.Texture2D.MipLevels = 1;
                source_srv_desc.Texture2D.MostDetailedMip = 0;
-               hr = native_device->CreateShaderResourceView(proxy_source_resource_texture.get(), &source_srv_desc, &source_resource_texture_view);
-               ASSERT_ONCE(SUCCEEDED(hr));
 
                com_ptr<ID3D11Texture2D> proxy_target_resource_texture = target_resource_texture;
                // We need to make a double copy if the target texture isn't a render target, unfortunately (we could intercept its creation and add the flag, or replace any further usage in this frame by redirecting all pointers
@@ -8876,7 +9705,6 @@ namespace
                   proxy_target_resource_texture = temp_copy_target_texture;
                }
 
-               com_ptr<ID3D11RenderTargetView> target_resource_texture_view;
                D3D11_RENDER_TARGET_VIEW_DESC target_rtv_desc;
                target_rtv_desc.Format = target_desc.Format;
                switch (target_rtv_desc.Format)
@@ -8902,8 +9730,6 @@ namespace
                }
                target_rtv_desc.ViewDimension = D3D11_RTV_DIMENSION_TEXTURE2D;
                target_rtv_desc.Texture2D.MipSlice = 0;
-               hr = native_device->CreateRenderTargetView(proxy_target_resource_texture.get(), &target_rtv_desc, &target_resource_texture_view);
-               ASSERT_ONCE(SUCCEEDED(hr));
 
                DrawStateStack<DrawStateStackType::FullGraphics> draw_state_stack; // Use full mode because setting the RTV here might unbind the same resource being bound as SRV
                draw_state_stack.Cache(native_device_context, device_data.uav_max_count);
@@ -8912,7 +9738,22 @@ namespace
                // otherwise DX11 will force ignore the attempted SRV binding, to avoid read/write conflicts.
                native_device_context->OMSetRenderTargetsAndUnorderedAccessViews(0, nullptr, nullptr, 0, 0, nullptr, nullptr);
 
-               DrawCustomPixelShader(native_device_context, device_data.default_depth_stencil_state.get(), device_data.default_blend_state.get(), nullptr, vs.get(), ps.get(), source_resource_texture_view.get(), target_resource_texture_view.get(), target_desc.Width, target_desc.Height, true);
+               com_ptr<ID3D11ShaderResourceView> source_resource_texture_view;
+               hr = native_device->CreateShaderResourceView(proxy_source_resource_texture.get(), &source_srv_desc, &source_resource_texture_view);
+               ASSERT_ONCE(SUCCEEDED(hr));
+
+               com_ptr<ID3D11RenderTargetView> target_resource_texture_view;
+               hr = native_device->CreateRenderTargetView(proxy_target_resource_texture.get(), &target_rtv_desc, &target_resource_texture_view);
+               ASSERT_ONCE(SUCCEEDED(hr));
+
+               if (use_scale)
+               {
+                  DrawCustomPixelShader(native_device_context, device_data.default_depth_stencil_state.get(), device_data.default_blend_state.get(), device_data.sampler_state_linear.get(), vs_scale.get(), ps_scale.get(), source_resource_texture_view.get(), target_resource_texture_view.get(), target_desc.Width, target_desc.Height, true);
+               }
+               else
+               {
+                  DrawCustomPixelShader(native_device_context, device_data.default_depth_stencil_state.get(), device_data.default_blend_state.get(), nullptr, vs_copy.get(), ps_copy.get(), source_resource_texture_view.get(), target_resource_texture_view.get(), target_desc.Width, target_desc.Height, true);
+               }
 
 #if DEVELOPMENT
                {
@@ -8969,7 +9810,7 @@ namespace
             // Note: there a tiny chance the source is not an upgraded texture while the target one is, that's handled with a pixel shader copy below
             any_replaced |= FindOrCreateIndirectUpgradedResource(cmd_list->get_device(), source.handle, source.handle, source.handle, device_data, false, reshade::api::resource_usage::copy_source, lock_device_read);
             // Don't ever allow creating new resources if "texture_format_upgrades_type" isn't enabled, we might end up missing its destruction and causing memory leaks
-            any_replaced |= FindOrCreateIndirectUpgradedResource(cmd_list->get_device(), source.handle, dest.handle, dest.handle, device_data, texture_format_upgrades_type == TextureFormatUpgradesType::AllowedEnabled && enable_chain_indirect_texture_format_upgrades >= ChainTextureFormatUpgradesType::DirectDependencies, reshade::api::resource_usage::copy_dest, lock_device_read, false);
+            any_replaced |= FindOrCreateIndirectUpgradedResource(cmd_list->get_device(), source.handle, dest.handle, dest.handle, device_data, texture_format_upgrades_type == TextureFormatUpgradesType::AllowedEnabled && enable_chain_indirect_texture_format_upgrades >= ChainTextureFormatUpgradesType::DirectDependencies, reshade::api::resource_usage::copy_dest, lock_device_read, false, false, false);
          }
 
          {
@@ -9016,7 +9857,7 @@ namespace
             std::shared_lock lock_device_read(device_data.mutex);
 
             any_replaced |= FindOrCreateIndirectUpgradedResource(cmd_list->get_device(), source.handle, source.handle, source.handle, device_data, false, reshade::api::resource_usage::copy_source, lock_device_read);
-            any_replaced |= FindOrCreateIndirectUpgradedResource(cmd_list->get_device(), source.handle, dest.handle, dest.handle, device_data, texture_format_upgrades_type == TextureFormatUpgradesType::AllowedEnabled && enable_chain_indirect_texture_format_upgrades >= ChainTextureFormatUpgradesType::DirectDependencies, reshade::api::resource_usage::copy_dest, lock_device_read, false);
+            any_replaced |= FindOrCreateIndirectUpgradedResource(cmd_list->get_device(), source.handle, dest.handle, dest.handle, device_data, texture_format_upgrades_type == TextureFormatUpgradesType::AllowedEnabled && enable_chain_indirect_texture_format_upgrades >= ChainTextureFormatUpgradesType::DirectDependencies, reshade::api::resource_usage::copy_dest, lock_device_read, false, false, false);
             // TODO: upgrade the "cmd_list_data.ps_srvs_state" state if any resources are upgraded here, they could also be bound as SRV/UAV already.
          }
 
@@ -9059,7 +9900,7 @@ namespace
             ID3D11Resource* target_resource = reinterpret_cast<ID3D11Resource*>(dest.handle);
             DeviceData& device_data = *cmd_list->get_device()->get_private_data<DeviceData>();
             std::shared_lock lock_device_read(device_data.mutex);
-            if (enable_upgraded_texture_resource_copy_redirection && (device_data.upgraded_resources.contains(source.handle) || device_data.upgraded_resources.contains(dest.handle) || (swapchain_upgrade_type > SwapchainUpgradeType::None && (device_data.back_buffers.contains(source.handle) || device_data.back_buffers.contains(dest.handle)))))
+            if (enable_upgraded_texture_resource_copy_redirection && (device_data.resource_upgrades.upgraded_resources.contains(source.handle) || device_data.resource_upgrades.upgraded_resources.contains(dest.handle) || (swapchain_upgrade_type > SwapchainUpgradeType::None && (device_data.back_buffers.contains(source.handle) || device_data.back_buffers.contains(dest.handle)))))
             {
                lock_device_read.unlock(); // Avoid deadlocks with device
                ASSERT_ONCE(AreResourcesEqual(source_resource, target_resource)); // Note: this might catch some false positives too
@@ -9085,7 +9926,7 @@ namespace
             std::shared_lock lock_device_read(device_data.mutex);
 
             any_replaced |= FindOrCreateIndirectUpgradedResource(cmd_list->get_device(), source.handle, source.handle, source.handle, device_data, false, reshade::api::resource_usage::resolve_source, lock_device_read);
-            any_replaced |= FindOrCreateIndirectUpgradedResource(cmd_list->get_device(), source.handle, dest.handle, dest.handle, device_data, texture_format_upgrades_type == TextureFormatUpgradesType::AllowedEnabled && enable_chain_indirect_texture_format_upgrades >= ChainTextureFormatUpgradesType::DirectDependencies, reshade::api::resource_usage::resolve_dest, lock_device_read, false);
+            any_replaced |= FindOrCreateIndirectUpgradedResource(cmd_list->get_device(), source.handle, dest.handle, dest.handle, device_data, texture_format_upgrades_type == TextureFormatUpgradesType::AllowedEnabled && enable_chain_indirect_texture_format_upgrades >= ChainTextureFormatUpgradesType::DirectDependencies, reshade::api::resource_usage::resolve_dest, lock_device_read, false, false, false);
          }
 
          if (any_replaced)
@@ -9119,7 +9960,7 @@ namespace
             DeviceData& device_data = *cmd_list->get_device()->get_private_data<DeviceData>();
             std::shared_lock lock_device_read(device_data.mutex);
             // If any of the resources has been upgraded but the format specified by the game doesn't match, enforce the right format
-            if (device_data.upgraded_resources.contains(source.handle) || device_data.upgraded_resources.contains(dest.handle) || (swapchain_upgrade_type > SwapchainUpgradeType::None && device_data.back_buffers.contains(dest.handle)))
+            if (device_data.resource_upgrades.upgraded_resources.contains(source.handle) || device_data.resource_upgrades.upgraded_resources.contains(dest.handle) || (swapchain_upgrade_type > SwapchainUpgradeType::None && device_data.back_buffers.contains(dest.handle)))
             {
                lock_device_read.unlock(); // Avoid deadlocks with device
 
@@ -9153,7 +9994,7 @@ namespace
             ID3D11Resource* target_resource = reinterpret_cast<ID3D11Resource*>(dest.handle);
             DeviceData& device_data = *cmd_list->get_device()->get_private_data<DeviceData>();
             std::shared_lock lock_device_read(device_data.mutex);
-            if (enable_upgraded_texture_resource_copy_redirection && (device_data.upgraded_resources.contains(source.handle) || device_data.upgraded_resources.contains(dest.handle) || (swapchain_upgrade_type > SwapchainUpgradeType::None && (device_data.back_buffers.contains(source.handle) || device_data.back_buffers.contains(dest.handle)))))
+            if (enable_upgraded_texture_resource_copy_redirection && (device_data.resource_upgrades.upgraded_resources.contains(source.handle) || device_data.resource_upgrades.upgraded_resources.contains(dest.handle) || (swapchain_upgrade_type > SwapchainUpgradeType::None && (device_data.back_buffers.contains(source.handle) || device_data.back_buffers.contains(dest.handle)))))
             {
                lock_device_read.unlock(); // Avoid deadlocks with device
                ASSERT_ONCE(AreResourcesEqual(source_resource, target_resource)); // Note: this might catch some false positives too
@@ -9227,20 +10068,22 @@ namespace
       // Load new shaders
       // We avoid running this if "thread_auto_compiling" is still running from boot.
       // Note that this thread doesn't really need to be by "device", but we did so to make it simpler, to automatically handle the "CreateDeviceNativeShaders()" shaders.
-      if (auto_load && !last_pressed_unload && !thread_auto_compiling_running && !device_data.thread_auto_loading_running && !device_data.pipelines_to_reload.empty())
+#if (LUMA_PATCH_PROVIDERS & (LUMA_PATCH_PROVIDER_BYTECODE_ASYNC | LUMA_PATCH_PROVIDER_RECIPE_ASYNC))
+      // Publish completed clones at the present boundary — the live clone map
+      // never mutates mid-frame (see worker lifecycle: OnInitDevice).
+      std::vector<uint32_t> published_patch_hashes = PublishReadyAsyncClones(device_data);
+#endif
+
+      s_mutex_loading.unlock_shared();
+
+#if (LUMA_PATCH_PROVIDERS & (LUMA_PATCH_PROVIDER_BYTECODE_ASYNC | LUMA_PATCH_PROVIDER_RECIPE_ASYNC))
+      // Games flip their binding state only for clones that are actually live
+      // this frame (never before the patched shader can run).
+      if (!published_patch_hashes.empty())
       {
-         s_mutex_loading.unlock_shared();
-         if (device_data.thread_auto_loading.joinable())
-         {
-            device_data.thread_auto_loading.join();
-         }
-         device_data.thread_auto_loading_running = true;
-         device_data.thread_auto_loading = std::thread(AutoLoadShaders, &device_data);
+         game->OnPatchedShadersPublished(device_data, published_patch_hashes);
       }
-      else
-      {
-         s_mutex_loading.unlock_shared();
-      }
+#endif
 
       if (needs_unload_shaders)
       {
@@ -9269,6 +10112,17 @@ namespace
             device_data.native_compute_shaders.clear();
          }
 #endif
+      }
+
+      if (needs_unload_patches)
+      {
+         UnloadPatches(device_data);
+         needs_unload_patches = false;
+      }
+      if (needs_load_patches)
+      {
+         ReloadPatches(device_data);
+         needs_load_patches = false;
       }
 
       if (!block_draw_until_device_custom_shaders_creation) s_mutex_shader_objects.lock_shared();
@@ -9353,7 +10207,8 @@ namespace
    {
 #if !ALLOW_SHADERS_DUMPING
       ASSERT_ONCE(false); // Shouldn't call this function if the feature is disabled
-#else // Note: this might work with "DEVELOPMENT" too, but possibly not entirely
+#else
+      auto* cached_shader = shader_cache.find(shader_hash)->second; // Expected to always be here already
 
       auto dump_path = shaders_dump_path;
       // Create it if it doesn't exist
@@ -9367,8 +10222,6 @@ namespace
       }
 
       dump_path /= Shader::Hash_NumToStr(shader_hash, true);
-
-      auto* cached_shader = shader_cache.find(shader_hash)->second; // Expected to always be here already
 
       // Automatically append the shader type and version
       if (!cached_shader->type_and_version.empty())
@@ -9445,6 +10298,37 @@ namespace
 #endif
    }
 
+#if ALLOW_SHADER_PATCHES_DUMPING && LUMA_PATCH_PROVIDERS != 0
+   void DumpPatchedShader(uint32_t shader_hash)
+   {
+      auto* cached_shader = shader_cache.find(shader_hash)->second; // Expected to always be here already
+
+      if (cached_shader->live_patched_data == nullptr)
+      {
+         return;
+      }
+
+      auto patched_dump_path = shaders_dump_path / "Patched" / Shader::Hash_NumToStr(shader_hash, true);
+      if (!cached_shader->type_and_version.empty())
+      {
+         patched_dump_path += ".";
+         patched_dump_path += cached_shader->type_and_version;
+      }
+      patched_dump_path += ".patched.cso";
+
+      std::filesystem::create_directories(patched_dump_path.parent_path());
+
+      try
+      {
+         std::ofstream file(patched_dump_path, std::ios::binary);
+         file.write(static_cast<const char*>(cached_shader->live_patched_data), cached_shader->live_patched_size);
+      }
+      catch (const std::exception& e)
+      {
+      }
+   }
+#endif
+
    void AutoDumpShaders()
    {
       // Copy the "shaders_to_dump" so we don't have to lock "s_mutex_dumping" all the times
@@ -9476,16 +10360,18 @@ namespace
          const std::lock_guard<std::recursive_mutex> lock_dumping(s_mutex_dumping);
          // Set this to true in case your old dumped shaders have bad naming (e.g. missing the "ps_5_0" appendix) and you want to replace them (on the next boot, the duplicate shaders with the shorter name will be deleted)
          constexpr bool force_redump_shaders = false;
-         if (force_redump_shaders || !dumped_shaders.contains(shader_to_dump)
+         // Skip patched shaders here — they're handled by the patched dump loop below.
+         // Dumping them here would write the unpatched binary.
+         if (!patched_shaders_to_dump.contains(shader_to_dump) && (force_redump_shaders || !dumped_shaders.contains(shader_to_dump)
 #if DEVELOPMENT
             || !dumped_shaders_meta_paths.contains(shader_to_dump)
 #endif
-            )
+            ))
          {
             DumpShader(shader_to_dump);
          }
 #if DEVELOPMENT && TEST_DUPLICATE_SHADER_HASH // Warning: very slow
-         else
+         else if (!patched_shaders_to_dump.contains(shader_to_dump))
          {
             // Make sure two different shaders didn't have the same hash (we only check if they start by the same name/hash)
             std::string shader_hash_name = Shader::Hash_NumToStr(shader_to_dump, true);
@@ -9501,30 +10387,403 @@ namespace
          }
 #endif
       }
+
+#if ALLOW_SHADER_PATCHES_DUMPING && LUMA_PATCH_PROVIDERS != 0
+      // Copy and process patched shaders separately — each entry is a freshly
+      // published patch that needs its patched cso written to disk.
+      std::unordered_set<uint32_t> patched_shaders_to_dump_copy;
+      {
+         const std::lock_guard<std::recursive_mutex> lock_dumping(s_mutex_dumping);
+         patched_shaders_to_dump_copy = patched_shaders_to_dump;
+         patched_shaders_to_dump.clear();
+      }
+      for (auto shader_hash : patched_shaders_to_dump_copy)
+      {
+         DumpPatchedShader(shader_hash);
+      }
+#endif
       thread_auto_dumping_running = false;
    }
 #pragma optimize("", on) // Restore the previous state
 
+#if LUMA_PATCH_PROVIDERS & (LUMA_PATCH_PROVIDER_BYTECODE_ASYNC | LUMA_PATCH_PROVIDER_RECIPE_ASYNC)
+   // TODO(Patch module): NotifyAsyncCloneQueue/ProcessAsyncCloneBatch/
+   // PublishReadyAsyncClones + AsyncCloneEntry belong in patch.hpp once
+   // core.hpp's globals (s_mutex_generic, pipeline_cache_destruction_mutex,
+   // custom_shaders_cache) are extracted. Include order currently prevents
+   // patch.hpp from referencing DeviceData's members.
+   // Wakes the persistent async clone worker after the job queue changed.
+   void NotifyAsyncCloneQueue(DeviceData& device_data)
+   {
+      {
+         const std::lock_guard lock(device_data.async_jobs_mutex);
+         device_data.async_queue_version++;
+      }
+      device_data.async_jobs_cv.notify_all();
+   }
+
+   // Compiles clones for one batch of pipeline handles on the worker thread.
+   // The subobject data is deep-copied under s_mutex_generic (shared) before
+   // compiling, so no raw pipeline pointers are held across locks and the
+   // game's pipeline destruction can never free memory we are still reading.
+   // Finished builds are handed to the ready queue; the present boundary
+   // publishes them (see PublishReadyAsyncClones).
+   void ProcessAsyncCloneBatch(DeviceData& device_data, const std::unordered_set<uint64_t>& pipelines)
+   {
+      for (const uint64_t pipeline_handle : pipelines)
+      {
+         reshade::api::pipeline_subobject* subobjects_copy = nullptr;
+         uint32_t subobject_count = 0;
+         reshade::api::device* device = nullptr;
+         reshade::api::pipeline_layout layout = {};
+         uint32_t shader_hash = 0;
+         {
+            const std::shared_lock lock_generic(s_mutex_generic);
+            const auto pipeline_it = device_data.pipeline_cache_by_pipeline_handle.find(pipeline_handle);
+            if (pipeline_it == device_data.pipeline_cache_by_pipeline_handle.end() || pipeline_it->second == nullptr)
+            {
+               continue; // Pipeline was destroyed before we got to it
+            }
+            CachedPipeline* cached_pipeline = pipeline_it->second;
+            if (cached_pipeline->cloned || cached_pipeline->pipeline_clone.handle != 0)
+            {
+               continue; // Already cloned, or a preserved patch clone survives unloads (nothing to rebuild)
+            }
+            subobjects_copy = Shader::ClonePipelineSubobjects(cached_pipeline->subobject_count, cached_pipeline->subobjects_cache);
+            subobject_count = cached_pipeline->subobject_count;
+            device = cached_pipeline->device;
+            layout = cached_pipeline->layout;
+            shader_hash = cached_pipeline->shader_hashes[0]; // identity check for the publish step
+         }
+
+         if (subobjects_copy == nullptr)
+         {
+            continue;
+         }
+
+         Shader::CloneOrigin clone_origin = Shader::CloneOrigin::None;
+         // Build the patched subobjects here (CPU only); device calls must stay
+         // on the render thread (create_pipeline raced with binds hangs the
+         // device), so creation happens at the present boundary. "s_mutex_loading"
+         // keeps custom-shader file bytes alive through the memcpy below (worker
+         // vs. reload race).
+         reshade::api::pipeline_subobject* patched_subobjects = nullptr;
+         {
+            const std::shared_lock lock_loading(s_mutex_loading);
+            auto [built, injected] = Patch::BuildPatchedCloneSubobjects(
+               subobject_count, subobjects_copy,
+               [&device_data, &clone_origin](
+                   const reshade::api::shader_desc*,
+                   const reshade::api::shader_desc* orig_desc) -> std::optional<std::pair<const uint8_t*, uint32_t>>
+               {
+                  const uint32_t shader_hash = Shader::BinToHash(static_cast<const uint8_t*>(orig_desc->code), orig_desc->code_size);
+
+                  // Custom shader files first (same lookup order as LoadCustomShaders).
+                  if (auto custom_it = custom_shaders_cache.find(shader_hash); custom_it != custom_shaders_cache.end())
+                  {
+                     const CachedCustomShader* custom_shader = custom_it->second;
+                     if (custom_shader != nullptr && !custom_shader->is_luma_native && !custom_shader->code.empty())
+                     {
+                        clone_origin = Shader::CloneOrigin::File;
+                        return std::make_pair(custom_shader->code.data(), static_cast<uint32_t>(custom_shader->code.size()));
+                     }
+                  }
+
+                  // Recipe / bytecode patches (only exist when patch providers
+                  // are enabled; other games have no patch_context).
+#if LUMA_PATCH_PROVIDERS != 0
+                  if (auto patched = device_data.patch_context.GetShaderData(shader_hash); patched)
+                  {
+                     clone_origin = Shader::CloneOrigin::Patch;
+                     return std::make_pair(patched->code.data(), static_cast<uint32_t>(patched->code.size()));
+                  }
+#endif
+                  return std::nullopt;
+               });
+            if (injected)
+            {
+               patched_subobjects = built;
+            }
+         }
+
+         Shader::DestroyPipelineSubojects(subobjects_copy, subobject_count);
+
+#if LUMA_ASYNC_CLONE_MODE == 1
+         // Hand the build to the present boundary, which creates the pipeline
+         // on the render thread (bounded per frame by
+         // LUMA_ASYNC_CLONE_PRESENT_BUDGET).
+         if (patched_subobjects != nullptr)
+         {
+            // Single worker thread — atomic pointer is sufficient, no mutex needed.
+            auto* queue = device_data.async_ready_queue.load(std::memory_order_relaxed);
+            if (queue == nullptr)
+            {
+               queue = new DeviceData::AsyncReadyQueue{};
+               device_data.async_ready_queue.store(queue, std::memory_order_release);
+            }
+            queue->items.push_back(DeviceData::AsyncCloneEntry{pipeline_handle, patched_subobjects, subobject_count, layout, {}, device, shader_hash, clone_origin});
+#if DEVELOPMENT
+            reshade::log::message(reshade::log::level::debug,
+               std::format("[AsyncClone] queued clone build for pipeline {:x}", pipeline_handle).c_str());
+#endif
+         }
+#elif LUMA_ASYNC_CLONE_MODE == 2
+         // Device call on the worker thread: fastest on paper,
+         // but NVIDIA driver may block on Create*Shaders
+         if (patched_subobjects != nullptr)
+         {
+            reshade::api::pipeline pipeline_clone = {};
+            const bool created = device->create_pipeline(layout, subobject_count, patched_subobjects, &pipeline_clone);
+            Shader::DestroyPipelineSubojects(patched_subobjects, subobject_count);
+
+            if (created && pipeline_clone.handle != 0)
+            {
+               auto* queue = device_data.async_ready_queue.load(std::memory_order_relaxed);
+               if (queue == nullptr)
+               {
+                  queue = new DeviceData::AsyncReadyQueue{};
+                  device_data.async_ready_queue.store(queue, std::memory_order_release);
+               }
+               queue->items.push_back(DeviceData::AsyncCloneEntry{pipeline_handle, nullptr, 0, {}, pipeline_clone, device, shader_hash, clone_origin});
+#if DEVELOPMENT
+               reshade::log::message(reshade::log::level::debug,
+                  std::format("[AsyncClone] compiled clone {:x} for pipeline {:x}", pipeline_clone.handle, pipeline_handle).c_str());
+#endif
+            }
+         }
+#endif // LUMA_ASYNC_CLONE_MODE
+      }
+   }
+
+#if LUMA_ASYNC_CLONE_MODE == 1
+   // Creates and registers pending clones at the present boundary: re-resolves
+   // each pipeline handle under s_mutex_generic (unique) and registers the
+   // clone, or drops it if the pipeline was destroyed / already cloned in the
+   // meantime. Runs strictly between frames — the live clone map never mutates
+   // mid-frame. At most LUMA_ASYNC_CLONE_PRESENT_BUDGET clones are created per
+   // present; the rest stay queued for the next frame (spreads the device
+   // work, removing the hitch from a giant one-frame batch).
+#elif LUMA_ASYNC_CLONE_MODE == 2
+   // Registers worker-built clones at the present boundary: re-resolves each
+   // pipeline handle under s_mutex_generic (unique) and registers the clone,
+   // or destroys it if the pipeline was destroyed / already cloned in the
+   // meantime. Runs strictly between frames — the live clone map never mutates
+   // mid-frame.
+#endif
+   //
+   // Drain is lock-free: atomically swap the queue pointer, then process the
+   // old queue without any mutex.  Worker publishes via atomic pointer read
+   // (single worker thread, no mutex needed).
+   std::vector<uint32_t> PublishReadyAsyncClones(DeviceData& device_data)
+   {
+      std::vector<uint32_t> published_patch_hashes;
+
+      // Lock-free drain: atomically swap in a fresh queue.
+      auto* old_queue = device_data.async_ready_queue.exchange(nullptr, std::memory_order_acq_rel);
+      if (old_queue == nullptr)
+      {
+         return published_patch_hashes;
+      }
+
+#if LUMA_ASYNC_CLONE_MODE == 1
+      // Budget-gated drain: spread device work across frames.
+      std::deque<DeviceData::AsyncCloneEntry> ready;
+      const size_t budget = std::min<size_t>(LUMA_ASYNC_CLONE_PRESENT_BUDGET, old_queue->items.size());
+      for (size_t i = 0; i < budget; ++i)
+      {
+         ready.push_back(std::move(old_queue->items.front()));
+         old_queue->items.pop_front();
+      }
+#else
+      // Full drain: all worker-compiled clones are ready.
+      std::deque<DeviceData::AsyncCloneEntry> ready;
+      ready.swap(old_queue->items);
+#endif
+
+      // Return the (possibly partially drained) queue to the pool for reuse.
+      if (!old_queue->items.empty())
+      {
+         device_data.async_ready_queue.store(old_queue, std::memory_order_release);
+      }
+      else
+      {
+         delete old_queue;
+      }
+      if (ready.empty())
+      {
+         return published_patch_hashes;
+      }
+
+      // The game recycles pipeline handles heavily (destroy + recreate at the
+      // same address), so every registration re-verifies the shader identity —
+      // otherwise the wrong shader would run (possible GPU fault under churn).
+      auto IsValidTarget = [&device_data](const DeviceData::AsyncCloneEntry& entry) -> Shader::CachedPipeline*
+      {
+         const auto pipeline_it = device_data.pipeline_cache_by_pipeline_handle.find(entry.pipeline_handle);
+         if (pipeline_it == device_data.pipeline_cache_by_pipeline_handle.end() || pipeline_it->second == nullptr || pipeline_it->second->cloned
+             || pipeline_it->second->shader_hashes[0] != entry.shader_hash
+             // A preserved patch clone still owns its object; the fresh clone would overwrite and leak it.
+             || pipeline_it->second->pipeline_clone.handle != 0)
+         {
+            return nullptr;
+         }
+         return pipeline_it->second;
+      };
+
+      // Verify before creating/registering (unique lock), then create outside
+      // the lock: device calls must not happen while holding s_mutex_generic
+      // (same pattern as the destroy path).
+      std::vector<std::pair<DeviceData::AsyncCloneEntry, Shader::CachedPipeline*>> verified;
+      {
+         const std::unique_lock lock_generic(s_mutex_generic);
+         for (const auto& entry : ready)
+         {
+            if (Shader::CachedPipeline* cached_pipeline = IsValidTarget(entry); cached_pipeline != nullptr)
+            {
+               verified.emplace_back(entry, cached_pipeline);
+            }
+         }
+      }
+
+#if LUMA_ASYNC_CLONE_MODE == 1
+      // Create pipelines from subobjects on the render thread.
+      std::vector<std::pair<reshade::api::pipeline, std::pair<DeviceData::AsyncCloneEntry, Shader::CachedPipeline*>>> created;
+      for (const auto& v : verified)
+      {
+         const DeviceData::AsyncCloneEntry& entry = v.first;
+         reshade::api::pipeline pipeline_clone = {};
+         if (entry.device->create_pipeline(entry.layout, entry.subobject_count, entry.subobjects, &pipeline_clone))
+         {
+            created.emplace_back(pipeline_clone, v);
+         }
+      }
+#else
+      // Mode 2: pipelines already compiled by worker — just collect them.
+      std::vector<std::pair<reshade::api::pipeline, std::pair<DeviceData::AsyncCloneEntry, Shader::CachedPipeline*>>> created;
+      for (const auto& v : verified)
+      {
+         created.emplace_back(v.first.pipeline_clone, v);
+      }
+#endif
+
+#if LUMA_PATCH_PROVIDERS != 0
+      std::unordered_set<uint32_t> published_set;
+#endif
+      std::vector<std::pair<reshade::api::device*, reshade::api::pipeline>> orphans;
+      {
+         const std::unique_lock lock_generic(s_mutex_generic);
+         for (const auto& [clone, v] : created)
+         {
+            const DeviceData::AsyncCloneEntry& entry = v.first;
+            // The pipeline may have been destroyed/recycled since the verify
+            // above — re-check before registering.
+            const auto pipeline_it = device_data.pipeline_cache_by_pipeline_handle.find(entry.pipeline_handle);
+            if (pipeline_it == device_data.pipeline_cache_by_pipeline_handle.end() || pipeline_it->second != v.second
+                || pipeline_it->second->cloned || pipeline_it->second->shader_hashes[0] != entry.shader_hash
+                || pipeline_it->second->pipeline_clone.handle != 0)
+            {
+               orphans.emplace_back(entry.device, clone);
+               continue;
+            }
+            CachedPipeline* cached_pipeline = pipeline_it->second;
+            cached_pipeline->pipeline_clone = clone;
+            cached_pipeline->cloned = true;
+            cached_pipeline->patch_application_mode = Shader::PatchApplicationMode::Async;
+            cached_pipeline->clone_origin = entry.clone_origin;
+            device_data.pipeline_cache_by_pipeline_clone_handle[clone.handle] = cached_pipeline;
+
+#if LUMA_PATCH_PROVIDERS != 0
+            if (entry.clone_origin == Shader::CloneOrigin::Patch)
+            {
+               if (published_set.emplace(entry.shader_hash).second)
+               {
+                  published_patch_hashes.push_back(entry.shader_hash);
+               }
+               const uint32_t shader_hash = cached_pipeline->shader_hashes[0];
+#if LUMA_PATCH_PROVIDERS != 0
+               if (auto patched = device_data.patch_context.GetShaderData(shader_hash); patched)
+               {
+                  if (auto it = shader_cache.find(shader_hash); it != shader_cache.end() && it->second)
+                  {
+#if DEVELOPMENT
+                     SetLivePatchedShaderInfo(it->second, shader_hash, patched->code.data(), static_cast<uint32_t>(patched->code.size()));
+#endif
+#if ALLOW_SHADER_PATCHES_DUMPING
+                     QueuePatchedShaderForDump(shader_hash);
+#endif
+                  }
+               }
+#endif
+            }
+#endif
+            device_data.cloned_pipeline_count++;
+            device_data.cloned_pipelines_changed = true;
+#if DEVELOPMENT
+            reshade::log::message(reshade::log::level::debug,
+               std::format("[AsyncClone] published clone {:x} for pipeline {:x}", clone.handle, entry.pipeline_handle).c_str());
+#endif
+         }
+      }
+
+#if LUMA_ASYNC_CLONE_MODE == 1
+      // Free the worker's subobject copies (whether created or not).
+      for (const auto& entry : ready)
+      {
+         Shader::DestroyPipelineSubojects(entry.subobjects, entry.subobject_count);
+      }
+#endif
+
+      // Device calls must not happen while holding s_mutex_generic (same
+      // pattern as the destroy path).
+      for (const auto& [device, clone] : orphans)
+      {
+         device->destroy_pipeline(clone);
+      }
+
+      return published_patch_hashes;
+   }
+
    void AutoLoadShaders(DeviceData* device_data)
    {
-      // Copy the "pipelines_to_reload_copy" so we don't have to lock "s_mutex_loading" all the times
-      std::unordered_set<uint64_t> pipelines_to_reload_copy;
+      uint64_t last_processed_version = 0;
+      for (;;)
       {
-         const std::unique_lock lock_loading(s_mutex_loading);
-         if (device_data->pipelines_to_reload.empty())
          {
-            device_data->thread_auto_loading_running = false;
-            return;
+            std::unique_lock lock_jobs(device_data->async_jobs_mutex);
+            device_data->async_jobs_cv.wait(lock_jobs, [&] {
+               return device_data->async_shutdown || device_data->async_queue_version != last_processed_version;
+            });
+            if (device_data->async_shutdown)
+            {
+               break; // Device is going away — never touch it again
+            }
+            last_processed_version = device_data->async_queue_version;
          }
-         pipelines_to_reload_copy = device_data->pipelines_to_reload;
-         device_data->pipelines_to_reload.clear();
-      }
-      if (pipelines_to_reload_copy.size() > 0)
-      {
-         LoadCustomShaders(*device_data, pipelines_to_reload_copy, !precompile_custom_shaders);
+
+         std::unordered_set<uint64_t> pipelines_to_reload_copy;
+         {
+            const std::unique_lock lock_loading(s_mutex_loading);
+            if (device_data->pipelines_to_reload.empty())
+            {
+               continue;
+            }
+            pipelines_to_reload_copy = std::move(device_data->pipelines_to_reload);
+         }
+
+#if DEVELOPMENT
+         reshade::log::message(reshade::log::level::debug, std::format("[Patch] AutoLoadShaders processing {} pipelines", pipelines_to_reload_copy.size()).c_str());
+#endif
+         if (!pipelines_to_reload_copy.empty())
+         {
+#if LUMA_PATCH_PROVIDERS & (LUMA_PATCH_PROVIDER_BYTECODE_ASYNC | LUMA_PATCH_PROVIDER_RECIPE_ASYNC)
+            GeneratePatchedShadersAsync(*device_data, pipelines_to_reload_copy);
+#endif
+            ProcessAsyncCloneBatch(*device_data, pipelines_to_reload_copy);
+         }
       }
       device_data->thread_auto_loading_running = false;
    }
+#endif // LUMA_PATCH_PROVIDERS & (LUMA_PATCH_PROVIDER_BYTECODE_ASYNC | LUMA_PATCH_PROVIDER_RECIPE_ASYNC)
 
 #pragma optimize("t", on) // Temporarily override optimization, this function is too slow in debug otherwise (comment this out if ever needed)
 
@@ -9613,7 +10872,7 @@ namespace
 #endif // DEVELOPMENT
 
 #if DEVELOPMENT || TEST
-      if (ImGui::Button(std::format("Unload Shaders ({})", device_data.cloned_pipeline_count).c_str())) // TODO: show number of custom+native loaded shaders instead of the number of pipelines we currently cloned? Games like Lego City Undercover re-compile the same shader many many times
+      if (ImGui::Button(std::format("Unload Shaders ({})", CountFileClones(device_data)).c_str())) // File clones only; patches have their own "Unload Patches" button
       {
          needs_unload_shaders = true;
          last_pressed_unload = true;
@@ -9635,6 +10894,7 @@ namespace
       {
          ImGui::SetTooltip("Unload all compiled and replaced shaders. The numbers shows how many shaders are being replaced at this moment in the game, from the custom loaded/compiled ones.\nThis will also reset many of their debug settings to default.\nYou can use ReShade's Global Effects Toggle Shortcut to toggle these on and off.");
       }
+
       ImGui::SameLine();
 #endif // DEVELOPMENT || TEST
 
@@ -9695,6 +10955,30 @@ namespace
       ImGui::EndDisabled();
 #endif
 #if DEVELOPMENT || TEST
+#if LUMA_PATCH_PROVIDERS != 0
+      // Patch-specific unload/reload: patches are preserved on unload (bytes never
+      // change at runtime), so reload is instant.
+      ImGui::SameLine();
+      if (ImGui::Button(std::format("Unload Patches ({})", CountPatchedClones(device_data)).c_str()))
+      {
+         needs_unload_patches = true;
+      }
+      if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
+      {
+         ImGui::SetTooltip("Unload only the patched shaders (custom shader files are untouched).\nPatch clones are preserved, not destroyed: 'Reload Patches' re-enables them instantly.\nPer-draw patch toggles (UseShaderVariant) no-op while unloaded.");
+      }
+
+      ImGui::SameLine();
+      if (ImGui::Button("Reload Patches"))
+      {
+         needs_load_patches = true;
+      }
+      if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
+      {
+         ImGui::SetTooltip("Re-enables the unloaded patches (re-registers the preserved clones and re-clones any destroyed by a full 'Unload Shaders').");
+      }
+#endif // LUMA_PATCH_PROVIDERS != 0
+
       ImGui::SameLine();
       if (ImGui::Button("Clean Shaders Cache"))
       {
@@ -9716,12 +11000,13 @@ namespace
       ImGui::PushID("##AutoLoadCheckBox");
       if (ImGui::Checkbox("Auto Load Shaders", &auto_load))
       {
-         if (!auto_load && device_data.thread_auto_loading.joinable())
-         {
-            device_data.thread_auto_loading.join();
-         }
+         // The persistent async worker stays alive (it just has nothing to
+         // do); only the queue is cleared so it stops processing.
          const std::unique_lock lock(s_mutex_loading);
          device_data.pipelines_to_reload.clear();
+#if LUMA_PATCH_PROVIDERS & (LUMA_PATCH_PROVIDER_BYTECODE_ASYNC | LUMA_PATCH_PROVIDER_RECIPE_ASYNC)
+         NotifyAsyncCloneQueue(device_data);
+#endif
       }
       if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
       {
@@ -9736,6 +11021,14 @@ namespace
       {
          ImGui::SetTooltip("Toggles all the mods custom shaders from applying (without unloading them).\nNote that this might break rendering, only use for testing or vanilla comparison.");
       }
+#if LUMA_PATCH_PROVIDERS != 0
+      ImGui::SameLine();
+      ImGui::Checkbox("Allow Patches", &allow_patches);
+      if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
+      {
+         ImGui::SetTooltip("Toggles all patched shaders from applying (without unloading them): bind-time swaps and per-draw toggles are disabled.\nCustom shader files are unaffected.");
+      }
+#endif // LUMA_PATCH_PROVIDERS != 0
 #endif // DEVELOPMENT || TEST
 #if DEVELOPMENT
       ImGui::SameLine();
@@ -9764,10 +11057,13 @@ namespace
          if (ImGui::Button("Force Dump Shaders"))
          {
             const std::lock_guard<std::recursive_mutex> lock_dumping(s_mutex_dumping);
-            // Force dump everything here
+            // Force dump everything here (skip patched shaders — handled by PatchedDump)
             for (auto shader : shader_cache)
             {
-               DumpShader(shader.first);
+               if (!patched_shaders_to_dump.contains(shader.first))
+               {
+                  DumpShader(shader.first);
+               }
             }
             shaders_to_dump.clear();
          }
@@ -10068,24 +11364,40 @@ namespace
                            }
 
                            // DX11 specific code
-                           bool live_patched = false;
-                           {
-                              const std::lock_guard<std::recursive_mutex> lock_dumping(s_mutex_dumping);
-                              const auto cached_shader = !pipeline->shader_hashes.empty() ? shader_cache[pipeline->shader_hashes[0]] : nullptr;
-                              live_patched = cached_shader ? cached_shader->live_patched_data : false;
-                           }
                            const std::shared_lock lock_loading(s_mutex_loading);
                            const auto custom_shader = !pipeline->shader_hashes.empty() ? custom_shaders_cache[pipeline->shader_hashes[0]] : nullptr;
 
-                           if (live_patched)
+                           // Clone provenance comes from CloneOrigin (recorded at
+                           // clone creation), not cache lookups or
+                           // patch_application_mode (also stamped on file clones).
+                           const bool is_custom_shader_clone = pipeline->cloned && pipeline->clone_origin == Shader::CloneOrigin::File;
+                           const bool is_patch_clone = pipeline->cloned && pipeline->clone_origin == Shader::CloneOrigin::Patch;
+                           const bool is_replaced_shader_clone = is_custom_shader_clone || is_patch_clone;
+
+                           // Markers: "*" = custom-shader file clone, "#" =
+                           // in-place sync, "#S" = sync clone, "#A" = async
+                           // clone.
+                           if (is_custom_shader_clone)
+                           {
+                              name << "*";
+                           }
+                           else if (pipeline->patch_application_mode == Shader::PatchApplicationMode::Inplace)
                            {
                               name << "#";
                            }
-                           // Find if the shader has been modified
-                           if (pipeline->cloned)
+                           else if (pipeline->cloned && pipeline->patch_application_mode == Shader::PatchApplicationMode::Sync)
                            {
-                              name << "*";
+                              name << "#S";
+                           }
+                           else if (pipeline->cloned && pipeline->patch_application_mode == Shader::PatchApplicationMode::Async)
+                           {
+                              name << "#A";
+                           }
 
+                           // Find if the shader has been modified
+
+                           if (is_replaced_shader_clone)
+                           {
                               if (pipeline->HasVertexShader())
                               {
                                  text_color = IM_COL32(128, 255, 0, 255); // Yellow + Green
@@ -10101,7 +11413,7 @@ namespace
                            }
                            // Texture upgrades symbols
                            constexpr bool targets_swapchain = false; // TODO: implement
-                           if (draw_call_data.any_input_resources_format_upgraded || draw_call_data.any_output_resources_format_upgraded || targets_swapchain)
+                           if (draw_call_data.any_input_resources_format_upgraded || draw_call_data.any_output_resources_format_upgraded || draw_call_data.any_input_resources_scaled || draw_call_data.any_output_resources_scaled || targets_swapchain)
                            {
                               name << " ";
                            }
@@ -10113,6 +11425,14 @@ namespace
                            {
                               name << "v";
                            }
+                           if (draw_call_data.any_input_resources_scaled)
+                           {
+                              name << "~^";
+                           }
+                           if (draw_call_data.any_output_resources_scaled)
+                           {
+                              name << "~v";
+                           }
                            if (targets_swapchain)
                            {
                               name << "°";
@@ -10122,7 +11442,7 @@ namespace
                            {
                               name << " - " << pipeline->custom_name.c_str(); // Add c string otherwise it will append a billion null terminators
                            }
-                           else if (pipeline->cloned)
+                           else if (is_custom_shader_clone)
                            {
                               // For now just force picking the first shader linked to the pipeline, there should always only be one (?)
                               if (custom_shader != nullptr && custom_shader->is_hlsl && !custom_shader->file_path.empty())
@@ -10529,6 +11849,7 @@ namespace
                                     UnloadCustomShaders(device_data, { pipeline_handle }, false);
                                     s_mutex_generic.lock();
                                  }
+
                                  if (ImGui::Button(pipeline_pair->second->cloned ? "Recompile" : "Load"))
                                  {
                                     reload = true;
@@ -10951,7 +12272,7 @@ namespace
                                           {
                                              const std::shared_lock lock(device_data.mutex);
                                              // TODO: store this information in the trace list, it might expire otherwise, or even be incorrect if ptrs were re-used. Also this info isn't shown if we use indirect texture upgrades.
-                                             for (auto upgraded_resource_pair : device_data.original_upgraded_resources_formats)
+                                             for (auto upgraded_resource_pair : device_data.resource_upgrades.original_upgraded_resources_formats)
                                              {
                                                 void* upgraded_resource_ptr = reinterpret_cast<void*>(upgraded_resource_pair.first);
                                                 if (sr_hash == std::to_string(std::hash<void*>{}(upgraded_resource_ptr)))
@@ -10960,7 +12281,7 @@ namespace
 
                                                    ImGui::Text("R Original Format: %s", GetFormatName(DXGI_FORMAT(upgraded_resource_pair.second)));
 
-                                                   if (const auto it = device_data.original_upgraded_resource_views_formats.find(reinterpret_cast<uint64_t>(draw_call_data.srvs[i])); it != device_data.original_upgraded_resource_views_formats.end())
+                                                   if (const auto it = device_data.resource_upgrades.original_upgraded_resource_views_formats.find(reinterpret_cast<uint64_t>(draw_call_data.srvs[i])); it != device_data.resource_upgrades.original_upgraded_resource_views_formats.end())
                                                    {
                                                       const auto& [native_resource, original_view_format] = it->second;
                                                       ASSERT_ONCE(native_resource == upgraded_resource_pair.first); // Uh!?
@@ -10987,7 +12308,7 @@ namespace
                                                    break;
                                                 }
                                              }
-                                             for (auto upgraded_resource_pair : device_data.original_resources_to_mirrored_upgraded_resources)
+                                             for (auto upgraded_resource_pair : device_data.resource_upgrades.original_resources_to_mirrored_upgraded_resources)
                                              {
                                                 void* upgraded_resource_ptr = reinterpret_cast<void*>(upgraded_resource_pair.first);
                                                 if (sr_hash == std::to_string(std::hash<void*>{}(upgraded_resource_ptr)))
@@ -11083,7 +12404,7 @@ namespace
                                           bool upgraded = false;
                                           {
                                              const std::shared_lock lock(device_data.mutex);
-                                             for (auto upgraded_resource_pair : device_data.original_upgraded_resources_formats)
+                                             for (auto upgraded_resource_pair : device_data.resource_upgrades.original_upgraded_resources_formats)
                                              {
                                                 void* upgraded_resource_ptr = reinterpret_cast<void*>(upgraded_resource_pair.first);
                                                 if (ua_hash == std::to_string(std::hash<void*>{}(upgraded_resource_ptr)))
@@ -11092,7 +12413,7 @@ namespace
 
                                                    ImGui::Text("R Original Format: %s", GetFormatName(DXGI_FORMAT(upgraded_resource_pair.second)));
 
-                                                   if (const auto it = device_data.original_upgraded_resource_views_formats.find(reinterpret_cast<uint64_t>(draw_call_data.uavs[i])); it != device_data.original_upgraded_resource_views_formats.end())
+                                                   if (const auto it = device_data.resource_upgrades.original_upgraded_resource_views_formats.find(reinterpret_cast<uint64_t>(draw_call_data.uavs[i])); it != device_data.resource_upgrades.original_upgraded_resource_views_formats.end())
                                                    {
                                                       const auto& [native_resource, original_view_format] = it->second;
                                                       ASSERT_ONCE(native_resource == upgraded_resource_pair.first); // Uh!?
@@ -11112,7 +12433,7 @@ namespace
                                                    break;
                                                 }
                                              }
-                                             for (auto upgraded_resource_pair : device_data.original_resources_to_mirrored_upgraded_resources)
+                                             for (auto upgraded_resource_pair : device_data.resource_upgrades.original_resources_to_mirrored_upgraded_resources)
                                              {
                                                 void* upgraded_resource_ptr = reinterpret_cast<void*>(upgraded_resource_pair.first);
                                                 if (ua_hash == std::to_string(std::hash<void*>{}(upgraded_resource_ptr)))
@@ -11132,7 +12453,7 @@ namespace
 
                                           if (!upgraded && texture_format_upgrades_type == TextureFormatUpgradesType::AllowedEnabled && ImGui::Button("Indirect Upgrade Resource Format (By Shader)"))
                                           {
-                                             auto_texture_format_upgrade_shader_hashes[pipeline_pair->second->shader_hashes[0]] = std::pair{ std::vector<uint8_t>(), std::vector<uint8_t>{ uint8_t(i) } }; // DX11 logic
+                                             auto_texture_format_upgrade_shader_hashes[pipeline_pair->second->shader_hashes[0]] = AutoTextureFormatUpgradeShaderHash{ std::vector<uint8_t>(), std::vector<uint8_t>{ uint8_t(i) }, false }; // DX11 logic
                                           }
 
                                           if (debug_draw_shader_enabled && (debug_draw_mode != DebugDrawMode::UnorderedAccessView || debug_draw_view_index != i) && ImGui::Button("Debug Draw Resource"))
@@ -11244,7 +12565,7 @@ namespace
                                           {
                                              const std::shared_lock lock(device_data.mutex);
                                              // TODO: this is missing the "R is UAV" print
-                                             for (auto upgraded_resource_pair : device_data.original_upgraded_resources_formats)
+                                             for (auto upgraded_resource_pair : device_data.resource_upgrades.original_upgraded_resources_formats)
                                              {
                                                 void* upgraded_resource_ptr = reinterpret_cast<void*>(upgraded_resource_pair.first);
                                                 if (rt_hash == std::to_string(std::hash<void*>{}(upgraded_resource_ptr)))
@@ -11254,7 +12575,7 @@ namespace
                                                    ImGui::Text("R Original Format: %s", GetFormatName(DXGI_FORMAT(upgraded_resource_pair.second)));
 
                                                    // TODO: why does this flicker on and off in Deux Ex HR when it writes on the swapchain for material draws?
-                                                   if (const auto it = device_data.original_upgraded_resource_views_formats.find(reinterpret_cast<uint64_t>(draw_call_data.rtvs[i])); it != device_data.original_upgraded_resource_views_formats.end())
+                                                   if (const auto it = device_data.resource_upgrades.original_upgraded_resource_views_formats.find(reinterpret_cast<uint64_t>(draw_call_data.rtvs[i])); it != device_data.resource_upgrades.original_upgraded_resource_views_formats.end())
                                                    {
                                                       const auto& [native_resource, original_view_format] = it->second;
                                                       ASSERT_ONCE(native_resource == upgraded_resource_pair.first); // Uh!?
@@ -11274,7 +12595,7 @@ namespace
                                                    break;
                                                 }
                                              }
-                                             for (auto upgraded_resource_pair : device_data.original_resources_to_mirrored_upgraded_resources)
+                                             for (auto upgraded_resource_pair : device_data.resource_upgrades.original_resources_to_mirrored_upgraded_resources)
                                              {
                                                 void* upgraded_resource_ptr = reinterpret_cast<void*>(upgraded_resource_pair.first);
                                                 if (rt_hash == std::to_string(std::hash<void*>{}(upgraded_resource_ptr)))
@@ -11524,7 +12845,7 @@ namespace
 
                                           if (!upgraded && texture_format_upgrades_type == TextureFormatUpgradesType::AllowedEnabled && ImGui::Button("Indirect Upgrade Resource Format (By Shader)"))
                                           {
-                                             auto_texture_format_upgrade_shader_hashes[pipeline_pair->second->shader_hashes[0]] = std::pair{ std::vector<uint8_t>{ uint8_t(i) }, std::vector<uint8_t>() }; // DX11 logic
+                                             auto_texture_format_upgrade_shader_hashes[pipeline_pair->second->shader_hashes[0]] = AutoTextureFormatUpgradeShaderHash{ std::vector<uint8_t>{ uint8_t(i) }, std::vector<uint8_t>(), false }; // DX11 logic
                                           }
 
                                           if (debug_draw_shader_enabled && (debug_draw_mode != DebugDrawMode::RenderTarget || debug_draw_view_index != i) && ImGui::Button("Debug Draw Resource"))
@@ -11616,7 +12937,7 @@ namespace
                                           ImGui::Text("R Size: %ux%u", draw_call_data.ds_size.x, draw_call_data.ds_size.y); // Should match all the Render Targets size
                                           {
                                              const std::shared_lock lock(device_data.mutex);
-                                             for (uint64_t upgraded_resource : device_data.upgraded_resources)
+                                             for (uint64_t upgraded_resource : device_data.resource_upgrades.upgraded_resources)
                                              {
                                                 void* upgraded_resource_ptr = reinterpret_cast<void*>(upgraded_resource);
                                                 if (draw_call_data.ds_hash == std::to_string(std::hash<void*>{}(upgraded_resource_ptr)))
@@ -11625,7 +12946,7 @@ namespace
                                                    break;
                                                 }
                                              }
-                                             for (auto upgraded_resource_pair : device_data.original_resources_to_mirrored_upgraded_resources)
+                                             for (auto upgraded_resource_pair : device_data.resource_upgrades.original_resources_to_mirrored_upgraded_resources)
                                              {
                                                 void* upgraded_resource_ptr = reinterpret_cast<void*>(upgraded_resource_pair.first);
                                                 if (draw_call_data.ds_hash == std::to_string(std::hash<void*>{}(upgraded_resource_ptr)))
@@ -11749,7 +13070,7 @@ namespace
                                        ImGui::Text("Source R Format: %s", GetFormatName(sr_format));
                                     }
                                     ImGui::Text("Source R Size: %ux%ux%ux%u", sr_size.x, sr_size.y, sr_size.z, sr_size.w);
-                                    for (uint64_t upgraded_resource : device_data.upgraded_resources)
+                                    for (uint64_t upgraded_resource : device_data.resource_upgrades.upgraded_resources)
                                     {
                                        void* upgraded_resource_ptr = reinterpret_cast<void*>(upgraded_resource);
                                        if (sr_hash == std::to_string(std::hash<void*>{}(upgraded_resource_ptr)))
@@ -11759,7 +13080,7 @@ namespace
                                           break;
                                        }
                                     }
-                                    for (auto upgraded_resource_pair : device_data.original_resources_to_mirrored_upgraded_resources)
+                                    for (auto upgraded_resource_pair : device_data.resource_upgrades.original_resources_to_mirrored_upgraded_resources)
                                     {
                                        void* upgraded_resource_ptr = reinterpret_cast<void*>(upgraded_resource_pair.first);
                                        if (sr_hash == std::to_string(std::hash<void*>{}(upgraded_resource_ptr)))
@@ -11799,7 +13120,7 @@ namespace
                                        ImGui::Text("Target R Format: %u", rt_format);
                                     }
                                     ImGui::Text("Target R Size: %ux%ux%ux%u", rt_size.x, rt_size.y, rt_size.z, rt_size.w);
-                                    for (uint64_t upgraded_resource : device_data.upgraded_resources)
+                                    for (uint64_t upgraded_resource : device_data.resource_upgrades.upgraded_resources)
                                     {
                                        void* upgraded_resource_ptr = reinterpret_cast<void*>(upgraded_resource);
                                        if (rt_hash == std::to_string(std::hash<void*>{}(upgraded_resource_ptr)))
@@ -11808,7 +13129,7 @@ namespace
                                           break;
                                        }
                                     }
-                                    for (auto upgraded_resource_pair : device_data.original_resources_to_mirrored_upgraded_resources)
+                                    for (auto upgraded_resource_pair : device_data.resource_upgrades.original_resources_to_mirrored_upgraded_resources)
                                     {
                                        void* upgraded_resource_ptr = reinterpret_cast<void*>(upgraded_resource_pair.first);
                                        if (rt_hash == std::to_string(std::hash<void*>{}(upgraded_resource_ptr)))
@@ -12361,10 +13682,10 @@ namespace
                   const std::shared_lock lock(device_data.mutex); // Note: this is probably not 100% safe, as we don't keep the resources as a com ptr, DX might destroy them as we iterate the array, but this is debug code so, whatever!
 
                   // TODO: add all resources (textures), including non upgraded ones, swapchain (we couldn't draw debug that one!) etc
-                  std::unordered_set<uint64_t> upgraded_resources = device_data.upgraded_resources;
-                  for (const auto& original_resource_to_mirrored_upgraded_resource : device_data.original_resources_to_mirrored_upgraded_resources)
+                  std::unordered_set<uint64_t> upgraded_resources = device_data.resource_upgrades.upgraded_resources;
+                  for (const auto& original_resource_to_mirrored_upgraded_resource : device_data.resource_upgrades.original_resources_to_mirrored_upgraded_resources)
                   {
-                     upgraded_resources.insert(original_resource_to_mirrored_upgraded_resource.second);
+                     upgraded_resources.insert(original_resource_to_mirrored_upgraded_resource.second.mirror_handle);
                   }
                   // Add swapchain buffers too!
                   for (const auto& back_buffer : device_data.back_buffers)
@@ -12387,7 +13708,7 @@ namespace
                      auto text_color = IM_COL32(255, 255, 255, 255); // White
 
                      bool swapchain = device_data.back_buffers.contains(upgraded_resource);
-                     bool direct_upgraded = device_data.upgraded_resources.contains(upgraded_resource) || swapchain;
+                     bool direct_upgraded = device_data.resource_upgrades.upgraded_resources.contains(upgraded_resource) || swapchain;
                      if (swapchain)
                      {
                         text_color = IM_COL32(0, 0, 255, 255); // Blue
@@ -12405,9 +13726,9 @@ namespace
                      std::string name = hash;
 
                      // Redirect the hash
-                     for (const auto& original_resource_to_mirrored_upgraded_resource : device_data.original_resources_to_mirrored_upgraded_resources)
+                     for (const auto& original_resource_to_mirrored_upgraded_resource : device_data.resource_upgrades.original_resources_to_mirrored_upgraded_resources)
                      {
-                        if (original_resource_to_mirrored_upgraded_resource.second == uint64_t(selected_resource.get()))
+                        if (original_resource_to_mirrored_upgraded_resource.second.mirror_handle == uint64_t(selected_resource.get()))
                         {
                            hash = std::to_string(std::hash<void*>{}((void*)original_resource_to_mirrored_upgraded_resource.first));
                            break;
@@ -12428,6 +13749,18 @@ namespace
                      {
                         name = debug_name.value();
                      }
+
+                     bool is_scaled = false;
+                     for (const auto& original_resource_to_mirrored_upgraded_resource : device_data.resource_upgrades.original_resources_to_mirrored_upgraded_resources)
+                     {
+                        if (original_resource_to_mirrored_upgraded_resource.second.mirror_handle == upgraded_resource && original_resource_to_mirrored_upgraded_resource.second.is_scaled)
+                        {
+                           is_scaled = true;
+                           break;
+                        }
+                     }
+                     if (is_scaled)
+                        name += " ~";
 
                      if (ImGui::Selectable(name.c_str(), is_selected))
                      {
@@ -12462,6 +13795,11 @@ namespace
 
                   bool swapchain = false;
                   bool indirect_upgrade = false;
+                  bool indirect_scaled = false;
+                  uint32_t original_width = 0;
+                  uint32_t original_height = 0;
+                  uint32_t mirror_width = 0;
+                  uint32_t mirror_height = 0;
 
                   // Replace the hash with the original one if this is an indirect upgrade
                   {
@@ -12470,15 +13808,20 @@ namespace
                      swapchain = device_data.back_buffers.contains(uint64_t(selected_resource.get()));
 
                      // Redirect the hash to the indirect texture
-                     for (const auto& original_resource_to_mirrored_upgraded_resource : device_data.original_resources_to_mirrored_upgraded_resources)
+                     for (const auto& original_resource_to_mirrored_upgraded_resource : device_data.resource_upgrades.original_resources_to_mirrored_upgraded_resources)
                      {
-                        if (original_resource_to_mirrored_upgraded_resource.second == uint64_t(selected_resource.get()))
+                        if (original_resource_to_mirrored_upgraded_resource.second.mirror_handle == uint64_t(selected_resource.get()))
                         {
                            lock.unlock();
 
                            hash = std::to_string(std::hash<void*>{}((void*)original_resource_to_mirrored_upgraded_resource.first));
                            ImGui::Text("Original Hash: %s", hash.c_str());
                            indirect_upgrade = true;
+                           indirect_scaled = original_resource_to_mirrored_upgraded_resource.second.is_scaled;
+                           original_width = original_resource_to_mirrored_upgraded_resource.second.original_width;
+                           original_height = original_resource_to_mirrored_upgraded_resource.second.original_height;
+                           mirror_width = original_resource_to_mirrored_upgraded_resource.second.mirror_width;
+                           mirror_height = original_resource_to_mirrored_upgraded_resource.second.mirror_height;
 
                            break;
                         }
@@ -12492,7 +13835,18 @@ namespace
                   }
 
                   // If it's here, it's always upgraded for now
-                  ImGui::Text("Upgrade Type: %s", indirect_upgrade ? "Indirect" : "Direct");
+                  if (indirect_upgrade)
+                  {
+                     ImGui::Text("Upgrade Type: Indirect%s", indirect_scaled ? " (Scaled)" : "");
+                  }
+                  else
+                  {
+                     ImGui::Text("Upgrade Type: Direct");
+                  }
+                  if (indirect_scaled)
+                  {
+                     ImGui::Text("Scaled Size: %ux%u -> %ux%u", original_width, original_height, mirror_width, mirror_height);
+                  }
 
                   bool debug_draw_resource_enabled = device_data.debug_draw_texture == selected_resource;
                   UINT extra_refs = 1; // Our current local ref.
@@ -12711,7 +14065,7 @@ namespace
                   ImVec2 size = ImGui::CalcTextSize(ICON_FK_UNDO);
                   size.x += style.FramePadding.x;
                   size.y += style.FramePadding.y;
-                  ImGui::InvisibleButton("", ImVec2(size.x, size.y));
+                  ImGui::InvisibleButton("##Super Resolution reset placeholder", ImVec2(size.x, size.y));
                }
 
                const char* selected_dlss_preset = nullptr;
@@ -13857,17 +15211,18 @@ namespace
                      
                      // TODO: add a button to also re-create all of them live (we'd need some sort of tracking for that, or to temporarily white list all PS/CS shaders to automatically upgrade textures, or actually, we can just read the source texture and re-upgrade it if we keep them in the list)
                      std::unordered_map<uint64_t, uint64_t> original_resource_views_to_mirrored_upgraded_resource_views;
-                     std::unordered_map<uint64_t, uint64_t> original_resources_to_mirrored_upgraded_resources;
+                     std::unordered_map<uint64_t, ResourceUpgradeManager::IndirectUpgradedResource> original_resources_to_mirrored_upgraded_resources;
                      std::shared_lock lock_device_read(device_data.mutex);
-                     if (!device_data.original_resources_to_mirrored_upgraded_resources.empty() && ImGui::Button("Clear Indirect Upgraded Textures"))
+                     if (!device_data.resource_upgrades.original_resources_to_mirrored_upgraded_resources.empty() && ImGui::Button("Clear Indirect Upgraded Textures"))
                      {
                         lock_device_read.unlock();
                         {
                            std::unique_lock lock_device_write(device_data.mutex);
-                           original_resource_views_to_mirrored_upgraded_resource_views = device_data.original_resource_views_to_mirrored_upgraded_resource_views;
-                           original_resources_to_mirrored_upgraded_resources = device_data.original_resources_to_mirrored_upgraded_resources;
-                           device_data.original_resource_views_to_mirrored_upgraded_resource_views.clear();
-                           device_data.original_resources_to_mirrored_upgraded_resources.clear();
+                           original_resource_views_to_mirrored_upgraded_resource_views = device_data.resource_upgrades.original_resource_views_to_mirrored_upgraded_resource_views;
+                           original_resources_to_mirrored_upgraded_resources = device_data.resource_upgrades.original_resources_to_mirrored_upgraded_resources;
+                           device_data.resource_upgrades.original_resource_views_to_mirrored_upgraded_resource_views.clear();
+                           device_data.resource_upgrades.original_resources_to_mirrored_upgraded_resources.clear();
+                           device_data.resource_upgrades.mirror_views_by_mirror_resource.clear();
                         }
                         for (const auto& original_resource_view_to_mirrored_upgraded_resource_view : original_resource_views_to_mirrored_upgraded_resource_views)
                         {
@@ -13875,13 +15230,13 @@ namespace
                         }
                         for (const auto& original_resource_to_mirrored_upgraded_resource : original_resources_to_mirrored_upgraded_resources)
                         {
-                           runtime->get_device()->destroy_resource({ original_resource_to_mirrored_upgraded_resource.second });
+                           runtime->get_device()->destroy_resource({ original_resource_to_mirrored_upgraded_resource.second.mirror_handle });
                         }
                      }
                      // Make sure there's no views if there's no textures, something would be wrong otherwise
-                     else if (device_data.original_resources_to_mirrored_upgraded_resources.empty())
+                     else if (device_data.resource_upgrades.original_resources_to_mirrored_upgraded_resources.empty())
                      {
-                        ASSERT_ONCE(device_data.original_resource_views_to_mirrored_upgraded_resource_views.empty());
+                        ASSERT_ONCE(device_data.resource_upgrades.original_resource_views_to_mirrored_upgraded_resource_views.empty());
                      }
                   }
                }
@@ -14440,11 +15795,11 @@ namespace
 
 #if !GRAPHICS_ANALYZER
                ImGui::Text("Direct Upgraded Textures: ", "");
-               text = std::to_string((int)device_data.upgraded_resources.size());
+               text = std::to_string((int)device_data.resource_upgrades.upgraded_resources.size());
                ImGui::Text(text.c_str(), "");
 
                ImGui::Text("Indirect Upgraded Textures: ", "");
-               text = std::to_string((int)device_data.original_resources_to_mirrored_upgraded_resources.size());
+               text = std::to_string((int)device_data.resource_upgrades.original_resources_to_mirrored_upgraded_resources.size());
                ImGui::Text(text.c_str(), "");
 
                ImGui::NewLine();
@@ -14503,6 +15858,7 @@ namespace
          }
 #endif // DEVELOPMENT || TEST
 
+#if !GRAPHICS_ANALYZER
          if (ImGui::BeginTabItem("About"))
          {
             game->PrintImGuiAbout();
@@ -14528,6 +15884,7 @@ namespace
 
             ImGui::EndTabItem(); // About
          }
+#endif // !GRAPHICS_ANALYZER
 
          ImGui::EndTabBar(); // TabBar
       }
@@ -14693,7 +16050,6 @@ void Init(bool async)
    }
 
    shaders_path = GetShadersRootPath(); // Needs to be done after "custom_shaders_path" was set
-
    // Delete old shaders from previous version
 #if DEVELOPMENT && defined(SOLUTION_DIR) && (!defined(REMOTE_BUILD) || !REMOTE_BUILD)
    // Development shader folder would always be up to date
@@ -14864,6 +16220,12 @@ void Uninit()
       {
          if (global_device_data->thread_auto_loading.joinable())
          {
+            // Signal the async worker shutdown before joining (see OnInitDevice).
+            // The atomic write needs no mutex (see DeviceData::async_shutdown).
+#if LUMA_PATCH_PROVIDERS & (LUMA_PATCH_PROVIDER_BYTECODE_ASYNC | LUMA_PATCH_PROVIDER_RECIPE_ASYNC)
+            global_device_data->async_shutdown = true;
+            global_device_data->async_jobs_cv.notify_all();
+#endif
             global_device_data->thread_auto_loading.join();
          }
       }
@@ -14975,7 +16337,7 @@ BOOL APIENTRY CoreMain(HMODULE h_module, DWORD fdw_reason, LPVOID lpv_reserved)
       reshade::register_event<reshade::addon_event::destroy_swapchain>(OnDestroySwapchain);
       reshade::register_event<reshade::addon_event::set_fullscreen_state>(OnSetFullscreenState);
 
-#if ENABLE_ORIGINAL_SHADERS_MEMORY_EDITS
+#if (LUMA_PATCH_PROVIDERS & (LUMA_PATCH_PROVIDER_BYTECODE_SYNC | LUMA_PATCH_PROVIDER_RECIPE_SYNC)) && !LUMA_PATCH_SYNC_MODE_CLONE
       reshade::register_event<reshade::addon_event::create_pipeline>(OnCreatePipeline);
 #endif
       reshade::register_event<reshade::addon_event::init_pipeline>(OnInitPipeline);
@@ -14985,6 +16347,18 @@ BOOL APIENTRY CoreMain(HMODULE h_module, DWORD fdw_reason, LPVOID lpv_reserved)
 
       reshade::register_event<reshade::addon_event::bind_render_targets_and_depth_stencil>(OnBindRenderTargetsAndDepthStencil);
 
+      // UE decides whether to enable upgrades at runtime (HDR config), after this registration point (its
+      // DllMain reads the ReShade config after CoreMain), so install the upgrade machinery events
+      // unconditionally for it. All other games set the upgrade settings in DllMain BEFORE CoreMain, so the
+      // load-time settings snapshot in the #else branch below works for them.
+#if GAME_UNREAL_ENGINE
+      reshade::register_event<reshade::addon_event::init_resource>(OnInitResource);
+      reshade::register_event<reshade::addon_event::create_resource>(OnCreateResource);
+      reshade::register_event<reshade::addon_event::destroy_resource>(OnDestroyResource);
+      reshade::register_event<reshade::addon_event::create_resource_view>(OnCreateResourceView);
+      reshade::register_event<reshade::addon_event::init_resource_view>(OnInitResourceView);
+      reshade::register_event<reshade::addon_event::destroy_resource_view>(OnDestroyResourceView);
+#else
       if (texture_format_upgrades_type > TextureFormatUpgradesType::None)
       {
          reshade::register_event<reshade::addon_event::init_resource>(OnInitResource);
@@ -15003,6 +16377,7 @@ BOOL APIENTRY CoreMain(HMODULE h_module, DWORD fdw_reason, LPVOID lpv_reserved)
          reshade::register_event<reshade::addon_event::init_resource_view>(OnInitResourceView);
          reshade::register_event<reshade::addon_event::destroy_resource_view>(OnDestroyResourceView);
       }
+#endif // GAME_UNREAL_ENGINE
 
       reshade::register_event<reshade::addon_event::push_descriptors>(OnPushDescriptors);
 #if DEVELOPMENT
@@ -15095,7 +16470,7 @@ BOOL APIENTRY CoreMain(HMODULE h_module, DWORD fdw_reason, LPVOID lpv_reserved)
       reshade::unregister_event<reshade::addon_event::destroy_swapchain>(OnDestroySwapchain);
       reshade::unregister_event<reshade::addon_event::set_fullscreen_state>(OnSetFullscreenState);
 
-#if ENABLE_ORIGINAL_SHADERS_MEMORY_EDITS
+#if (LUMA_PATCH_PROVIDERS & (LUMA_PATCH_PROVIDER_BYTECODE_SYNC | LUMA_PATCH_PROVIDER_RECIPE_SYNC)) && !LUMA_PATCH_SYNC_MODE_CLONE
       reshade::unregister_event<reshade::addon_event::create_pipeline>(OnCreatePipeline);
 #endif
       reshade::unregister_event<reshade::addon_event::init_pipeline>(OnInitPipeline);
@@ -15207,8 +16582,14 @@ BOOL APIENTRY CoreMain(HMODULE h_module, DWORD fdw_reason, LPVOID lpv_reserved)
       {
          if (global_device_data->thread_auto_loading.joinable())
          {
+            // Signal shutdown, then detach — never spin on "running" (a
+            // detached thread may not reach loop exit). The atomic write needs no
+            // mutex, so it's safe even under the loader lock (DLL_PROCESS_DETACH).
+#if LUMA_PATCH_PROVIDERS & (LUMA_PATCH_PROVIDER_BYTECODE_ASYNC | LUMA_PATCH_PROVIDER_RECIPE_ASYNC)
+            global_device_data->async_shutdown = true;
+            global_device_data->async_jobs_cv.notify_all();
+#endif
             global_device_data->thread_auto_loading.detach();
-            while (global_device_data->thread_auto_loading_running) {}
          }
       }
 

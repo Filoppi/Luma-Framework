@@ -1,13 +1,7 @@
-// Borderlands 2 / The Pre-Sequel — Scaleform emissive HUD sprite (e.g. the autosave/saving icon).
-//
-// This HUD shader allows an emissive overshoot: o0 = min(color, 4) * vertexColor.w + vertexColor.xyz, so its
-// output can exceed 1.0 (the autosave icon pulses with a >1 glow). Vanilla rendered to an 8-bit UNORM backbuffer
-// which clamped that to white for free; Luma upgrades the LDR to fp16, so the overshoot SURVIVES. It draws POST-
-// tonemap (after DICE), so it bypasses the HDR display rolloff and the composition's paper-white scale pushes the
-// unclamped value past peak -> the icon blows to ~10000 nits, ignoring the user's Peak setting.
-//
-// Fix: re-add the vanilla 8-bit clamp dgVoodoo dropped (saturate the output) so the icon lands at UI paper white
-// like the rest of the HUD. Body transcribed verbatim from the dgVoodoo->ps_5_0 disasm of 0xC84956AA; the
+// Borderlands 2 / The Pre-Sequel — Scaleform emissive HUD sprite (e.g. the autosave icon).
+// o0 = min(color, 4) * vertexColor.w + vertexColor.xyz can exceed 1.0; vanilla's 8-bit UNORM backbuffer clamped that
+// for free, Luma's fp16 LDR does not, and since it draws POST-tonemap the overshoot bypasses DICE and the paper-white
+// scale blows the icon to ~10000 nits. Fix: re-add the saturate. Body verbatim from the dgVoodoo ps_5_0 disasm; the
 // cb3 and/or pairs are dgVoodoo's texture-format bit emulation (mask+set), kept exactly via asint.
 
 Texture2D<float4> t0 : register(t0);
@@ -88,8 +82,7 @@ void main(
    r1.xyz = min(float3(4, 4, 4), r0.xyz);
    o0.xyz = r1.xyz * v12.www + v12.xyz;
 
-   // Vanilla relied on the 8-bit UNORM backbuffer to clamp this emissive HUD output; the fp16 LDR doesn't, so the
-   // autosave icon's >1 glow escapes to peak nits. Re-add the clamp -> icon caps at UI paper white like other HUD.
+   // Re-add the 8-bit clamp vanilla got from its UNORM backbuffer (see header).
    o0 = saturate(o0);
    return;
 }

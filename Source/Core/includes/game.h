@@ -1,6 +1,6 @@
 #pragma once
 
-#include "shaders.h"
+#include "patch.hpp"
 
 using namespace Shader;
 
@@ -51,10 +51,29 @@ public:
    virtual bool OverrideCopyResource(ID3D11Device* native_device, DeviceData& device_data, uint64_t& dst_resource, uint64_t& src_resource) { return false; }
    virtual bool OverrideCopyTextureRegion(ID3D11Device* native_device, DeviceData& device_data, uint64_t& dst_resource, uint32_t dst_subresource, const D3D11_BOX* dst_box, uint64_t& src_resource, uint32_t src_subresource, const D3D11_BOX* src_box) { return false; }
 
-   // Optionally returns a modified shader.
-   // Requires "ENABLE_ORIGINAL_SHADERS_MEMORY_EDITS" to be enabled.
-   // "shader_hash" is 32bit, will be set to -1 if it's not specified.
-   virtual std::unique_ptr<std::byte[]> ModifyShaderByteCode(const std::byte* code, size_t& size, reshade::api::pipeline_subobject_type type, uint64_t shader_hash = -1, const std::byte* shader_object = nullptr, size_t shader_object_size = 0) { return nullptr; }
+   // ============================================================================
+   // Shader patching providers. Select which ones a game uses with the
+   // LUMA_PATCH_* macros (see patch.hpp). Both methods are available in sync
+   // and async variants; a game can mix them (e.g. bytecode sync + recipe
+   // async). Sync providers run either at pipeline creation time (in-place,
+   // default) or at pipeline init with a pipeline clone (LUMA_PATCH_SYNC_MODE_CLONE).
+   // Async providers run on a background thread; once a sync provider reaches a
+   // definitive outcome (patched or no-patch-needed) for a shader, the same
+   // method's async provider is skipped for it.
+   // ============================================================================
+
+   // Bytecode method: operates on the SHEX/SHDR bytecode chunk of the shader
+   // ("code"/"size") with the full DXBC container available as "shader_object".
+   // Return the modified bytecode; update "size" with its new size (must stay
+   // DWORD-aligned). "shader_hash" is the luma hash of the original shader.
+   virtual std::unique_ptr<std::byte[]> PatchShaderBytecodeSync(const std::byte* code, size_t& size, reshade::api::pipeline_subobject_type type, uint64_t shader_hash = -1, const std::byte* shader_object = nullptr, size_t shader_object_size = 0) { return nullptr; }
+   virtual std::unique_ptr<std::byte[]> PatchShaderBytecodeAsync(const std::byte* code, size_t& size, reshade::api::pipeline_subobject_type type, uint64_t shader_hash = -1, const std::byte* shader_object = nullptr, size_t shader_object_size = 0) { return nullptr; }
+
+#if LUMA_USE_DXP
+   // Recipe method: operates on the full DXBC container via a DXP recipe.
+   virtual std::optional<dxp::RecipeReport> PatchShaderRecipeSync(DeviceData& device_data, const Patch::ShaderPatchRequest& request) { return std::nullopt; }
+   virtual std::optional<dxp::RecipeReport> PatchShaderRecipeAsync(DeviceData& device_data, const Patch::ShaderPatchRequest& request) { return std::nullopt; }
+#endif
 
    // Called for every game's valid draw call (any type),
    // this is where you can override passes, add new ones, cancel other ones etc.
@@ -62,6 +81,16 @@ public:
    // Return true to cancel the original call.
    // Use "original_draw_dispatch_func" to call the original draw/dispatch within your function (you have to cancel it manually if you do so, as that's not tracked). This is useful if you want to add any post draw/dispatch behaviour. "ENABLE_POST_DRAW_DISPATCH_CALLBACK" is required for the it to work. Note that some advanced debugging behaviours might conflict if you replace the draw call.
    virtual DrawOrDispatchOverrideType OnDrawOrDispatch(ID3D11Device* native_device, ID3D11DeviceContext* native_device_context, CommandListData& cmd_list_data, DeviceData& device_data, reshade::api::shader_stage stages, const ShaderHashesList<OneShaderPerPipeline>& original_shader_hashes, bool is_custom_pass, bool& updated_cbuffers, std::function<void()>* original_draw_dispatch_func = nullptr) { return DrawOrDispatchOverrideType::None; }
+#if LUMA_PATCH_PROVIDERS != 0
+   // Called at bind time for patch-cloned pipelines to decide whether to use the
+   // patched variant (true) or the original (false). Default is true (patch ON).
+   virtual bool OnBindPatchedShader(DeviceData& device_data, uint32_t shader_hash, reshade::api::pipeline_subobject_type type) { return true; }
+   // Called on the render thread when a patch clone was created (lazily, on
+   // first bind) with the hashes that became live. Games flip their binding
+   // state here so resources are never bound before the patched shader can
+   // run. Must not take luma mutexes.
+   virtual void OnPatchedShadersPublished(DeviceData& device_data, const std::vector<uint32_t>& published_shader_hashes) {}
+#endif
    // This is called every frame just before sending out the final image to the display (the swapchain).
    // You can reliable reset any per frame setting here.
    virtual void OnPresent(ID3D11Device* native_device, DeviceData& device_data) {}

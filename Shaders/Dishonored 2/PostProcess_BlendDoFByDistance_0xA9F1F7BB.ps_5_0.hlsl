@@ -80,7 +80,7 @@ void main(
   r0.x = -cb_inverseprojectionmatrix._m23 / r0.x;
   r0.x = saturate(r0.x / cb_postfx_dof_commonparams);
   r0.y = -cb_postfx_dof_farparams.y + r0.x;
-  r0.x = cmp(cb_postfx_dof_farparams.y < r0.x);
+  r0.x = (cb_postfx_dof_farparams.y < r0.x) ? 1.0 : 0.0;
   r0.z = cb_postfx_dof_farparams.x + -cb_postfx_dof_farparams.y;
   r0.y = r0.y / r0.z;
   r0.x = saturate(r0.x * r0.y + cb_postfx_dof_farparams.z);

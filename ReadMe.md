@@ -7,8 +7,11 @@ Luma also acts as a graphics analyzer, having deep debugging capabilities (captu
 
 # Development requirements
 - Windows 11 (Windows 10 probably works fine too)
-- Visual Studio 2026 (2022 works, older versions might work too)
 - Windows 11 SDK 10.0.26100.0 (older versions work, but don't support HDR as well)
+- Visual Studio 2026
+  - 2022 and older might work, but currently best with "v145 for Microsoft C++ Build Tools".
+  - Only need "Desktop development with C++" component package.
+<br><img width="300" height="75" alt="image" src="https://github.com/user-attachments/assets/5a7939c5-3dcd-4e43-b8e8-93e398fbea93" />
 
 # Instructions
 - (Prey only, optional otherwise) Set "VCPKG_ROOT" environment variable to your vcpkg installation folder if it wasn't already (download it from here "https://github.com/microsoft/vcpkg", the version integrated with Visual Studio doesn't seem to be as reliable).

@@ -1,0 +1,435 @@
+// ---- Fixed from 3Dmigoto v1.3.16 dump (Wed Jun 24 17:08:06 2026)
+// Motion vector creation compute shader
+
+Texture2D<float4> t2 : register(t2);
+Texture2D<float4> t1 : register(t1);
+Texture2D<uint4>  t0 : register(t0);
+
+SamplerState s0_s : register(s0);
+
+cbuffer cb0 : register(b0)
+{
+    float4 cb0[8];
+}
+
+RWTexture2D<float4> u0 : register(u0);
+RWTexture2D<float4> u1 : register(u1);
+RWTexture2D<float4> u2 : register(u2);
+
+#define cmp -
+
+[numthreads(8, 8, 1)]
+void main(uint3 vThreadID : SV_DispatchThreadID)
+{
+    float4 r0, r1, r2, r3, r4, r5;
+    uint4  bitmask, uiDest;
+    float4 fDest;
+
+    // Early-out if thread is outside the target region
+    r0.xy = cmp((uint2)vThreadID.xy >= asuint(cb0[5].zw));
+    r0.x = (int)r0.y | (int)r0.x;
+    if (r0.x == 0)
+    {
+        // --- Compute depth/sample coords and gather depth quad ---
+        r0.xy = (float2)(uint2)vThreadID.xy;
+        r0.xy = r0.xy * cb0[7].xy + cb0[7].zw;
+        r0.xyzw = t2.Gather(s0_s, r0.xy).xyzw;
+
+        // Decode: values >= 0 are abs(x), values < 0 are abs(x) - 100
+        r1.xyzw = cmp(r0.xyzw < float4(0, 0, 0, 0));
+        r2.xyzw = abs(r0.xyzw) + float4(-100, -100, -100, -100);
+        r0.xyzw = r1.xyzw ? r2.xyzw : abs(r0.xyzw);
+
+        // Find the minimum of the four gathered depth values
+        r0.w = min(r0.w, r0.z);
+        r0.w = min(r0.w, r0.y);
+        r0.w = min(r0.w, r0.x);
+
+        // Which component equals the minimum?
+        // ASM: eq r0.xyz, r0.xzyx, r0.wwww  => r0.x=(r0.x==min), r0.y=(r0.z==min), r0.z=(r0.y==min)
+        r0.xyz = cmp(r0.xzy == r0.www);
+
+        // Compute sub-pixel offset (1-bit flags) from which component matched
+        // ASM: or r1.x, r0.z, r0.y  then  and r1.x, r1.x, l(1)
+        r1.x = (int)r0.z | (int)r0.y;
+        r1.x = (int)r1.x & 1;
+
+        // ASM: not r0.y, r0.y  /  and r0.x, r0.x, r0.y  /  or r0.x, r0.z, r0.x  /  and r1.y, r0.x, l(1)
+        r0.y = ~(int)r0.y;
+        r0.x = (int)r0.x & (int)r0.y;
+        r0.x = (int)r0.z | (int)r0.x;
+        r1.y = (int)r0.x & 1;
+
+        // Compute 2x2 pixel address of the minimum-depth sample
+        r0.xy = (float2)mad((int2)vThreadID.xy, int2(2, 2), (int2)r1.xy);
+
+        // Load stencil/flag data
+        r1.xy  = (float2)(int2)r0.xy + cb0[6].xy;
+        r1.zw  = float2(0, 0);
+        r0.z   = (float)t0.Load(int3((int2)r1.xy, 0)).y;
+        r0.z   = (int)r0.z & 4;
+
+        if (r0.z != 0)
+        {
+            // --- Dynamic object path: decode motion from t1 chroma ---
+            r1.xy  = t1.Load(int3((int2)r1.xy, 0)).zw;
+            r1.xy  = r1.xy + float2(-0.501960814, -0.501960814);
+            r1.zw  = r1.xy + r1.xy;
+
+            r2.xy  = abs(r1.zw) + float2(-0.5, -0.5);
+            r2.xy  = saturate(r2.xy + r2.xy);
+
+            r1.zw  = abs(r1.zw) + abs(r1.zw);
+            r1.zw  = min(float2(1, 1), r1.zw);
+
+            r2.xy  = r2.xy * r2.xy;
+            r1.zw  = float2(4, 4) * r1.zw;
+            r1.zw  = r2.xy * float2(36, 36) + r1.zw;
+
+            r1.xy  = cmp(r1.xy >= float2(0, 0));
+            r1.xy  = r1.xy ? r1.zw : -r1.zw;
+        }
+        else
+        {
+            // --- Static object path: reproject via camera matrices ---
+            r0.xy  = (float2)(uint2)r0.xy;
+            r2.xy  = float2(0.5, 0.5) + r0.xy;
+            r0.x   = cb0[4].z / r0.w;
+            r2.z   = saturate(0.984375 * r0.x);
+            r2.w   = 1;
+
+            r0.x   = dot(r2.xyzw, cb0[0].xyzw);
+            r0.y   = dot(r2.xyzw, cb0[1].xyzw);
+            r0.z   = dot(r2.xyzw, cb0[3].xyzw);
+
+            r0.xy  = r0.xy / r0.zz;
+            r1.xy  = r2.xy - r0.xy;
+        }
+
+        // --- Compute output UAV write address ---
+        // iadd r2.xyzw, vThreadID.xyyy, cb0[5].xyyy
+        r2.xyzw = (float4)((int4)vThreadID.xyyy + (int4)cb0[5].xyyy);
+
+        // --- Scale motion vector and apply smooth magnitude clamping ---
+        // utof r3.xyzw, cb0[6].zwzz  (reinterpret uint bits as float, i.e. uint->float cast)
+        r3.xyzw = float4(cb0[6].zwzz);
+
+        // div r3.xyzw, r1.xyxx, r3.xyzw
+        r3.xyzw = r1.xyxx / r3.xyzw;
+
+        // mul r4.xyzw, r3.wyww, l(1920, 1080, 1920, 1920)
+        r4.xyzw = r3.wyww * float4(1920, 1080, 1920, 1920);
+
+        r5.xyzw = abs(r4.wyww) + float4(-3, -3, -3, -3);
+        r5.xyzw = saturate(float4(0.0270270277, 0.0270270277, 0.0270270277, 0.0270270277) * r5.xyzw);
+
+        r4.xyzw = abs(r4.xyzw) * float4(0.333333343, 0.333333343, 0.333333343, 0.333333343);
+        r4.xyzw = min(float4(1, 1, 1, 1), r4.xyzw);
+
+        r5.xyzw = sqrt(r5.xyzw);
+        r4.xyzw = r4.xyzw - r5.wyww;
+        r4.xyzw = r4.xyzw * float4(0.5, 0.5, 0.5, 0.5) + r5.xyzw;
+
+        r3.xyzw = cmp(r3.xyzw >= float4(0, 0, 0, 0));
+        r3.xyzw = r3.xyzw ? r4.xyzw : -r4.wyww;
+
+        // store_uav_typed u0.xyzw, r2.xwww, r3.xyzw
+        // Address r2.xwww => uint2(r2.x, r2.w) but .w is unused padding; effective 2D address is (r2.x, 0)
+        // Per ASM: r2.xwww packs x=r2.x, y=r2.w — for a 2D UAV write this is (r2.x, r2.w)
+        u0[(uint2)r2.xw] = r3.xyzw;
+
+        // store_uav_typed u1.xyzw, r2.xwww, r0.xxxx
+        r0.x = r0.w + 100.0;
+        u1[(uint2)r2.xw] = r0.xxxx;
+
+        // --- Encode motion vector direction + magnitude into u2 ---
+        r0.y = dot(r1.xy, r1.xy);
+        r0.y = sqrt(r0.y);
+        r0.z = max(9.99999975e-005, r0.y);
+        r0.z = rcp(r0.z);
+
+        r1.xy = r1.xy * r0.zz;      // normalize direction
+
+        r0.y = min(40.0, r0.y);     // clamp magnitude
+        r0.z = r0.y - 2.0;
+
+        r0.xz = float2(3.05175781e-005, 1.33333337) * r0.xz;
+        r0.z  = max(0.0, r0.z);
+        r0.y  = min(r0.y, r0.z);
+
+        r1.z  = 1.0;
+        r1.xyz = r1.xyz * r0.yyy;   // scale direction by magnitude
+
+        r0.y  = cmp(r1.y >= 0);
+        r1.w  = r0.y ? r1.z : -r1.z;
+
+        r1.xy = r1.xw * float2(0.0125000002, 0.0125000002) + float2(0.498039216, 0.498039216);
+
+        // Fast float->half-like magnitude encoding
+        r0.x = min(1.0, r0.x);
+        r0.x = (int)r0.x >> 1;
+        r0.x = (int)r0.x + 0x1fbd1df5;
+        r0.x = 255.0 * r0.x;
+        r0.y = floor(r0.x);
+        r1.z = 0.00392156886 * r0.y;
+        r1.w = frac(r0.x);
+
+        // store_uav_typed u2.xyzw, r2.xyzw, r1.xyzw
+        u2[(uint2)r2.xy] = r1.xyzw;
+    }
+}
+
+
+/*
+// ---- Created with 3Dmigoto v1.3.16 on Wed Jun 24 17:08:06 2026
+Texture2D<float4> t2 : register(t2);
+
+Texture2D<float4> t1 : register(t1);
+
+Texture2D<uint4> t0 : register(t0);
+
+SamplerState s0_s : register(s0);
+
+cbuffer cb0 : register(b0)
+{
+  float4 cb0[8];
+}
+
+
+
+
+// 3Dmigoto declarations
+#define cmp -
+
+
+void main)
+{
+// Needs manual fix for instruction:
+// unknown dcl_: dcl_uav_typed_texture2d (float,float,float,float) u0
+// Needs manual fix for instruction:
+// unknown dcl_: dcl_uav_typed_texture2d (float,float,float,float) u1
+// Needs manual fix for instruction:
+// unknown dcl_: dcl_uav_typed_texture2d (float,float,float,float) u2
+  float4 r0,r1,r2,r3,r4,r5;
+  uint4 bitmask, uiDest;
+  float4 fDest;
+
+// Needs manual fix for instruction:
+// unknown dcl_: dcl_thread_group 8, 8, 1
+  r0.xy = cmp((uint2)vThreadID.xy >= asuint(cb0[5].zw));
+  r0.x = (int)r0.y | (int)r0.x;
+  if (r0.x == 0) {
+    r0.xy = (uint2)vThreadID.xy;
+    r0.xy = r0.xy * cb0[7].xy + cb0[7].zw;
+    r0.xyzw = t2.Gather(s0_s, r0.xy).xyzw;
+    r1.xyzw = cmp(r0.xyzw < float4(0,0,0,0));
+    r2.xyzw = float4(-100,-100,-100,-100) + abs(r0.xyzw);
+    r0.xyzw = r1.xyzw ? r2.xyzw : abs(r0.xyzw);
+    r0.w = min(r0.z, r0.w);
+    r0.w = min(r0.y, r0.w);
+    r0.w = min(r0.x, r0.w);
+    r0.xyz = cmp(r0.xzy == r0.www);
+    r1.x = (int)r0.z | (int)r0.y;
+    r1.x = r1.x ? 0.000000 : 0;
+    r0.y = ~(int)r0.y;
+    r0.x = r0.x ? r0.y : 0;
+    r0.x = (int)r0.z | (int)r0.x;
+    r1.y = r0.x ? 0.000000 : 0;
+    r0.xy = mad((int2)vThreadID.xy, int2(2,2), (int2)r1.xy);
+    r1.xy = (int2)r0.xy + asint(cb0[6].xy);
+    r1.zw = float2(0,0);
+    r0.z = t0.Load(r1.xyw).y;
+    r0.z = (int)r0.z & 4;
+    if (r0.z != 0) {
+      r1.xy = t1.Load(r1.xyz).zw;
+      r1.xy = float2(-0.501960814,-0.501960814) + r1.xy;
+      r1.zw = r1.xy + r1.xy;
+      r2.xy = float2(-0.5,-0.5) + abs(r1.zw);
+      r2.xy = saturate(r2.xy + r2.xy);
+      r1.zw = abs(r1.zw) + abs(r1.zw);
+      r1.zw = min(float2(1,1), r1.zw);
+      r2.xy = r2.xy * r2.xy;
+      r1.zw = float2(4,4) * r1.zw;
+      r1.zw = r2.xy * float2(36,36) + r1.zw;
+      r1.xy = cmp(r1.xy >= float2(0,0));
+      r1.xy = r1.xy ? r1.zw : -r1.zw;
+    } else {
+      r0.xy = (uint2)r0.xy;
+      r2.xy = float2(0.5,0.5) + r0.xy;
+      r0.x = cb0[4].z / r0.w;
+      r2.z = saturate(0.984375 * r0.x);
+      r2.w = 1;
+      r0.x = dot(r2.xyzw, cb0[0].xyzw);
+      r0.y = dot(r2.xyzw, cb0[1].xyzw);
+      r0.z = dot(r2.xyzw, cb0[3].xyzw);
+      r0.xy = r0.xy / r0.zz;
+      r1.xy = r2.xy + -r0.xy;
+    }
+    r2.xyzw = (int4)vThreadID.xyyy + asint(cb0[5].xyyy);
+    r3.xyzw = asuint(cb0[6].zwzz);
+    r3.xyzw = r1.xyxx / r3.xyzw;
+    r4.xyzw = float4(1920,1080,1920,1920) * r3.wyww;
+    r5.xyzw = float4(-3,-3,-3,-3) + abs(r4.wyww);
+    r5.xyzw = saturate(float4(0.0270270277,0.0270270277,0.0270270277,0.0270270277) * r5.xyzw);
+    r4.xyzw = float4(0.333333343,0.333333343,0.333333343,0.333333343) * abs(r4.xyzw);
+    r4.xyzw = min(float4(1,1,1,1), r4.xyzw);
+    r5.xyzw = sqrt(r5.xyzw);
+    r4.xyzw = -r5.wyww + r4.xyzw;
+    r4.xyzw = r4.xyzw * float4(0.5,0.5,0.5,0.5) + r5.xyzw;
+    r3.xyzw = cmp(r3.xyzw >= float4(0,0,0,0));
+    r3.xyzw = r3.xyzw ? r4.xyzw : -r4.wyww;
+  // No code for instruction (needs manual fix):
+    store_uav_typed u0.xyzw, r2.xwww, r3.xyzw
+    r0.x = 100 + r0.w;
+  // No code for instruction (needs manual fix):
+    store_uav_typed u1.xyzw, r2.xwww, r0.xxxx
+    r0.y = dot(r1.xy, r1.xy);
+    r0.y = sqrt(r0.y);
+    r0.z = max(9.99999975e-005, r0.y);
+    r0.z = rcp(r0.z);
+    r1.xy = r1.xy * r0.zz;
+    r0.y = min(40, r0.y);
+    r0.z = -2 + r0.y;
+    r0.xz = float2(3.05175781e-005,1.33333337) * r0.xz;
+    r0.z = max(0, r0.z);
+    r0.y = min(r0.z, r0.y);
+    r1.z = 1;
+    r1.xyz = r1.xyz * r0.yyy;
+    r0.y = cmp(r1.y >= 0);
+    r1.w = r0.y ? r1.z : -r1.z;
+    r1.xy = r1.xw * float2(0.0125000002,0.0125000002) + float2(0.498039216,0.498039216);
+    r0.x = min(1, r0.x);
+    r0.x = (uint)r0.x >> 1;
+    r0.x = (int)r0.x + 0x1fbd1df5;
+    r0.x = 255 * r0.x;
+    r0.y = floor(r0.x);
+    r1.z = 0.00392156886 * r0.y;
+    r1.w = frac(r0.x);
+  // No code for instruction (needs manual fix):
+    store_uav_typed u2.xyzw, r2.xyzw, r1.xyzw
+  }
+  return;
+}
+*/
+/*
+//
+// Generated by Microsoft (R) D3D Shader Disassembler
+//
+//
+// Input signature:
+//
+// Name                 Index   Mask Register SysValue  Format   Used
+// -------------------- ----- ------ -------- -------- ------- ------
+// no Input
+//
+// Output signature:
+//
+// Name                 Index   Mask Register SysValue  Format   Used
+// -------------------- ----- ------ -------- -------- ------- ------
+// no Output
+cs_5_0
+dcl_globalFlags refactoringAllowed
+dcl_constantbuffer CB0[8], immediateIndexed
+dcl_sampler s0, mode_default
+dcl_resource_texture2d (uint,uint,uint,uint) t0
+dcl_resource_texture2d (float,float,float,float) t1
+dcl_resource_texture2d (float,float,float,float) t2
+dcl_uav_typed_texture2d (float,float,float,float) u0
+dcl_uav_typed_texture2d (float,float,float,float) u1
+dcl_uav_typed_texture2d (float,float,float,float) u2
+dcl_input vThreadID.xy
+dcl_temps 6
+dcl_thread_group 8, 8, 1
+uge r0.xy, vThreadID.xyxx, cb0[5].zwzz
+or r0.x, r0.y, r0.x
+if_z r0.x
+  utof r0.xy, vThreadID.xyxx
+  mad r0.xy, r0.xyxx, cb0[7].xyxx, cb0[7].zwzz
+  gather4_indexable(texture2d)(float,float,float,float) r0.xyzw, r0.xyxx, t2.xyzw, s0.x
+  lt r1.xyzw, r0.xyzw, l(0.000000, 0.000000, 0.000000, 0.000000)
+  add r2.xyzw, |r0.xyzw|, l(-100.000000, -100.000000, -100.000000, -100.000000)
+  movc r0.xyzw, r1.xyzw, r2.xyzw, |r0.xyzw|
+  min r0.w, r0.w, r0.z
+  min r0.w, r0.w, r0.y
+  min r0.w, r0.w, r0.x
+  eq r0.xyz, r0.xzyx, r0.wwww
+  or r1.x, r0.z, r0.y
+  and r1.x, r1.x, l(1)
+  not r0.y, r0.y
+  and r0.x, r0.x, r0.y
+  or r0.x, r0.z, r0.x
+  and r1.y, r0.x, l(1)
+  imad r0.xy, vThreadID.xyxx, l(2, 2, 0, 0), r1.xyxx
+  iadd r1.xy, r0.xyxx, cb0[6].xyxx
+  mov r1.zw, l(0,0,0,0)
+  ld_indexable(texture2d)(uint,uint,uint,uint) r0.z, r1.xyww, t0.xzyw
+  and r0.z, r0.z, l(4)
+  if_nz r0.z
+    ld_indexable(texture2d)(float,float,float,float) r1.xy, r1.xyzw, t1.zwxy
+    add r1.xy, r1.xyxx, l(-0.501961, -0.501961, 0.000000, 0.000000)
+    add r1.zw, r1.xxxy, r1.xxxy
+    add r2.xy, |r1.zwzz|, l(-0.500000, -0.500000, 0.000000, 0.000000)
+    add_sat r2.xy, r2.xyxx, r2.xyxx
+    add r1.zw, |r1.zzzw|, |r1.zzzw|
+    min r1.zw, r1.zzzw, l(0.000000, 0.000000, 1.000000, 1.000000)
+    mul r2.xy, r2.xyxx, r2.xyxx
+    mul r1.zw, r1.zzzw, l(0.000000, 0.000000, 4.000000, 4.000000)
+    mad r1.zw, r2.xxxy, l(0.000000, 0.000000, 36.000000, 36.000000), r1.zzzw
+    ge r1.xy, r1.xyxx, l(0.000000, 0.000000, 0.000000, 0.000000)
+    movc r1.xy, r1.xyxx, r1.zwzz, -r1.zwzz
+  else 
+    utof r0.xy, r0.xyxx
+    add r2.xy, r0.xyxx, l(0.500000, 0.500000, 0.000000, 0.000000)
+    div r0.x, cb0[4].z, r0.w
+    mul_sat r2.z, r0.x, l(0.984375)
+    mov r2.w, l(1.000000)
+    dp4 r0.x, r2.xyzw, cb0[0].xyzw
+    dp4 r0.y, r2.xyzw, cb0[1].xyzw
+    dp4 r0.z, r2.xyzw, cb0[3].xyzw
+    div r0.xy, r0.xyxx, r0.zzzz
+    add r1.xy, -r0.xyxx, r2.xyxx
+  endif 
+  iadd r2.xyzw, vThreadID.xyyy, cb0[5].xyyy
+  utof r3.xyzw, cb0[6].zwzz
+  div r3.xyzw, r1.xyxx, r3.xyzw
+  mul r4.xyzw, r3.wyww, l(1920.000000, 1080.000000, 1920.000000, 1920.000000)
+  add r5.xyzw, |r4.wyww|, l(-3.000000, -3.000000, -3.000000, -3.000000)
+  mul_sat r5.xyzw, r5.xyzw, l(0.027027, 0.027027, 0.027027, 0.027027)
+  mul r4.xyzw, |r4.xyzw|, l(0.333333, 0.333333, 0.333333, 0.333333)
+  min r4.xyzw, r4.xyzw, l(1.000000, 1.000000, 1.000000, 1.000000)
+  sqrt r5.xyzw, r5.xyzw
+  add r4.xyzw, r4.xyzw, -r5.wyww
+  mad r4.xyzw, r4.xyzw, l(0.500000, 0.500000, 0.500000, 0.500000), r5.xyzw
+  ge r3.xyzw, r3.xyzw, l(0.000000, 0.000000, 0.000000, 0.000000)
+  movc r3.xyzw, r3.xyzw, r4.xyzw, -r4.wyww
+  store_uav_typed u0.xyzw, r2.xwww, r3.xyzw
+  add r0.x, r0.w, l(100.000000)
+  store_uav_typed u1.xyzw, r2.xwww, r0.xxxx
+  dp2 r0.y, r1.xyxx, r1.xyxx
+  sqrt r0.y, r0.y
+  max r0.z, r0.y, l(0.000100)
+  rcp r0.z, r0.z
+  mul r1.xy, r0.zzzz, r1.xyxx
+  min r0.y, r0.y, l(40.000000)
+  add r0.z, r0.y, l(-2.000000)
+  mul r0.xz, r0.xxzx, l(0.000031, 0.000000, 1.333333, 0.000000)
+  max r0.z, r0.z, l(0.000000)
+  min r0.y, r0.y, r0.z
+  mov r1.z, l(1.000000)
+  mul r1.xyz, r0.yyyy, r1.xyzx
+  ge r0.y, r1.y, l(0.000000)
+  movc r1.w, r0.y, r1.z, -r1.z
+  mad r1.xy, r1.xwxx, l(0.012500, 0.012500, 0.000000, 0.000000), l(0.498039, 0.498039, 0.000000, 0.000000)
+  min r0.x, r0.x, l(1.000000)
+  ishr r0.x, r0.x, l(1)
+  iadd r0.x, r0.x, l(0x1fbd1df5)
+  mul r0.x, r0.x, l(255.000000)
+  round_ni r0.y, r0.x
+  mul r1.z, r0.y, l(0.003922)
+  frc r1.w, r0.x
+  store_uav_typed u2.xyzw, r2.xyzw, r1.xyzw
+endif 
+ret 
+// Approximately 0 instruction slots used
+
+*/

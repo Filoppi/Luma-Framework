@@ -1,3 +1,6 @@
+#include "Includes/GameCBuffers.hlsl"
+#include "../Includes/Common.hlsl"
+
 cbuffer PerInstanceCB : register(b2)
 {
   float4 cb_color : packoffset(c0);
@@ -34,7 +37,7 @@ void main(
   r0.xy = r1.xy * cb_opacity_tilling.xy + r0.xy;
   r0.x = ro_fx_opacity.Sample(smp_linearclamp_s, r0.xy).x;
   r0.y = -0.00196078443 + r0.x;
-  r0.x = cb_postfx_screenquadfade * r0.x;
+  r0.x = cb_postfx_screenquadfade * r0.x * LumaSettings.GameSettings.VignetteStrength;
   r0.y = cmp(r0.y < 0);
   if (r0.y != 0) discard;
   r0.yzw = float3(-1,-1,-1) + cb_color_adjust.xyz;

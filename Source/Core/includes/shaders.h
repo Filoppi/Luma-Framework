@@ -27,6 +27,36 @@ namespace Shader
    static const std::string template_pixel_shader_name = "ps_";
    static const std::string template_compute_shader_name = "cs_";
 
+   // How a shader patch was applied to this pipeline (see the Patch module).
+   // TODO(Patch module): could move to patch.hpp later (scoped enums with a
+   // fixed underlying type are forward-declarable, so shaders.h could keep the
+   // field with just a forward declaration) once headers are self-contained.
+   enum class PatchApplicationMode : uint8_t
+   {
+      None = 0,      // No patch applied
+      Inplace = 1,   // Applied in-place at shader creation (sync, INPLACE mode)
+      Sync = 2,      // Applied via a pipeline clone created synchronously at pipeline init (CLONE mode)
+      Async = 3,     // Applied via a pipeline clone created on the background thread
+   };
+
+   // Which shader variant is (or should be) bound.
+   enum class ShaderVariant : uint8_t
+   {
+      Original = 0,  // the game's original shader
+      Patched  = 1,  // the pipeline clone (patch applied)
+   };
+
+   // What a pipeline's clone was built from (set at clone creation, reset before
+   // each re-clone). Exactly one source per clone: a file wins over a patch on
+   // the same hash. Used to preserve patch clones across unloads and to tell
+   // patch toggles from file swaps.
+   enum class CloneOrigin : uint8_t
+   {
+      None = 0,
+      File = 1,
+      Patch = 2,
+   };
+
    // Mostly hardcoded to match a shader object, but it can work for other ReShade pipelines as well
    struct CachedPipeline
    {
@@ -46,6 +76,12 @@ namespace Shader
       bool cloned = false;
       // Needs to be destroyed when the original pipeline is.
       reshade::api::pipeline pipeline_clone;
+      // How the patch was applied to this pipeline (for the frame capture view: "#", "#S", "#A")
+      PatchApplicationMode patch_application_mode = PatchApplicationMode::None;
+      // What the current clone was built from (set at clone creation, reset
+      // before each re-clone). Preserves patch clones across unloads; a file
+      // wins over a patch on the same clone.
+      CloneOrigin clone_origin = CloneOrigin::None;
       // Original shaders hash (there should only be one except in DX12)
 #if DX12
       std::vector<uint32_t> shader_hashes;
@@ -148,6 +184,8 @@ namespace Shader
       // Unordered Access Views
       bool uavs[D3D11_1_UAV_SLOT_COUNT] = {};
 
+      // Own storage for live patched shader bytes (e.g. DXP clone injection), so debug UI pointers stay valid.
+      std::vector<uint8_t> live_patched_owned_data;
       const void* live_patched_data = nullptr; // Usually nullptr. Valid if we edited the byte code of the shader live when it was created (including shader debug data stripped)
       size_t live_patched_size = 0;
 #endif

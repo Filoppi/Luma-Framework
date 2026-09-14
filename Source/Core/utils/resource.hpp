@@ -167,7 +167,7 @@ UINT GetUAVMipLevel(const D3D11_UNORDERED_ACCESS_VIEW_DESC& desc)
    }
 }
 
-bool IsMipOf(uint32_t base_w, uint32_t base_h, uint32_t w, uint32_t h)
+inline bool IsMipOf(uint32_t base_w, uint32_t base_h, uint32_t w, uint32_t h)
 {
    if (w == 0 || h == 0 || base_w == 0 || base_h == 0)
       return false;

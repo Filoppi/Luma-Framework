@@ -82,7 +82,7 @@ void main(
   o0.rgb *= (BackgroundMidGray + BackgroundMidGray) / pow(pow(BackgroundMidGray, DefaultGamma) * pow(BackgroundMidGray, DefaultGamma), 1.f / DefaultGamma);
 #endif
 #endif // POST_PROCESS_SPACE_TYPE >= 1
-#if !ENABLE_ARK_CUSTOM_POST_PROCESS
+#if !ENABLE_ARK_CUSTOM_POST_PROCESS || !ENABLE_OBJECT_HIGHLIGHTING
   o0 = 0;
 #endif
 }

@@ -10,6 +10,10 @@
 
 // #define CUSTOM_ALTSAT 0
 
+#ifndef cmp
+#define cmp -
+#endif
+
 //CUSTOM_SDR defs
 #if CUSTOM_SDR == 1
   #ifdef CUSTOM_TESTSDR
@@ -320,31 +324,6 @@ float3 UCSFrom(float3 x, uint cs) {
   // #endif
 }
 
-float3 CorrectPerChannelTonemapHiglightsDesaturationBo3(float3 color, float peakBrightness, float desaturationExponent = 2.0, float highlightsOnly = 2, uint colorSpace = CS_DEFAULT)
-{
-  float sourceChrominance = length(UCSTo(color, CS_BT2020).yz);
-
-  float maxBrightness = max3(color); 
-  float midBrightness = GetMidValue(color);
-	float minBrightness = min3(color);
-	float brightnessRatio = saturate(maxBrightness / peakBrightness);
-
-  brightnessRatio = lerp(brightnessRatio, sqrt(brightnessRatio), sqrt(saturate(InverseLerp(minBrightness, maxBrightness, midBrightness))));
-  brightnessRatio = pow(brightnessRatio, highlightsOnly); // skewed towards highlights only
-
-  float chrominancePow = lerp(1.0, 1.0 / desaturationExponent, brightnessRatio);
-  
-  float targetChrominance = sourceChrominance > 1.0 ? pow(sourceChrominance, chrominancePow) : (1.0 - pow(1.0 - sourceChrominance, chrominancePow));
-  float chrominanceRatio = safeDivision(targetChrominance, sourceChrominance, 1);
-
-  // return RestoreLuminance(SetChrominance(color, chrominanceRatio), color, true, colorSpace);
-  color = UCSTo(color, CS_BT2020);
-  color.yz *= chrominanceRatio;
-  color = UCSFrom(color, CS_BT2020);
-  color = max(0, color); //clamp BT2020
-  return color;
-}
-
 float3 RestoreHueAndChrominanceUcsInternal(float3 targetUcs, float3 sourceUcs, float currentChrominance, float hueStrength, float chrominanceStrength, float minChromaRatio = 0.f)
 {
   if (targetUcs.x == 0) return targetUcs;
@@ -381,8 +360,6 @@ float3 ClampByMaxChannel(float3 x, float peak) {
   return x;
 }
 ////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
-float Sum(float3 x) { return x.x + x.y + x.z; }
-////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
 
 // Emulate luminance loss/clipping from LDR per-channel tonemap on high single channel colors.
 //
@@ -400,10 +377,12 @@ float Sum(float3 x) { return x.x + x.y + x.z; }
 float3 PerChannelTonemapLuminanceReductionEmulatation(float3 color_upgraded, float3 color_untonemapped, float peak = 1.0f, float makeup = 1.35f, float strength = 0.25f, uint cs = CS_BT709) {
   //compress perchannel
   color_untonemapped = NeuTwo::PerChannel(color_untonemapped, peak);
-  color_untonemapped = min(color_untonemapped, peak); //clip
+
+  //luminance
+  float y = GetLuminance(color_untonemapped, cs);
+  if (y <= 0) return color_upgraded; //safe
 
   //inverse luminance
-  float y = GetLuminance(color_untonemapped, cs);
   float y1 = NeuTwo::inverse::Neutwo(y, peak);
   y1 *= makeup; //makeup
 
@@ -416,11 +395,79 @@ float3 PerChannelTonemapLuminanceReductionEmulatation(float3 color_upgraded, flo
   //apply
   return color_upgraded * ratio;
 }
+////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
+float4 BloomUpsample1(float2 position, Texture2D tex, SamplerState smp, float sizeScale) {
+  uint2 texSize;
+  tex.GetDimensions(texSize.x, texSize.y);
+  float2 pixSize = 1.f / texSize;
+  float2 texcoord = position * pixSize;
 
+  float2 coord_grid = texcoord * (texSize / sizeScale) - 0.5;
+  float2 index = floor(coord_grid);
+  float2 fraction = coord_grid - index;
+  float2 one_frac = 1.0 - fraction;
+  float2 one_frac2 = one_frac * one_frac;
+  float2 fraction2 = fraction * fraction;
+  float2 w0 = 1.0 / 6.0 * one_frac2 * one_frac;
+  float2 w1 = 2.0 / 3.0 - 0.5 * fraction2 * (2.0 - fraction);
+  float2 w2 = 2.0 / 3.0 - 0.5 * one_frac2 * (2.0 - one_frac);
+  float2 w3 = 1.0 / 6.0 * fraction2 * fraction;
+  float2 g0 = w0 + w1;
+  float2 g1 = w2 + w3;
+
+  // h0 = w1/g0 - 1, move from [-0.5, extent-0.5] to [0, extent]
+  float2 h0 = (w1 / g0) - 0.5 + index;
+  float2 h1 = (w3 / g1) + 1.5 + index;
+
+  // fetch the four linear interpolations
+  float4 tex00 = tex.SampleLevel(smp, float2(h0.x, h0.y) * pixSize, 0.0);
+  float4 tex10 = tex.SampleLevel(smp, float2(h1.x, h0.y) * pixSize, 0.0);
+  float4 tex01 = tex.SampleLevel(smp, float2(h0.x, h1.y) * pixSize, 0.0);
+  float4 tex11 = tex.SampleLevel(smp, float2(h1.x, h1.y) * pixSize, 0.0);
+
+  // weigh along the y-direction
+  tex00 = lerp(tex01, tex00, g0.y);
+  tex10 = lerp(tex11, tex10, g0.y);
+
+  // weigh along the x-direction
+  return lerp(tex10, tex00, g0.x);
+}
+////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
+float3 Tonemap_BloomSample(Texture2D<float4> t, SamplerState s, float2 uv) {
+    // uint w;
+    // uint h;
+    // t.GetDimensions(w, h);
+    // float2 pixSize = 1.f / uint2(w, h);
+
+    float3 x = 0;
+
+    // x += t.Sample(s, uv + (pixSize * int2(-1,  0))).xyz;
+    // x += t.Sample(s, uv + (pixSize * int2( 1,  0))).xyz;
+    // x += t.Sample(s, uv + (pixSize * int2( 0,  0))).xyz;
+    // x += t.Sample(s, uv + (pixSize * int2( 0, -1))).xyz;
+    // x += t.Sample(s, uv + (pixSize * int2( 0, 1))).xyz;
+    // x *= (1.f/5.f) * GS.BloomStrength;
+
+    // x += t.Sample(s, uv + (pixSize * int2(-1, -1))).xyz;
+    // x += t.Sample(s, uv + (pixSize * int2(-1,  0))).xyz;
+    // x += t.Sample(s, uv + (pixSize * int2(-1,  1))).xyz;
+    // x += t.Sample(s, uv + (pixSize * int2( 0, -1))).xyz;
+    // x += t.Sample(s, uv + (pixSize * int2( 0,  0))).xyz;
+    // x += t.Sample(s, uv + (pixSize * int2( 0,  1))).xyz;
+    // x += t.Sample(s, uv + (pixSize * int2( 1, -1))).xyz;
+    // x += t.Sample(s, uv + (pixSize * int2( 1,  0))).xyz;
+    // x += t.Sample(s, uv + (pixSize * int2( 1,  1))).xyz;
+    // x *= (1.f/9.f) * GS.BloomStrength;
+
+    x = t.Sample(s, uv).xyz /* * GS.BloomStrength */;
+
+    return x;
+}
 ////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
 float3 Tonemap_SaveSprites_UpgradeSpritesOnly(float3 sprites) {
   #if CUSTOM_TESTSDR == 1
-    return saturate(sprites);
+    // return saturate(sprites);
+    return max(0, sprites);
   #endif
 
   //gamma decode
@@ -538,42 +585,10 @@ float3 Tonemap_Complex(float3 colorT, float4 v3, bool isLookBack = true, bool is
 
   r1.xy = g_textures_2_.SampleLevel(g_samplers_2__s, float2(r1.x, 0), 0).yx;
     // Maybe Neutral LUT https://www.desmos.com/calculator/u3bhz0bn62
-    // r1.x = Saturation (Rolls off to 0 way before 1) //TODO: some has too fast drop off in saturation, causing chroma clipping sensation. fix by replacing lut?
+    // r1.x = Saturation (Rolls off to 0 way before 1)
     // r1.y = SDR Tonemapped Luma (Rolls off to 1 as it approaches 1)
     // r1.x *= DVS2;
     // r1.y *= DVS3;
-
-//   //extend //TODO: remove, artefacts when out of bounds
-//   if (isExtend)
-//   {
-//     float ex = backUpY * 5; //fudge midgray
-//       //1.2 ~= 450nits
-//       //1.4 ~= 500nits
-//       //1.6 ~= 600nits
-//       //2.0 ~= 800nits
-//     
-//     float y_untonemapped = NeuTwo::Neutwo(ex, 1.4f);
-//     y_untonemapped = min(y_untonemapped, 1.4f);
-//     float y_tonemapped = NeuTwo::Neutwo(ex, 1.0);
-//     y_tonemapped = min(y_tonemapped, 1.0f);
-//     float y_tonemapped_graded = r1.y;
-// 
-//     float ratio = 1.f;
-//     float ratioToU = y_untonemapped / y_tonemapped_graded;
-//     if (y_untonemapped < y_tonemapped) {
-//       ratio = y_untonemapped / y_tonemapped;
-//     } else {
-//       float y_delta = y_untonemapped - y_tonemapped;
-//       y_delta = max(0, y_delta);  // Cleans up NaN
-//       const float y_new = y_tonemapped_graded + y_delta;
-// 
-//       const bool y_valid = (y_tonemapped_graded > 0);
-//       ratio = y_valid ? (y_new / y_tonemapped_graded) : 0;
-//     }
-// 
-//     // r1.y *= ratio;
-//     // r1.y = ex; //debug: replace
-//   }
 
   #if CUSTOM_TESTSDR == 0 && CUSTOM_SDR == 0
     r1.xy *= GS.LUTScalingAndMakeUp;
@@ -588,18 +603,26 @@ float3 Tonemap_Complex(float3 colorT, float4 v3, bool isLookBack = true, bool is
     #if CUSTOM_LUT_BLOWOUT_GAUSSIAN > 0
     {
       float yLB = backUpY;
-      const float lutStep = (1.0f / 512.f) * GS.LUTGaussianBlurStep;
+
+      
+      #if CUSTOM_LUT_BLOWOUT_GAUSSIAN_STOPS == 0 //sampling step size
+        const float lutStep = (1.0f / 512.f) * GS.LUTGaussianBlurStep;
+      #else
+        const float lutStep = (1.0f / 512.f) * GS.LUTGaussianBlurStep * (GS.TonemapHDRStops * 0.5f + 0.5f); 
+      #endif 
       const float softMaxStr = GS.LUTGaussianBlurBias; //higher = stronger bias toward peak sat
+
       float blurredSat = 0, totalWeight = 0;
       [unroll]
-      for (int k = -4; k <= 2; k++) { //biased towards lower luminance
+      for (int k = -4; k <= 2; k++) { //biased towards lower luminance (more negative index)
         float ySample = max(0.0430528375734, yLB + k * lutStep); //neutral LUT peak
         float sat = g_textures_2_.SampleLevel(g_samplers_2__s, float2(ySample, 0), 0).y; //sat channel
-        float w = exp(-0.5f * (k * k)) * exp(sat * softMaxStr); //Gaussian * soft-max bias
+        float w = exp(-0.5f * (k * k)) * exp(sat * softMaxStr); //gaussian * soft-max bias //TODO: simpler?
         blurredSat = mad(sat, w, blurredSat);
         totalWeight += w;
       }
-      float m = blurredSat / totalWeight;
+
+      float m = blurredSat / totalWeight; //avg
       newSat = max(newSat, m); //clamp chrominance loss
     }
     #endif
@@ -696,15 +719,6 @@ float3 Tonemap_DoFade(float3 x) {
 }
 #endif
 ////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
-float GammaPeakCorrect(float x) {
-  #if CUSTOM_HDTVREC709_1 == 1
-    x = linear_to_sRGB_gamma1(x, GCT_NONE);
-    x = DecodeRec709(x);
-  #endif
-
-  return x;
-}
-
 // REQUIRES colorU linear!
 // isIVT is constexpr type beat
 float3 Tonemap_Do(in float3 colorU, in float3 colorT, in float2 uv, in Texture2D<float4> texColor, /* float4 g_tone_offset, */ const bool isIVT = false) {
@@ -718,8 +732,7 @@ float3 Tonemap_Do(in float3 colorU, in float3 colorT, in float2 uv, in Texture2D
     if (isIVT) return saturate(colorT);
   #endif
 
-  //CUSTOM_UPSCALE_TOON);
-  // "Forced SDR", "Off / Treat as Complex", "On", "On (Ignore Customization Menu)"
+  // CUSTOM_UPSCALE_TOON ("Forced SDR", "Off / Treat as Complex", "On", "On (Ignore Customization Menu)")
   #if CUSTOM_UPSCALE_TOON == 0
     const bool isIVT1 = false; //DEFAULT CASE! THIS SHOULD NOT BE USED.
   #elif CUSTOM_UPSCALE_TOON == 1
@@ -729,13 +742,9 @@ float3 Tonemap_Do(in float3 colorU, in float3 colorT, in float2 uv, in Texture2D
   #endif
 
   // gamma decode
-  colorT = max(0, colorT);
-  // colorT = pow(colorT, 2.2);
+  colorT = max(0, colorT); // required safe
   colorT = gamma_sRGB_to_linear(colorT, GCT_NONE);
   // colorT = pow(colorT, 1/g_tone_offset.w); //g_tone_offset.w is the game's gamma?!?! but there's no benefit to using it now.
-  
-  // colorU = pow(colorU, 1 / 2.2);
-  // colorU = gamma_sRGB_to_linear(colorU, GCT_NONE);
 
   //y
   float colorUy;
@@ -747,60 +756,10 @@ float3 Tonemap_Do(in float3 colorU, in float3 colorT, in float2 uv, in Texture2D
     if (!isIVT1)
     {
       colorUy = GetLuminance(colorU, CS_BT709);
-
-      const float mx = 1/* 500.f / 203.f */;
-      // colorNy = NeuTwo::Neutwo(colorUy, 1/* , 13.5 */); //neutral rolloff
-      colorNy = HermiteSpline::HermiteSplineLuminanceRolloff(colorUy, mx, 90/* 1000 */); // neutral rolloff
-      colorNy = min(colorNy, mx);
-      // colorNy = colorUy; //no rolloff
+      // colorNy = HermiteSpline::HermiteSplineLuminanceRolloff(colorUy, 1, 90); 
+      colorNy = colorUy / (colorUy + 1); // reinhard (like 99% same as Hermite)
     }
   }
-  
-  //CUSTOM_PCBLOWOUT per-channel blowout emulation
-  // #if CUSTOM_PCBLOWOUT == 0
-  //   const float colorTMax = 1;
-  //   float3 colorTS = min(colorT, colorTMax);
-  // #elif CUSTOM_PCBLOWOUT == 1
-  //   const float colorTShoulderStart = GS.PCBlowoutStart;
-  //   const float colorTMax = GS.PCBlowoutEnd;
-  //   float3 colorTS = Reinhard::ReinhardPiecewiseExtended(colorT, 100, colorTMax, colorTShoulderStart);
-  // #elif CUSTOM_PCBLOWOUT == 2
-  //   const float colorTShoulderStart = GS.PCBlowoutStart;
-  //   const float colorTMax = GS.PCBlowoutEnd;
-  //   float3 colorTS = ExponentialRollOff(colorT, colorTShoulderStart, colorTMax);
-  // #elif CUSTOM_PCBLOWOUT == 3
-  //   float3 colorTS = NeuTwo::PerChannel(colorT, GS.PCBlowoutEnd, GS.PCBlowoutStart); //start is replaced with clip
-  //   colorTS = min(colorTS, GS.PCBlowoutEnd); //clamp clippings
-  // #endif
-
-  // // neutralize LUT luminance
-  // float neutralizeRatio;
-  // {
-  //   neutralizeRatio = colorNy / colorTy;
-  //   neutralizeRatio = lerp(neutralizeRatio, 1, saturate(pow(1 - colorNy, 16.0 * GS.LUTNeutralize))); //highpass
-  //   neutralizeRatio = lerp(1, neutralizeRatio, GS.LUTNeutralize); //strength
-  //   
-  //   colorT *= neutralizeRatio;
-  //   colorTy *= neutralizeRatio;
-  // }
-
-//   Per Channel Blowout
-//   if (DVS6 == 0)
-//   {  
-//     // NeuTwo is most goated
-//     float3 colorTS = NeuTwo::PerChannel(colorT, GS.PCBlowoutEnd, GS.PCBlowoutStart); //start is replaced with clip
-//     colorTS = min(colorTS, GS.PCBlowoutEnd); //clamp clippings
-// 
-//     // colorT = UCSTo(colorT, CS_BT709);
-//     // colorTS = UCSTo(colorTS, CS_BT709);
-//     // colorT = RestoreHueAndChrominanceUcs(colorT, colorTS, 1/* GS.PCBlowoutHue */, 1/* GS.PCBlowoutChrom */);
-//     // // colorT.x = colorTS.x; //not needed
-//     // colorT = UCSFrom(colorT, CS_BT709);
-//     // colorT = max(0, colorT);
-// 
-//     colorTS *= colorTy / GetLuminance(colorTS, CS_BT709);
-//     colorT = colorTS;
-//   }
 
   if (isIVT1) {
     // inverse tonemap, skips colorU
@@ -821,86 +780,76 @@ float3 Tonemap_Do(in float3 colorU, in float3 colorT, in float2 uv, in Texture2D
       float y_tonemapped_graded = colorTy;
 
       float ratio = 1.f;
-      float ratioToU = y_untonemapped / y_tonemapped_graded;
       if (y_untonemapped < y_tonemapped) {
         ratio = y_untonemapped / y_tonemapped;
       } else {
         float y_delta = y_untonemapped - y_tonemapped;
         y_delta = max(0, y_delta);  // Cleans up NaN
         const float y_new = y_tonemapped_graded + y_delta;
-
-        const bool y_valid = (y_tonemapped_graded > 0);
-        ratio = y_valid ? (y_new / y_tonemapped_graded) : 0;
+        ratio = y_tonemapped_graded > 0 ? (y_new / y_tonemapped_graded) : 0;
       }
 
       //apply ratio
       float3 color_scaled = colorT * ratio;
       float color_scaled_y = y_tonemapped_graded * ratio;
 
-      //hue correct //TODO: remove or fix. This causes rare issues when colors are max BT709 primaries.
-      // float3 color_scaled_ucs = UCSTo(color_scaled, CS_BT2020);
-      // float3 color_tonemapped_graded_ucs = UCSTo(colorT, CS_BT2020);
-      // color_scaled_ucs = RestoreHueAndChrominanceUcs(color_scaled_ucs, color_tonemapped_graded_ucs, 1.f, 0.f, 1.f);
-      // color_scaled = UCSFrom(color_scaled_ucs, CS_BT2020);
-
+      //backup
       float3 color_scaled_bak = color_scaled;
 
-      //Per Channel Blowout (gradual pass)
+      //Per Channel Blowout (gradual)
       {
         float3 colorTS = color_scaled;
         float y = color_scaled_y;
-        if (y > 0) { //safe
-          const float p = GS.PCBlowoutLumaEnd; //peak
-          // float y1 = HermiteSpline::HermiteSplineLuminanceRolloff(y, /* 12 */ DVS8, 10000 * DVS7); //extended peak for smoother gradients.
-          float y1 = NeuTwo::Neutwo(y, p/* , DVS7 */); //extended peak for smoother gradients.
-          y1 = min(y1, p); //clamp to peak
-          colorTS *= y1 / y;
 
-          const float end = GS.PCBlowoutPerChannelEnd;
-          colorTS = NeuTwo::PerChannel(colorTS, end, GS.PCBlowoutPerChannelClip); //per channel rolloff
-          colorTS = min(colorTS, end); //clamp clip
-          // colorTS = colorTS == DVS4 ? float3(1,0,1) : colorTS; //debug clipped visualize
+        const float p = 2.016f /* GS.PCBlowoutLumaEnd */; //peak
+        // float y1 = HermiteSpline::HermiteSplineLuminanceRolloff(y, /* 12 */ DVS8, 10000 * DVS7); //extended peak for smoother gradients.
+        float y1 = NeuTwo::Neutwo(y, p); //extended peak for smoother gradients.
+        colorTS *= safeDivision(y1, y, 0);
 
+        const float end = 2.64f /* GS.PCBlowoutPerChannelEnd */;
+        colorTS = NeuTwo::PerChannel(colorTS, end, 3.918f /* GS.PCBlowoutPerChannelClip */); //per channel rolloff
+        colorTS = min(colorTS, end); //clamp clip
+
+        #if CUSTOM_PCC_QUALITY == 0
           //set: chroma & hue only
-          colorTS *= y / GetLuminance(colorTS, CS_BT709);
+          colorTS *= safeDivision(y, GetLuminance(colorTS, CS_BT709), 0);
           color_scaled = colorTS;
-
+        #else
           //set: via UCS
-          // color_scaled = UCSTo(color_scaled, CS_BT709);
-          // colorTS = UCSTo(colorTS, CS_BT709);
-          // color_scaled = RestoreHueAndChrominanceUcs(color_scaled, colorTS, 0.95/* GS.PCBlowoutHue */, 0.8/* GS.PCBlowoutChrom */);
-          // if (DVS6 == 0) color_scaled.x = colorTS.x;
-          // color_scaled = UCSFrom(color_scaled, CS_BT709);
-          // color_scaled = max(0, color_scaled);
-        }
+          colorTS *= safeDivision(y, GetLuminance(colorTS, CS_BT709), 0); //luma normalization
+          color_scaled = UCSTo(color_scaled, CS_BT709);
+          colorTS = UCSTo(colorTS, CS_BT709);
+          color_scaled = RestoreHueAndChrominanceUcs(color_scaled, colorTS, 0.87, 0.87, 0.1f);
+          color_scaled = UCSFrom(color_scaled, CS_BT709);
+          color_scaled = max(0, color_scaled);
+        #endif
       }
 
-      //Per Channel Blowout (agressive near peak pass)
+      //Per Channel Blowout (agressive near peak)
       {
         float3 colorTS = color_scaled;
         float y = color_scaled_y;
-        if (y > 0) { //safe
-          const float p = GS.PCBlowoutPerChannel2ndEnd;
-          float y1 = NeuTwo::Neutwo(y, p); 
-          y1 = min(y1, p);
-          colorTS *= y1 / y;
 
-          const float end = p;
-          colorTS = ExponentialRollOff(colorTS, end * GS.PCBlowoutPerChannel2ndStartRatio, end);
-          colorTS = min(colorTS, end);
+        const float p = 2.517f/* GS.PCBlowoutPerChannel2ndEnd */;
+        float y1 = NeuTwo::Neutwo(y, p); 
+        colorTS *= safeDivision(y1, y, 0);
 
+        const float end = p;
+        colorTS = ExponentialRollOff(colorTS, end * 0.93f /* GS.PCBlowoutPerChannel2ndStartRatio */, end);
+
+        #if CUSTOM_PCC_QUALITY == 0
           //set: chroma & hue only
-          colorTS *= y / GetLuminance(colorTS, CS_BT709);
+          colorTS *= safeDivision(y, GetLuminance(colorTS, CS_BT709), 0);
           color_scaled = colorTS;
-
+        #else
           //set: via UCS
-          // color_scaled = UCSTo(color_scaled, CS_BT709);
-          // colorTS = UCSTo(colorTS, CS_BT709);
-          // color_scaled = RestoreHueAndChrominanceUcs(color_scaled, colorTS, 0.95/* GS.PCBlowoutHue */, 0.8/* GS.PCBlowoutChrom */);
-          // if (DVS6 == 0) color_scaled.x = colorTS.x;
-          // color_scaled = UCSFrom(color_scaled, CS_BT709);
-          // color_scaled = max(0, color_scaled);
-        }
+          colorTS *= safeDivision(y, GetLuminance(colorTS, CS_BT709), 0); //luma normalization
+          color_scaled = UCSTo(color_scaled, CS_BT709);
+          colorTS = UCSTo(colorTS, CS_BT709);
+          color_scaled = RestoreHueAndChrominanceUcs(color_scaled, colorTS, 0.87, 0.87, 0.1f);
+          color_scaled = UCSFrom(color_scaled, CS_BT709);
+          color_scaled = max(0, color_scaled);
+        #endif
       }
 
       //perchannel luminance reduction
@@ -934,7 +883,7 @@ float3 Tonemap_Do(in float3 colorU, in float3 colorT, in float2 uv, in Texture2D
   }
   //(colorT is the main output starting here!)
 
-  //LUT decrease makeup
+  // LUT decrease makeup
   #ifdef TONEMAP_COMPLEX
   {
     float e = rcp(GS.LUTScalingAndMakeUp);
@@ -943,7 +892,7 @@ float3 Tonemap_Do(in float3 colorU, in float3 colorT, in float2 uv, in Texture2D
   }
   #endif
 
-  //ColorGrade
+  // ColorGrade
   #if CUSTOM_COLORGRADE == 1
     colorT = RenoDX_ColorGrade(
       colorT, 
@@ -959,37 +908,27 @@ float3 Tonemap_Do(in float3 colorU, in float3 colorT, in float2 uv, in Texture2D
   // //Gamma Correction
   // colorT = GammaCorrection_Linear(colorT);
 
-  //HDR tonemap
+  // HDR tonemap
+  float p = GS.TonemapperPeakCached;
+  float m = GS.TonemapperMaxExpectedCached;
+
   #if CUSTOM_TONEMAP_SCALING == 0
     float l = GetLuminance(colorT, CS_BT709); //luma
   #elif CUSTOM_TONEMAP_SCALING == 1
     float l = max(colorT.x, max(colorT.y, colorT.z)); //max channel
   #endif
-  if (l > 0) { //safe
-    float p = GS.TonemapperPeakCached;
-    float m = GS.TonemapperMaxExpectedCached;
+  float lT = HermiteSpline::HermiteSplineLuminanceRolloff(l, p, m); //REQUIRED HQ HermiteSpline!
+  colorT *= safeDivision(lT, l, 0);
 
-    float lT;
-    lT = HermiteSpline::HermiteSplineLuminanceRolloff(l, p, m);
-    colorT *= lT / l;
+  // clamp peak
+  #if CUSTOM_TONEMAP_CLAMP == 1
+    colorT = min(colorT, p);
+  #elif CUSTOM_TONEMAP_CLAMP == 2
+    colorT = ClampByMaxChannel(colorT, p);
+  #endif
 
-    // colorT = HermiteSpline::HermiteSplinePerChannelRolloff(colorT, p, m); //TODO: remove. not possible, hues required luminance rolloff first, else blowout is too strong.
-
-    // clamp peak
-    #if CUSTOM_TONEMAP_CLAMP == 1
-      colorT = min(colorT, p);
-    #elif CUSTOM_TONEMAP_CLAMP == 2
-      colorT = ClampByMaxChannel(colorT, p);
-    #endif
-
-    // colorT = p; //test peak 
-    // colorT = -0.00001f; //test 0
-    // colorT = 1; //test 1
-   } else colorT = 0; //safe
-
-  //gamme encode
+  // gamme encode
   colorT = max(0, colorT);
-  // colorT = pow(colorT, g_tone_offset.w);
   colorT = linear_to_sRGB_gamma(colorT);
 
   return colorT;

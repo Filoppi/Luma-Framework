@@ -1,8 +1,6 @@
 #define GAME_UNREAL_ENGINE 1
 
-#define ENABLE_ORIGINAL_SHADERS_MEMORY_EDITS 1
-#define ENABLE_NGX 1
-#define ENABLE_FIDELITY_SK 1
+#define LUMA_PATCH_BYTECODE_SYNC 1
 #define ENABLE_POST_DRAW_DISPATCH_CALLBACK 1
 #define CHECK_GRAPHICS_API_COMPATIBILITY 1
 
@@ -32,7 +30,7 @@ namespace
       bool sr_auto_exposure = true;
 
       bool first_boot = true; // Automatic setting
-      bool enable_hdr = false;
+      bool enable_hdr = true;
       bool next_enable_hdr = enable_hdr; // The value we serialize, that will be ignored until reboot
 
       CB::LumaGameSettings cb_default_game_settings;
@@ -284,7 +282,7 @@ public:
       game_device_data.viewport_rect = {0.0f, 0.0f, device_data.render_resolution.x, device_data.render_resolution.y};
    }
 
-   std::unique_ptr<std::byte[]> ModifyShaderByteCode(const std::byte* code, size_t& size, reshade::api::pipeline_subobject_type type, uint64_t shader_hash = -1, const std::byte* shader_object = nullptr, size_t shader_object_size = 0) override
+   std::unique_ptr<std::byte[]> PatchShaderBytecodeSync(const std::byte* code, size_t& size, reshade::api::pipeline_subobject_type type, uint64_t shader_hash = -1, const std::byte* shader_object = nullptr, size_t shader_object_size = 0) override
    {
       // Only process pixel/compute shaders
       if (type != reshade::api::pipeline_subobject_type::pixel_shader && type != reshade::api::pipeline_subobject_type::compute_shader)
@@ -1616,7 +1614,8 @@ BOOL APIENTRY DllMain(HMODULE hModule, DWORD ul_reason_for_call, LPVOID lpReserv
          if (extra_upgraded_formats)
          {
             texture_upgrade_formats.emplace(reshade::api::format::r11g11b10_float); // Some games use this format for the whole post processing
-            texture_format_upgrades_2d_size_filters = 0 | (uint32_t)TextureFormatUpgrades2DSizeFilters::SwapchainResolution | (uint32_t)TextureFormatUpgrades2DSizeFilters::SwapchainAspectRatio | (uint32_t)TextureFormatUpgrades2DSizeFilters::No1Px;
+            // Allow padding to 4 as UE always does it for screen space render targets
+            texture_format_upgrades_2d_size_filters = 0 | (uint32_t)TextureFormatUpgrades2DSizeFilters::SwapchainResolution | (uint32_t)TextureFormatUpgrades2DSizeFilters::SwapchainAspectRatio | (uint32_t)TextureFormatUpgrades2DSizeFilters::PadTo4Px | (uint32_t)TextureFormatUpgrades2DSizeFilters::No1Px;
          }
 
 #if 0 // Not needed as we do it through "auto_texture_format_upgrade_shader_hashes"

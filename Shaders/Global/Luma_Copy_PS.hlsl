@@ -28,7 +28,7 @@ float4 main(
 #endif
 #if A_SAT 
 	color.a = saturate(color.a);
-#elif A_MAX
+#elif A_MAX_0
 	color.a = max(color.a, 0.0);
 #endif
 

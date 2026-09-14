@@ -1,0 +1,379 @@
+// ---- Created with 3Dmigoto v1.3.16 on Tue Sep 02 15:46:08 2025
+
+cbuffer Shader : register(b0)
+{
+  uint4 g_shader_flags : packoffset(c0);
+}
+
+cbuffer Scene : register(b1)
+{
+  float4 g_irradiance_r_transforms[4] : packoffset(c0);
+  float4 g_irradiance_g_transforms[4] : packoffset(c4);
+  float4 g_irradiance_b_transforms[4] : packoffset(c8);
+  float4 g_light_env_stage_diffuse : packoffset(c12);
+  float4 g_light_env_stage_specular : packoffset(c13);
+  float4 g_light_env_chara_diffuse : packoffset(c14);
+  float4 g_light_env_chara_ambient : packoffset(c15);
+  float4 g_light_env_chara_specular : packoffset(c16);
+  float4 g_light_env_reflect_diffuse : packoffset(c17);
+  float4 g_light_env_reflect_ambient : packoffset(c18);
+  float4 g_light_env_reflect_specular : packoffset(c19);
+  float4 g_light_env_proj_diffuse : packoffset(c20);
+  float4 g_light_env_proj_specular : packoffset(c21);
+  float4 g_light_env_proj_position : packoffset(c22);
+  float4 g_light_stage_dir : packoffset(c23);
+  float4 g_light_stage_diff : packoffset(c24);
+  float4 g_light_stage_spec : packoffset(c25);
+  float4 g_light_chara_dir : packoffset(c26);
+  float4 g_light_chara_spec : packoffset(c27);
+  float4 g_light_chara_luce : packoffset(c28);
+  float4 g_light_chara_back : packoffset(c29);
+  float4 g_light_face_diff : packoffset(c30);
+  float4 g_chara_color0 : packoffset(c31);
+  float4 g_chara_color1 : packoffset(c32);
+  float4 g_chara_f_dir : packoffset(c33);
+  float4 g_chara_f_ambient : packoffset(c34);
+  float4 g_chara_f_diffuse : packoffset(c35);
+  float4 g_chara_tc_param : packoffset(c36);
+  float4 g_fog_depth_color : packoffset(c37);
+  float4 g_fog_height_params : packoffset(c38);
+  float4 g_fog_height_color : packoffset(c39);
+  float4 g_fog_bump_params : packoffset(c40);
+  float4 g_fog_state_params : packoffset(c41);
+  float4 g_normal_tangent_transforms[3] : packoffset(c42);
+  float4 g_esm_param : packoffset(c45);
+  float4 g_self_shadow_receivers[6] : packoffset(c46);
+  float4 g_shadow_ambient : packoffset(c52);
+  float4 g_shadow_ambient1 : packoffset(c53);
+  float4 g_framebuffer_size : packoffset(c54);
+  float4 g_light_reflect_dir : packoffset(c55);
+  float4 g_clip_plane : packoffset(c56);
+  float4 g_npr_cloth_spec_color : packoffset(c57);
+  float4 g_view[3] : packoffset(c58);
+  float4 g_view_inverse[3] : packoffset(c61);
+  float4 g_projection_view[4] : packoffset(c64);
+  float4 g_view_position : packoffset(c68);
+  float4 g_light_projection[4] : packoffset(c69);
+  float4 g_light_projection_depth[4] : packoffset(c73);
+  float4 g_foward_z_projection_row2 : packoffset(c77);
+}
+
+cbuffer Batch : register(b2)
+{
+  float4 g_transforms[4] : packoffset(c0);
+  float4 g_worlds[3] : packoffset(c4);
+  float4 g_worlds_invtrans[3] : packoffset(c7);
+  float4 g_worldview[3] : packoffset(c10);
+  float4 g_worldview_inverse[3] : packoffset(c13);
+  float4 g_joint[3] : packoffset(c16);
+  float4 g_joint_inverse[3] : packoffset(c19);
+  float4 g_texcoord_transforms[4] : packoffset(c22);
+  float4 g_blend_color : packoffset(c26);
+  float4 g_offset_color : packoffset(c27);
+  float4 g_material_state_diffuse : packoffset(c28);
+  float4 g_material_state_ambient : packoffset(c29);
+  float4 g_material_state_emission : packoffset(c30);
+  float4 g_material_state_shininess : packoffset(c31);
+  float4 g_material_state_specular : packoffset(c32);
+  float4 g_fresnel_coefficients : packoffset(c33);
+  float4 g_texture_color_coefficients : packoffset(c34);
+  float4 g_texture_color_offset : packoffset(c35);
+  float4 g_texture_specular_coefficients : packoffset(c36);
+  float4 g_texture_specular_offset : packoffset(c37);
+  float4 g_shininess : packoffset(c38);
+  float4 g_max_alpha : packoffset(c39);
+  float4 g_morph_weight : packoffset(c40);
+  float4 g_sss_param : packoffset(c41);
+  float4 g_bump_depth : packoffset(c42);
+  float4 g_intensity : packoffset(c43);
+  float4 g_reflect_uv_scale : packoffset(c44);
+  float4 g_shadow_position[2] : packoffset(c45);
+  float4 g_shadow_direction[2] : packoffset(c47);
+  float4 g_shadow_param : packoffset(c49);
+  uint4 g_skip_flags : packoffset(c50);
+}
+
+cbuffer NPRParam : register(b4)
+{
+  uint4 g_npr_flags : packoffset(c0);
+  float4 g_npr_param[8] : packoffset(c1);
+  uint4 g_npr_dbg_flags : packoffset(c9);
+  float4 g_npr_dbg_param[4] : packoffset(c10);
+}
+
+SamplerState g_samplers_0__s : register(s0);
+SamplerState g_samplers_1__s : register(s1);
+SamplerState g_samplers_2__s : register(s2);
+SamplerState g_samplers_3__s : register(s3);
+SamplerState g_samplers_4__s : register(s4);
+SamplerState g_envmap_sampler_s : register(s5);
+SamplerState g_shadow_sampler_s : register(s6);
+SamplerState g_shadow_depth_sampler_s : register(s7);
+Texture2D<float4> g_textures_0_ : register(t0);
+Texture2D<float4> g_textures_1_ : register(t1);
+Texture2D<float4> g_textures_2_ : register(t2);
+Texture2D<float4> g_textures_3_ : register(t3);
+Texture2D<float4> g_textures_4_ : register(t4);
+TextureCube<float4> g_envmap_texture : register(t5);
+Texture2D<float4> g_shadow_textures_0_ : register(t6);
+Texture2D<float4> g_shadow_textures_1_ : register(t7);
+Texture2D<float4> g_shadow_depth_textures_1_ : register(t20);
+
+
+// 3Dmigoto declarations
+#define cmp -
+
+
+void main(
+  float4 v0 : SV_POSITION0,
+  float3 v1 : NORMAL0,
+  float3 v2 : TANGENT0,
+  float3 v3 : BINORMAL0,
+  float4 v4 : TEXCOORD0,
+  float4 v5 : TEXCOORD1,
+  float4 v6 : TEXCOORD2,
+  float4 v7 : TEXCOORD3,
+  float4 v8 : COLOR0,
+  float4 v9 : COLOR1,
+  float4 v10 : COLOR2,
+  float4 v11 : COLOR3,
+  out float4 o0 : SV_Target0)
+{
+  float4 r0,r1,r2,r3,r4,r5,r6,r7,r8;
+  uint4 bitmask, uiDest;
+  float4 fDest;
+
+  if (2 == 0) r0.x = 0; else if (2+2 < 32) {   r0.x = (uint)g_shader_flags.w << (32-(2 + 2)); r0.x = (uint)r0.x >> (32-2);  } else r0.x = (uint)g_shader_flags.w >> 2;
+  if (1 == 0) r0.y = 0; else if (1+4 < 32) {   r0.y = (uint)g_shader_flags.w << (32-(1 + 4)); r0.y = (uint)r0.y >> (32-1);  } else r0.y = (uint)g_shader_flags.w >> 4;
+  if (1 == 0) r0.z = 0; else if (1+28 < 32) {   r0.z = (uint)g_shader_flags.x << (32-(1 + 28)); r0.z = (uint)r0.z >> (32-1);  } else r0.z = (uint)g_shader_flags.x >> 28;
+  r0.w = cmp((int)r0.x == 1);
+  if (r0.w != 0) {
+    r1.xyzw = g_textures_0_.Sample(g_samplers_0__s, v4.xy).xyzw;
+    if (1 == 0) r0.w = 0; else if (1+9 < 32) {     r0.w = (uint)g_shader_flags.w << (32-(1 + 9)); r0.w = (uint)r0.w >> (32-1);    } else r0.w = (uint)g_shader_flags.w >> 9;
+    r0.w = cmp((int)r0.w == 1);
+    if (r0.w != 0) {
+      r1.w = g_textures_4_.Sample(g_samplers_4__s, v4.zw).w;
+    }
+  } else {
+    r0.w = cmp((int)r0.x == 2);
+    if (r0.w != 0) {
+      r2.xyzw = g_textures_0_.Sample(g_samplers_0__s, v4.xy).xyzw;
+      r3.xyzw = g_textures_1_.Sample(g_samplers_1__s, v4.zw).xyzw;
+      if (3 == 0) r4.x = 0; else if (3+5 < 32) {       r4.x = (uint)g_shader_flags.x << (32-(3 + 5)); r4.x = (uint)r4.x >> (32-3);      } else r4.x = (uint)g_shader_flags.x >> 5;
+      if (3 == 0) r4.y = 0; else if (3+5 < 32) {       r4.y = (uint)g_shader_flags.x << (32-(3 + 5)); r4.y = (uint)r4.y >> (32-3);      } else r4.y = (uint)g_shader_flags.x >> 5;
+      if (3 == 0) r4.z = 0; else if (3+5 < 32) {       r4.z = (uint)g_shader_flags.x << (32-(3 + 5)); r4.z = (uint)r4.z >> (32-3);      } else r4.z = (uint)g_shader_flags.x >> 5;
+      if (1 == 0) r4.w = 0; else if (1+9 < 32) {       r4.w = (uint)g_shader_flags.w << (32-(1 + 9)); r4.w = (uint)r4.w >> (32-1);      } else r4.w = (uint)g_shader_flags.w >> 9;
+      r0.w = 0.00400000019 + r3.w;
+      r0.w = 1 / r0.w;
+      r5.xyz = r3.xyz * r0.www;
+      r5.xyz = r5.xyz * r2.xyz;
+      r6.xyz = r3.xyz + -r2.xyz;
+      r6.xyz = r3.www * r6.xyz + r2.xyz;
+      r7.xyzw = r3.xyzw * r2.xyzw;
+      r8.xyzw = cmp((int4)r4.xyzw == int4(3,1,2,1));
+      r3.xyz = r3.xyz + r2.xyz;
+      r3.w = r7.w;
+      r3.xyzw = r8.zzzz ? r3.xyzw : r2.xyzw;
+      r3.xyzw = r8.yyyy ? r7.xyzw : r3.xyzw;
+      r6.w = r2.w;
+      r2.xyzw = r4.zzzz ? r3.xyzw : r6.xyzw;
+      r5.w = r6.w;
+      r1.xyzw = r8.xxxx ? r5.xyzw : r2.xyzw;
+      if (r8.w != 0) {
+        r1.w = g_textures_4_.Sample(g_samplers_4__s, v4.zw).w;
+      }
+    } else {
+      r1.xyzw = r0.xxxx ? float4(1,0,0,1) : g_material_state_diffuse.xyzw;
+    }
+  }
+  r0.x = v8.w * r1.w;
+  o0.w = max(g_max_alpha.w, r0.x);
+  r0.x = cmp(v10.w == 0.000000);
+  if (r0.x != 0) {
+    r0.xw = g_textures_2_.Sample(g_samplers_2__s, v4.xy).xy;
+    r2.xy = r0.xw * float2(2,2) + float2(-1,-1);
+    r0.x = r2.y * r2.y;
+    r2.z = r0.x * r2.y;
+    r2.xyz = float3(1.5,1.5,2) * r2.xyz;
+    r0.xw = r2.xy + r2.zz;
+    r2.xyz = v3.xyz * r0.www;
+    r2.xyz = v2.xyz * r0.xxx + r2.xyz;
+    r2.xyz = v1.xyz + r2.xyz;
+    r0.x = dot(r2.xyz, r2.xyz);
+    r0.x = rsqrt(r0.x);
+    r2.xyz = r2.xyz * r0.xxx;
+    r2.w = 1;
+    r3.x = dot(g_irradiance_r_transforms[0].xyzw, r2.xyzw);
+    r3.y = dot(g_irradiance_r_transforms[1].xyzw, r2.xyzw);
+    r3.z = dot(g_irradiance_r_transforms[2].xyzw, r2.xyzw);
+    r3.w = dot(g_irradiance_r_transforms[3].xyzw, r2.xyzw);
+    r3.x = dot(r3.xyzw, r2.xyzw);
+    r4.x = dot(g_irradiance_g_transforms[0].xyzw, r2.xyzw);
+    r4.y = dot(g_irradiance_g_transforms[1].xyzw, r2.xyzw);
+    r4.z = dot(g_irradiance_g_transforms[2].xyzw, r2.xyzw);
+    r4.w = dot(g_irradiance_g_transforms[3].xyzw, r2.xyzw);
+    r3.y = dot(r4.xyzw, r2.xyzw);
+    r4.x = dot(g_irradiance_b_transforms[0].xyzw, r2.xyzw);
+    r4.y = dot(g_irradiance_b_transforms[1].xyzw, r2.xyzw);
+    r4.z = dot(g_irradiance_b_transforms[2].xyzw, r2.xyzw);
+    r4.w = dot(g_irradiance_b_transforms[3].xyzw, r2.xyzw);
+    r3.z = dot(r4.xyzw, r2.xyzw);
+  } else {
+    r0.x = dot(v1.xyz, v1.xyz);
+    r0.x = rsqrt(r0.x);
+    r2.xyz = v1.xyz * r0.xxx;
+    r3.xyz = v10.xyz;
+  }
+  r0.x = dot(v5.xyz, v5.xyz);
+  r0.x = rsqrt(r0.x);
+  r4.xyz = v5.xyz * r0.xxx;
+  r0.w = cmp(0 < v11.w);
+  if (r0.w != 0) {
+    if (2 == 0) r0.w = 0; else if (2+1 < 32) {     r0.w = (uint)g_shader_flags.z << (32-(2 + 1)); r0.w = (uint)r0.w >> (32-2);    } else r0.w = (uint)g_shader_flags.z >> 1;
+    if (r0.w == 0) {
+      r1.w = g_shadow_depth_textures_1_.Sample(g_shadow_depth_sampler_s, v6.xy).x;
+      r1.w = -v6.z + r1.w;
+      r1.w = g_esm_param.x * r1.w;
+      r1.w = exp2(r1.w);
+      r1.w = min(1, r1.w);
+      r2.w = cmp(r1.w < 1);
+      if (r2.w != 0) {
+        r2.w = g_shadow_textures_0_.Sample(g_shadow_sampler_s, v6.xy).x;
+        r1.w = max(r2.w, r1.w);
+      } else {
+        r1.w = 1;
+      }
+      r5.xyz = g_shadow_ambient1.xyz * r1.www + g_shadow_ambient.xyz;
+    } else {
+      r0.w = cmp((int)r0.w == 1);
+      if (r0.w != 0) {
+        r0.w = g_shadow_depth_textures_1_.Sample(g_shadow_depth_sampler_s, v6.xy).x;
+        r0.w = -v6.z + r0.w;
+        r0.w = g_esm_param.x * r0.w;
+        r0.w = exp2(r0.w);
+        r0.w = min(1, r0.w);
+        r2.w = g_shadow_depth_textures_1_.Sample(g_shadow_depth_sampler_s, v7.xy).x;
+        r2.w = -v7.z + r2.w;
+        r2.w = g_esm_param.x * r2.w;
+        r2.w = exp2(r2.w);
+        r2.w = min(1, r2.w);
+        r0.w = min(r2.w, r0.w);
+        r2.w = cmp(r0.w < 1);
+        if (r2.w != 0) {
+          r2.w = g_shadow_textures_0_.Sample(g_shadow_sampler_s, v6.xy).x;
+          r3.w = g_shadow_textures_1_.Sample(g_shadow_sampler_s, v7.xy).x;
+          r2.w = min(r3.w, r2.w);
+          r1.w = max(r2.w, r0.w);
+        } else {
+          r1.w = 1;
+        }
+        r5.xyz = g_shadow_ambient1.xyz * r1.www + g_shadow_ambient.xyz;
+      } else {
+        r5.xyz = float3(1,1,1);
+        r1.w = 1;
+      }
+    }
+  } else {
+    r5.xyz = float3(1,1,1);
+    r1.w = 1;
+  }
+  r6.xyz = v5.xyz * r0.xxx + g_light_stage_dir.xyz;
+  r0.x = dot(r6.xyz, r6.xyz);
+  r0.x = rsqrt(r0.x);
+  r6.xyz = r6.xyz * r0.xxx;
+  r0.x = saturate(dot(r2.xyz, g_light_stage_dir.xyz));
+  r0.w = saturate(dot(r2.xyz, r6.xyz));
+  r2.w = g_material_state_shininess.x * 112 + 16;
+  r0.w = log2(r0.w);
+  r0.w = r2.w * r0.w;
+  r0.w = exp2(r0.w);
+  r2.w = cmp(0 < (uint)g_npr_flags.x);
+  if (1 == 0) r3.w = 0; else if (1+7 < 32) {   r3.w = (uint)g_npr_flags.y << (32-(1 + 7)); r3.w = (uint)r3.w >> (32-1);  } else r3.w = (uint)g_npr_flags.y >> 7;
+  r3.w = cmp((int)r3.w != 0);
+  r2.w = r2.w ? r3.w : 0;
+  if (r2.w != 0) {
+    r6.xyz = v8.xyz * r3.xyz;
+    r6.xyz = r6.xyz * r1.xyz;
+    r7.x = dot(r6.xyz, float3(0.5,-0.41834259,-0.0816574022));
+    r7.z = dot(r6.xyz, float3(0.298900008,0.586600006,0.114500001));
+    r7.y = dot(r6.xyz, float3(-0.168774694,-0.331225306,0.5));
+    r3.w = dot(r7.xy, r7.xy);
+    r3.w = 9.99999997e-007 + r3.w;
+    r4.w = rsqrt(r3.w);
+    r3.w = -r3.w * r4.w + 0.119999997;
+    r3.w = max(0, r3.w);
+    r7.w = r3.w * 0.5 + r7.y;
+    r6.xyz = float3(1.20000005,0.800000012,0.800000012) * r7.xzw;
+    r8.x = saturate(dot(r6.xy, float2(1.40219998,1)));
+    r8.y = saturate(dot(r6.xyz, float3(-0.714486003,1,-0.345685989)));
+    r8.z = saturate(dot(r6.yz, float2(1,1.77100003)));
+    r6.xy = cmp(float2(0,0) < r7.xy);
+    r6.zw = cmp(r7.xy < float2(0,0));
+    r6.xy = (int2)-r6.xy + (int2)r6.zw;
+    r6.xy = (int2)r6.xy;
+    r6.zw = r7.xy + r7.xy;
+    r6.zw = log2(abs(r6.zw));
+    r6.zw = float2(0.850000024,0.850000024) * r6.zw;
+    r6.zw = exp2(r6.zw);
+    r6.xy = r6.xy * r6.zw;
+    r6.xz = float2(0.5,0.5) * r6.xy;
+    r3.w = 1 + -r7.z;
+    r3.w = log2(abs(r3.w));
+    r3.w = 1.5 * r3.w;
+    r3.w = exp2(r3.w);
+    r6.y = r3.w * -0.970000029 + 1;
+    r7.x = saturate(dot(r6.xy, float2(1.40219998,1)));
+    r7.y = saturate(dot(r6.xyz, float3(-0.714486003,1,-0.345685989)));
+    r7.z = saturate(dot(r6.yz, float2(1,1.77100003)));
+    r3.w = r0.x * r5.x;
+    r6.xyz = r7.xyz + -r8.xyz;
+    r6.xyz = r3.www * r6.xyz + r8.xyz;
+    r7.xyz = v8.xyz * r1.xyz;
+    r7.xyz = r7.xyz * r0.xxx;
+    r7.xyz = g_light_stage_diff.xyz * r7.xyz;
+    r6.xyz = r7.xyz * g_npr_param[1].www + r6.xyz;
+    r7.xyz = g_material_state_emission.xyz * r1.xyz;
+    r6.xyz = r7.xyz * g_npr_param[1].www + r6.xyz;
+  } else {
+    r3.xyz = r0.xxx * g_light_stage_diff.xyz + r3.xyz;
+    r3.xyz = r3.xyz * v8.xyz + g_material_state_emission.xyz;
+    r6.xyz = r3.xyz * r1.xyz;
+  }
+  r1.xyz = r6.xyz * r5.xyz;
+  r3.xyz = r6.xyz * r5.xxx;
+  r1.xyz = r0.zzz ? r1.xyz : r3.xyz;
+  r0.xzw = g_light_stage_spec.xyz * r0.www;
+  r0.xzw = r0.xzw * r1.www;
+  r0.xzw = g_light_env_stage_specular.xyz * r0.xzw;
+  r3.xyzw = g_textures_3_.Sample(g_samplers_3__s, v4.xy).xyzw;
+  r3.xyzw = v9.xyzw * r3.xyzw;
+  r0.xzw = r3.xyz * r0.xzw;
+  r0.xzw = r1.xyz * float3(0.959999979,0.959999979,0.959999979) + r0.xzw;
+  r0.y = cmp((int)r0.y != 0);
+  r1.x = cmp(0.00999999978 < r3.w);
+  r0.y = r0.y ? r1.x : 0;
+  if (r0.y != 0) {
+    r0.y = dot(r4.xyz, r2.xyz);
+    r0.y = r0.y + r0.y;
+    r1.xyz = r2.xyz * -r0.yyy + r4.xyz;
+    r1.xyz = -r1.xyz;
+    r1.xyz = g_envmap_texture.Sample(g_envmap_sampler_s, r1.xyz).xyz;
+    r0.y = g_light_env_stage_specular.w * r1.w;
+    r1.xyz = r1.xyz * r0.yyy;
+    r0.xzw = r1.xyz * r3.www + r0.xzw;
+  }
+  r1.xyz = g_npr_param[0].zzz * r0.xzw;
+  r0.xyz = r2.www ? r1.xyz : r0.xzw;
+  r0.w = (int)g_shader_flags.y & 3;
+  r1.xy = cmp((int2)r0.ww == int2(2,3));
+  r0.w = (int)r1.y | (int)r1.x;
+
+  r1.xyz = g_fog_height_color.xyz + -r0.xyz;
+  r1.xyz = v6.www * r1.xyz + r0.xyz;
+  
+  r2.xyz = g_fog_depth_color.xyz + -r0.xyz;
+  r0.xyz = v6.www * r2.xyz + r0.xyz;
+
+  o0.xyz = r0.www ? r1.xyz : r0.xyz;
+  return;
+}

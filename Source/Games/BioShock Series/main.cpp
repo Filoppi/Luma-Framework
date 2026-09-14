@@ -166,7 +166,7 @@ public:
    void OnInit(bool async) override
    {
       std::vector<ShaderDefineData> game_shader_defines_data = {
-         {"TONEMAP_TYPE", '1', true, false, "0 - SDR: Vanilla\n2 - SDR/HDR: Vanilla+\n3 - HDR: Untonemapped"},
+         {"TONEMAP_TYPE", '1', true, false, "0 - SDR: Vanilla\n1 - SDR/HDR: Vanilla+\n2 - HDR: Untonemapped"},
          {"ALLOW_AA", '0', true, false, "Allows disabling the game's FXAA implementation", 1},
          {"ENABLE_LUMA", '1', true, false, "Allow disabling the mod's improvements to the game's look", 1},
          {"ENABLE_IMPROVED_BLOOM", '1', true, false, "BS: Reduces blur over the entire scene.\nBS2: Reduces the excessive bloom's pixelation due to usage of nearest neighbor texture sampling in the original shaders", 1},
