@@ -15458,7 +15458,12 @@ namespace
                   ImGui::Checkbox("Ignore Upgraded Texture Samplers", &ignore_upgraded_samplers); // Note: some games might swap this on/off within a frame so this toggle isn't always reliable
                   bool samplers_changed = ImGui::SliderInt("Texture Samplers Upgrade Mode", &samplers_upgrade_mode, 0, 7);
                   samplers_changed |= ImGui::SliderInt("Texture Samplers Upgrade Mode - 2", &samplers_upgrade_mode_2, 0, 6);
-                  ImGui::Checkbox("Custom Texture Samplers Mip LOD Bias", &custom_texture_mip_lod_bias_offset); // When this is unticked, we expect the game to reset "texture_mip_lod_bias_offset" to the best TAA or Super Resolution value (if not, the last set custom value will persist)
+                  // When this is unticked, we expect the game to reset "texture_mip_lod_bias_offset" to the best TAA or Super Resolution value (if not, the last set custom value will persist)
+                  if (ImGui::Checkbox("Custom Texture Samplers Mip LOD Bias", &custom_texture_mip_lod_bias_offset) && !custom_texture_mip_lod_bias_offset)
+                  {
+                     device_data.texture_mip_lod_bias_offset = 0.f;
+                     samplers_changed = true;
+                  }
                   if (samplers_upgrade_mode > 0 && custom_texture_mip_lod_bias_offset)
                   {
                      const std::unique_lock lock_samplers(s_mutex_samplers);
