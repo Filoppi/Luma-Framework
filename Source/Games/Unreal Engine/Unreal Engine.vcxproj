@@ -71,7 +71,6 @@
   </ImportGroup>
   <ImportGroup Label="PropertySheets">
     <Import Project="$(UserRootDir)\Microsoft.Cpp.$(Platform).user.props" Condition="exists('$(UserRootDir)\Microsoft.Cpp.$(Platform).user.props')" Label="LocalAppDataPlatform" />
-    <Import Project="..\Luma.DXP.props" Condition="Exists('..\Luma.DXP.props')" />
   </ImportGroup>
   <PropertyGroup Label="UserMacros" />
   <PropertyGroup>
@@ -308,6 +307,8 @@
   <ItemGroup>
     <ClInclude Include="includes\shader_detect.hpp" />
   </ItemGroup>
+  <!-- Apply feature settings after the final per-configuration properties. -->
+  <Import Project="..\Luma.DXP.props" Condition="Exists('..\Luma.DXP.props')" />
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
   <ImportGroup Label="ExtensionTargets">
   </ImportGroup>

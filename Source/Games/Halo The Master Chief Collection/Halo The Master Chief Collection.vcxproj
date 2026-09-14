@@ -153,7 +153,7 @@
       </LinkLibraryDependencies>
     </ProjectReference>
     <PostBuildEvent>
-      <Command>IF DEFINED LUMA_TEMPLATE_BIN_PATH ( xcopy /Y "$(TargetDir)*$(SolutionName)-$(ProjectName).addon" "%LUMA_TEMPLATE_BIN_PATH%" || exit /B 0 )</Command>
+      <Command>IF DEFINED LUMA_HALO_THE_MASTER_CHIEF_COLLECTION_BIN_PATH ( xcopy /Y "$(TargetDir)*$(SolutionName)-$(ProjectName).addon" "%LUMA_HALO_THE_MASTER_CHIEF_COLLECTION_BIN_PATH%" || exit /B 0 )</Command>
     </PostBuildEvent>
   </ItemDefinitionGroup>
   <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Publishing-Release|x64'">
@@ -202,7 +202,7 @@
       </LinkLibraryDependencies>
     </ProjectReference>
     <PostBuildEvent>
-      <Command>IF DEFINED LUMA_TEMPLATE_BIN_PATH ( xcopy /Y "$(TargetDir)*$(SolutionName)-$(ProjectName).addon" "%LUMA_TEMPLATE_BIN_PATH%" || exit /B 0 )</Command>
+      <Command>IF DEFINED LUMA_HALO_THE_MASTER_CHIEF_COLLECTION_BIN_PATH ( xcopy /Y "$(TargetDir)*$(SolutionName)-$(ProjectName).addon" "%LUMA_HALO_THE_MASTER_CHIEF_COLLECTION_BIN_PATH%" || exit /B 0 )</Command>
     </PostBuildEvent>
   </ItemDefinitionGroup>
   <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Test-Release|x64'">
@@ -251,7 +251,7 @@
       </LinkLibraryDependencies>
     </ProjectReference>
     <PostBuildEvent>
-      <Command>IF DEFINED LUMA_TEMPLATE_BIN_PATH ( xcopy /Y "$(TargetDir)*$(SolutionName)-$(ProjectName).addon" "%LUMA_TEMPLATE_BIN_PATH%" || exit /B 0 )</Command>
+      <Command>IF DEFINED LUMA_HALO_THE_MASTER_CHIEF_COLLECTION_BIN_PATH ( xcopy /Y "$(TargetDir)*$(SolutionName)-$(ProjectName).addon" "%LUMA_HALO_THE_MASTER_CHIEF_COLLECTION_BIN_PATH%" || exit /B 0 )</Command>
     </PostBuildEvent>
   </ItemDefinitionGroup>
   <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Development-Release|x64'">
@@ -300,7 +300,7 @@
       </LinkLibraryDependencies>
     </ProjectReference>
     <PostBuildEvent>
-      <Command>IF DEFINED LUMA_TEMPLATE_BIN_PATH ( xcopy /Y "$(TargetDir)*$(SolutionName)-$(ProjectName).addon" "%LUMA_TEMPLATE_BIN_PATH%" || exit /B 0 )</Command>
+      <Command>IF DEFINED LUMA_HALO_THE_MASTER_CHIEF_COLLECTION_BIN_PATH ( xcopy /Y "$(TargetDir)*$(SolutionName)-$(ProjectName).addon" "%LUMA_HALO_THE_MASTER_CHIEF_COLLECTION_BIN_PATH%" || exit /B 0 )</Command>
     </PostBuildEvent>
   </ItemDefinitionGroup>
   <ItemGroup>

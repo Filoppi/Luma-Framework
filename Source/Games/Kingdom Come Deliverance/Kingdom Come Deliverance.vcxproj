@@ -69,7 +69,6 @@
   </ImportGroup>
   <ImportGroup Label="PropertySheets">
     <Import Project="$(UserRootDir)\Microsoft.Cpp.$(Platform).user.props" Condition="exists('$(UserRootDir)\Microsoft.Cpp.$(Platform).user.props')" Label="LocalAppDataPlatform" />
-    <Import Project="..\Luma.DXP.props" Condition="Exists('..\Luma.DXP.props')" />
   </ImportGroup>
   <PropertyGroup Label="UserMacros" />
   <PropertyGroup>
@@ -161,7 +160,7 @@
       </LinkLibraryDependencies>
     </ProjectReference>
     <PostBuildEvent>
-      <Command>IF DEFINED LUMA_TEMPLATE_BIN_PATH ( xcopy /Y "$(TargetDir)*$(SolutionName)-$(ProjectName).addon" "%LUMA_TEMPLATE_BIN_PATH%" || exit /B 0 )</Command>
+      <Command>IF DEFINED LUMA_KINGDOM_COME_DELIVERANCE_BIN_PATH ( xcopy /Y "$(TargetDir)*$(SolutionName)-$(ProjectName).addon" "%LUMA_KINGDOM_COME_DELIVERANCE_BIN_PATH%" || exit /B 0 )</Command>
     </PostBuildEvent>
   </ItemDefinitionGroup>
   <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Publishing-Release|x64'">
@@ -206,7 +205,7 @@
       </LinkLibraryDependencies>
     </ProjectReference>
     <PostBuildEvent>
-      <Command>IF DEFINED LUMA_TEMPLATE_BIN_PATH ( xcopy /Y "$(TargetDir)*$(SolutionName)-$(ProjectName).addon" "%LUMA_TEMPLATE_BIN_PATH%" || exit /B 0 )</Command>
+      <Command>IF DEFINED LUMA_KINGDOM_COME_DELIVERANCE_BIN_PATH ( xcopy /Y "$(TargetDir)*$(SolutionName)-$(ProjectName).addon" "%LUMA_KINGDOM_COME_DELIVERANCE_BIN_PATH%" || exit /B 0 )</Command>
     </PostBuildEvent>
   </ItemDefinitionGroup>
   <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Test-Release|x64'">
@@ -251,7 +250,7 @@
       </LinkLibraryDependencies>
     </ProjectReference>
     <PostBuildEvent>
-      <Command>IF DEFINED LUMA_TEMPLATE_BIN_PATH ( xcopy /Y "$(TargetDir)*$(SolutionName)-$(ProjectName).addon" "%LUMA_TEMPLATE_BIN_PATH%" || exit /B 0 )</Command>
+      <Command>IF DEFINED LUMA_KINGDOM_COME_DELIVERANCE_BIN_PATH ( xcopy /Y "$(TargetDir)*$(SolutionName)-$(ProjectName).addon" "%LUMA_KINGDOM_COME_DELIVERANCE_BIN_PATH%" || exit /B 0 )</Command>
     </PostBuildEvent>
   </ItemDefinitionGroup>
   <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Development-Release|x64'">
@@ -296,13 +295,15 @@
       </LinkLibraryDependencies>
     </ProjectReference>
     <PostBuildEvent>
-      <Command>IF DEFINED LUMA_TEMPLATE_BIN_PATH ( xcopy /Y "$(TargetDir)*$(SolutionName)-$(ProjectName).addon" "%LUMA_TEMPLATE_BIN_PATH%" || exit /B 0 )</Command>
+      <Command>IF DEFINED LUMA_KINGDOM_COME_DELIVERANCE_BIN_PATH ( xcopy /Y "$(TargetDir)*$(SolutionName)-$(ProjectName).addon" "%LUMA_KINGDOM_COME_DELIVERANCE_BIN_PATH%" || exit /B 0 )</Command>
     </PostBuildEvent>
   </ItemDefinitionGroup>
   <ItemGroup>
     <ClCompile Include="..\..\Core\unity_build.cpp" />
     <ClCompile Include="main.cpp" />
   </ItemGroup>
+  <!-- Apply feature settings after the final per-configuration properties. -->
+  <Import Project="..\Luma.DXP.props" Condition="Exists('..\Luma.DXP.props')" />
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
   <ImportGroup Label="ExtensionTargets">
   </ImportGroup>

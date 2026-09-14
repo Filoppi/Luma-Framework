@@ -73,7 +73,6 @@
   </ImportGroup>
   <ImportGroup Label="PropertySheets">
     <Import Project="$(UserRootDir)\Microsoft.Cpp.$(Platform).user.props" Condition="exists('$(UserRootDir)\Microsoft.Cpp.$(Platform).user.props')" Label="LocalAppDataPlatform" />
-    <Import Project="..\Luma.DXP.props" Condition="Exists('..\Luma.DXP.props')" />
   </ImportGroup>
   <PropertyGroup Label="UserMacros" />
   <PropertyGroup>
@@ -319,6 +318,8 @@
       <Command>IF DEFINED LUMA_DXHRDC_BIN_PATH ( xcopy /Y "$(TargetDir)*$(SolutionName)-$(ProjectName).addon" "%LUMA_DXHRDC_BIN_PATH%" || exit /B 0 )</Command>
     </PostBuildEvent>
   </ItemDefinitionGroup>
+  <!-- Apply feature settings after the final per-configuration properties. -->
+  <Import Project="..\Luma.DXP.props" Condition="Exists('..\Luma.DXP.props')" />
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
   <ImportGroup Label="ExtensionTargets">
   </ImportGroup>
