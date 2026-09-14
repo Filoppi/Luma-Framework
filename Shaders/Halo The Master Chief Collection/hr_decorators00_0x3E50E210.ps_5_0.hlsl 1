@@ -1,0 +1,58 @@
+// ---- Created with 3Dmigoto v1.3.16 on Wed Aug 05 17:39:45 2026
+
+cbuffer ExposurePS : register(b0)
+{
+  float4 g_exposure : packoffset(c0);
+  float4 g_alt_exposure : packoffset(c1);
+}
+
+cbuffer MeshPS : register(b1)
+{
+  float4 k_ps_analytical_light_direction : packoffset(c0);
+  float4 k_ps_analytical_light_intensity : packoffset(c1);
+  float4 k_ps_constant_shadow_alpha : packoffset(c2);
+  float4 k_ps_bounce_light_direction : packoffset(c3);
+  float4 k_ps_bounce_light_intensity : packoffset(c4);
+  float4 k_ps_wetness_coefficients : packoffset(c5);
+  float4 k_ps_rain_ripple_coefficients : packoffset(c6);
+  float4 p_analytical_gel_xform[3] : packoffset(c7);
+  float4 antialias_scalars : packoffset(c10);
+  float4 object_velocity : packoffset(c11);
+  float4 p_lightmap_compress_constant_0 : packoffset(c12);
+  bool k_ps_bool_is_uber_light_directional : packoffset(c13);
+  bool ps_boolean_enable_wet_effect : packoffset(c13.y);
+}
+
+SamplerState LocalSampler_diffuse_texture_s : register(s0);
+Texture2D<float4> LocalTexture_diffuse_texture : register(t0);
+
+
+// 3Dmigoto declarations
+#define cmp -
+
+
+void main(
+  float4 v0 : SV_Position0,
+  float4 v1 : TEXCOORD0,
+  float4 v2 : TEXCOORD1,
+  out float4 o0 : SV_Target0)
+{
+  float4 r0;
+  uint4 bitmask, uiDest;
+  float4 fDest;
+
+  r0.xyzw = LocalTexture_diffuse_texture.Sample(LocalSampler_diffuse_texture_s, v1.xy).xyzw;
+  r0.w = r0.w * v2.w + -0.5;
+  
+  r0.xyz = v2.xyz * r0.xyz;
+  
+  r0.xyz = k_ps_wetness_coefficients.xxx * r0.xyz;
+  o0.xyz = g_exposure.xxx * r0.xyz;
+
+  // clip
+  r0.x = cmp(r0.w < 0);
+  if (r0.x != 0) discard;
+
+  o0.w = v1.w;
+  return;
+}
