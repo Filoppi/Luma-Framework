@@ -2,7 +2,7 @@
 
 #if CUSTOM_FAST == 0
    #define ENABLE_NGX 1
-   #define ENABLE_FIDELITY_SK 0 //TODO: still dont know why FSR complete ruin main color Resource on draw...
+   // #define ENABLE_FIDELITY_SK 1 //TODO: still dont know why FSR complete ruin main color Resource on draw...
 #endif
 
 #define DISABLE_AUTO_DEBUGGER  1
@@ -217,6 +217,22 @@ namespace ShaderDefineInfo
    }
 }
 
+namespace Website
+{
+   static void OpenWebsite(const char* url) {
+#if defined(_WIN32) || defined(_WIN64)
+      std::string command = "start " + std::string(url);
+      std::system(command.c_str());
+#elif defined(__linux__)
+      std::string command = "xdg-open " + std::string(url);
+      std::system(command.c_str());
+#elif defined(__APPLE__)
+      std::string command = "open " + std::string(url);
+      std::system(command.c_str());
+#endif
+   }
+}
+
 #if ENABLE_SR == 1
 namespace MemoryHack
 {
@@ -224,7 +240,7 @@ namespace MemoryHack
    {
       Unknown,
       BO3Enhanced,
-      Steam_Feb2026_21201493,
+      Steam_Sep2026_24784313, //Steam_Feb2026_21201493
       Steam_2023_BOIII,
    };
    static ExeType exe_type = Unknown;
@@ -234,7 +250,7 @@ namespace MemoryHack
       switch (type)
       {
          case BO3Enhanced: return "BO3Enhanced";
-         case Steam_Feb2026_21201493: return "Steam, Feb. 2026, BuildID 21201493";
+         case Steam_Sep2026_24784313: return "Steam, Sep. 2026, BuildID 24784313";
          case Steam_2023_BOIII: return "Steam, 2023, used by BOIII";
          default: return "Unknown";
       }
@@ -273,11 +289,11 @@ namespace MemoryHack
       }
       AfterBO3Enhanced:;
       
-      //Steam_Feb2026_21201493
+      //Steam_Sep2026_24784313
       if (exe_type == Unknown)
       {
          //log
-         message(reshade::log::level::info, std::format("MemoryHack::OnInit: Checking for ({})", GetExeTypeName(Steam_Feb2026_21201493)).c_str());
+         message(reshade::log::level::info, std::format("MemoryHack::OnInit: Checking for ({})", GetExeTypeName(Steam_Sep2026_24784313)).c_str());
          
          //expectations
          constexpr uintptr_t offset = 0x1CDE2FC;
@@ -297,7 +313,7 @@ namespace MemoryHack
          }
 
          //success
-         exe_type = Steam_Feb2026_21201493;
+         exe_type = Steam_Sep2026_24784313;
       }
       AfterSteamFeb21201493:;
 
@@ -341,7 +357,7 @@ struct CallOfDutyBlackOps3GameDeviceData final : public GameDeviceData
       return *static_cast<CallOfDutyBlackOps3GameDeviceData*>(device_data.game);
    }
    
-#if ENABLE_SR == 1   
+#if ENABLE_SR == 1
    //jitter
    float2 jitter = float2(0);
    float2 jitter_prev = float2(0);
@@ -524,22 +540,6 @@ namespace BlackFloorSDRTonemap
    }
 }
 
-namespace Website
-{
-   static void OpenWebsite(const char* url) {
-#if defined(_WIN32) || defined(_WIN64)
-      std::string command = "start " + std::string(url);
-      std::system(command.c_str());
-#elif defined(__linux__)
-      std::string command = "xdg-open " + std::string(url);
-      std::system(command.c_str());
-#elif defined(__APPLE__)
-      std::string command = "open " + std::string(url);
-      std::system(command.c_str());
-#endif
-   }
-}
-
 #if ENABLE_SR == 1
 namespace DLSSJitter
 {
@@ -645,7 +645,7 @@ namespace DLSSJitter
             VirtualProtect(addr0.a0x, 16, PAGE_READWRITE, &old_protect);
             is_found0 = true;
             break;
-         case MemoryHack::Steam_Feb2026_21201493:
+         case MemoryHack::Steam_Sep2026_24784313:
             //Jitter1 Function (Dynamic Objects)
             /*
                 +1CDE2FC     c7 44 24        MOV        dword ptr [RSP + 0x20],0xbe800000
@@ -809,7 +809,7 @@ namespace DLSSJitter
       {
          // red
          ImGui::PushStyleColor(ImGuiCol_Text, IM_COL32(255, 100, 100, 255));
-         ImGui::BulletText("Unsupported version of the game detected.");
+         ImGui::BulletText("Unsupported exe version detected.");
          ImGui::PopStyleColor();
       }
       else
@@ -1078,7 +1078,7 @@ namespace ForcedLODBias //TODO: other executables besides BO3Enhanced
       {
          //red
          ImGui::PushStyleColor(ImGuiCol_Text, IM_COL32(255, 100, 100, 255));
-         ImGui::BulletText("Unsupported version of the game detected.");
+         ImGui::BulletText("Unsupported exe version detected.");
          ImGui::PopStyleColor();
          return;
       }
@@ -1228,8 +1228,9 @@ namespace SectionedImGui
          // Info
          ImGui::Bullet(); ImGui::SameLine(); ImGui::TextWrapped("This acts as a wizard to fully configure.");
          ImGui::Bullet(); ImGui::SameLine(); ImGui::TextWrapped("Ordered by importance, please at least view all non-Advanced sections!");
+         ImGui::Bullet(); ImGui::SameLine(); ImGui::TextWrapped("For those new to ImGUI, you can CTRL click a slider for keyboard input.");
 #if ENABLE_SR == 1
-         ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.75f, 0.75f, 0.75f, 1.f));
+         ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.5f, 0.5f, 0.5f, 1.f));
          ImGui::Bullet(); ImGui::SameLine(); ImGui::TextWrapped(std::format("Detected Executable: {}", GetExeTypeName(MemoryHack::exe_type)).c_str());
          ImGui::PopStyleColor();
 #endif
@@ -1239,7 +1240,7 @@ namespace SectionedImGui
             ImGui::Separator(); ////////////////////
 
             ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.75f, 1.f, 1.f, 1.f));
-            ImGui::TextWrapped("[Advanced settings are showing!]");
+            ImGui::TextWrapped("[Advanced settings are showing.]");
             ImGui::PopStyleColor();
             
             ImGui::Bullet(); ImGui::SameLine(); ImGui::TextWrapped("Be ready for some reading!");
@@ -1367,13 +1368,23 @@ namespace SectionedImGui
          ImGui::PopStyleColor();
 
          ImGui::Bullet(); ImGui::SameLine(); ImGui::TextWrapped("(Use Luma default sliders above!)");
+         
+         if (cb_luma_global_settings.DisplayMode != DisplayModeType::SDR) ShaderDefineInfo::UIToggleCheckmark(ShaderDefineInfo::SWAPCHAIN_TEST_USER_PEAK, "Test Display Peak", "3 rectangles inside a big one.\n- Left should disappear (2x Peak).\n- Middle should be barely visible (Peak).\n- Right should be easy to see (0.5x Peak).\n\n(Or set to personal preference, just don't let middle clip/disappear!)");
+         
 
          if (Globals::UIIsAdvanced)
          {
-            ImGui::Bullet(); ImGui::SameLine(); ImGui::TextWrapped("HDR Stops based on Peak & Paper White: +%.2f", std::log2(cb_luma_global_settings.ScenePeakWhite / cb_luma_global_settings.ScenePaperWhite));
+            ImGui::Separator();
+            ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.75f, 1.f, 1.f, 1.f));
+            ImGui::TextWrapped("[HDR Stops]");
+            ImGui::PopStyleColor();
+            
+            ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.75f, 0.75f, 1.f, 1.f));
+            ImGui::Bullet(); ImGui::SameLine(); ImGui::TextWrapped("Current: +%.2f", std::log2(cb_luma_global_settings.ScenePeakWhite / cb_luma_global_settings.ScenePaperWhite));
+            ImGui::PopStyleColor();
+            
+            ImGui::Bullet(); ImGui::SameLine(); ImGui::TextWrapped("This mod is tuned to accommodate up to +2 HDR stops.\nGoing higher is unfaithful to intended compression by low slope tonemap rolloff curve, especially resulting in ugly sunny outdoors.\nGoing higher also reveals the limit of highlights, grossly stretching out white path.");
          }
-         
-         if (cb_luma_global_settings.DisplayMode != DisplayModeType::SDR) ShaderDefineInfo::UIToggleCheckmark(ShaderDefineInfo::SWAPCHAIN_TEST_USER_PEAK, "Test Display Peak", "3 rectangles inside a big one.\n- Left should disappear (2x Peak).\n- Middle should be barely visible (Peak).\n- Right should be easy to see (0.5x Peak).\n\n(Or set to personal preference, just don't let middle disappear!)");
          
          ImGui::Separator();
 
@@ -1411,6 +1422,11 @@ namespace SectionedImGui
          ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.75f, 1.f, 1.f, 1.f));
          ImGui::TextWrapped("[Various multipliers and whatnot.]");
          ImGui::PopStyleColor();
+
+         if (ImGui::SliderFloat("Ambient Occlusion", &cb_luma_global_settings.GameSettings.AmbientOcclusion, 0.f, 2.f))
+            reshade::set_config_value(runtime, NAME, "AmbientOcclusion", cb_luma_global_settings.GameSettings.AmbientOcclusion);
+         if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled)) ImGui::SetTooltip("Ambient Occlusion final power.");
+         DrawResetButton(cb_luma_global_settings.GameSettings.AmbientOcclusion, default_luma_global_game_settings.AmbientOcclusion, "AmbientOcclusion", runtime);
          
          if (Globals::UIIsAdvanced)
          {
@@ -1423,14 +1439,14 @@ namespace SectionedImGui
                auto i1 = {z, z};
                ShaderDefineInfo::UIDropDown(ShaderDefineInfo::CUSTOM_BLOOM_TONEMAP, "Bloom Tonemap",
                   cb_luma_global_settings.DisplayMode == DisplayModeType::SDR ? i1 : i0,
-                  "After Bloom is aggregated, it gets SDR tonemapped before compositing on SDR tonemapped color.\nOriginal is Reinhard Per-Channel, which blows out hard, suitable for SDR.\nFor HDR, I found it better to still do it then inverse it after, but we don't have to blowout.");
+                  "After Bloom is aggregated, it gets SDR tonemapped before compositing on SDR tonemapped color.\nOriginal is Reinhard Per-Channel, which blows out hard, suitable for SDR.\nFor HDR, blowing out gives unnatural results.");
             }
             if (cb_luma_global_settings.DisplayMode == DisplayModeType::SDR) ImGui::EndDisabled();
          }
          
          if (ImGui::SliderFloat("Bloom", &cb_luma_global_settings.GameSettings.Bloom, 0.f, 2.f))
             reshade::set_config_value(runtime, NAME, "Bloom", cb_luma_global_settings.GameSettings.Bloom);
-         if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled)) ImGui::SetTooltip("Bloom multiplier.\n(The game's hues are crucially basked by bloom, e.g. zombies menu campfire.)");
+         if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled)) ImGui::SetTooltip("Bloom multiplier.\n(The game's hues are crucially basked in bloom, e.g. zombies menu campfire.)");
          DrawResetButton(cb_luma_global_settings.GameSettings.Bloom, default_luma_global_game_settings.Bloom, "Bloom", runtime);
          
          if (ImGui::SliderFloat("Lens Dirt / Flare", &cb_luma_global_settings.GameSettings.LensFlare, 0.f, 2.f))
@@ -1440,7 +1456,7 @@ namespace SectionedImGui
 
          if (ImGui::SliderFloat("Slide Lens Dirt", &cb_luma_global_settings.GameSettings.SlideLensDirt, 0.f, 2.f))
             reshade::set_config_value(runtime, NAME, "SlideLensDirt", cb_luma_global_settings.GameSettings.SlideLensDirt);
-         if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled)) ImGui::SetTooltip("Bottom of screen lens dirt from slide.");
+         if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled)) ImGui::SetTooltip("Bottom-of-screen lens dirt from slide.");
          DrawResetButton(cb_luma_global_settings.GameSettings.SlideLensDirt, default_luma_global_game_settings.SlideLensDirt, "SlideLensDirt", runtime);
 
          if (ImGui::SliderFloat("ADS Sights", &cb_luma_global_settings.GameSettings.ADSSights, 0.f, 2.f))
@@ -1551,7 +1567,7 @@ namespace SectionedImGui
          auto& game_device_data = CallOfDutyBlackOps3GameDeviceData::GetGameDeviceData(device_data);
          
          ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.75f, 1.f, 1.f, 1.f));
-         ImGui::TextWrapped("[Use for a more filmic look, though with the usual temporal artifacts.]");
+         ImGui::TextWrapped("[Use for an even more filmic look, though with the usual temporal drawbacks.]");
          ImGui::PopStyleColor();
 
          if (device_data.sr_type == SR::Type::None)
@@ -1601,7 +1617,7 @@ namespace SectionedImGui
             reshade::set_config_value(runtime, NAME, "SRAutoExposure", Globals::SRAutoExposure);
          ImGui::PopID();
          if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
-            ImGui::SetTooltip("DLSS will adapt to the input, usually resulting in more smoothed highlights.\nOtherwise, the exposure null, resulting in sharper highlights but probably more smearing.\n\nPreset L/M seems to ignore this.");
+            ImGui::SetTooltip("When on, DLSS will find exposure value, resulting in intentionally smoothed highlights.\nOtherwise, exposure input is null, resulting in sharper highlights but probably more smearing.\n\nPreset L/M seems to ignore this.");
          DrawResetButton(Globals::SRAutoExposure, true, "SRAutoExposure", runtime);
 
          if (Globals::UIIsAdvanced)
@@ -1657,7 +1673,7 @@ namespace SectionedImGui
          ImGui::TextWrapped("[Counteract decrease of distant object quality at lower internal resolutions.]");
          ImGui::PopStyleColor();
          
-         ImGui::Bullet(); ImGui::SameLine(); ImGui::TextWrapped("(Useless if you have access console and can change r_lodBiasRigid.)");
+         ImGui::Bullet(); ImGui::SameLine(); ImGui::TextWrapped("(Useless if you have access to console, able to change r_lodBiasRigid.)");
 
          ForcedLODBias::OnUI(runtime);
          if (ForcedLODBias::IsActive())
@@ -1684,7 +1700,7 @@ namespace SectionedImGui
          ImGui::TextWrapped("[Fake Wide Color Gamut]");
          ImGui::PopStyleColor();
          ImGui::Bullet(); ImGui::SameLine(); ImGui::TextWrapped("Helps perceptually bring back mid-high orange, but may make everything too \"10000%% Digital Vibrance\" looking.");
-         ImGui::Bullet(); ImGui::SameLine(); ImGui::TextWrapped("(This is purely tomfoolery, as the original is non-wide BT.709 primaries. You need deep changes and regrading, e.g. Black Ops 4.)");
+         ImGui::Bullet(); ImGui::SameLine(); ImGui::TextWrapped("(This is purely tomfoolery, as the original is non-wide BT.709 primaries. For real WCG, you need deep changes and regrading, e.g. Black Ops 4.)");
          
          ImGui::PushID("Preset BT2020 Off");
          is_clicked = ImGui::Button("Off");
@@ -1786,7 +1802,7 @@ namespace SectionedImGui
          ImGui::TextWrapped("[Chrominance & Hue Recovery via SDR Rolloff Extension]");
          ImGui::PopStyleColor();
          ImGui::Bullet(); ImGui::SameLine(); ImGui::TextWrapped("Essential for HDR!");
-         ImGui::Bullet(); ImGui::SameLine(); ImGui::TextWrapped("Some overexposed sunny maps may require on Low to better blowout.");
+         ImGui::Bullet(); ImGui::SameLine(); ImGui::TextWrapped("Some overexposed sunny maps may look better with Low.");
          
          ImGui::PushID("Preset PCC On 1");
          is_clicked = ImGui::Button("High (Recommended)");
@@ -2089,7 +2105,7 @@ namespace SectionedImGui
          ImGui::PopStyleColor();
 
          bool is_on = ShaderDefineInfo::UIToggleCheckmark(ShaderDefineInfo::CUSTOM_LUTBUILDER_COLORSPACE, "LUT Builder BT2020",
-            "Make the LUT Builder (and other stuff after) work in wider BT2020 to allowing for wider colors from chrominance boosts.");
+            "Make the LUT Builder (and other stuff after) work in wider BT2020 to allow for wider colors from chrominance boosts.");
 
          bool is_on1 = is_on;
          if (!is_on1) ImGui::BeginDisabled(); 
@@ -2438,6 +2454,7 @@ public:
       //GameSettings default
       default_luma_global_game_settings.TonemapperRolloffStart = cb_luma_global_settings.GameSettings.TonemapperRolloffStart = 36.f;
       default_luma_global_game_settings.TonemapperMaxExpected = cb_luma_global_settings.GameSettings.TonemapperMaxExpected = 50000.f;
+      default_luma_global_game_settings.AmbientOcclusion = cb_luma_global_settings.GameSettings.AmbientOcclusion = 1.f;
       default_luma_global_game_settings.Bloom = cb_luma_global_settings.GameSettings.Bloom = 1.f;
       default_luma_global_game_settings.LensFlare = cb_luma_global_settings.GameSettings.LensFlare = 1.f;
       default_luma_global_game_settings.SlideLensDirt = cb_luma_global_settings.GameSettings.SlideLensDirt = 1.f;
@@ -2493,6 +2510,51 @@ public:
 
       //log Globals::SDR8Bit
       if (Globals::SDR8Bit) message(reshade::log::level::info, "OnInit(): SDR8Bit is enabled.");
+
+      // Alerts: users on Steam vanilla of crash if not t7patch
+      constexpr const char* NAME_ALERTS = "Alerts";
+      if (MemoryHack::exe_type == MemoryHack::Steam_Sep2026_24784313)
+      {
+         constexpr const char* ENTRY = "HasShownT7PatchAlert";
+         
+         bool has_shown = false;
+         reshade::get_config_value(nullptr, NAME_ALERTS, ENTRY, has_shown);
+
+         if (!has_shown)
+         {
+            MessageBoxA(
+               nullptr,
+               "(Final alert, never shown again!)\n\nIf you are running raw vanilla Steam,\nT7Patch (updated by Scroptss) is required for DLSS not to crash (and for your safety online).",
+               "T7Patch Required",
+               MB_ICONINFORMATION | MB_OK
+            );
+            
+            has_shown = true;
+            reshade::set_config_value(nullptr, NAME_ALERTS, ENTRY, has_shown);
+         }
+      }
+
+      // Alerts: smooth motion crash
+      if (swapchain_format_upgrade_type != TextureFormatUpgradesType::None)
+      {
+         constexpr const char* ENTRY = "HasShownSmoothMotionAlert";
+         
+         bool has_shown = false;
+         reshade::get_config_value(nullptr, NAME_ALERTS, ENTRY, has_shown);
+
+         if (!has_shown)
+         {
+            MessageBoxA(
+               nullptr,
+               "(Final alert, never shown again!)\n\nNVIDIA Smooth Motion is incompatible with scRGB 16bit, causing crash!",
+               "NVIDIA Smooth Motion",
+               MB_ICONINFORMATION | MB_OK
+            );
+            
+            has_shown = true;
+            reshade::set_config_value(nullptr, NAME_ALERTS, ENTRY, has_shown);
+         }
+      }
    }
 
    // void OnLoad(std::filesystem::path& file_path, bool failed) override
@@ -3171,6 +3233,7 @@ public:
       //Load ReShade settings
       reshade::get_config_value(runtime, NAME, "TonemapperRolloffStart", cb_luma_global_settings.GameSettings.TonemapperRolloffStart);
       reshade::get_config_value(runtime, NAME, "TonemapperMaxExpected", cb_luma_global_settings.GameSettings.TonemapperMaxExpected);
+      reshade::get_config_value(runtime, NAME, "AmbientOcclusion", cb_luma_global_settings.GameSettings.AmbientOcclusion);
       reshade::get_config_value(runtime, NAME, "Bloom", cb_luma_global_settings.GameSettings.Bloom);
       reshade::get_config_value(runtime, NAME, "LensFlare", cb_luma_global_settings.GameSettings.LensFlare);
       reshade::get_config_value(runtime, NAME, "SlideLensDirt", cb_luma_global_settings.GameSettings.SlideLensDirt);
@@ -3240,8 +3303,7 @@ public:
       message(reshade::log::level::info, ("LoadConfigs() GAMMA_CORRECTION_TYPE: " + std::to_string(ShaderDefineInfo::Get(GAMMA_CORRECTION_TYPE_HASH))).c_str());
       // message(reshade::log::level::info, ("LoadConfigs() CUSTOM_SR: " + std::to_string(ShaderDefineInfo::Get(ShaderDefineInfo::CUSTOM_SR))).c_str());
       // message(reshade::log::level::info, ("LoadConfigs() CUSTOM_SDR: " + std::to_string(ShaderDefineInfo::Get(ShaderDefineInfo::CUSTOM_SDR))).c_str());
-
-
+      
       //SectionedImGui
       SectionedImGui::OnLoadConfigs(runtime);
       
@@ -3426,40 +3488,19 @@ BOOL APIENTRY DllMain(HMODULE hModule, DWORD ul_reason_for_call, LPVOID lpReserv
       force_disable_display_composition = Globals::SDR8Bit;
 
       //texture upgrade
-// #if ENABLE_SR == 1
       texture_format_upgrades_type   = TextureFormatUpgradesType::AllowedEnabled;
-      //enable_indirect_texture_format_upgrades = true;
-      //enable_automatic_indirect_texture_format_upgrades = true;
       texture_upgrade_formats = {
          #if ENABLE_SR == 1
             reshade::api::format::r16g16_snorm, //motion vectors
          #endif
-         reshade::api::format::r11g11b10_float, //color
+         reshade::api::format::r11g11b10_float, //color (not super necessary, but its nice)
       };
       texture_format_upgrades_2d_size_filters = (uint32_t)TextureFormatUpgrades2DSizeFilters::SwapchainAspectRatio;
-      
-      //texture upgrade: LUT (r11g11b10_float too)
-      // texture_format_upgrades_lut_dimensions = LUTDimensions::_3D;
-      // texture_format_upgrades_lut_size = 32;
-// #else
-//       texture_format_upgrades_type   = TextureFormatUpgradesType::None; //TODO: is r11g11b10_float enough already?
-// #endif
 
 // #if ENABLE_SR == 1
 //       //sampler upgrade
-//       enable_samplers_upgrade = true;
+//       enable_samplers_upgrade = true; //TODO: this has no effect... use other modes?
 // #endif
-      
-// #if DEVELOPMENT // If you want to track any shader names over time, you can hardcode them here by hash (they can be a useful reference in the pipeline)
-//       forced_shader_names.emplace(std::stoul("FD2925B4", nullptr, 16), "Tracked Shader Name");
-// #endif
-
-#if !DEVELOPMENT // Put shaders that a previous version of the mod used but has ever since been deleted here
-      old_shader_file_names.emplace("!tonemapper_mainmenu_0x1744B1D4.ps_5_0.hlsl");
-      old_shader_file_names.emplace("!tonemapper_game_0x59F328E3.ps_5_0.hlsl");
-      old_shader_file_names.emplace("!final_mainmenu_0x224A8BF5.ps_5_0.hlsl");
-      old_shader_file_names.emplace("!final_game_0x3D461B1A.ps_5_0.hlsl");
-#endif
       
       game = new CallOfDutyBlackOps3();
    }

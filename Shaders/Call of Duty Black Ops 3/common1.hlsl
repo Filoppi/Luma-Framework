@@ -708,66 +708,6 @@ float3 GammaCorrection_IntermediateEncode(float3 x) {
   return x;
 }
 ////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
-// //AI ahh moment
-// static const float K_A  =  0.0727029592f;
-// static const float K_B  =  0.598205984f;
-// static const float K_C  =  0.0669102818f;
-// 
-// float ForwardPoly(float t)
-// {
-//     float p = 7.71294689f;
-//     p = p * t - 19.3115273f;
-//     p = p * t + 14.2751675f;
-//     p = p * t - 2.49004531f;
-//     p = p * t + 0.87808305f;
-//     return p * t - K_C;
-// }
-// 
-// float ForwardPolyDeriv(float t)
-// {
-//     float dp = 5.0f * 7.71294689f;
-//     dp = dp * t - 4.0f * 19.3115273f;
-//     dp = dp * t + 3.0f * 14.2751675f;
-//     dp = dp * t - 2.0f * 2.49004531f;
-//     dp = dp * t + 0.87808305f;
-//     return dp;
-// }
-// 
-// float InvertPoly(float y)
-// {
-//     static const float F0 = -K_C;
-//     static const float F1 =  0.99715394f;
-//     float t = saturate((y - F0) / (F1 - F0));
-// 
-//     [unroll]
-//     for (int i = 0; i < 5; ++i)
-//     {
-//         float f  = ForwardPoly(t) - y;
-//         float df = ForwardPolyDeriv(t);
-//         t -= f / (df + 1e-10f);
-//         t  = saturate(t);   // clamped — gracefully clips at forward ceiling
-//     }
-//     return t;
-// }
-
-float3 TonemapVanilla_Inverse(float3 y)
-{
-    float3 result;
-// 
-//     [unroll]
-//     for (int ch = 0; ch < 3; ++ch)
-//     {
-//         float t     = InvertPoly(y[ch]);
-//         float xLog2 = (t - K_B) / K_A;
-//         result[ch]  = max(exp2(xLog2) - k, 0.0f);
-//     }
-
-    // result = RenoDX_Contrast(y, DVS1, DVS2) * DVS3;
-    result = RenoDX_Contrast(y, 3.291, 1.067) * 1.240;
-
-    return result;
-}
-////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
 float3 TonemapVanilla_Internal(float3 x, float blackFloor = -1) { //https://www.desmos.com/calculator/1hmlnb6z1m
   float3 r0, r1;
 
