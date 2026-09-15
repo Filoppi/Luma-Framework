@@ -38,6 +38,12 @@ struct CachedRenderTargetResource
    D3D11_TEXTURE2D_DESC desc{};
 };
 
+struct __declspec(uuid("0209D65C-08B8-4E0F-ACAE-99B44ACC0B98")) WD2CmdListCache
+{
+   std::unordered_set<uint64_t> known_viewport_cbuffers;
+   std::unordered_set<uint64_t> known_non_viewport_cbuffers;
+};
+
 #if DEVELOPMENT
 struct WD2DebugInfo
 {
@@ -125,7 +131,7 @@ namespace
    ShaderHashesList shader_hashes_TemporalResolve;
    ShaderHashesList shader_hashes_TemporalAA;
    ShaderHashesList shader_hashes_WaterGridVectorMap;
-   ShaderHashesList shader_hashes_Materials;
+   //ShaderHashesList shader_hashes_Materials;
    ShaderHashesList shader_hashes_ClothPreTransformed;
    ShaderHashesList shader_hashes_PostFXMask;
    ShaderHashesList shader_hashes_TemporalFiltering;
@@ -186,8 +192,6 @@ struct GameDeviceDataWatchDogs2 final : public GameDeviceData
    std::unique_ptr<StretchyBuffer> skin_buffer;
    std::unordered_map<ID3D11Buffer*, SkinCacheEntry> prev_skin_lookup;
    std::unordered_map<ID3D11Buffer*, SkinCacheEntry> skin_lookup;
-   
-   std::mutex game_device_data_mutex;
    
    void CleanMVResources()
    {
@@ -378,7 +382,9 @@ public:
       {
          reshade::register_event<reshade::addon_event::execute_secondary_command_list>(WatchDogs2::OnExecuteSecondaryCommandList);
          reshade::register_event<reshade::addon_event::clear_render_target_view>(WatchDogs2::OnClearRenderTargetView);
-         //reshade::register_event<reshade::addon_event::create_pipeline>(WatchDogs2::OnCreatePipeline);
+         reshade::register_event<reshade::addon_event::push_descriptors>(WatchDogs2::OnPushDescriptors);
+         reshade::register_event<reshade::addon_event::init_command_list>(WatchDogs2::OnInitCommandList);
+         reshade::register_event<reshade::addon_event::destroy_command_list>(WatchDogs2::OnDestroyCommandList);
 #if DEVELOPMENT
          reshade::log::message(reshade::log::level::info, "OnLoad: OnExecuteSecondaryCommandList()");
 #endif
@@ -427,6 +433,16 @@ public:
          ClearState = g_clear_state_hook.original<fnClearState>();
       }
 #endif
+   }
+   
+   static void OnInitCommandList(reshade::api::command_list *cmd_list)
+   {
+      cmd_list->create_private_data<WD2CmdListCache>();
+   }
+
+   static void OnDestroyCommandList(reshade::api::command_list *cmd_list)
+   {
+      cmd_list->destroy_private_data<WD2CmdListCache>();
    }
    
    std::unique_ptr<std::byte[]> PatchShaderBytecodeSync(const std::byte* code, size_t& size, reshade::api::pipeline_subobject_type type, uint64_t shader_hash, const std::byte* shader_object, size_t shader_object_size) override
@@ -478,7 +494,7 @@ public:
          {
             {
                //const std::unique_lock lock(materials_mutex);
-               shader_hashes_Materials.vertex_shaders.emplace(uint32_t(shader_hash));
+               //shader_hashes_Materials.vertex_shaders.emplace(uint32_t(shader_hash));
             }
             
             reshade::log::message(reshade::log::level::info, "Found motion vector shader.");
@@ -871,6 +887,67 @@ public:
       
       return false;
    }
+
+   static void OnPushDescriptors(reshade::api::command_list *cmd_list, reshade::api::shader_stage stages, reshade::api::pipeline_layout layout, uint32_t layout_param, const reshade::api::descriptor_table_update &update)
+   {
+      if (test_index == 14)
+         return;
+
+      if ((stages & reshade::api::shader_stage::vertex) == 0)
+         return;
+
+      if (update.type != reshade::api::descriptor_type::constant_buffer)
+         return;
+
+      auto *native_device_context = reinterpret_cast<ID3D11DeviceContext *>(cmd_list->get_native());
+      if (native_device_context == nullptr)
+         return;
+
+      CommandListData *cmd_list_data = cmd_list->get_private_data<CommandListData>();
+      DeviceData *device_data = cmd_list->get_device()->get_private_data<DeviceData>();
+      WD2CmdListCache *luma_cache = cmd_list->get_private_data<WD2CmdListCache>();
+
+      if (cmd_list_data == nullptr || device_data == nullptr || luma_cache == nullptr)
+         return;
+
+      const auto *ranges = static_cast<const reshade::api::buffer_range *>(update.descriptors);
+
+      for (uint32_t i = 0; i < update.count; ++i)
+      {
+         const reshade::api::buffer_range &range = ranges[i];
+         if (range.buffer.handle == 0)
+            continue;
+
+         if (luma_cache->known_viewport_cbuffers.contains(range.buffer.handle))
+         {
+            SetLumaConstantBuffers(native_device_context, *cmd_list_data, *device_data, reshade::api::shader_stage::vertex, LumaConstantBufferType::LumaData);
+            return;
+         }
+         if (luma_cache->known_non_viewport_cbuffers.contains(range.buffer.handle))
+            continue;
+
+         auto *native_buffer = reinterpret_cast<ID3D11Buffer *>(range.buffer.handle);
+         bool is_viewport = false;
+
+         if (native_buffer != nullptr)
+         {
+            D3D11_BUFFER_DESC desc{};
+            native_buffer->GetDesc(&desc);
+            is_viewport = (desc.ByteWidth == 3008);
+         }
+
+         if (is_viewport)
+         {
+            luma_cache->known_viewport_cbuffers.insert(range.buffer.handle);
+            SetLumaConstantBuffers(native_device_context, *cmd_list_data, *device_data, reshade::api::shader_stage::vertex, LumaConstantBufferType::LumaData);
+            return;
+         }
+         else
+         {
+            luma_cache->known_non_viewport_cbuffers.insert(range.buffer.handle);
+         }
+      }
+   }
    
    DrawOrDispatchOverrideType OnDrawOrDispatch(ID3D11Device* native_device, ID3D11DeviceContext* native_device_context, CommandListData& cmd_list_data, DeviceData& device_data, reshade::api::shader_stage stages, const ShaderHashesList<OneShaderPerPipeline>& original_shader_hashes, bool is_custom_pass, bool& updated_cbuffers, std::function<void()>* original_draw_dispatch_func) override
    {
@@ -904,11 +981,12 @@ public:
       }
       
       auto& game_device_data = GetGameDeviceData(device_data);
+#if 0
       {
          //const std::shared_lock lock(materials_mutex);
          if (original_shader_hashes.Contains(shader_hashes_Materials))
          {
-#if 0
+
             if (!g_finnish_commandlist_hook)
             {
                void** vtable = *reinterpret_cast<void***>(native_device_context);
@@ -920,7 +998,6 @@ public:
       
                FinishCommandList = g_finnish_commandlist_hook.original<fnFinishCommandList>();
             }
-#endif
             
             // Tried tracking binding manually but game freezes
             ComPtr<ID3D11Buffer> cbv;
@@ -933,9 +1010,11 @@ public:
             return DrawOrDispatchOverrideType::None;
          }
       }
+#endif
 
       if (original_shader_hashes.Contains(shader_hashes_ClothPreTransformed))
       {
+#if 0
          ComPtr<ID3D11Buffer> cbv;
          native_device_context->VSGetConstantBuffers(luma_data_cbuffer_index, 1, cbv.put());
          if (cbv == nullptr)
@@ -943,7 +1022,7 @@ public:
             SetLumaConstantBuffers(native_device_context, cmd_list_data, device_data, reshade::api::shader_stage::vertex, LumaConstantBufferType::LumaData);
             //motion_vector_contexts.emplace(native_device_context);
          }
-            
+#endif
          ID3D11ShaderResourceView* srv = game_device_data.prev_skin_buffer->srv.get();
          native_device_context->VSSetConstantBuffers(9, 1, &game_device_data.cbuffer_skin_cache);
          native_device_context->VSSetShaderResources(1, 1, &srv);
@@ -1152,7 +1231,7 @@ public:
                ID3D11Buffer* buffers[] = {game_device_data.viewport_cbv.get()};
                ID3D11SamplerState* samplers[] = {game_device_data.depth_sampler.get()};
 
-               auto cs = ZeroTimeDelta ? 
+               const auto cs = ZeroTimeDelta ? 
                                           device_data.native_compute_shaders[CompileTimeStringHash("Decode Motion Vector ZTD")].get() : 
                                           device_data.native_compute_shaders[CompileTimeStringHash("Decode Motion Vector")].get();
                
@@ -1808,7 +1887,9 @@ BOOL APIENTRY DllMain(HMODULE hModule, DWORD ul_reason_for_call, LPVOID lpReserv
       g_net_hacking_renderer_hook.reset();
       reshade::unregister_event<reshade::addon_event::execute_secondary_command_list>(WatchDogs2::OnExecuteSecondaryCommandList);
       reshade::unregister_event<reshade::addon_event::clear_render_target_view>(WatchDogs2::OnClearRenderTargetView);
-      //reshade::unregister_event<reshade::addon_event::create_pipeline>(WatchDogs2::OnCreatePipeline);
+      reshade::unregister_event<reshade::addon_event::push_descriptors>(WatchDogs2::OnPushDescriptors);
+      reshade::unregister_event<reshade::addon_event::init_command_list>(WatchDogs2::OnInitCommandList);
+      reshade::unregister_event<reshade::addon_event::destroy_command_list>(WatchDogs2::OnDestroyCommandList);
    }
 
    CoreMain(hModule, ul_reason_for_call, lpReserved);
