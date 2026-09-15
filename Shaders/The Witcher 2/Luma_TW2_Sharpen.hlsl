@@ -1,6 +1,6 @@
 // RCAS sharpening for the SMAA output (The Witcher 2; same shape as the shipped BL2/TPS pass).
 // Runs after the SMAA neighborhood-blend pass, on the gamma canvas color (the same gamma buffer SMAA
-// consumed), before the result is copied back into the canvas (the UI then draws on it and the core Display
+// consumed), and writes straight into the canvas RTV (the UI then draws on it and the core Display
 // Composition does paper-white + scRGB downstream). paperWhite=1.0; the sharpness slider is the tuning knob.
 // RCAS_LIMIT bounds the lobe so bright pixels don't over-sharpen.
 

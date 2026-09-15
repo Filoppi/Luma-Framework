@@ -1,7 +1,7 @@
 // The Witcher 2 final grade, NO-FXAA + NO-VIGNETTE permutation (dgVoodoo -> ps_5_0, hash 0xBABBFFAD): the
 // engine drops the vignette stage entirely in this variant. Identical by disassembly diff
 // vs 0xCF3B72A9: byte-for-byte the same shader minus the t2/s2 mask sample, cb3[48..49] fixup and the
-// cb4[66..67] weight/color lerp — everything from the desaturation through the tint lerps is identical, and
+// cb4[66..67] weight/color lerp — everything from the colour balance through the split toning is identical, and
 // the output alpha likewise carries the scene alpha.
 //
 // Without this file the pass fell through unreplaced, which silently costs the whole Luma tail on any frame

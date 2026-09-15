@@ -352,7 +352,8 @@ void XeGTAO_MainPass(uint2 pixCoord, float2 localNoise, float3 viewspaceNormal, 
    }
 #endif
 
-   const float effectRadius = XeGTAO_EffectRadius();
+   // Capped at the native HBAO kernel, cb4[16].y pixels.
+   const float effectRadius = min(XeGTAO_EffectRadius(), cb4[16].y * viewspaceZ * NDC_TO_VIEW_MUL_X_PIXEL_SIZE.x);
    const float sampleDistributionPower = SAMPLE_DISTRIBUTION_POWER;
    const float thinOccluderCompensation = THIN_OCCLUDER_COMPENSATION;
    const float falloffRange = EFFECT_FALLOFF_RANGE * effectRadius;
