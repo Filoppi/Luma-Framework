@@ -18,7 +18,15 @@ namespace FC5
    inline bool configured_enable = true, configured_upscale = true;
    inline bool gpu_timing = false;
    inline bool configured_suspend_reporter = false;
-   constexpr uint32_t ShaderTAA = 0x902DA714, ShaderSharpen = 0xF73CAD14, ShaderMotionVectorCS = 0x47C5C6CD;
+   constexpr uint32_t ShaderTAA = 0x902DA714, ShaderTAAScope = 0x76DF16DF;
+   constexpr uint32_t ShaderSharpen = 0xF73CAD14, ShaderMotionVectorCS = 0x47C5C6CD;
+   inline bool IsTemporalResolve(const ShaderHashesList<OneShaderPerPipeline>& hashes)
+   {
+      // ADS with some weapon sights uses a TAA permutation with the same
+      // scene-color, motion-vector and output bindings as the main resolve.
+      return hashes.Contains(ShaderTAA, reshade::api::shader_stage::pixel) ||
+         hashes.Contains(ShaderTAAScope, reshade::api::shader_stage::pixel);
+   }
    struct Device final : GameDeviceData
    {
       CameraProbe camera;
@@ -285,7 +293,7 @@ public:
       auto& fc = Data(data);
       if (fc.scaling_frames && !fc.scaling_frame &&
          (hashes.Contains(FC5::ShaderMotionVectorCS, reshade::api::shader_stage::compute) ||
-          hashes.Contains(FC5::ShaderTAA, reshade::api::shader_stage::pixel)))
+          FC5::IsTemporalResolve(hashes)))
       {
          fc.scaling_frame = true; --fc.scaling_frames;
       }
@@ -396,7 +404,7 @@ public:
          }
          return DrawOrDispatchOverrideType::None;
       }
-      if (hashes.Contains(FC5::ShaderTAA, reshade::api::shader_stage::pixel))
+      if (FC5::IsTemporalResolve(hashes))
       {
          ++fc.taa_count;
          if (fc.capture_samples && !fc.probe_frame) { fc.probe_frame = true; --fc.capture_samples; }
@@ -778,6 +786,7 @@ BOOL APIENTRY DllMain(HMODULE module, DWORD reason, LPVOID reserved)
       enable_samplers_upgrade = false;
 #if DEVELOPMENT
       forced_shader_names.emplace(FC5::ShaderTAA, "FC5 Temporal Resolve");
+      forced_shader_names.emplace(FC5::ShaderTAAScope, "FC5 Temporal Resolve (ADS)");
       forced_shader_names.emplace(FC5::ShaderSharpen, "FC5 Temporal Sharpen");
       forced_shader_names.emplace(FC5::ShaderMotionVectorCS, "FC5 Motion Vectors Compute");
 #endif
