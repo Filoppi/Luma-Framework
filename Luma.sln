@@ -135,6 +135,8 @@ Project("{8BC9CEB8-8B4A-11D0-8D11-00A0C91BC942}") = "Sekiro", "Source\Games\Seki
 EndProject
 Project("{8BC9CEB8-8B4A-11D0-8D11-00A0C91BC942}") = "Call of Duty DX11", "Source\Games\Call of Duty DX11\Call of Duty DX11.vcxproj", "{A6A0EC5F-AFD4-4699-B489-A621FB82C431}"
 EndProject
+Project("{8BC9CEB8-8B4A-11D0-8D11-00A0C91BC942}") = "Snowbreak Containment Zone", "Source\Games\Snowbreak Containment Zone\Snowbreak Containment Zone.vcxproj", "{FFBF1DD9-341B-4CFE-859D-F10F9620220E}"
+EndProject
 Global
 	GlobalSection(SolutionConfigurationPlatforms) = preSolution
 		Development-Debug|Win32 = Development-Debug|Win32
@@ -147,6 +149,18 @@ Global
 		Test-Release|x64 = Test-Release|x64
 	EndGlobalSection
 	GlobalSection(ProjectConfigurationPlatforms) = postSolution
+		{FFBF1DD9-341B-4CFE-859D-F10F9620220E}.Development-Debug|Win32.ActiveCfg = Development-Debug|x64
+		{FFBF1DD9-341B-4CFE-859D-F10F9620220E}.Development-Debug|x64.ActiveCfg = Development-Debug|x64
+		{FFBF1DD9-341B-4CFE-859D-F10F9620220E}.Development-Debug|x64.Build.0 = Development-Debug|x64
+		{FFBF1DD9-341B-4CFE-859D-F10F9620220E}.Development-Release|Win32.ActiveCfg = Development-Release|x64
+		{FFBF1DD9-341B-4CFE-859D-F10F9620220E}.Development-Release|x64.ActiveCfg = Development-Release|x64
+		{FFBF1DD9-341B-4CFE-859D-F10F9620220E}.Development-Release|x64.Build.0 = Development-Release|x64
+		{FFBF1DD9-341B-4CFE-859D-F10F9620220E}.Publishing-Release|Win32.ActiveCfg = Publishing-Release|x64
+		{FFBF1DD9-341B-4CFE-859D-F10F9620220E}.Publishing-Release|x64.ActiveCfg = Publishing-Release|x64
+		{FFBF1DD9-341B-4CFE-859D-F10F9620220E}.Publishing-Release|x64.Build.0 = Publishing-Release|x64
+		{FFBF1DD9-341B-4CFE-859D-F10F9620220E}.Test-Release|Win32.ActiveCfg = Test-Release|x64
+		{FFBF1DD9-341B-4CFE-859D-F10F9620220E}.Test-Release|x64.ActiveCfg = Test-Release|x64
+		{FFBF1DD9-341B-4CFE-859D-F10F9620220E}.Test-Release|x64.Build.0 = Test-Release|x64
 		{E0947F3A-8107-3BB4-83BE-9A22D419719E}.Development-Debug|Win32.ActiveCfg = Development-Debug|Win32
 		{E0947F3A-8107-3BB4-83BE-9A22D419719E}.Development-Debug|Win32.Build.0 = Development-Debug|Win32
 		{E0947F3A-8107-3BB4-83BE-9A22D419719E}.Development-Debug|x64.ActiveCfg = Development-Debug|x64
@@ -952,6 +966,7 @@ Global
 		HideSolutionNode = FALSE
 	EndGlobalSection
 	GlobalSection(NestedProjects) = preSolution
+		{FFBF1DD9-341B-4CFE-859D-F10F9620220E} = {02EA681E-C7D8-13C7-8484-4AC65E1B71E8}
 		{3DA928FD-9A18-473E-8D05-F22B96A30197} = {02EA681E-C7D8-13C7-8484-4AC65E1B71E8}
 		{08143144-3ABB-D7B3-815C-7A798924E8E6} = {02EA681E-C7D8-13C7-8484-4AC65E1B71E8}
 		{3898C29D-83BD-406E-B891-7E2D4BDB34DF} = {02EA681E-C7D8-13C7-8484-4AC65E1B71E8}
