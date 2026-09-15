@@ -135,6 +135,8 @@ Project("{8BC9CEB8-8B4A-11D0-8D11-00A0C91BC942}") = "Sekiro", "Source\Games\Seki
 EndProject
 Project("{8BC9CEB8-8B4A-11D0-8D11-00A0C91BC942}") = "Call of Duty DX11", "Source\Games\Call of Duty DX11\Call of Duty DX11.vcxproj", "{A6A0EC5F-AFD4-4699-B489-A621FB82C431}"
 EndProject
+Project("{8BC9CEB8-8B4A-11D0-8D11-00A0C91BC942}") = "Mass Effect", "Source\Games\Mass Effect\Mass Effect.vcxproj", "{A8505E49-DA6F-4C05-ADF0-3480DC27B3FC}"
+EndProject
 Project("{8BC9CEB8-8B4A-11D0-8D11-00A0C91BC942}") = "Snowbreak Containment Zone", "Source\Games\Snowbreak Containment Zone\Snowbreak Containment Zone.vcxproj", "{FFBF1DD9-341B-4CFE-859D-F10F9620220E}"
 EndProject
 Global
@@ -961,6 +963,18 @@ Global
 		{A6A0EC5F-AFD4-4699-B489-A621FB82C431}.Test-Release|Win32.ActiveCfg = Test-Release|x64
 		{A6A0EC5F-AFD4-4699-B489-A621FB82C431}.Test-Release|x64.ActiveCfg = Test-Release|x64
 		{A6A0EC5F-AFD4-4699-B489-A621FB82C431}.Test-Release|x64.Build.0 = Test-Release|x64
+		{A8505E49-DA6F-4C05-ADF0-3480DC27B3FC}.Development-Debug|Win32.ActiveCfg = Development-Debug|Win32
+		{A8505E49-DA6F-4C05-ADF0-3480DC27B3FC}.Development-Debug|Win32.Build.0 = Development-Debug|Win32
+		{A8505E49-DA6F-4C05-ADF0-3480DC27B3FC}.Development-Debug|x64.ActiveCfg = Development-Debug|Win32
+		{A8505E49-DA6F-4C05-ADF0-3480DC27B3FC}.Development-Release|Win32.ActiveCfg = Development-Release|Win32
+		{A8505E49-DA6F-4C05-ADF0-3480DC27B3FC}.Development-Release|Win32.Build.0 = Development-Release|Win32
+		{A8505E49-DA6F-4C05-ADF0-3480DC27B3FC}.Development-Release|x64.ActiveCfg = Development-Release|Win32
+		{A8505E49-DA6F-4C05-ADF0-3480DC27B3FC}.Publishing-Release|Win32.ActiveCfg = Publishing-Release|Win32
+		{A8505E49-DA6F-4C05-ADF0-3480DC27B3FC}.Publishing-Release|Win32.Build.0 = Publishing-Release|Win32
+		{A8505E49-DA6F-4C05-ADF0-3480DC27B3FC}.Publishing-Release|x64.ActiveCfg = Publishing-Release|Win32
+		{A8505E49-DA6F-4C05-ADF0-3480DC27B3FC}.Test-Release|Win32.ActiveCfg = Test-Release|Win32
+		{A8505E49-DA6F-4C05-ADF0-3480DC27B3FC}.Test-Release|Win32.Build.0 = Test-Release|Win32
+		{A8505E49-DA6F-4C05-ADF0-3480DC27B3FC}.Test-Release|x64.ActiveCfg = Test-Release|Win32
 	EndGlobalSection
 	GlobalSection(SolutionProperties) = preSolution
 		HideSolutionNode = FALSE
@@ -1030,6 +1044,7 @@ Global
 		{ECDA6EA5-3C80-42D1-9F2A-4544E3036090} = {02EA681E-C7D8-13C7-8484-4AC65E1B71E8}
 		{D4547FAC-2A3D-4974-97C3-1063B1449D8C} = {02EA681E-C7D8-13C7-8484-4AC65E1B71E8}
 		{A6A0EC5F-AFD4-4699-B489-A621FB82C431} = {02EA681E-C7D8-13C7-8484-4AC65E1B71E8}
+		{A8505E49-DA6F-4C05-ADF0-3480DC27B3FC} = {02EA681E-C7D8-13C7-8484-4AC65E1B71E8}
 	EndGlobalSection
 	GlobalSection(ExtensibilityGlobals) = postSolution
 		SolutionGuid = {8B799422-BA66-3174-B21F-B9FA07C4B2E3}
