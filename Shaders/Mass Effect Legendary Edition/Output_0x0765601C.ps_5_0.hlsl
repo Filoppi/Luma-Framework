@@ -1,9 +1,9 @@
 // Trilogy-wide stage-2 display map, decoding the gamma intermediate into absolute linear scRGB.
 //
 // Stage 1 writes gamma(scene / R) with R = UI Paper White / Game Paper White, and the native gamma HUD blends on
-// that buffer first, so decoding and multiplying by R restores the scene while leaving HUD white relative to Game
-// Paper White. This pass writes the swapchain directly as the frame's last draw, so under EARLY_DISPLAY_ENCODING
-// 1 it also applies G = Game Paper White / 80; Display Composition divides G back out when it does run.
+// that buffer first, so decoding and multiplying by R restores the scene and puts HUD white at R, i.e. at UI Paper
+// White. This pass writes the swapchain directly, so under EARLY_DISPLAY_ENCODING 1 it also applies G = Game Paper
+// White / 80; Display Composition divides G back out when it does run.
 
 // clang-format off
 #include "Includes/Common.hlsl"   // Defines game settings; keep first.

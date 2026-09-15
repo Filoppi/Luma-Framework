@@ -7,12 +7,14 @@
 //
 // Sub-native borderless is best-effort: the game allocates desktop-sized targets but renders a top-left
 // sub-rectangle through cb2 DynamicScale, so injected in-place passes process the full allocation.
+//
+// No DLSS or DLAA. The velocity target is RGBA8 with one velocity per object: VelocityShader.usf discards the
+// per-pixel vectors its VS computes, and the stage-1 blur reads only its red channel as a blur amount. On ME3LE
+// the velocity pass draws only the player, and only with in-game Motion Blur on; skinning uses the current bone
+// palette for both poses, so full-scene vectors would need stream-out on the depth prepass.
 
 #define DISABLE_AUTO_DEBUGGER 1 // The DEVELOPMENT attach prompt is hidden by fullscreen and blocks the loader.
 
-#define ENABLE_NGX 0 // UE3 LE exposes only an 8-bit SoftEdge mask, not usable motion vectors for DLSS/DLAA.
-#define ENABLE_FIDELITY_SK 0
-#define GEOMETRY_SHADER_SUPPORT 0
 #define ENABLE_SMAA 1  // replaces the game's compute FXAA
 #define ENABLE_BLOOM 1 // fp16 pyramidal bloom replaces the game's clamped bloom
 
@@ -26,15 +28,15 @@
 #include <optional>
 #include <span>
 
-// Selects the per-game tonemap table used by injected resource-slot handling; replacement stays CSO-hash keyed.
+// Selects the per-game profile (tonemap slot table, GTAO radius, bloom reference); replacement stays CSO-hash keyed.
 enum class MEGame
 {
    Unknown = 0,
-   ME1,
-   ME2,
-   ME3,
+   ME1LE,
+   ME2LE,
+   ME3LE,
 };
-static MEGame g_me_game = MEGame::ME1;
+static MEGame g_me_game = MEGame::ME1LE;
 
 static MEGame DetectMEGame()
 {
@@ -44,12 +46,12 @@ static MEGame DetectMEGame()
    for (auto& c : exe)
       c = (char)tolower((unsigned char)c);
    if (exe.find("masseffect3") != std::string::npos)
-      return MEGame::ME3;
+      return MEGame::ME3LE;
    if (exe.find("masseffect2") != std::string::npos)
-      return MEGame::ME2;
+      return MEGame::ME2LE;
    if (exe.find("masseffect1") != std::string::npos)
-      return MEGame::ME1;
-   return MEGame::ME1; // Treat an unknown executable as ME1.
+      return MEGame::ME1LE;
+   return MEGame::ME1LE; // Treat an unknown executable as ME1LE.
 }
 
 // SMAA replaces the shared MiniEngine FXAA resolve on the fp16 gamma post buffer. The prepass and indirect-
@@ -57,45 +59,45 @@ static MEGame DetectMEGame()
 static constexpr uint32_t kFXAAResolveHHash = 0xB53BB634; // Horizontal resolve: replaced with SMAA.
 static constexpr uint32_t kFXAAResolveVHash = 0xF43DBFFD; // Vertical in-place refine: skipped after SMAA.
 
-// Stage-1 tonemap permutations (MB = motion blur, FG = film grain). Slots are stored per permutation because
-// MB binds depth at t0 and pushes everything up one, and ME3 additionally binds velocity at t2. They mirror
-// R_SCENE and R_BLOOM in the matching HLSL body with no compile-time cross-check, so a re-captured permutation
-// must move both sides. Unlisted permutations stay vanilla; this table drives only bloom and SMAA depth capture.
+// Stage-1 tonemap permutations (MB = motion blur). Slots are stored per permutation because MB binds depth at t0
+// and pushes everything up one, and ME3LE additionally binds velocity at t2. They mirror the scene and bloom
+// registers of the matching HLSL body with no compile-time cross-check, so a re-captured permutation must move both
+// sides. Unlisted permutations stay vanilla; this table drives bloom, SMAA depth capture and the DEVELOPMENT readout.
 struct TonemapPermDesc
 {
    uint32_t hash;
    uint8_t scene_slot; // 1 on motion-blur permutations, where t0 is depth instead of scene color.
    uint8_t bloom_slot;
 };
-static constexpr TonemapPermDesc kTonemapPermsME1[] = {
-   {0x151FE4CA, 1, 5}, // MB+FG, LUT grade
+static constexpr TonemapPermDesc kTonemapPermsME1LE[] = {
+   {0x151FE4CA, 1, 5}, // MB + grain, LUT grade
    {0x69F03340, 1, 5}, // MB, LUT grade
-   {0x109F3B6E, 0, 4}, // FG, LUT grade
+   {0x109F3B6E, 0, 4}, // grain, LUT grade
    {0x8C8E8CA2, 0, 4}, // LUT grade
    {0xAAE8755A, 0, 4}, // analytic grade (no LUT)
 };
-static constexpr TonemapPermDesc kTonemapPermsME2[] = {
+static constexpr TonemapPermDesc kTonemapPermsME2LE[] = {
    {0x2754F750, 1, 5}, // MB, LUT grade
-   {0x1536C5B5, 1, 5}, // MB+FG, LUT grade
-   {0x940979D8, 1, 5}, // MB, Filmic+LUT grade
-   {0x75BFAFBC, 1, 5}, // MB+FG, Filmic+LUT grade
+   {0x1536C5B5, 1, 5}, // MB + grain, LUT grade
+   {0x940979D8, 1, 5}, // MB, filmic + LUT grade
+   {0x75BFAFBC, 1, 5}, // MB + grain, filmic + LUT grade
    {0xCC76075F, 0, 4}, // analytic grade (no LUT)
    {0xD077D06B, 0, 4}, // LUT grade
-   {0x8E0C0DBB, 0, 4}, // FG, LUT grade
-   {0x222186F8, 0, 4}, // Filmic+LUT grade
-   {0xEC890842, 0, 4}, // FG, Filmic+LUT grade
+   {0x8E0C0DBB, 0, 4}, // grain, LUT grade
+   {0x222186F8, 0, 4}, // filmic + LUT grade
+   {0xEC890842, 0, 4}, // grain, filmic + LUT grade
 };
-static constexpr TonemapPermDesc kTonemapPermsME3[] = {
-   {0x36B90B12, 1, 6}, // MB(depth)+Filmic+LUT grade
-   {0x49BD5A95, 1, 6}, // MB(depth)+FG, Filmic+LUT grade
-   {0x00944C2E, 0, 4}, // Filmic+LUT grade
-   {0x5AA0BD09, 0, 4}, // FG, Filmic+LUT grade
+static constexpr TonemapPermDesc kTonemapPermsME3LE[] = {
+   {0x36B90B12, 1, 6}, // MB, filmic + LUT grade
+   {0x49BD5A95, 1, 6}, // MB + grain, filmic + LUT grade
+   {0x00944C2E, 0, 4}, // filmic + LUT grade
+   {0x5AA0BD09, 0, 4}, // grain, filmic + LUT grade
    {0x225A8330, 0, 4}, // analytic grade (no LUT)
 };
 // Selected once in DllMain.
-static std::span<const TonemapPermDesc> g_tonemap_perms = kTonemapPermsME1;
+static std::span<const TonemapPermDesc> g_tonemap_perms = kTonemapPermsME1LE;
 
-// Everything that differs between the three games. ME2/ME3 share the native HBAO+ radius of 48 uu against ME1's
+// Everything that differs between the three games. ME2LE/ME3LE share the native HBAO+ radius of 48 uu against ME1LE's
 // 30 uu; GTAO visibility power is 1 everywhere, so it stays at its global default instead of living here.
 struct MEGameProfile
 {
@@ -107,12 +109,12 @@ static constexpr MEGameProfile ProfileFor(MEGame game)
 {
    switch (game)
    {
-   case MEGame::ME2:
-      return {kTonemapPermsME2, 0.96f, 1.0f};
-   case MEGame::ME3:
-      return {kTonemapPermsME3, 0.96f, 1.0f};
+   case MEGame::ME2LE:
+      return {kTonemapPermsME2LE, 0.96f, 1.0f};
+   case MEGame::ME3LE:
+      return {kTonemapPermsME3LE, 0.96f, 1.0f};
    default:
-      return {kTonemapPermsME1, 0.f, 1.0f};
+      return {kTonemapPermsME1LE, 0.f, 1.0f};
    }
 }
 // Quarter-resolution bloom bright-pass; cb0.xy = (BloomScale, Threshold).
@@ -129,7 +131,7 @@ static constexpr float kPredThreshold = 0.001f; // Depth delta that identifies a
 static constexpr float kPredStrength = 0.4f;    // [0,1] edge influence on the color threshold.
 
 // fp16 pyramidal bloom built from the stage-1 linear scene and rebound at the native bloom slot, keeping the
-// game's tint and screen blend. Mip count is fixed: DrawBloom resizes its static mip cache only in DEVELOPMENT.
+// game's tint and screen blend.
 static bool g_bloom_enable = true;
 // One sigma per mip, so the two counts cannot drift apart.
 static constexpr std::array<float, 6> kBloomSigmas = {1.5f, 2.f, 2.f, 2.f, 2.f, 1.f};
@@ -139,9 +141,10 @@ static float g_bloom_intensity = 1.0f;
 static float g_bloom_scale_ref = 1.0f;
 
 // Bink targets the intermediate gamma buffer or the swapchain directly; GameSettings.VideoOnSwapchain reports
-// which, so the replacement applies the UI/Game scale exactly once.
+// which, so the UI/Game ratio and Game Paper White are applied exactly once on either path.
 static constexpr uint32_t kVideoBinkHash = 0x7B5C59DF;
-// Shared stage 2 decodes the gamma scene/HUD composite into Game-relative linear scRGB. Native SDR omits it.
+// Shared stage 2 decodes the gamma scene/HUD composite into linear scRGB and applies the UI/Game ratio and Game
+// Paper White. Native SDR omits it.
 static constexpr uint32_t kOutputStage2Hash = 0x0765601C;
 
 // XeGTAO replaces the half-resolution GFSDK HBAO+ chain, writing the game's R8_UNORM AO target at the blur
@@ -166,7 +169,17 @@ static int g_gtao_debug_view = 0; // 0=off, 1=depth, 2=normals, 3=AO x8, 4=edges
 
 // Native DoF is retained: its fp16 near/far chain has no SDR clamp, and stage 1 composites those buffers.
 
-// Per-device SMAA resources. The gamma snapshot feeds both DrawSMAA color inputs; no linear copy is needed.
+// fp16 scratch target and the views it was created with; EnsureRGBA16FTarget rebuilds it on resolution change.
+struct RGBA16FTarget
+{
+   ComPtr<ID3D11Texture2D> tex;
+   ComPtr<ID3D11RenderTargetView> rtv;
+   ComPtr<ID3D11ShaderResourceView> srv;
+   ComPtr<ID3D11UnorderedAccessView> uav;
+   uint32_t w = 0, h = 0;
+};
+
+// Per-device resources and per-frame state. SMAA detects edges on a gamma snapshot and blends a linear decode of it.
 struct MassEffectGameDeviceData final : public GameDeviceData
 {
    // Handles already processed by SMAA this frame; later in-place FXAA resolves must be skipped.
@@ -184,25 +197,20 @@ struct MassEffectGameDeviceData final : public GameDeviceData
    uint32_t smaa_core_w = 0, smaa_core_h = 0;
 
    // SRV-readable snapshot of the in-place gamma post buffer.
-   ComPtr<ID3D11Texture2D> tex_input;
-   ComPtr<ID3D11ShaderResourceView> srv_input;
-   uint32_t smaa_temps_w = 0, smaa_temps_h = 0;
+   RGBA16FTarget smaa_input;
+   // Its linear-light decode, for the neighborhood blend.
+   RGBA16FTarget smaa_input_linear;
 
    // fp16 SMAA output, copied back directly or through RCAS.
-   ComPtr<ID3D11Texture2D> tex_smaa_out;
-   ComPtr<ID3D11RenderTargetView> tex_smaa_out_rtv;
-   ComPtr<ID3D11ShaderResourceView> tex_smaa_out_srv;
-   uint32_t smaa_out_w = 0, smaa_out_h = 0;
+   RGBA16FTarget smaa_out;
 
    // RCAS b0 = (width, height, sharpness, 0).
    ComPtr<ID3D11Buffer> cb_sharpen;
    uint32_t sharpen_w = 0, sharpen_h = 0;
    float sharpen_amount = -1.f;
-   ComPtr<ID3D11Texture2D> tex_rcas_out;
-   ComPtr<ID3D11RenderTargetView> tex_rcas_out_rtv;
-   uint32_t rcas_out_w = 0, rcas_out_h = 0;
+   RGBA16FTarget rcas_out;
 
-   // XeGTAO scratch at half-res AO size: R24 depth from deinterleave t0, packed R8G8 view normals from horizon t0.
+   // XeGTAO inputs at half-res AO size: R24 depth from deinterleave t0, packed R8G8 view normals from horizon t0.
    ComPtr<ID3D11ShaderResourceView> srv_gtao_depth;
    ComPtr<ID3D11ShaderResourceView> srv_gtao_normals;
    // Set only after a complete takeover at deinterleave; otherwise the native chain remains intact.
@@ -212,7 +220,7 @@ struct MassEffectGameDeviceData final : public GameDeviceData
    ComPtr<ID3D11Texture2D> tex_gtao_depth_mips;
    ComPtr<ID3D11UnorderedAccessView> gtao_depth_mip_uavs[5];
    ComPtr<ID3D11ShaderResourceView> srv_gtao_depth_mips;
-   // R8G8_UNORM AO/edge ping-pong; the second denoiser writes the game's u0.
+   // R8G8_UNORM AO/edge outputs of the main pass and first denoiser; the second denoiser writes the game's u0.
    ComPtr<ID3D11Texture2D> tex_gtao_working[2];
    ComPtr<ID3D11UnorderedAccessView> uav_gtao_working[2];
    ComPtr<ID3D11ShaderResourceView> srv_gtao_working[2];
@@ -233,6 +241,10 @@ struct MassEffectGameDeviceData final : public GameDeviceData
    float bloom_threshold_live = -1.f;            // Negative selects the 1.2 fallback.
 #if DEVELOPMENT
    int bloom_bright_pass_hits = 0; // Bright-pass captures this frame.
+   // Which stage-1 permutation the game last drew, and how many stage-1 draws the frame contained. A count of two
+   // can mean a mid-frame permutation switch, and so two HDR families in one frame.
+   const TonemapPermDesc* stage1_perm = nullptr;
+   int stage1_draws = 0;
 #endif
 };
 
@@ -260,6 +272,7 @@ class MassEffectLE final : public Game
    static constexpr uint32_t kNameSMAABlendPS = CompileTimeStringHash("SMAA Neighborhood Blending PS");
    static constexpr uint32_t kNameCopyVS = CompileTimeStringHash("Copy VS");
    static constexpr uint32_t kNameSharpenPS = CompileTimeStringHash("MELE Sharpen PS");
+   static constexpr uint32_t kNameSMAALinearizeCS = CompileTimeStringHash("MELE SMAA Linearize CS");
 
    // operator[] default-inserts on a miss, which would mutate a map the render thread otherwise only reads.
    template <typename ShaderMap>
@@ -306,30 +319,26 @@ class MassEffectLE final : public Game
       return SUCCEEDED(device->CreateTexture2D(&td, nullptr, out.put()));
    }
 
-   // (Re)create an fp16 scratch target and its views on resolution change. Pass nullptr for a view the target does
-   // not use: bind flags follow the requested views, so an unused one cannot leave a stale flag behind.
-   static bool EnsureRGBA16FTarget(ID3D11Device* device, uint32_t w, uint32_t h, ComPtr<ID3D11Texture2D>& tex,
-      ComPtr<ID3D11RenderTargetView>* rtv, ComPtr<ID3D11ShaderResourceView>* srv, uint32_t& cached_w, uint32_t& cached_h)
+   // (Re)create an fp16 scratch target on resolution change, with one view per requested bind flag. Returns false if
+   // the texture or any requested view is missing.
+   static bool EnsureRGBA16FTarget(ID3D11Device* device, uint32_t w, uint32_t h, UINT bind_flags, RGBA16FTarget* target)
    {
-      if (!tex || cached_w != w || cached_h != h)
+      if (!target->tex || target->w != w || target->h != h)
       {
-         if (rtv != nullptr)
-            rtv->reset();
-         if (srv != nullptr)
-            srv->reset();
-         tex.reset();
-         const UINT bind_flags = (srv != nullptr ? D3D11_BIND_SHADER_RESOURCE : 0u) | (rtv != nullptr ? D3D11_BIND_RENDER_TARGET : 0u);
-         if (CreateDefaultRGBA16FTex(device, w, h, bind_flags, tex))
+         *target = {};
+         if (CreateDefaultRGBA16FTex(device, w, h, bind_flags, target->tex))
          {
-            if (rtv != nullptr)
-               device->CreateRenderTargetView(tex.get(), nullptr, rtv->put());
-            if (srv != nullptr)
-               device->CreateShaderResourceView(tex.get(), nullptr, srv->put());
-            cached_w = w;
-            cached_h = h;
+            if (bind_flags & D3D11_BIND_RENDER_TARGET)
+               device->CreateRenderTargetView(target->tex.get(), nullptr, target->rtv.put());
+            if (bind_flags & D3D11_BIND_SHADER_RESOURCE)
+               device->CreateShaderResourceView(target->tex.get(), nullptr, target->srv.put());
+            if (bind_flags & D3D11_BIND_UNORDERED_ACCESS)
+               device->CreateUnorderedAccessView(target->tex.get(), nullptr, target->uav.put());
+            target->w = w;
+            target->h = h;
          }
       }
-      return (rtv == nullptr || *rtv) && (srv == nullptr || *srv);
+      return target->tex && (!(bind_flags & D3D11_BIND_RENDER_TARGET) || target->rtv) && (!(bind_flags & D3D11_BIND_SHADER_RESOURCE) || target->srv) && (!(bind_flags & D3D11_BIND_UNORDERED_ACCESS) || target->uav);
    }
 
    static void ReleaseGTAOScratch(MassEffectGameDeviceData& gd)
@@ -364,7 +373,6 @@ public:
       auto& early_display_encoding = GetShaderDefineData(EARLY_DISPLAY_ENCODING_HASH); // Inert unless the above is 1.
       early_display_encoding.SetDefaultValue(native_hdr);
       early_display_encoding.SetValueFixed(true);
-      GetShaderDefineData(VANILLA_ENCODING_TYPE_HASH).SetDefaultValue('0');
       // The stage-1/stage-2 chain already carries gamma 2.2, so 1 would apply the sRGB mismatch a second time and
       // crush shadows. On the native-SDR topology Core still corrects sRGB against 2.2 on its own, through the
       // display-mode term of its composition pass.
@@ -372,15 +380,16 @@ public:
       // Exposes UI Paper White without renormalizing the already combined scene/HUD buffer; type 2 would
       // double-apply the transport ratio.
       GetShaderDefineData(UI_DRAW_TYPE_HASH).SetDefaultValue('1');
-
       use_os_reference_white_level = false; // Explicit Scene and UI Paper White controls.
 
       // Native post passes use b0-b3; inject Luma cbuffers at the high slots.
       luma_settings_cbuffer_index = 13;
       luma_data_cbuffer_index = 12;
 
-      // Core registers SMAA through ENABLE_SMAA; no input linearization is needed because the post buffer stays
-      // gamma encoded. RCAS runs afterwards through Copy VS and DrawCustomPixelShader.
+      // Core registers SMAA through ENABLE_SMAA; its neighborhood blend reads a linear decode of the gamma post buffer.
+      // RCAS runs afterwards through Copy VS and DrawCustomPixelShader.
+      native_shaders_definitions.emplace(kNameSMAALinearizeCS,
+         ShaderDefinition("Luma_MELE_SMAALinearize", reshade::api::pipeline_subobject_type::compute_shader));
       native_shaders_definitions.emplace(kNameSharpenPS,
          ShaderDefinition{"Luma_MELE_Sharpen", reshade::api::pipeline_subobject_type::pixel_shader, nullptr, "sharpen_ps"});
 
@@ -400,7 +409,7 @@ public:
       };
       shader_defines_data.append_range(game_shader_defines_data);
 
-      // Grade controls default to a vanilla no-op. Exposure affects SDR and HDR, the rest are HDR only.
+      // Grade controls default to a vanilla no-op. Contrast, Saturation and HighlightDechroma are HDR only.
       default_luma_global_game_settings.Exposure = 1.f;
       default_luma_global_game_settings.Saturation = 1.f;
       default_luma_global_game_settings.HighlightDechroma = 0.f;
@@ -408,7 +417,7 @@ public:
       default_luma_global_game_settings.VignetteIntensity = 1.f;
       default_luma_global_game_settings.FilmGrainIntensity = 1.f;
       default_luma_global_game_settings.BloomIntensity = g_bloom_intensity; // Per-game gain lives in g_bloom_scale_ref.
-      default_luma_global_game_settings.BloomThreshold = 1.2f;              // ME1 fallback until live capture succeeds.
+      default_luma_global_game_settings.BloomThreshold = 1.2f;              // ME1LE fallback until live capture succeeds.
       default_luma_global_game_settings.Dithering = 1.f;                    // Output anti-banding.
       default_luma_global_game_settings.VideoAutoHDREnable = 1.f;           // Off preserves vanilla SDR video.
       default_luma_global_game_settings.VideoAutoHDRBoost = 0.5f;           // 0=1x, 0.5=2.0625x, 1=3.125x UI white.
@@ -538,6 +547,11 @@ public:
       if (perm == nullptr)
          return;
 
+#if DEVELOPMENT
+      gd.stage1_perm = perm; // Recorded before the SMAA and bloom gates, so the readout reflects every stage-1 draw.
+      ++gd.stage1_draws;
+#endif
+
       if (g_smaa_enable)
       {
          if (perm->scene_slot != 0)
@@ -583,7 +597,7 @@ public:
 
    // Take over HBAO+ only when every XeGTAO shader and resource is ready at the first dispatch, otherwise the
    // whole native deinterleave -> horizon -> blur -> apply chain stays active. A returned value is terminal for
-   // the callback; nullopt means no AO hash matched and the caller continues.
+   // the callback; nullopt means XeGTAO is off or no AO hash matched, and the caller continues.
    std::optional<DrawOrDispatchOverrideType> RunXeGTAO(ID3D11Device* native_device, ID3D11DeviceContext* native_device_context, DeviceData& device_data, MassEffectGameDeviceData& gd, const ShaderHashesList<OneShaderPerPipeline>& original_shader_hashes)
    {
       if (g_gtao_enable)
@@ -705,7 +719,8 @@ public:
                return DrawOrDispatchOverrideType::Replaced;
             }
 
-            // Dispatch dimensions follow the captured content size; native apply ignores any larger stale region.
+            // Dispatch dimensions follow the captured depth allocation, not the DynamicScale content size; native
+            // apply ignores the region outside the content.
             const uint32_t w = gd.gtao_w, h = gd.gtao_h;
             DrawStateStack<DrawStateStackType::Compute> st;
             st.Cache(native_device_context, device_data.uav_max_count);
@@ -777,7 +792,7 @@ public:
    {
       const bool is_resolve_h = original_shader_hashes.Contains(kFXAAResolveHHash, reshade::api::shader_stage::compute);
       const bool is_resolve_v = original_shader_hashes.Contains(kFXAAResolveVHash, reshade::api::shader_stage::compute);
-      // The resolve is the final scene-post step and arms HUD suppression for subsequent draws regardless of AA.
+      // The resolve is the final scene-post step and arms HUD suppression for subsequent draws, with or without SMAA.
       if (is_resolve_h || is_resolve_v)
          gd.scene_post_done_this_frame = true;
       if (!g_smaa_enable)
@@ -824,9 +839,10 @@ public:
          const float pred_scale = depth_ok ? kPredScale : 1.f;
 
          // Async loading and live reload may temporarily require native FXAA fallback.
-         const bool smaa_ready =
-            AllShadersReady(device_data.native_pixel_shaders, {kNameSMAAEdgePS, kNameSMAAWeightPS, kNameSMAABlendPS}) &&
-            AllShadersReady(device_data.native_vertex_shaders, {kNameSMAAEdgeVS, kNameSMAAWeightVS, kNameSMAABlendVS});
+         auto* linearize_cs = FindShader(device_data.native_compute_shaders, kNameSMAALinearizeCS);
+         const bool smaa_ready = linearize_cs != nullptr &&
+                                 AllShadersReady(device_data.native_pixel_shaders, {kNameSMAAEdgePS, kNameSMAAWeightPS, kNameSMAABlendPS}) &&
+                                 AllShadersReady(device_data.native_vertex_shaders, {kNameSMAAEdgeVS, kNameSMAAWeightVS, kNameSMAABlendVS});
          if (!smaa_ready)
             return DrawOrDispatchOverrideType::None;
 
@@ -855,14 +871,26 @@ public:
             return DrawOrDispatchOverrideType::None;
 
          // The fp16 SMAA output is both a render target and an SRV for the optional sharpen pass.
-         if (!EnsureRGBA16FTarget(native_device, w, h, gd.tex_smaa_out, std::addressof(gd.tex_smaa_out_rtv), std::addressof(gd.tex_smaa_out_srv), gd.smaa_out_w, gd.smaa_out_h))
+         if (!EnsureRGBA16FTarget(native_device, w, h, D3D11_BIND_RENDER_TARGET | D3D11_BIND_SHADER_RESOURCE, &gd.smaa_out))
             return DrawOrDispatchOverrideType::None;
 
-         // The gamma snapshot is only ever read.
-         if (!EnsureRGBA16FTarget(native_device, w, h, gd.tex_input, nullptr, std::addressof(gd.srv_input), gd.smaa_temps_w, gd.smaa_temps_h))
+         // The gamma snapshot is only ever read; its linear-light decode feeds the neighborhood blend.
+         if (!EnsureRGBA16FTarget(native_device, w, h, D3D11_BIND_SHADER_RESOURCE, &gd.smaa_input) ||
+             !EnsureRGBA16FTarget(native_device, w, h, D3D11_BIND_SHADER_RESOURCE | D3D11_BIND_UNORDERED_ACCESS, &gd.smaa_input_linear))
             return DrawOrDispatchOverrideType::None;
 
-         native_device_context->CopyResource(gd.tex_input.get(), color_res.get());
+         native_device_context->CopyResource(gd.smaa_input.tex.get(), color_res.get());
+         {
+            DrawStateStack<DrawStateStackType::Compute> linearize_state;
+            linearize_state.Cache(native_device_context, device_data.uav_max_count);
+            ID3D11ShaderResourceView* lin_srv = gd.smaa_input.srv.get();
+            ID3D11UnorderedAccessView* lin_uav = gd.smaa_input_linear.uav.get();
+            native_device_context->CSSetUnorderedAccessViews(0, 1, &lin_uav, nullptr);
+            native_device_context->CSSetShaderResources(0, 1, &lin_srv);
+            native_device_context->CSSetShader(linearize_cs, nullptr, 0);
+            native_device_context->Dispatch((w + 7) / 8, (h + 7) / 8, 1);
+            linearize_state.Restore(native_device_context);
+         }
 
          // DrawSMAA restores shaders, resources, and targets, but not cbuffer slots; save VS/PS b1 explicitly.
          ComPtr<ID3D11Buffer> vs_cb1_orig, ps_cb1_orig;
@@ -873,7 +901,7 @@ public:
          native_device_context->PSSetConstantBuffers(1, 1, &mcb);
 
          DrawSMAA(native_device, native_device_context, device_data,
-            gd.tex_smaa_out_rtv.get(), gd.srv_input.get() /*edge color (gamma)*/, gd.srv_input.get() /*blend color (gamma)*/,
+            gd.smaa_out.rtv.get(), gd.smaa_input_linear.srv.get() /*blend color (linear)*/, gd.smaa_input.srv.get() /*edge color (gamma)*/,
             depth_ok ? gd.srv_depth.get() : nullptr /*predication*/);
 
          // Apply optional RCAS, otherwise copy SMAA directly so the cancelled resolve always produces output.
@@ -895,7 +923,7 @@ public:
             }
             // Written by the sharpen pass and then copied out, so it needs no SRV.
             const bool rcas_target_ready =
-               EnsureRGBA16FTarget(native_device, w, h, gd.tex_rcas_out, std::addressof(gd.tex_rcas_out_rtv), nullptr, gd.rcas_out_w, gd.rcas_out_h);
+               EnsureRGBA16FTarget(native_device, w, h, D3D11_BIND_RENDER_TARGET, &gd.rcas_out);
             if (!gd.cb_sharpen || !rcas_target_ready)
                do_sharpen = false;
          }
@@ -911,18 +939,18 @@ public:
             ID3D11Buffer* scb = gd.cb_sharpen.get();
             native_device_context->PSSetConstantBuffers(0, 1, &scb);
             DrawCustomPixelShader(native_device_context, device_data.default_depth_stencil_state.get(), device_data.default_blend_state.get(), nullptr,
-               sharpen_vs, sharpen_ps, gd.tex_smaa_out_srv.get(), gd.tex_rcas_out_rtv.get(), w, h, false);
+               sharpen_vs, sharpen_ps, gd.smaa_out.srv.get(), gd.rcas_out.rtv.get(), w, h, false);
 
             sharpen_state.Restore(native_device_context);
 
-            native_device_context->CopyResource(color_res.get(), gd.tex_rcas_out.get());
+            native_device_context->CopyResource(color_res.get(), gd.rcas_out.tex.get());
          }
          else
          {
-            native_device_context->CopyResource(color_res.get(), gd.tex_smaa_out.get());
+            native_device_context->CopyResource(color_res.get(), gd.smaa_out.tex.get());
          }
 
-         // Restore native VS/PS b1; no compute state was changed.
+         // Restore native VS/PS b1; the linearize dispatch already restored its compute state.
          ID3D11Buffer* vcb = vs_cb1_orig.get();
          ID3D11Buffer* pcb = ps_cb1_orig.get();
          native_device_context->VSSetConstantBuffers(1, 1, &vcb);
@@ -936,8 +964,8 @@ public:
       return DrawOrDispatchOverrideType::None;
    }
 
-   // Captures inputs for SMAA/bloom/XeGTAO/video and replaces their native dispatches; stage-1 HDR replacement
-   // stays hash-driven by Core.
+   // Captures inputs for SMAA, bloom, XeGTAO and Bink, replaces the FXAA and HBAO+ dispatches, and applies Hide UI;
+   // shader replacement itself stays hash-driven by Core.
    DrawOrDispatchOverrideType OnDrawOrDispatch(ID3D11Device* native_device, ID3D11DeviceContext* native_device_context, CommandListData& cmd_list_data, DeviceData& device_data, reshade::api::shader_stage stages, const ShaderHashesList<OneShaderPerPipeline>& original_shader_hashes, bool is_custom_pass, bool& updated_cbuffers, std::function<void()>* original_draw_dispatch_func) override
    {
       auto& gd = GetGameDeviceData(device_data);
@@ -992,6 +1020,7 @@ public:
       gd.scene_post_done_this_frame = false;      // Re-armed by the FXAA resolve.
 #if DEVELOPMENT
       gd.bloom_bright_pass_hits = 0;
+      gd.stage1_draws = 0; // stage1_perm deliberately survives: a paused or menu frame keeps the last answer.
 #endif
 
       // This is the sole writer of effective BloomIntensity. UI code edits only the raw slider and enable state,
@@ -1015,7 +1044,7 @@ public:
             device_data.cb_luma_global_settings_dirty = true;
          }
 
-         // Follow native per-scene cb0.y; use ME1's 1.2 default until the first readback.
+         // Follow native per-scene cb0.y; use ME1LE's 1.2 default until the first readback.
          const float thr = gd.bloom_threshold_live >= 0.f ? gd.bloom_threshold_live : 1.2f;
          if (fabsf(gs.BloomThreshold - thr) > 1e-4f)
          {
@@ -1110,7 +1139,7 @@ public:
          if (ImGui::IsItemDeactivatedAfterEdit())
             reshade::set_config_value(nullptr, PROJECT_NAME, "HighlightDechroma", gs.HighlightDechroma);
          if (ImGui::IsItemHovered())
-            ImGui::SetTooltip("How soon bright sources fade to neutral white, HDR only (0 = keep color at any brightness).");
+            ImGui::SetTooltip("How far the brightest sources fade to neutral white, HDR only (0 = keep color at any brightness).");
          if (DrawResetButton<float, false>(gs.HighlightDechroma, gd_def.HighlightDechroma, "HighlightDechroma"))
          {
             device_data.cb_luma_global_settings_dirty = true;
@@ -1226,7 +1255,7 @@ public:
          reshade::set_config_value(nullptr, PROJECT_NAME, "Dithering", gs.Dithering);
       }
       if (ImGui::IsItemHovered())
-         ImGui::SetTooltip("Reduces gradient banding (HDR output).");
+         ImGui::SetTooltip("Reduces gradient banding.");
 
       ImGui::SeparatorText("UI");
       ImGui::Checkbox("Hide Gameplay UI", &g_hide_ui); // Session-only to avoid a confusing HUD-less restart.
@@ -1236,8 +1265,20 @@ public:
 #if DEVELOPMENT
       {
          auto& gd = GetGameDeviceData(device_data);
-         const char* gname = g_me_game == MEGame::ME1 ? "ME1" : (g_me_game == MEGame::ME2 ? "ME2" : "ME3");
+         const char* gname = g_me_game == MEGame::ME1LE ? "ME1LE" : (g_me_game == MEGame::ME2LE ? "ME2LE" : "ME3LE");
          const float eff_thr = gd.bloom_threshold_live >= 0.f ? gd.bloom_threshold_live : 1.2f;
+         ImGui::SeparatorText("Stage 1 DEV readout");
+         if (gd.stage1_perm == nullptr)
+         {
+            ImGui::Text("no stage-1 tonemap draw seen yet");
+         }
+         else
+         {
+            ImGui::Text("perm 0x%08X  (draws this frame: %d)", gd.stage1_perm->hash, gd.stage1_draws);
+            if (ImGui::IsItemHovered())
+               ImGui::SetTooltip("The stage-1 permutation the game drew last; its description and HDR family are in the matching Tonemap_0x<hash> shader. A frame reporting two draws switched permutation mid-frame and may be using two families.");
+         }
+
          ImGui::SeparatorText("Bloom DEV readout");
          ImGui::Text("game=%s  bright-pass hits/frame=%d  (0 = capture hook never fired)", gname, gd.bloom_bright_pass_hits);
          ImGui::Text("threshold_live=%.4f  scale_live=%.4f  (-1 = not captured yet)", gd.bloom_threshold_live, gd.bloom_scale_live);
@@ -1290,12 +1331,11 @@ public:
                   "\n\nThird Party:"
                   "\nReShade"
                   "\nImGui"
+                  "\nRenoDX (HDR tonemap method)"
+                  "\nDICE (HDR tonemapper)"
                   "\nSMAA (Iryoku)"
                   "\nXeGTAO (Intel)"
-                  "\nAMD FidelityFX (RCAS)"
-                  "\nDICE (HDR tonemapper)"
-                  "\n3Dmigoto"
-                  "\nRenoDX (HDR tonemap method)");
+                  "\nAMD FidelityFX (RCAS)");
    }
 };
 
@@ -1312,8 +1352,8 @@ BOOL APIENTRY DllMain(HMODULE hModule, DWORD ul_reason_for_call, LPVOID lpReserv
 
       Globals::SetGlobals(PROJECT_NAME, "Mass Effect Legendary Edition Luma mod", "", 3);
 
-      // Native in-game HDR is required; it already supplies the fp16 scRGB swapchain and RGBA16F stage-1/2
-      // transport. A general texture upgrade would also catch R8G8B8A8 velocity and UI, breaking their contracts.
+      // With in-game HDR on, the game already supplies the fp16 scRGB swapchain and RGBA16F stage-1/2 transport.
+      // A general texture upgrade would also catch R8G8B8A8 velocity and UI, breaking their contracts.
       swapchain_format_upgrade_type = TextureFormatUpgradesType::AllowedEnabled; // Enables scRGB and linear composition.
       swapchain_upgrade_type = SwapchainUpgradeType::scRGB;
       texture_format_upgrades_type = TextureFormatUpgradesType::None; // HDR buffers are already fp16.
