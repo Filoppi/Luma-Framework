@@ -13,17 +13,8 @@
 // NOTE: dgVoodoo dropped the SM3 `saturate(o)` (vanilla's 8-bit UNORM target clamped for free); the fp16
 // canvas does not, so we re-add it before the AutoHDR (kills YUV overshoot + negatives).
 
-#include "Includes/Common.hlsl" // game-local: pulls GameCBuffers (LumaGameSettings VideoAutoHDR* fields) + shared Common
-
-// Light AutoHDR on videos (0 = off -> flat SDR at paper white). Peak kept low on purpose (the movies are
-// low-bitrate; pushing peak amplifies block/compression artifacts in highlights). PumboAutoHDR self-noops
-// in SDR (peak==paper).
-#ifndef ENABLE_VIDEO_AUTO_HDR
-#define ENABLE_VIDEO_AUTO_HDR 1
-#endif
-#ifndef VIDEO_AUTO_HDR_PEAK_NITS
-#define VIDEO_AUTO_HDR_PEAK_NITS 250.0
-#endif
+#include "Includes/Common.hlsl"       // game-local: pulls GameCBuffers (LumaGameSettings VideoAutoHDR* fields) + shared Common
+#include "Includes/GameBindings.hlsl" // b3/b4, the dgVoodoo masks, ApplyDgvMask
 
 Texture2D<float4> t0 : register(t0); // Y plane (value in .w)
 Texture2D<float4> t1 : register(t1); // U plane (value in .w)
@@ -32,15 +23,6 @@ Texture2D<float4> t2 : register(t2); // V plane (value in .w)
 SamplerState s0_s : register(s0);
 SamplerState s1_s : register(s1);
 SamplerState s2_s : register(s2);
-
-cbuffer cb3 : register(b3)
-{
-   float4 cb3[77];
-}
-cbuffer cb4 : register(b4)
-{
-   float4 cb4[236];
-}
 
 void main(
     float4 v0 : SV_POSITION0,
@@ -63,15 +45,9 @@ void main(
    float3 rgbScale = fade * cb4[10].xyz;
 
    // --- YUV plane fetch + dgVoodoo format-emulation mask (verbatim; plane value lives in .w) ---
-   float4 rV = t2.Sample(s2_s, v5.xy);
-   rV = asfloat((asuint(rV) & asuint(cb3[48])) | asuint(cb3[49]));
-   float V = rV.w - 0.501961;
-   float4 rU = t1.Sample(s1_s, v5.xy);
-   rU = asfloat((asuint(rU) & asuint(cb3[46])) | asuint(cb3[47]));
-   float U = rU.w - 0.501961;
-   float4 rY = t0.Sample(s0_s, v5.xy);
-   rY = asfloat((asuint(rY) & asuint(cb3[44])) | asuint(cb3[45]));
-   float Y = (rY.w - 0.062745) * 1.164;
+   float V = ApplyDgvMask(t2.Sample(s2_s, v5.xy), DgvMaskT2, DgvFillT2).w - 0.501961;
+   float U = ApplyDgvMask(t1.Sample(s1_s, v5.xy), DgvMaskT1, DgvFillT1).w - 0.501961;
+   float Y = (ApplyDgvMask(t0.Sample(s0_s, v5.xy), DgvMaskT0, DgvFillT0).w - 0.062745) * 1.164;
 
    // --- BT.601 limited-range -> RGB (verbatim constants) ---
    float3 rgb;
@@ -85,14 +61,15 @@ void main(
    // --- restore vanilla 8-bit clamp, then light AutoHDR ---
    o0.rgb = saturate(o0.rgb);
    float3 lin = gamma_to_linear(o0.rgb);
-#if ENABLE_VIDEO_AUTO_HDR
+   // Light AutoHDR (VideoAutoHDREnable 0 = flat SDR at paper white). The 250-nit peak stays low on purpose: the movies
+   // are low-bitrate, and a higher peak amplifies block/compression artifacts in highlights. PumboAutoHDR self-noops
+   // in SDR (peak == paper white).
    if (LumaSettings.GameSettings.VideoAutoHDREnable > 0.5)
    {
-      // boost 0 = peak at paper white -> PumboAutoHDR no-ops (off); 1 = full VIDEO_AUTO_HDR_PEAK_NITS.
-      const float peakNits = lerp(sRGB_WhiteLevelNits, VIDEO_AUTO_HDR_PEAK_NITS, saturate(LumaSettings.GameSettings.VideoAutoHDRBoost));
+      // boost 0 = peak at paper white -> PumboAutoHDR no-ops (off); 1 = the full 250 nits.
+      const float peakNits = lerp(sRGB_WhiteLevelNits, 250.0, saturate(LumaSettings.GameSettings.VideoAutoHDRBoost));
       lin = PumboAutoHDR(lin, peakNits, LumaSettings.GamePaperWhiteNits);
    }
-#endif
 #if UI_DRAW_TYPE >= 2
    // Match the final grade's linear pre-scale: land movies at the same brightness as in-game after the
    // composition's UIPaperWhite rescale (when UIPaperWhite != GamePaperWhite).

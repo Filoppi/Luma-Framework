@@ -2,21 +2,25 @@
 // ORDER MATTERS — see Luma_TW2_Tonemap.hlsl (game-local Common.hlsl defines LumaGameSettings first).
 #include "Includes/Common.hlsl" // game-local: LumaGameSettings — keep FIRST
 #include "../Includes/Color.hlsl"
-#include "../Includes/ColorGradingLUT.hlsl" // RestoreHueAndChrominance (vanilla clip hue/chroma emulation)
 #include "../Includes/DICE.hlsl"
+#include "../Includes/Reinhard.hlsl"    // Reinhard::ReinhardPiecewise, the soft hue reference
+#include "Includes/MacLeodBoynton.hlsl" // MacLeodBoynton::HueOnlyBT2020. Byte-identical copy of the BL GOTY production model: do not edit here, sync it from "Borderlands GOTY Enhanced/Includes"
+#include "Includes/GameBindings.hlsl"   // b3/b4, the dgVoodoo masks, ApplyDgvMask, DgVoodooRcp, DgVoodooLog2
 // clang-format on
 
-// The Witcher 2 FINAL GRADE pass (dgVoodoo -> ps_5_0, hash 0xDE5CF9CD): FXAA + the in-game Gamma slider +
-// highlight/shadow tint lerps + vignette, on the full-res fp16 canvas right before the UI draws.
+// The Witcher 2 FINAL GRADE pass (dgVoodoo -> ps_5_0, hash 0xDE5CF9CD), the engine's
+// CEnvFinalColorBalanceParameters: FXAA + shadow offset, midtone power and highlight gain + luma-keyed split
+// toning + vignette, on the full-res fp16 canvas right before the UI draws.
 // Vanilla body transcribed VERBATIM (register-level, constants cb4[N] = DX9 c(N-8)). This is also where the
-// Luma HDR output block lives (expansion + DICE + UI paper-white pre-scale): the vanilla tint lerps weight by
-// SATURATED luma and soft-clip everything above 1.0, so the HDR range dies here unless it is rebuilt after
-// them. The tonemap replacements stay vanilla-only.
+// Luma HDR output block lives (highlight hue + DICE + UI paper-white pre-scale): the highlight split tone lerps
+// toward a SATURATED luma target and soft-clips everything above 1.0, so the HDR range dies here unless it is
+// rebuilt after it. The tonemap replacements stay vanilla-only.
 //
-// Three permutations, and the only ones that exist: this file (FXAA + vignette), 0xCF3B72A9 with the game's
-// Anti-aliasing off (no FXAA block, scene alpha instead of 0) and 0xBABBFFAD with the vignette stage dropped
-// as well (no t2/s2 mask sample, no cb4[66..67]). The wrappers include this file and select with
-// LUMA_TW2_NO_FXAA_PERM / LUMA_TW2_NO_VIGNETTE_PERM, so the grade tail lives in one place.
+// Four permutations, the engine's 2x2 matrix of FXAA in/out x vignette in/out: this file (FXAA + vignette),
+// 0x058E2498 with the vignette stage dropped (no t2/s2 mask sample, no cb4[66..67]), 0xCF3B72A9 with the game's
+// Anti-aliasing off (no FXAA block, scene alpha instead of 0) and 0xBABBFFAD with both dropped. The wrappers
+// include this file and select with LUMA_TW2_NO_FXAA_PERM / LUMA_TW2_NO_VIGNETTE_PERM, so the grade tail lives
+// in one place. (The four dark-mode permutations are unreachable in the Enhanced Edition, see NOTES.md.)
 #ifndef LUMA_TW2_NO_FXAA_PERM
 #define LUMA_TW2_NO_FXAA_PERM 0
 #endif
@@ -24,7 +28,7 @@
 #define LUMA_TW2_NO_VIGNETTE_PERM 0
 #endif
 
-Texture2D<float4> t0 : register(t0); // scene canvas (full-res fp16, gamma-space, carries >1 Luma HDR range)
+Texture2D<float4> t0 : register(t0); // scene canvas (full-res fp16, LINEAR light: the vMidtone power below encodes it; carries >1 Luma HDR range)
 #if !LUMA_TW2_NO_VIGNETTE_PERM
 Texture2D<float4> t2 : register(t2); // vignette mask
 #endif
@@ -34,38 +38,6 @@ SamplerState s0_s : register(s0);
 SamplerState s2_s : register(s2);
 #endif
 
-cbuffer cb3 : register(b3)
-{
-   float4 cb3[77];
-}
-cbuffer cb4 : register(b4)
-{
-   float4 cb4[236];
-}
-
-// dgVoodoo texture-format fixup + guarded ops — transcribed verbatim. Deliberately duplicated per replacement
-// rather than shared: each hash-replaced file stays self-contained for side-by-side comparison with its dump.
-// Names match Luma_TW2_Tonemap.hlsl's copies exactly, so identical bodies never read as different helpers.
-float4 DgVoodooTexFixup(float4 color, float4 mask_and, float4 mask_or)
-{
-   return asfloat((asuint(color) & asuint(mask_and)) | asuint(mask_or));
-}
-// 1e37 is the exact sentinel every dgVoodoo dump uses (l(9999999933815812510711506376257961984.0)); it must
-// not be rounded up to 1e38, or "hiTarget * DgVoodooRcp(0)" below overflows to inf ten times sooner and the
-// zero-weight lerp around it turns into 0 * inf = NaN (which the guard at the end paints black).
-#define DGVOODOO_BIG 1e37
-float DgVoodooRcp(float x)
-{
-   return (abs(x) > 0.0) ? (1.0 / x) : DGVOODOO_BIG;
-}
-float DgVoodooLog2(float x)
-{
-   float l = log2(abs(x));
-   // dgVoodoo: log(0) = -inf -> -BIG (so exp2 later yields 0). It tests the -inf BIT PATTERN, not isinf(), so
-   // a +inf input keeps propagating as vanilla does instead of being flipped to ~0 (a white pixel gone black).
-   return (asuint(l) == 0xff800000u) ? -DGVOODOO_BIG : l;
-}
-
 // FXAA luma approximation the pass uses everywhere: R + 1.963211 * G
 float FxaaLuma(float4 c)
 {
@@ -74,7 +46,7 @@ float FxaaLuma(float4 c)
 
 float4 SampleScene(float2 uv)
 {
-   return DgVoodooTexFixup(t0.SampleLevel(s0_s, uv, 0.0), cb3[44], cb3[45]);
+   return ApplyDgvMask(t0.SampleLevel(s0_s, uv, 0.0), DgvMaskT0, DgvFillT0);
 }
 
 void main(
@@ -212,38 +184,51 @@ void main(
    }
 #endif // !LUMA_TW2_NO_FXAA_PERM
 
-   // ---- vanilla grade tail (verbatim): desat, gamma slider (log2/exp2 pow), tints, vignette ----
+   // ---- vanilla grade tail (verbatim) = CEnvFinalColorBalanceParameters: shadow offset, midtone power (log2/exp2),
+   // highlight gain, split toning, vignette ----
    float lumaAA = dot(aaColor, float3(0.299, 0.587, 0.114));
-   float3 color = saturate(lumaAA * cb4[62].w) * -cb4[62].rgb + aaColor;
+   float3 color = saturate(lumaAA * cb4[62].w) * -cb4[62].rgb + aaColor; // c54 vShadow: offset, ramped in from black by .w
+
+#if TONEMAP_TYPE == 1
+   // HDR: grade the colour at its clip point and give the brightness back after linearization (the HDR block below).
+   // Vanilla fed this grade at most 1 (the glow blend clips first), and extrapolating its per-channel power and gain
+   // past that turned a neutral 10 into Y ~24 with a blue cast in a graded area, and let the Gamma slider (it scales
+   // vMidtone) move highlight brightness. Dividing by the max channel keeps every stage on its authored 0-1 domain; at
+   // or below 1 the scale is exactly 1.0, so the result is bit-identical there.
+   const float gradeScale = (LumaSettings.DisplayMode == 1) ? max(max3(color), 1.0) : 1.0;
+   color /= gradeScale;
+#endif
 
    float3 clamped = max(color, 0.0);
    color.r = DgVoodooLog2(clamped.r);
    color.g = DgVoodooLog2(clamped.g);
    color.b = DgVoodooLog2(clamped.b);
-   color *= cb4[61].rgb; // in-game Gamma slider exponent
+   color *= cb4[61].rgb; // c53 vMidtone: per-channel power exponent, the display encode (measured 1/2.2 at neutral)
    color = exp2(color);
-   color *= cb4[60].rgb; // scale
+   color *= cb4[60].rgb; // c52 vHighlight: gain
 
    float lum = dot(color, float3(0.299, 0.587, 0.114));
 
-   // Highlight tint branch: lerp toward lum * cb4[68].rgb / cb4[70].y, weight sat((1.3 - lum) * cb4[71].x * 4) * cb4[68].w
-   float3 hiTarget = lum * cb4[68].rgb;
-   float hiWeight = saturate((1.3 - lum) * cb4[71].x * 4.0) * cb4[68].w;
-   float3 hiBranch = hiWeight * (hiTarget * DgVoodooRcp(cb4[70].y) - color) + color;
+   // Shadow split tone (c60 vSplitToneShadows, c62 vSplitToneBalance.y, c63 vSplitToneRange.x): lerp toward
+   // lum * cb4[68].rgb / cb4[70].y, weight sat((1.3 - lum) * cb4[71].x * 4) * cb4[68].w
+   float3 shadowToneTarget = lum * cb4[68].rgb;
+   float shadowToneWeight = saturate((1.3 - lum) * cb4[71].x * 4.0) * cb4[68].w;
+   float3 shadowToneBranch = shadowToneWeight * (shadowToneTarget * DgVoodooRcp(cb4[70].y) - color) + color;
 
-   // Shadow tint branch: lerp toward SATURATED lum * cb4[69].rgb / cb4[70].z — the vanilla >1 soft-clip lives here
-   float3 loTarget = saturate(lum) * cb4[69].rgb;
-   float loWeight = saturate((lum + 0.3) * cb4[71].y * 4.0) * cb4[69].w;
-   float3 loBranch = loWeight * (loTarget * DgVoodooRcp(cb4[70].z) - color) + color;
+   // Highlight split tone (c61 vSplitToneHighlights, c62 vSplitToneBalance.z, c63 vSplitToneRange.y): lerp toward
+   // SATURATED lum * cb4[69].rgb / cb4[70].z — the vanilla >1 soft clip lives here
+   float3 highlightToneTarget = saturate(lum) * cb4[69].rgb;
+   float highlightToneWeight = saturate((lum + 0.3) * cb4[71].y * 4.0) * cb4[69].w;
+   float3 highlightToneBranch = highlightToneWeight * (highlightToneTarget * DgVoodooRcp(cb4[70].z) - color) + color;
 
-   // Vanilla: final = lerp(hiBranch, loBranch, sat(lum * cb4[70].x * 5))
+   // Vanilla: final = lerp(shadowToneBranch, highlightToneBranch, sat(lum * cb4[70].x * 5)), c62 vSplitToneBalance.x
    float mixWeight = saturate(lum * cb4[70].x * 5.0);
-   float3 graded = mixWeight * (loBranch - hiBranch) + hiBranch;
+   float3 graded = mixWeight * (highlightToneBranch - shadowToneBranch) + shadowToneBranch;
 
-   // User Color Grading Intensity fades the two tint lerps back toward the untinted grade (the game's
-   // yellow-sepia cast); "color" is already the exact untinted reference, so nothing is recomputed. In the
-   // vanilla tail on purpose, so it applies in SDR too. Side effect: the shadow-tint branch carries vanilla's
-   // saturate(lum) soft-clip, so below 1.0 highlights above white reach a little further in HDR.
+   // User Color Grading Intensity fades the split toning back toward the un-toned grade: "color" is already the
+   // exact reference (offset, power and gain applied, no split tone), so nothing is recomputed. In the vanilla
+   // tail on purpose, so it applies in SDR too. Side effect: the highlight split tone carries vanilla's
+   // saturate(lum) soft clip, so below 1.0 highlights above white reach a little further in HDR.
    [branch] if (LumaSettings.GameSettings.ColorGradingIntensity != 1.0)
        graded = lerp(color, graded, LumaSettings.GameSettings.ColorGradingIntensity);
 
@@ -253,8 +238,8 @@ void main(
    // Vignette Intensity slider has nothing to scale here.
    float3 vanillaColor = graded;
 #else
-   // Vignette
-   float4 vignette = DgVoodooTexFixup(t2.Sample(s2_s, v7.xy), cb3[48], cb3[49]);
+   // Vignette (c58 vVignetteWeights, c59 vVignetteColor)
+   float4 vignette = ApplyDgvMask(t2.Sample(s2_s, v7.xy), DgvMaskT2, DgvFillT2);
    float vigWeight = saturate(dot(cb4[66], vignette));
    float3 vanillaColor = vigWeight * (cb4[67].rgb - graded) + graded;
    // User Vignette Intensity: lerp between the pre-vignette grade and the vignetted result (1 = vanilla,
@@ -265,7 +250,8 @@ void main(
 #if TONEMAP_TYPE == 1
    // ---- Luma HDR output (BL2-shape tail; this pass runs once per frame, full-res, scene only) ----
    {
-      float3 lin = gamma_to_linear(vanillaColor, GCT_MIRROR); // VANILLA_ENCODING_TYPE 1: gamma 2.2 buffers
+      // VANILLA_ENCODING_TYPE 1: gamma 2.2 buffers. gradeScale gives back the brightness the grade was normalized by.
+      float3 lin = gamma_to_linear(vanillaColor, GCT_MIRROR) * gradeScale;
 
       float3 postProcessedColor;
       if (LumaSettings.DisplayMode == 1) // HDR
@@ -273,65 +259,52 @@ void main(
          const float paperWhite = LumaSettings.GamePaperWhiteNits / sRGB_WhiteLevelNits;
          const float peakWhite = LumaSettings.PeakWhiteNits / sRGB_WhiteLevelNits;
 
-         // Vanilla highlight emulation (ALWAYS ON — part of the game's look, not a user knob). The vanilla SDR
-         // ceiling was a per-channel clamp at exactly 1.0, and it lived in the ROP, not in any shader: dgVoodoo's
-         // present blit (PS 0x2749AFD8) is a bare "sample_l -> o0" with zero math, and it wrote into an 8-bit
-         // r8g8b8a8 intermediate, so the output merger did the clamping. Luma upgrades that very intermediate to
-         // fp16 (texture_upgrade_formats in main.cpp), which is exactly why the clamp — and with it the vanilla
-         // look — disappears and has to be put back here, in the last pass before that blit. On a bright
-         // saturated source one channel reaches 1.0 first, which both skews the hue toward white (fire ->
-         // yellow-white) AND desaturates it; the shadow-tint branch above adds a partial soft clip of its own.
-         //
-         // REFERENCE = saturate(lin), the vanilla per-channel clip itself: this pass transcribes the whole
-         // vanilla grade, so the real vanilla SDR color is already here and needs no stand-in. A synthetic
-         // ReinhardPiecewise reference is only the fallback for passes with no vanilla SDR in hand, and it is a
-         // poor one here — a ceiling-5 reference recovers ~4% of the needed hue swing on a moderate highlight
-         // (G/R 0.347 where vanilla clips to 0.400), leaving fire red.
-         //
-         // Clip in BT.709: the artifact happened in the game's 8-bit sRGB buffer, so that is the faithful domain
-         // and both gamut matrices disappear with it. Clipping before or after the transfer function is
-         // equivalent, since a per-channel clamp at 1.0 commutes with any monotonic curve fixing 1 -> 1.
-         // The gate is exact, not conservative: below 1.0 saturate is the identity, so hueRef == lin and the
-         // restore provably does nothing, sparing two Oklab round trips on the ~96% of pixels that sit below.
-         [branch] if (max(lin.r, max(lin.g, lin.b)) > 1.0)
+         // Highlight hue: the colour stage of the other hard-clip ports (Borderlands GOTY, Medal of Honor Airborne,
+         // Mass Effect 2007 and 2010) and of RenoDX's BL1 template. Vanilla clipped per channel twice, in the glow blend
+         // before this grade and in the 8-bit present blit after it, which bends a bright saturated source toward
+         // yellow-white; Luma removes both clips. This stage bends the hue the same way, partway and without the
+         // whitening: a per-channel ReinhardPiecewise(5, 1.5) of the colour itself in BT.2020 supplies a hue DIRECTION,
+         // and MacLeod-Boynton rebuilds it on the colour's own purity and T = L + M, before the display map so DICE rolls
+         // off the bent colour. Full hue strength and no purity transfer (the RenoDX ports' Hue Shift 100% and Blowout 0),
+         // fixed rather than exposed. Measured in a graded area (2026-09-13): fire (6, 2, 0.4) goes from 8 to 23 degrees
+         // at unchanged purity. The exact clip colour as reference instead (hue 60, half the purity) read as greenish
+         // white at HDR brightness, and a fully clipped reference is achromatic, with no MacLeod-Boynton direction at all
+         // (it turned such fire blue).
+         // The gate sits at the reference's shoulder: below it ReinhardPiecewise returns its input exactly, and the
+         // BT.2020 channels of a BT.709 colour never exceed its max, so the reference equals the colour, the stage is a
+         // no-op up to float rounding, and those pixels skip the MacLeod-Boynton solve. One constant for both keeps them
+         // from drifting apart.
+         const float hueReferenceShoulder = 1.5;
+         [branch] if (max3(lin) > hueReferenceShoulder)
          {
-            float3 hueRef = saturate(lin);
-            // Shipped 0.8 hue / 0.4 whitening, both from GameSettings. 0.8 is the catalog value for a clipped
-            // SDR reference; 0.4 reproduces part of the clip's own chroma loss without paying for path-to-white
-            // twice, since DICE desaturates again at the display peak and Highlights Desaturation adds more on
-            // request. A non-zero whitening is only defensible because the reference here IS the vanilla clip.
-            // Only the CHROMA argument can whiten: the helper transfers hue, then restores chrominance exactly.
-            //
-            // HAZARD: hue strength must stay BELOW 1.0. Once every channel clips, hueRef is (1,1,1) whose
-            // chrominance is 1.7e-4 rather than 0, so the helper misses its safe-division fallback and its
-            // renormalization goes near-singular — the hue runs away while chroma stays put. On (6,5,4) linear:
-            // +0.87 deg at 0.80, +2.02 at 0.90, +4.49 at 0.95, +36.9 at 0.99, +143.9 at 1.00, where a white-hot
-            // pixel comes out CYAN. 0.80 keeps 61-79% of the vanilla hue swing; 0.90 is the hard ceiling.
-            lin = RestoreHueAndChrominance(lin, hueRef, saturate(LumaSettings.GameSettings.HighlightsHueStrength), saturate(LumaSettings.GameSettings.HighlightsHueChroma));
+            const float3 target2020 = BT709_To_BT2020(lin);
+            lin = BT2020_To_BT709(MacLeodBoynton::HueOnlyBT2020(target2020, Reinhard::ReinhardPiecewise(target2020, 5.0, hueReferenceShoulder)));
          }
 
-         DICESettings settings = DefaultDICESettings(DICE_TYPE_BY_LUMINANCE_PQ_CORRECT_CHANNELS_BEYOND_PEAK_WHITE);
-         float3 hdr = DICETonemap(lin * paperWhite, peakWhite, settings) / paperWhite;
-
-         const float highlightDechroma = LumaSettings.GameSettings.HighlightDechroma;
-         if (highlightDechroma > 0.0)
-         {
-            float dcExp = lerp(1.0, 0.05, highlightDechroma);
-            float dcWeight = saturate(pow(saturate(GetLuminance(hdr) / peakWhite), dcExp));
-            hdr = Saturation(hdr, 1.0 - dcWeight);
-         }
-         hdr = Saturation(hdr, LumaSettings.GameSettings.Saturation);
-
-         // User contrast: slope around 18% mid-gray (linear, 1.0 = paper white), after DICE and saturation.
-         // Gated so the shipped 1.0 stays bit-exact rather than paying a subtract/multiply/add round trip.
-         // KNOWN, ACCEPTED: the pivot means black does not stay black below 1.0 — a fully faded frame lands on
-         // 0.18 * (1 - Contrast), so cutscene fade-to-blacks read dark grey. The fade is applied upstream in
-         // the tonemap pass, so it cannot be reordered after the pivot.
+         // User contrast BEFORE the display map so DICE contains whatever it pushes up: after the rolloff the
+         // slider would escape the peak it just established, and nothing downstream re-contains it.
+         // Multiplicative around mid-gray, the repo's form (RenoDX_Contrast); 0.18 is mid-gray here too,
+         // display-referred with 1.0 = paper white (code 0.5). Gated so the shipped 1.0 stays bit-exact. The pow
+         // is spelled out with a floored log2 so Contrast 0 on a black pixel is 0 * log2(1e-30) = 0 rather than
+         // pow(0, 0) = NaN. Black stays black at every setting (0^C = 0), so the upstream fade-to-black no longer
+         // lands on 0.18 * (1 - Contrast) as the old additive pivot did.
          [branch] if (LumaSettings.GameSettings.Contrast != 1.0)
          {
             const float midGray = 0.18;
-            hdr = (hdr - midGray) * LumaSettings.GameSettings.Contrast + midGray;
+            lin = exp2(LumaSettings.GameSettings.Contrast * log2(max(lin / midGray, 1e-30))) * midGray;
          }
+
+         DICESettings settings = DefaultDICESettings(DICE_TYPE_BY_LUMINANCE_PQ_CORRECT_CHANNELS_BEYOND_PEAK_WHITE);
+         // Highlight dechroma handed to DICE rather than run as our own pass afterwards. Core's is better placed: it ramps
+         // on the MAX CHANNEL (by luminance a bright blue never triggers), exists only between ShoulderStart * PeakWhite
+         // and peak (1/3 of peak for this type, so mid-tones cannot be touched), and runs INSIDE the containment in the
+         // processing primaries. 0 = off for the OUTPUT but not the cost: DICE's guard carries no [branch], so fxc
+         // flattens it for every pixel above the shoulder.
+         settings.HighlightsDesaturation = LumaSettings.GameSettings.HighlightDechroma;
+         float3 hdr = DICETonemap(lin * paperWhite, peakWhite, settings) / paperWhite;
+
+         // User saturation LAST, after the display map: the repo's convention.
+         hdr = Saturation(hdr, LumaSettings.GameSettings.Saturation);
 
          postProcessedColor = hdr;
       }
@@ -345,15 +318,23 @@ void main(
       postProcessedColor *= LumaSettings.GamePaperWhiteNits / max(LumaSettings.UIPaperWhiteNits, 1.0);
 #endif
 
-      postProcessedColor = (postProcessedColor == postProcessedColor) ? postProcessedColor : 0.0; // NaN -> 0
+      postProcessedColor = IsNaN_Strict(postProcessedColor) ? 0.0 : postProcessedColor; // explicit exponent/mantissa bit test
       postProcessedColor = max(0.0, postProcessedColor);
       postProcessedColor = linear_to_gamma(postProcessedColor, GCT_MIRROR);
 
-      // Animated triangular dither in the stored gamma space, HDR and SDR alike (MELE precedent): the core
-      // composition never dithers, and the 8-bit SDR output bands harder than the HDR one. Deliberately NOT
-      // vanilla — vanilla had no dither — hence the runtime toggle.
+      // Anti-banding dither, one step of the output quantizer: the 8-bit code in SDR, 10-bit BT.2020 PQ in HDR.
       if (LumaSettings.GameSettings.Dithering > 0.5)
-         ApplyDithering(postProcessedColor, v5.xy, true, 1.0, DITHERING_BIT_DEPTH, LumaSettings.FrameIndex, true);
+      {
+         if (LumaSettings.DisplayMode == 0)
+            ApplyDithering(postProcessedColor, v5.xy, true, 1.0, 8u, LumaSettings.FrameIndex, true);
+         else
+         {
+            const float pqScale = max(LumaSettings.UIPaperWhiteNits, 1.0) / HDR10_MaxWhiteNits;
+            float3 pq = Linear_to_PQ(BT709_To_BT2020(gamma_to_linear(postProcessedColor, GCT_MIRROR) * pqScale), GCT_MIRROR);
+            ApplyDithering(pq, v5.xy, true, 1.0, 10u, LumaSettings.FrameIndex, true);
+            postProcessedColor = linear_to_gamma(BT2020_To_BT709(PQ_to_Linear(pq, GCT_MIRROR)) / pqScale, GCT_MIRROR);
+         }
+      }
 
       vanillaColor = postProcessedColor;
    }

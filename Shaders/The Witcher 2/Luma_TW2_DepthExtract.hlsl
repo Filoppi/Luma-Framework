@@ -1,6 +1,6 @@
 // The Witcher 2 — build the SMAA predication signal from the game's depth.
 //
-// Input is the game's full-res r32_float depth, captured in main.cpp at the TINT tonemap draw (t1) or the AO
+// Input is the game's full-res r32_float depth, captured in main.cpp at the bright-pass tonemap draw (t1) or the AO
 // pack pass. LINEAR VIEW-SPACE metres, not device Z (min 1.77, p50 7.3, max 686).
 //
 // Not a rescale, on purpose. SMAA predicates on a plain first difference between adjacent pixels, and on

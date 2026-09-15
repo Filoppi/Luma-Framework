@@ -6,9 +6,6 @@
 // Without this file the pass fell through unreplaced whenever the user ran the game's Anti-aliasing ON with
 // the vignette OFF, which silently costs the whole Luma tail on those frames: no HDR block, no SMAA (the
 // post-draw callback keys on the grade hash) and no Hide UI gate.
-//
-// No dgVoodoo 2.81.3 counterpart is keyed: that build's dump was captured with the vignette on and never
-// produced this permutation. It needs a re-dump under 2.81.3 with the vignette off.
 
 #define LUMA_TW2_NO_VIGNETTE_PERM 1
 #include "FinalGrade_0xDE5CF9CD.ps_5_0.hlsl"
