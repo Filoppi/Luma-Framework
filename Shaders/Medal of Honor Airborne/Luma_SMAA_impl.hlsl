@@ -10,9 +10,9 @@
 // Runs POST-final-grade on the graded gamma canvas: main.cpp drives it from the post-draw callback on whichever
 // final pass ran this frame (UberPostProcessBlend 0xB9548800 with DoF on, FGammaCorrectionPixelShader 0x52B868E0
 // with DoF off), i.e. after the grade and BEFORE the HUD draws onto the same canvas. The canvas is GAMMA
-// (POST_PROCESS_SPACE_TYPE=0) and carries display-mapped HDR values (>1 possible) — edge detection and
-// neighborhood blending both work in gamma, which keeps 1px-thin dark features alive against a bright sky. The PS
-// appends NO HDR/tonemap tail; the core Display Composition runs downstream.
+// (POST_PROCESS_SPACE_TYPE=0) and carries display-mapped HDR values (>1 possible) — edge detection works in gamma,
+// neighborhood blending in linear light (Luma_MOHA_SMAALinearize) and re-encodes. The PS appends NO HDR/tonemap
+// tail; the core Display Composition runs downstream.
 
 #include "Includes/Common.hlsl"
 
@@ -102,7 +102,8 @@ void smaa_neighborhood_blending_vs(uint id : SV_VertexID, out float4 position : 
 
 float4 smaa_neighborhood_blending_ps(float4 position : SV_Position, float2 texcoord : TEXCOORD0, float4 offset : TEXCOORD1) : SV_Target
 {
-   // tex0 = colorTex (gamma copy), tex1 = blendTex. Blend in gamma (the buffer's space): keeps the bright HDR sky
-   // compressed so 1px-thin dark features survive. No HDR tail, no re-encode - output stays in the canvas' space.
-   return SMAANeighborhoodBlendingPS(texcoord, offset, tex0, tex1);
+   // tex0 = colorTex (linear copy), tex1 = blendTex. Re-encode to the canvas' gamma.
+   float4 color = SMAANeighborhoodBlendingPS(texcoord, offset, tex0, tex1);
+   color.rgb = linear_to_gamma(color.rgb, GCT_MIRROR);
+   return color;
 }
