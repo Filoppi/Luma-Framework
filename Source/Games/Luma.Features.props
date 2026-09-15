@@ -47,6 +47,10 @@
   </PropertyGroup>
 
   <ItemDefinitionGroup>
+    <ClCompile>
+      <!-- The unity build can exceed the default object file section limit (C1128), especially in Debug. -->
+      <AdditionalOptions>/bigobj %(AdditionalOptions)</AdditionalOptions>
+    </ClCompile>
     <ClCompile Condition="'$(UseLumaDXP)'=='true'">
       <!-- PreprocessorDefinitions metadata overrides the CharacterSet-derived
            UNICODE defines, so restore them explicitly. -->
