@@ -42,6 +42,34 @@ function Find-ProjectDir {
     return $null
 }
 
+function Copy-PackageShaders {
+    param([string]$Source, [string]$Destination, [string]$Mount, [string]$RelativePath = "")
+
+    # Enumerate one level at a time so excluded directories are never entered.
+    foreach ($entry in Get-ChildItem -LiteralPath $Source) {
+        $relative = if ($RelativePath) { Join-Path $RelativePath $entry.Name } else { $entry.Name }
+        $destinationPath = Join-Path $Destination $entry.Name
+        if ($entry.PSIsContainer) {
+            if ($Mount -eq $Project -and $entry.Name -like "Dump*") { continue }
+            if ($entry.Name -in @("Unused", "Dev", "Sample")) { continue }
+            if (-not $RelativePath -and $Mount -eq "Global" -and $entry.Name -eq "Textures" -and -not $useLumaFastNoise) { continue }
+            Copy-PackageShaders -Source $entry.FullName -Destination $destinationPath -Mount $Mount -RelativePath $relative
+            continue
+        }
+
+        # Exclude compiled dumps even when they sit inside a texture directory.
+        if ($entry.Extension -ieq ".cso") { continue }
+        # ".h" too, as some shaders include headers (e.g. Deus Ex Mankind Divided's "shared.h")
+        $isShader = $entry.Extension -in @(".hlsl", ".hlsli", ".h")
+        $isRecipe = $entry.Name.EndsWith('.recipe.yml', [System.StringComparison]::OrdinalIgnoreCase)
+        $isTexture = $relative -match '(^|[\\/])Textures[\\/]'
+        if (-not ($isShader -or $isRecipe -or $isTexture)) { continue }
+
+        New-Item -ItemType Directory -Path $Destination -Force | Out-Null
+        Copy-Item -LiteralPath $entry.FullName -Destination $destinationPath -Force
+    }
+}
+
 $projectDir = Find-ProjectDir -RepoRoot $repoRoot -ProjectName $Project
 if (-not $projectDir) {
     Write-Error "Project folder not found (or no vcxproj): Source\Games\$Project"
@@ -96,71 +124,49 @@ $zipName += ".zip"
 # Temp staging dir (unique per run, in the system temp so interrupted builds
 # don't pollute the repo tree)
 $tempDir = Join-Path $env:TEMP ("Luma-Package-" + [guid]::NewGuid().ToString("N"))
-New-Item -ItemType Directory -Path "$tempDir\Luma" -Force | Out-Null
+try {
+    New-Item -ItemType Directory -Path "$tempDir\Luma" -Force | Out-Null
 
-# 1. Copy the shaders mount (which now also carries the textures)
-Copy-Item -Path (Join-Path $repoRoot "Shaders\*") -Destination "$tempDir\Luma" -Recurse -Force
-
-# 2. Keep only this project's folders (Global/Includes/<Project> + Core for opt-ins)
-$allowedDirs = @("Global", "Includes", $Project)
-Get-ChildItem -Path "$tempDir\Luma" -Directory | ForEach-Object {
-    if ($allowedDirs -notcontains $_.Name) {
-        Write-Host "Removing disallowed folder: $($_.Name)"
-        Remove-Item $_.FullName -Recurse -Force
-    } elseif (-not $Config.StartsWith("Development")) {
-        foreach ($folder in @("Unused", "Dev", "Sample")) {
-            $target = Join-Path $_.FullName $folder
-            if (Test-Path $target) { Remove-Item $target -Recurse -Force }
+    # Copy only the three package mounts, filtering before copying any files.
+    # Never enumerate other games or descend into this game's Dump directories.
+    foreach ($mount in @("Global", "Includes", $Project) | Select-Object -Unique) {
+        $source = Join-Path $repoRoot "Shaders\$mount"
+        if (Test-Path -LiteralPath $source -PathType Container) {
+            Write-Host "Staging shaders: $mount"
+            Copy-PackageShaders -Source $source -Destination (Join-Path "$tempDir\Luma" $mount) -Mount $mount
         }
     }
-}
 
-# 2b. Project-wide (Global) textures only ship to opt-in projects
-if (-not $useLumaFastNoise) {
-    $globalTexturesDir = Join-Path "$tempDir\Luma" "Global\Textures"
-    if (Test-Path $globalTexturesDir) {
-        Write-Host "Removing project-wide textures for non-opt-in project: $globalTexturesDir"
-        Remove-Item $globalTexturesDir -Recurse -Force
+    # Runtime DLLs (dxcompiler.dll is intentionally not shipped: Luma only uses the
+    #    SM5 recipe path, which is native — DXC/DXIL is only needed once SM6 is used)
+    $d3dCompilerSrc = if ($Platform -eq "Win32") { Join-Path $repoRoot "Shaders\Decompiler\d3dcompiler_47_x32.dll" }
+                      else { Join-Path $repoRoot "Shaders\Decompiler\d3dcompiler_47.dll" }
+    if (Test-Path $d3dCompilerSrc) { Copy-Item $d3dCompilerSrc -Destination "$tempDir\Luma" -Force }
+    $reshadeSrc = if ($Platform -eq "Win32") { Join-Path $repoRoot "Source\External\reshade\bin\Win32\Release\ReShade32.dll" }
+                  else { Join-Path $repoRoot "Source\External\reshade\bin\x64\Release\ReShade64.dll" }
+    if (Test-Path $reshadeSrc) { Copy-Item $reshadeSrc -Destination (Join-Path $tempDir "dxgi.dll") -Force }
+    if ($useLumaNGX) {
+        $ngxSrc = Join-Path $repoRoot "Source\External\NGX\bin\dev\nvngx_dlss.dll"
+        if ($Config -notlike "Development*") { $ngxSrc = Join-Path $repoRoot "Source\External\NGX\bin\rel\nvngx_dlss.dll" }
+        if (Test-Path $ngxSrc) { Copy-Item $ngxSrc -Destination $tempDir -Force }
     }
-}
 
-# 3. Keep shader/recipe/texture files only
-$allowedExtensions = @(".hlsl", ".hlsli")
-Get-ChildItem -Path "$tempDir\Luma" -Recurse -File | ForEach-Object {
-    # Keep Windows PowerShell 5.1 compatible - it lacks [IO.Path]::GetRelativePath, so compute it manually
-    $relativePath = $_.FullName.Substring("$tempDir\Luma\".Length)
-    $isRecipeFile = $_.Name.EndsWith('.recipe.yml', [System.StringComparison]::OrdinalIgnoreCase)
-    $isTextureFile = $relativePath -match 'Textures[\\/]'
-    if (($allowedExtensions -notcontains $_.Extension.ToLower()) -and (-not $isRecipeFile) -and (-not $isTextureFile)) {
-        Remove-Item $_.FullName -Force
-    }
-}
+    # Addon at the zip root, under the canonical Luma-<Project>.addon name
+    Copy-Item $addonFile.FullName -Destination (Join-Path $tempDir "Luma-$Project.addon") -Force
 
-# 4. Runtime DLLs (dxcompiler.dll is intentionally not shipped: Luma only uses the
-#    SM5 recipe path, which is native — DXC/DXIL is only needed once SM6 is used)
-$d3dCompilerSrc = if ($Platform -eq "Win32") { Join-Path $repoRoot "Shaders\Decompiler\d3dcompiler_47_x32.dll" }
-                  else { Join-Path $repoRoot "Shaders\Decompiler\d3dcompiler_47.dll" }
-if (Test-Path $d3dCompilerSrc) { Copy-Item $d3dCompilerSrc -Destination "$tempDir\Luma" -Force }
-$reshadeSrc = if ($Platform -eq "Win32") { Join-Path $repoRoot "Source\External\reshade\bin\Win32\Release\ReShade32.dll" }
-              else { Join-Path $repoRoot "Source\External\reshade\bin\x64\Release\ReShade64.dll" }
-if (Test-Path $reshadeSrc) { Copy-Item $reshadeSrc -Destination (Join-Path $tempDir "dxgi.dll") -Force }
-if ($useLumaNGX) {
-    $ngxSrc = Join-Path $repoRoot "Source\External\NGX\bin\dev\nvngx_dlss.dll"
-    if ($Config -notlike "Development*") { $ngxSrc = Join-Path $repoRoot "Source\External\NGX\bin\rel\nvngx_dlss.dll" }
-    if (Test-Path $ngxSrc) { Copy-Item $ngxSrc -Destination $tempDir -Force }
-}
-
-# 5. Addon at the zip root, under the canonical Luma-<Project>.addon name
-Copy-Item $addonFile.FullName -Destination (Join-Path $tempDir "Luma-$Project.addon") -Force
-
-# 6. Zip — next to the addon by default
-if ([string]::IsNullOrEmpty($OutDir)) { $OutDir = $addonFile.DirectoryName }
-$OutDir = $OutDir.TrimEnd('\')
-New-Item -ItemType Directory -Path $OutDir -Force | Out-Null
-$zipPath = Join-Path $OutDir $zipName
-try {
+    # Zip — next to the addon by default
+    if ([string]::IsNullOrEmpty($OutDir)) { $OutDir = $addonFile.DirectoryName }
+    $OutDir = $OutDir.TrimEnd('\')
+    New-Item -ItemType Directory -Path $OutDir -Force | Out-Null
+    $zipPath = Join-Path $OutDir $zipName
     Compress-Archive -Path "$tempDir\*" -DestinationPath $zipPath -Force
     Write-Host "Packaged: $zipPath"
 } finally {
-    Remove-Item -Recurse -Force $tempDir -ErrorAction SilentlyContinue
+    # Only remove the unique staging directory created by this invocation.
+    $resolvedTempDir = [IO.Path]::GetFullPath($tempDir)
+    $tempRoot = [IO.Path]::GetFullPath($env:TEMP).TrimEnd('\', '/') + [IO.Path]::DirectorySeparatorChar
+    if ($resolvedTempDir.StartsWith($tempRoot, [StringComparison]::OrdinalIgnoreCase) -and
+        (Split-Path $resolvedTempDir -Leaf) -match '^Luma-Package-[0-9a-f]{32}$') {
+        Remove-Item -LiteralPath $resolvedTempDir -Recurse -Force -ErrorAction SilentlyContinue
+    }
 }

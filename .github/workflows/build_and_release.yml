@@ -180,10 +180,11 @@ jobs:
           #}
 
           # Package with the shared script (single source of truth with local packaging):
-          # it copies the shaders mount, filters to this project, bundles the runtime
+          # it copies only this game's shaders, Global and Includes, skipping game
+          # Dump directories before traversal and excluding all .cso files. It bundles the runtime
           # DLLs (d3dcompiler_47, ReShade as dxgi.dll, NGX DLSS) and zips next to the
           # addon or into -OutDir. dxcompiler.dll is intentionally not shipped (SM5-only).
-          pwsh -ExecutionPolicy Bypass -File "Scripts/package.ps1" -Project $projectName -Config "${{ matrix.config }}" -Platform "${{ matrix.platform }}" -OutDir "."
+          pwsh -ExecutionPolicy Bypass -File "Scripts/package.ps1" -Project $projectName -Config "${{ matrix.config }}" -Platform "${{ matrix.platform }}" -AddonPath $addonFile.FullName -OutDir "."
           if ($LASTEXITCODE -ne 0) {
             Write-Host "::warning::Packaging failed for '$projectName' - it will be excluded from this release."
             continue
