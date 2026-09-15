@@ -18,7 +18,7 @@
 // LUMA_GAME_CB_STRUCTS (via GameCBuffers.hlsl) BEFORE any shared header pulls Settings.hlsl, so
 // LumaSettings.GameSettings resolves to the real grade struct rather than the empty dummy.
 #include "Includes/Common.hlsl"       // game-local: LumaSettings.GameSettings.LumaBloomEnable
-#include "Includes/GameBindings.hlsl" // b3/b4, the dgVoodoo masks, ApplyDgvMask, PowUE3
+#include "Includes/GameBindings.hlsl" // b3/b4, the dgVoodoo masks, ApplyDgvMask, DoFBlurAmount
 // clang-format on
 
 // Only what this pass samples; the grade's t1/t6 are none of its business.
@@ -71,10 +71,7 @@ void main(
 
    // Depth of field, from all four taps. The alpha carries scene depth (UE3 packs it in the fp16 alpha).
    const float4 sum = s0 + s1 + s2 + s3;
-   const float signedDistance = sum.w * 0.25 - DoFParams.x;
-   const float normalizedDistance = saturate(abs(signedDistance) * DoFParams.y);
-   const float maxBlur = (signedDistance >= 0.0) ? DoFMaxBlur.y : DoFMaxBlur.x;
-   const float blurAmount = min(PowUE3(normalizedDistance.xxx, DoFParams.zzz).x, maxBlur);
+   const float blurAmount = DoFBlurAmount(sum.w * 0.25, DoFParams, DoFMaxBlur);
 
    // The target is quarter-res and the grade multiplies it back by 4, hence the trailing 0.25 (the engine stores
    // this buffer pre-divided so it fits an 8-bit range; the fp16 upgrade lifted that ceiling but not the scale).

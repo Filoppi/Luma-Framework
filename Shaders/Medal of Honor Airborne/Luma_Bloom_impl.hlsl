@@ -5,10 +5,9 @@
 #include "Includes/Common.hlsl" // game-local: pulls GameCBuffers (LumaSettings) before the shared includes
 // clang-format on
 
-// The threshold function reads these two as macros, so a runtime cbuffer value works (BioShock precedent).
+// The threshold is a macro, so a runtime cbuffer value works (BioShock precedent).
 // b13 (LumaSettings) is re-bound by main.cpp right before DrawBloom, which owns b11 for its own constants.
 #define LUMA_BLOOM_THRESHOLD max(0.0, LumaSettings.GameSettings.BloomThreshold)
-#define LUMA_BLOOM_SOFT_KNEE (LUMA_BLOOM_THRESHOLD * 0.5)
 
 // Vanilla's SHAPE, not the shared quadratic one: the gather keeps the WHOLE sample once a channel passes the
 // threshold, while quadratic_threshold keeps only the EXCESS, which measured 6x too dim at brightness 1.2 and 2x at
@@ -21,9 +20,8 @@
 float3 moha_bloom_threshold(float3 color)
 {
    const float br = max(color.r, max(color.g, color.b));
-   const float k = max(1e-6, LUMA_BLOOM_SOFT_KNEE);
    const float t = LUMA_BLOOM_THRESHOLD;
-   return color * saturate((br - t) * rcp(k));
+   return color * saturate((br - t) * rcp(max(1e-6, t * 0.5)));
 }
 #define LUMA_BLOOM_THRESHOLD_FUNCTION(color) moha_bloom_threshold(color)
 
