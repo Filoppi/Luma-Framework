@@ -54,22 +54,22 @@ public:
       }
 
       // indirect upgrades
-      auto_texture_format_upgrade_shader_hashes[0xEFA73C0C] = std::pair{std::vector<uint8_t>{0}, std::vector<uint8_t>()};
-      auto_texture_format_upgrade_shader_hashes[0x00A4FD79] = std::pair{std::vector<uint8_t>{0}, std::vector<uint8_t>()};
-      auto_texture_format_upgrade_shader_hashes[0x40CAFDE9] = std::pair{std::vector<uint8_t>{0}, std::vector<uint8_t>()};
-      auto_texture_format_upgrade_shader_hashes[0x3201362F] = std::pair{std::vector<uint8_t>{0}, std::vector<uint8_t>()};
-      auto_texture_format_upgrade_shader_hashes[0x103C8F9D] = std::pair{std::vector<uint8_t>{0}, std::vector<uint8_t>()};
-      auto_texture_format_upgrade_shader_hashes[0x5358AA7E] = std::pair{std::vector<uint8_t>{0}, std::vector<uint8_t>()};
-      auto_texture_format_upgrade_shader_hashes[0x0BE76B98] = std::pair{std::vector<uint8_t>{0}, std::vector<uint8_t>()};
-      auto_texture_format_upgrade_shader_hashes[0xECB20855] = std::pair{std::vector<uint8_t>{0}, std::vector<uint8_t>()};
-      auto_texture_format_upgrade_shader_hashes[0x4466E09A] = std::pair{std::vector<uint8_t>{0}, std::vector<uint8_t>()};
-      auto_texture_format_upgrade_shader_hashes[0xCE6D49B0] = std::pair{std::vector<uint8_t>{0}, std::vector<uint8_t>()};
-      auto_texture_format_upgrade_shader_hashes[0xDC064703] = std::pair{std::vector<uint8_t>{0}, std::vector<uint8_t>()};
-      auto_texture_format_upgrade_shader_hashes[0x49F5CA76] = std::pair{std::vector<uint8_t>{0}, std::vector<uint8_t>()};
-      auto_texture_format_upgrade_shader_hashes[0xAA4C2778] = std::pair{std::vector<uint8_t>{0}, std::vector<uint8_t>()};
-      auto_texture_format_upgrade_shader_hashes[0x543655A4] = std::pair{std::vector<uint8_t>{0}, std::vector<uint8_t>()};
-      auto_texture_format_upgrade_shader_hashes[0x29838F5A] = std::pair{std::vector<uint8_t>{0}, std::vector<uint8_t>()};
-      auto_texture_format_upgrade_shader_hashes[0xF5B965D2] = std::pair{std::vector<uint8_t>{0}, std::vector<uint8_t>()};
+      auto_texture_format_upgrade_shader_hashes[0xEFA73C0C] = AutoTextureFormatUpgradeShaderHash{std::vector<uint8_t>{0}, std::vector<uint8_t>()};
+      auto_texture_format_upgrade_shader_hashes[0x00A4FD79] = AutoTextureFormatUpgradeShaderHash{std::vector<uint8_t>{0}, std::vector<uint8_t>()};
+      auto_texture_format_upgrade_shader_hashes[0x40CAFDE9] = AutoTextureFormatUpgradeShaderHash{std::vector<uint8_t>{0}, std::vector<uint8_t>()};
+      auto_texture_format_upgrade_shader_hashes[0x3201362F] = AutoTextureFormatUpgradeShaderHash{std::vector<uint8_t>{0}, std::vector<uint8_t>()};
+      auto_texture_format_upgrade_shader_hashes[0x103C8F9D] = AutoTextureFormatUpgradeShaderHash{std::vector<uint8_t>{0}, std::vector<uint8_t>()};
+      auto_texture_format_upgrade_shader_hashes[0x5358AA7E] = AutoTextureFormatUpgradeShaderHash{std::vector<uint8_t>{0}, std::vector<uint8_t>()};
+      auto_texture_format_upgrade_shader_hashes[0x0BE76B98] = AutoTextureFormatUpgradeShaderHash{std::vector<uint8_t>{0}, std::vector<uint8_t>()};
+      auto_texture_format_upgrade_shader_hashes[0xECB20855] = AutoTextureFormatUpgradeShaderHash{std::vector<uint8_t>{0}, std::vector<uint8_t>()};
+      auto_texture_format_upgrade_shader_hashes[0x4466E09A] = AutoTextureFormatUpgradeShaderHash{std::vector<uint8_t>{0}, std::vector<uint8_t>()};
+      auto_texture_format_upgrade_shader_hashes[0xCE6D49B0] = AutoTextureFormatUpgradeShaderHash{std::vector<uint8_t>{0}, std::vector<uint8_t>()};
+      auto_texture_format_upgrade_shader_hashes[0xDC064703] = AutoTextureFormatUpgradeShaderHash{std::vector<uint8_t>{0}, std::vector<uint8_t>()};
+      auto_texture_format_upgrade_shader_hashes[0x49F5CA76] = AutoTextureFormatUpgradeShaderHash{std::vector<uint8_t>{0}, std::vector<uint8_t>()};
+      auto_texture_format_upgrade_shader_hashes[0xAA4C2778] = AutoTextureFormatUpgradeShaderHash{std::vector<uint8_t>{0}, std::vector<uint8_t>()};
+      auto_texture_format_upgrade_shader_hashes[0x543655A4] = AutoTextureFormatUpgradeShaderHash{std::vector<uint8_t>{0}, std::vector<uint8_t>()};
+      auto_texture_format_upgrade_shader_hashes[0x29838F5A] = AutoTextureFormatUpgradeShaderHash{std::vector<uint8_t>{0}, std::vector<uint8_t>()};
+      auto_texture_format_upgrade_shader_hashes[0xF5B965D2] = AutoTextureFormatUpgradeShaderHash{std::vector<uint8_t>{0}, std::vector<uint8_t>()};
    }
 
    void OnCreateDevice(ID3D11Device* native_device, DeviceData& device_data) override
@@ -142,7 +142,7 @@ public:
       // {
       //    if (!auto_texture_format_upgrade_shader_hashes.contains(ps))
       //    {
-      //       auto_texture_format_upgrade_shader_hashes[ps] = std::pair{ std::vector<uint8_t>{ 0 }, std::vector<uint8_t>() }; // DX11 logic
+      //       auto_texture_format_upgrade_shader_hashes[ps] = AutoTextureFormatUpgradeShaderHash{ std::vector<uint8_t>{ 0 }, std::vector<uint8_t>() }; // DX11 logic
       //       message(reshade::log::level::info, std::format("Auto-upgrade texture formats for shader hash 0x{:016X}", ps).c_str());
       //    }
       // }

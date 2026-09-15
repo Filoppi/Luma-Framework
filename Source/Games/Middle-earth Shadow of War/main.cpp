@@ -410,14 +410,14 @@ public:
       // UI Buffer Indirect Upgrades
       {
          // Add many, since Alt-Tabbing (swapchain recreates) will clear upgrades.
-         auto_texture_format_upgrade_shader_hashes[0x3D829665] = std::pair{std::vector<uint8_t>{0}, std::vector<uint8_t>()}; // ui base
-         auto_texture_format_upgrade_shader_hashes[0x61BC2E86] = std::pair{std::vector<uint8_t>{0}, std::vector<uint8_t>()}; // ui glow
-         auto_texture_format_upgrade_shader_hashes[0xE6453EB0] = std::pair{std::vector<uint8_t>{0}, std::vector<uint8_t>()}; // ui idk...
-         auto_texture_format_upgrade_shader_hashes[0x34A2050F] = std::pair{std::vector<uint8_t>{0}, std::vector<uint8_t>()}; // ui trans
-         auto_texture_format_upgrade_shader_hashes[0x9BA33763] = std::pair{std::vector<uint8_t>{0}, std::vector<uint8_t>()}; // ui text
-         auto_texture_format_upgrade_shader_hashes[0xB2EAAA62] = std::pair{std::vector<uint8_t>{0}, std::vector<uint8_t>()}; // ui mov
+         auto_texture_format_upgrade_shader_hashes[0x3D829665] = AutoTextureFormatUpgradeShaderHash{std::vector<uint8_t>{0}, std::vector<uint8_t>()}; // ui base
+         auto_texture_format_upgrade_shader_hashes[0x61BC2E86] = AutoTextureFormatUpgradeShaderHash{std::vector<uint8_t>{0}, std::vector<uint8_t>()}; // ui glow
+         auto_texture_format_upgrade_shader_hashes[0xE6453EB0] = AutoTextureFormatUpgradeShaderHash{std::vector<uint8_t>{0}, std::vector<uint8_t>()}; // ui idk...
+         auto_texture_format_upgrade_shader_hashes[0x34A2050F] = AutoTextureFormatUpgradeShaderHash{std::vector<uint8_t>{0}, std::vector<uint8_t>()}; // ui trans
+         auto_texture_format_upgrade_shader_hashes[0x9BA33763] = AutoTextureFormatUpgradeShaderHash{std::vector<uint8_t>{0}, std::vector<uint8_t>()}; // ui text
+         auto_texture_format_upgrade_shader_hashes[0xB2EAAA62] = AutoTextureFormatUpgradeShaderHash{std::vector<uint8_t>{0}, std::vector<uint8_t>()}; // ui mov
 
-         auto_texture_format_upgrade_shader_hashes[0xFD32C367] = std::pair{std::vector<uint8_t>{0}, std::vector<uint8_t>()}; // tonemap SDR
+         auto_texture_format_upgrade_shader_hashes[0xFD32C367] = AutoTextureFormatUpgradeShaderHash{std::vector<uint8_t>{0}, std::vector<uint8_t>()}; // tonemap SDR
       }
 
       // cb inject indices

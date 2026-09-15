@@ -217,10 +217,10 @@ public:
       ShaderDefines::OnInit();
 
       // Indirect Upgrade by Shader Hash: Tonemap output, FXAA input
-      auto_texture_format_upgrade_shader_hashes[0xB06EC0CD] = std::pair{ std::vector<uint8_t>{ 0 }, std::vector<uint8_t>() }; //t000
-      auto_texture_format_upgrade_shader_hashes[0xDF795FB5] = std::pair{ std::vector<uint8_t>{ 0 }, std::vector<uint8_t>() }; //t001
-      auto_texture_format_upgrade_shader_hashes[0x80B1ADCC] = std::pair{ std::vector<uint8_t>{ 0 }, std::vector<uint8_t>() }; //t002
-      auto_texture_format_upgrade_shader_hashes[0xD2D57404] = std::pair{ std::vector<uint8_t>{ 0 }, std::vector<uint8_t>() }; //t003
+      auto_texture_format_upgrade_shader_hashes[0xB06EC0CD] = AutoTextureFormatUpgradeShaderHash{ std::vector<uint8_t>{ 0 }, std::vector<uint8_t>() }; //t000
+      auto_texture_format_upgrade_shader_hashes[0xDF795FB5] = AutoTextureFormatUpgradeShaderHash{ std::vector<uint8_t>{ 0 }, std::vector<uint8_t>() }; //t001
+      auto_texture_format_upgrade_shader_hashes[0x80B1ADCC] = AutoTextureFormatUpgradeShaderHash{ std::vector<uint8_t>{ 0 }, std::vector<uint8_t>() }; //t002
+      auto_texture_format_upgrade_shader_hashes[0xD2D57404] = AutoTextureFormatUpgradeShaderHash{ std::vector<uint8_t>{ 0 }, std::vector<uint8_t>() }; //t003
       
       // CB Indices
       luma_settings_cbuffer_index = 13;

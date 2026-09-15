@@ -963,72 +963,72 @@ namespace
          auto_texture_format_upgrade_shader_hashes.clear();
          
          // set new Indirect Upgrades hashes
-         auto_texture_format_upgrade_shader_hashes[0x5B190892] = std::pair{ std::vector<uint8_t>{ 0 }, std::vector<uint8_t>() }; //ui blurdown00
-         auto_texture_format_upgrade_shader_hashes[0x3CC502A9] = std::pair{ std::vector<uint8_t>{ 0 }, std::vector<uint8_t>() }; //ui blurdown00 subsequent blurring
-         auto_texture_format_upgrade_shader_hashes[0xF207E935] = std::pair{ std::vector<uint8_t>{ 0 }, std::vector<uint8_t>() }; //ui blur settings 0
-         auto_texture_format_upgrade_shader_hashes[0xE45B4EB7] = std::pair{ std::vector<uint8_t>{ 0 }, std::vector<uint8_t>() }; //ui blur settings subsequent downsample
+         auto_texture_format_upgrade_shader_hashes[0x5B190892] = AutoTextureFormatUpgradeShaderHash{ std::vector<uint8_t>{ 0 }, std::vector<uint8_t>() }; //ui blurdown00
+         auto_texture_format_upgrade_shader_hashes[0x3CC502A9] = AutoTextureFormatUpgradeShaderHash{ std::vector<uint8_t>{ 0 }, std::vector<uint8_t>() }; //ui blurdown00 subsequent blurring
+         auto_texture_format_upgrade_shader_hashes[0xF207E935] = AutoTextureFormatUpgradeShaderHash{ std::vector<uint8_t>{ 0 }, std::vector<uint8_t>() }; //ui blur settings 0
+         auto_texture_format_upgrade_shader_hashes[0xE45B4EB7] = AutoTextureFormatUpgradeShaderHash{ std::vector<uint8_t>{ 0 }, std::vector<uint8_t>() }; //ui blur settings subsequent downsample
          switch (curr)
          {
             case Halo1Classic:
-               auto_texture_format_upgrade_shader_hashes[0xB70CC18B] = std::pair{ std::vector<uint8_t>{ 0 }, std::vector<uint8_t>() }; //fxaa
+               auto_texture_format_upgrade_shader_hashes[0xB70CC18B] = AutoTextureFormatUpgradeShaderHash{ std::vector<uint8_t>{ 0 }, std::vector<uint8_t>() }; //fxaa
                // if (!best_resource_unorm_disallow) best_resource_unorm = true; //TODO: Luma needs this or something better for core.hpp!
                WarmupDirectAndIndirectHandler::Start();
                break;
             case Halo1Anniversary:
-               // auto_texture_format_upgrade_shader_hashes[0xDCC32775] = std::pair{ std::vector<uint8_t>{ 0 }, std::vector<uint8_t>() }; //transparency combine
-               // auto_texture_format_upgrade_shader_hashes[0x700325CF] = std::pair{ std::vector<uint8_t>{ 0 }, std::vector<uint8_t>() }; //downsample (exposure)
-               // auto_texture_format_upgrade_shader_hashes[0xB70CC18B] = std::pair{ std::vector<uint8_t>{ 0 }, std::vector<uint8_t>() }; //fxaa
+               // auto_texture_format_upgrade_shader_hashes[0xDCC32775] = AutoTextureFormatUpgradeShaderHash{ std::vector<uint8_t>{ 0 }, std::vector<uint8_t>() }; //transparency combine
+               // auto_texture_format_upgrade_shader_hashes[0x700325CF] = AutoTextureFormatUpgradeShaderHash{ std::vector<uint8_t>{ 0 }, std::vector<uint8_t>() }; //downsample (exposure)
+               // auto_texture_format_upgrade_shader_hashes[0xB70CC18B] = AutoTextureFormatUpgradeShaderHash{ std::vector<uint8_t>{ 0 }, std::vector<uint8_t>() }; //fxaa
 #if DAV_CORE
                best_resource_unorm = true;
 #endif
                break;
             case Halo2Classic:
-               auto_texture_format_upgrade_shader_hashes[0xD39821CB] = std::pair{ std::vector<uint8_t>{ 0 }, std::vector<uint8_t>() }; //blit
+               auto_texture_format_upgrade_shader_hashes[0xD39821CB] = AutoTextureFormatUpgradeShaderHash{ std::vector<uint8_t>{ 0 }, std::vector<uint8_t>() }; //blit
 #if DAV_CORE
                if (!best_resource_unorm_disallow) best_resource_unorm = true; //TODO: Luma needs this or something better for core.hpp!
 #endif
                break;
             case Halo2Anniversary:
-               auto_texture_format_upgrade_shader_hashes[0x87F940A3] = std::pair{ std::vector<uint8_t>{ 0 }, std::vector<uint8_t>() }; //dof down 0
-               auto_texture_format_upgrade_shader_hashes[0xBF5A726E] = std::pair{ std::vector<uint8_t>{ 0 }, std::vector<uint8_t>() }; //dof down 1
-               auto_texture_format_upgrade_shader_hashes[0xC5A027C1] = std::pair{ std::vector<uint8_t>{ 0 }, std::vector<uint8_t>() }; //dof final
-               auto_texture_format_upgrade_shader_hashes[0x8D11B112] = std::pair{ std::vector<uint8_t>{ 0 }, std::vector<uint8_t>() }; //t00
-               auto_texture_format_upgrade_shader_hashes[0xBDDD9A3C] = std::pair{ std::vector<uint8_t>{ 0 }, std::vector<uint8_t>() }; //t01
-               auto_texture_format_upgrade_shader_hashes[0xE5A32080] = std::pair{ std::vector<uint8_t>{ 0 }, std::vector<uint8_t>() }; //t02
-               auto_texture_format_upgrade_shader_hashes[0x60449413] = std::pair{ std::vector<uint8_t>{ 0 }, std::vector<uint8_t>() }; //t03
-               auto_texture_format_upgrade_shader_hashes[0xB5D334B0] = std::pair{ std::vector<uint8_t>{ 0 }, std::vector<uint8_t>() }; //aa
-               auto_texture_format_upgrade_shader_hashes[0x9EC6DFC8] = std::pair{ std::vector<uint8_t>{ 0 }, std::vector<uint8_t>() }; //blit
-               auto_texture_format_upgrade_shader_hashes[0xBF5A726E] = std::pair{ std::vector<uint8_t>{ 0 }, std::vector<uint8_t>() }; //after blit downsample blur (concussion)
-               auto_texture_format_upgrade_shader_hashes[0x3D30DAB7] = std::pair{ std::vector<uint8_t>{ 0 }, std::vector<uint8_t>() }; //some generic copy that runs after CopyResource()
+               auto_texture_format_upgrade_shader_hashes[0x87F940A3] = AutoTextureFormatUpgradeShaderHash{ std::vector<uint8_t>{ 0 }, std::vector<uint8_t>() }; //dof down 0
+               auto_texture_format_upgrade_shader_hashes[0xBF5A726E] = AutoTextureFormatUpgradeShaderHash{ std::vector<uint8_t>{ 0 }, std::vector<uint8_t>() }; //dof down 1
+               auto_texture_format_upgrade_shader_hashes[0xC5A027C1] = AutoTextureFormatUpgradeShaderHash{ std::vector<uint8_t>{ 0 }, std::vector<uint8_t>() }; //dof final
+               auto_texture_format_upgrade_shader_hashes[0x8D11B112] = AutoTextureFormatUpgradeShaderHash{ std::vector<uint8_t>{ 0 }, std::vector<uint8_t>() }; //t00
+               auto_texture_format_upgrade_shader_hashes[0xBDDD9A3C] = AutoTextureFormatUpgradeShaderHash{ std::vector<uint8_t>{ 0 }, std::vector<uint8_t>() }; //t01
+               auto_texture_format_upgrade_shader_hashes[0xE5A32080] = AutoTextureFormatUpgradeShaderHash{ std::vector<uint8_t>{ 0 }, std::vector<uint8_t>() }; //t02
+               auto_texture_format_upgrade_shader_hashes[0x60449413] = AutoTextureFormatUpgradeShaderHash{ std::vector<uint8_t>{ 0 }, std::vector<uint8_t>() }; //t03
+               auto_texture_format_upgrade_shader_hashes[0xB5D334B0] = AutoTextureFormatUpgradeShaderHash{ std::vector<uint8_t>{ 0 }, std::vector<uint8_t>() }; //aa
+               auto_texture_format_upgrade_shader_hashes[0x9EC6DFC8] = AutoTextureFormatUpgradeShaderHash{ std::vector<uint8_t>{ 0 }, std::vector<uint8_t>() }; //blit
+               auto_texture_format_upgrade_shader_hashes[0xBF5A726E] = AutoTextureFormatUpgradeShaderHash{ std::vector<uint8_t>{ 0 }, std::vector<uint8_t>() }; //after blit downsample blur (concussion)
+               auto_texture_format_upgrade_shader_hashes[0x3D30DAB7] = AutoTextureFormatUpgradeShaderHash{ std::vector<uint8_t>{ 0 }, std::vector<uint8_t>() }; //some generic copy that runs after CopyResource()
                ignore_upgraded_samplers = false;
                break;
             case Halo3:
                // 0x01262530: color diffuse copy (SRV0 is used by regular opaque. RTV0 is used by small and cutout stuff (vegetation))
-               auto_texture_format_upgrade_shader_hashes[0xEEB815BC] = std::pair{ std::vector<uint8_t>{ 0 }, std::vector<uint8_t>() }; //t00 
-               auto_texture_format_upgrade_shader_hashes[0x7D41B2E6] = std::pair{ std::vector<uint8_t>{ 0 }, std::vector<uint8_t>() }; //t01 
-               auto_texture_format_upgrade_shader_hashes[0x9EC6DFC8] = std::pair{ std::vector<uint8_t>{ 0 }, std::vector<uint8_t>() }; //fxaa
+               auto_texture_format_upgrade_shader_hashes[0xEEB815BC] = AutoTextureFormatUpgradeShaderHash{ std::vector<uint8_t>{ 0 }, std::vector<uint8_t>() }; //t00 
+               auto_texture_format_upgrade_shader_hashes[0x7D41B2E6] = AutoTextureFormatUpgradeShaderHash{ std::vector<uint8_t>{ 0 }, std::vector<uint8_t>() }; //t01 
+               auto_texture_format_upgrade_shader_hashes[0x9EC6DFC8] = AutoTextureFormatUpgradeShaderHash{ std::vector<uint8_t>{ 0 }, std::vector<uint8_t>() }; //fxaa
                WarmupDirectAndIndirectHandler::Start();
                break;
             case Halo3ODST:
-               auto_texture_format_upgrade_shader_hashes[0xADADBE3D] = std::pair{ std::vector<uint8_t>{ 0 }, std::vector<uint8_t>() }; //t00
-               auto_texture_format_upgrade_shader_hashes[0x2193CAB5] = std::pair{ std::vector<uint8_t>{ 0 }, std::vector<uint8_t>() }; //t01 
-               auto_texture_format_upgrade_shader_hashes[0x9EC6DFC8] = std::pair{ std::vector<uint8_t>{ 0 }, std::vector<uint8_t>() }; //fxaa
-               auto_texture_format_upgrade_shader_hashes[0x03B68268] = std::pair{ std::vector<uint8_t>{ 0 }, std::vector<uint8_t>() }; //noise overlay
+               auto_texture_format_upgrade_shader_hashes[0xADADBE3D] = AutoTextureFormatUpgradeShaderHash{ std::vector<uint8_t>{ 0 }, std::vector<uint8_t>() }; //t00
+               auto_texture_format_upgrade_shader_hashes[0x2193CAB5] = AutoTextureFormatUpgradeShaderHash{ std::vector<uint8_t>{ 0 }, std::vector<uint8_t>() }; //t01 
+               auto_texture_format_upgrade_shader_hashes[0x9EC6DFC8] = AutoTextureFormatUpgradeShaderHash{ std::vector<uint8_t>{ 0 }, std::vector<uint8_t>() }; //fxaa
+               auto_texture_format_upgrade_shader_hashes[0x03B68268] = AutoTextureFormatUpgradeShaderHash{ std::vector<uint8_t>{ 0 }, std::vector<uint8_t>() }; //noise overlay
                WarmupDirectAndIndirectHandler::Start();
                break;
             case HaloReach:
-               auto_texture_format_upgrade_shader_hashes[0x6A2F1FE6] = std::pair{ std::vector<uint8_t>{ 0 }, std::vector<uint8_t>() }; //downsample
-               auto_texture_format_upgrade_shader_hashes[0xC1FF277A] = std::pair{ std::vector<uint8_t>{ 0 }, std::vector<uint8_t>() }; //t00
-               auto_texture_format_upgrade_shader_hashes[0x363648B2] = std::pair{ std::vector<uint8_t>{ 0 }, std::vector<uint8_t>() }; //t01
-               auto_texture_format_upgrade_shader_hashes[0x924D7B98] = std::pair{ std::vector<uint8_t>{ 0 }, std::vector<uint8_t>() }; //t02
-               auto_texture_format_upgrade_shader_hashes[0x0EFB2B17] = std::pair{ std::vector<uint8_t>{ 0 }, std::vector<uint8_t>() }; //fxaa
-               auto_texture_format_upgrade_shader_hashes[0xBD7AE2AF] = std::pair{ std::vector<uint8_t>{ 0 }, std::vector<uint8_t>() }; //health pickup fx: down
-               auto_texture_format_upgrade_shader_hashes[0x270131A1] = std::pair{ std::vector<uint8_t>{ 0 }, std::vector<uint8_t>() }; //health pickup fx: kernel blur
+               auto_texture_format_upgrade_shader_hashes[0x6A2F1FE6] = AutoTextureFormatUpgradeShaderHash{ std::vector<uint8_t>{ 0 }, std::vector<uint8_t>() }; //downsample
+               auto_texture_format_upgrade_shader_hashes[0xC1FF277A] = AutoTextureFormatUpgradeShaderHash{ std::vector<uint8_t>{ 0 }, std::vector<uint8_t>() }; //t00
+               auto_texture_format_upgrade_shader_hashes[0x363648B2] = AutoTextureFormatUpgradeShaderHash{ std::vector<uint8_t>{ 0 }, std::vector<uint8_t>() }; //t01
+               auto_texture_format_upgrade_shader_hashes[0x924D7B98] = AutoTextureFormatUpgradeShaderHash{ std::vector<uint8_t>{ 0 }, std::vector<uint8_t>() }; //t02
+               auto_texture_format_upgrade_shader_hashes[0x0EFB2B17] = AutoTextureFormatUpgradeShaderHash{ std::vector<uint8_t>{ 0 }, std::vector<uint8_t>() }; //fxaa
+               auto_texture_format_upgrade_shader_hashes[0xBD7AE2AF] = AutoTextureFormatUpgradeShaderHash{ std::vector<uint8_t>{ 0 }, std::vector<uint8_t>() }; //health pickup fx: down
+               auto_texture_format_upgrade_shader_hashes[0x270131A1] = AutoTextureFormatUpgradeShaderHash{ std::vector<uint8_t>{ 0 }, std::vector<uint8_t>() }; //health pickup fx: kernel blur
                break;
             case Halo4:
-               auto_texture_format_upgrade_shader_hashes[0x3A2F6CF7] = std::pair{ std::vector<uint8_t>{ 0 }, std::vector<uint8_t>() }; //t00
-               auto_texture_format_upgrade_shader_hashes[0xB38416A2] = std::pair{ std::vector<uint8_t>{ 0 }, std::vector<uint8_t>() }; //t01
-               auto_texture_format_upgrade_shader_hashes[0xCCC24837] = std::pair{ std::vector<uint8_t>{ 0 }, std::vector<uint8_t>() }; //fxaa
+               auto_texture_format_upgrade_shader_hashes[0x3A2F6CF7] = AutoTextureFormatUpgradeShaderHash{ std::vector<uint8_t>{ 0 }, std::vector<uint8_t>() }; //t00
+               auto_texture_format_upgrade_shader_hashes[0xB38416A2] = AutoTextureFormatUpgradeShaderHash{ std::vector<uint8_t>{ 0 }, std::vector<uint8_t>() }; //t01
+               auto_texture_format_upgrade_shader_hashes[0xCCC24837] = AutoTextureFormatUpgradeShaderHash{ std::vector<uint8_t>{ 0 }, std::vector<uint8_t>() }; //fxaa
                break;
             default: ;
          }
