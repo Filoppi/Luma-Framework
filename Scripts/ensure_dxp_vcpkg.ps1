@@ -3,8 +3,6 @@
     Ensures a game project's vcpkg manifest + overlay configuration carry the DXP
     dependency, merging into existing files (never overwriting or deleting user
     content). Called by the LumaEnsureDxpManifest target when UseLumaDXP=true.
-    Also patches the vcxproj to remove any hardcoded VcpkgEnabled=false that would
-    override Luma.Features.props' conditional VcpkgEnabled=true.
 #>
 param(
     [Parameter(Mandatory = $true)][string]$ProjectDir,
@@ -50,7 +48,7 @@ if (Test-Path $configPath) {
 } else {
     $config = [pscustomobject]@{}
 }
-$ports = if ($config."overlay-ports") { @($config."overlay-ports") } else { @() }
+$ports = @(if ($config."overlay-ports") { $config."overlay-ports" })
 $hasOverlay = $ports | Where-Object { $_ -eq "../../External/vcpkg-ports" } | Select-Object -First 1
 if (-not $hasOverlay) {
     $ports += "../../External/vcpkg-ports"
@@ -58,40 +56,5 @@ if (-not $hasOverlay) {
 }
 $configJson = $config | ConvertTo-Json -Depth 8
 [System.IO.File]::WriteAllText($configPath, $configJson, [System.Text.UTF8Encoding]::new($false))
-
-# Patch the vcxproj: remove hardcoded VcpkgEnabled=false / VcpkgEnableManifest=false
-# that would override Luma.Features.props' conditional VcpkgEnabled=true.
-# These are typically left by the _Template and block MSBuild's vcpkg integration.
-$vcxprojPath = Join-Path $ProjectDir "${ManifestName}.vcxproj"
-if (-not (Test-Path $vcxprojPath)) {
-    # The vcxproj name may differ from the manifest name; search for any .vcxproj
-    $vcxprojFiles = Get-ChildItem $ProjectDir -Filter "*.vcxproj"
-    if ($vcxprojFiles.Count -eq 1) {
-        $vcxprojPath = $vcxprojFiles[0].FullName
-    } elseif ($vcxprojFiles.Count -gt 1) {
-        Write-Warning "Multiple .vcxproj files found in $ProjectDir; skipping vcxproj patch."
-        $vcxprojPath = $null
-    }
-}
-
-if ($vcxprojPath -and (Test-Path $vcxprojPath)) {
-    $vcxprojContent = [System.IO.File]::ReadAllText($vcxprojPath)
-    $vcxprojModified = $false
-
-    # Match the unconditional PropertyGroup that sets both VcpkgEnabled and
-    # VcpkgEnableManifest to false. These block Luma.Features.props from
-    # enabling vcpkg when UseLumaDXP=true.
-    # Handles variable whitespace/indentation.
-    $pattern = '(?s)\s*<PropertyGroup\s+Label="Vcpkg">\s*<VcpkgEnableManifest>false</VcpkgEnableManifest>\s*<VcpkgEnabled>false</VcpkgEnabled>\s*</PropertyGroup>\s*'
-    if ($vcxprojContent -match $pattern) {
-        $vcxprojContent = $vcxprojContent -replace $pattern, ""
-        $vcxprojModified = $true
-    }
-
-    if ($vcxprojModified) {
-        [System.IO.File]::WriteAllText($vcxprojPath, $vcxprojContent, [System.Text.UTF8Encoding]::new($false))
-        Write-Host "Luma: removed hardcoded VcpkgEnabled=false from $vcxprojPath (Luma.Features.props now controls it)"
-    }
-}
 
 Write-Host "Luma: ensured DXP vcpkg configuration in $ProjectDir (dxp dependency + overlay port)"
