@@ -9,6 +9,7 @@
 #define TM_T_LUT          t4 // ColorGradingLUT (256x16, 16-slice)
 #define TM_T_DOF          t5 // LowResPostProcessBuffer (half-res DOF)
 #define TM_T_LUMABLOOM    t8 // injected Luma HDR bloom (t5 is the native DOF on TPS — bind higher to avoid the clash)
+#define TM_S_LIGHTSHAFT   s1 // the light-shaft texture's own sampler (native: sample t1, s1)
 #define TM_S_BLOOM        s2
 #define TM_S_VIGNETTE     s3
 #define TM_S_LUT          s4
