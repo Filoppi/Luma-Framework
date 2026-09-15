@@ -6,11 +6,11 @@
 //   coarse horizon AO 0xF534EB09 -> bilateral blur 0x4E1BEE34 -> apply-multiply PS 0x44764BF6. We run at
 //   full res and write the final visibility term into the game's own FINAL AO target (the blur CS u0, a
 //   r16g16_float; apply blit reads .x). The apply blit (blend dst*src_color) is untouched by us.
-// - We bind the game's OWN constant buffers: cb0 = HBAO+ $Globals (ProjInfo = NDC->view, live FOV) and
-//   cb2 = CSOffsetConstants (MinZ_MaxZRatioCS = depth linearization).
-// - Depth input = the game's full-res r24_g8 scene depth (deinterleave 0xFFE232A6 t0), viewed r24_unorm_x8.
-//   Read with explicit .Load: GatherRed on an r24_unorm_x8 view returns all-zeros on this driver (silently
-//   kills the AO) — do not "optimize" this back to Gather.
+// - We read the game's OWN constant buffers, left bound by its AO passes (main.cpp does not rebind them):
+//   cb0 = HBAO+ $Globals (ProjInfo = NDC->view, live FOV), cb2 = CSOffsetConstants (MinZ_MaxZRatioCS = depth
+//   linearization).
+// - Depth input = the game's full-res r24_g8 scene depth (deinterleave 0xFFE232A6 t0), viewed r24_unorm_x8 and
+//   read with explicit Loads (see XeGTAO_PrefilterDepths16x16).
 // - Normals input = the game's ViewNormalTex (coarse-AO pass 0xF534EB09 t0), r11g11b10_float: xyz packed
 //   v*0.5+0.5 (full 3-channel view-space normal, no z reconstruct). View-space already.
 // - BL GOTY has NO TAA and no motion vectors: NoiseIndex is FROZEN at 0 (never feed a frame index — the
@@ -18,7 +18,7 @@
 //   stability is spatial.
 // - viewZ is in UE3 units (near plane ~10 units) — a huge range; DepthScale (default 50 -> ~meters)
 //   rescales it into the range XeGTAO's Intel-tuned constants expect (R32F pyramid, so no fp16 precision
-//   loss at huge Z). DepthScale is a tuning convenience, not a correctness requirement.
+//   loss at huge Z). EFFECT_RADIUS below is anchored at that scale.
 
 // --- Game constant buffers (bound by the game at the hooked dispatches) ---
 
@@ -95,10 +95,6 @@ cbuffer LumaGTAO : register(b11)
 
 #ifndef THIN_OCCLUDER_COMPENSATION
 #define THIN_OCCLUDER_COMPENSATION 0.0 // Default 0.0; > 0 causes more mistakes than it fixes on big geometry
-#endif
-
-#ifndef FINAL_VALUE_POWER
-#define FINAL_VALUE_POWER 1.0 // Default 2.2; shadow default for FinalValuePowerRT (the CB value is what actually applies)
 #endif
 
 #ifndef DEPTH_MIP_SAMPLING_OFFSET
@@ -190,9 +186,9 @@ void XeGTAO_PrefilterDepths16x16(uint2 dispatchThreadID, uint2 groupThreadID, Te
    // MIP 0
    const uint2 baseCoord = dispatchThreadID;
    const uint2 pixCoord = baseCoord * 2;
-   // Explicit integer Loads of the 2x2 instead of GatherRed — GatherRed on the r24_unorm_x8 depth
-   // view returns 0 on some drivers (flat depth -> visibility 1 -> AO silently gone). Loads read real
-   // values. Out-of-bounds Loads return 0 (D3D11-defined), clamped depth.
+   // Explicit integer Loads of the 2x2, not GatherRed: GatherRed on the r24_unorm_x8 depth view returns 0 on
+   // some drivers (flat depth -> visibility 1 -> AO silently gone), so do not switch this back to Gather.
+   // Out-of-bounds Loads return 0 (D3D11-defined), clamped depth.
    float d00 = sourceNDCDepth.Load(int3(pixCoord + uint2(0, 0), 0)).x;
    float d10 = sourceNDCDepth.Load(int3(pixCoord + uint2(1, 0), 0)).x;
    float d01 = sourceNDCDepth.Load(int3(pixCoord + uint2(0, 1), 0)).x;
@@ -342,7 +338,8 @@ void XeGTAO_MainPass(uint2 pixCoord, float2 localNoise, float3 viewspaceNormal, 
    const float3 pixCenterPos = XeGTAO_ComputeViewspacePosition(normalizedScreenPos, viewspaceZ);
    const float3 viewVec = normalize(-pixCenterPos);
 
-   // prevents normals that are facing away from the view vector - xeGTAO struggles with extreme cases, but in Vanilla it seems rare so it's disabled by default
+   // prevents normals that are facing away from the view vector - xeGTAO struggles with extreme cases. Upstream
+   // ships this line commented out as rare in vanilla; this port runs it.
    viewspaceNormal = normalize(viewspaceNormal + max(0, -dot(viewspaceNormal, viewVec)) * viewVec);
 
 #if DEVELOPMENT
@@ -654,7 +651,6 @@ void XeGTAO_Denoise(uint2 pixCoordBase, Texture2D sourceAOTermAndEdges, SamplerS
       aoTerm[side] = sum / sumWeight;
 
 #if XE_GTAO_FINAL_APPLY
-      // The game's final AO buffer is r16g16_float; the apply blit reads .x. Write AO to .x (.y unused).
       outputTexture[pixCoord] = float2(saturate(aoTerm[side] * XE_GTAO_OCCLUSION_TERM_SCALE), 0.0);
 #else
       outputTexture[pixCoord] = float2(aoTerm[side], side == 0 ? edgesQ0.y : edgesQ1.x);
@@ -735,9 +731,7 @@ float2 SpatioTemporalNoise(uint2 pixCoord, uint temporalIndex)
    // tex1 = the game's ViewNormalTex (r11g11b10_float, captured at the coarse-AO dispatch)
    // smp = point-clamp
 
-   // Decode the game's packed view-space normals: r11g11b10_float, xyz in [0,1] -> [-1,1]. Full 3-channel,
-   // so no z reconstruction; NORMAL_Z_SIGN flips z only if the handedness needs
-   // it (verify via DebugViewRT=2; flip to -1.0 if shading looks inverted).
+   // Decode the game's packed view-space normals: xyz in [0,1] -> [-1,1], all three channels (see NORMAL_Z_SIGN).
    float3 n = tex1.Load(int3(dtid, 0)).xyz * 2.0 - 1.0;
    n.z *= NORMAL_Z_SIGN;
    float3 viewspaceNormal = normalize(n);
@@ -746,7 +740,7 @@ float2 SpatioTemporalNoise(uint2 pixCoord, uint temporalIndex)
 }
 
 [numthreads(XE_GTAO_NUMTHREADS_X, XE_GTAO_NUMTHREADS_Y, 1)] void denoise_pass_cs(uint2 dtid : SV_DispatchThreadID) {
-   // tex0 = g_srcWorkingAOTerm and g_srcWorkingEdges, packed
+   // tex0 = working AO term (.x) + packed edges (.y)
    // smp = point-clamp
    const uint2 pix_coord_base = dtid * uint2(2, 1); // we're computing 2 horizontal pixels at a time (performance optimization)
    XeGTAO_Denoise(pix_coord_base, tex0, smp, final_output);

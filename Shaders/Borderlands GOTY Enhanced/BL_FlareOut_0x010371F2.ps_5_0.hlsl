@@ -1,8 +1,8 @@
 // Borderlands GOTY Enhanced — lens-flare/glare composite (PS 0x010371F2).
 //
 // Vanilla adds an additive flare/glare overlay (FinalTexture) on top of the scene: o0 = scene + flare.
-// We keep that verbatim but scale the additive term by a user "Flare" slider (LumaSettings.GameSettings.FlareOut;
-// 1 = vanilla, 0 = no flare). Faithful to the game's additive behavior; lets users dial down the bloom-like glare.
+// We keep that verbatim but scale the additive term by the "Lens Flare Intensity" slider
+// (LumaSettings.GameSettings.FlareOut; 1 = vanilla, 0 = no flare).
 
 #include "Includes/Common.hlsl" // game-local: LumaSettings.GameSettings
 
