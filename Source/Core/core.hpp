@@ -102,6 +102,7 @@
 #else
 #define ENABLE_SR 0
 #endif
+// Enable to allow HDR10+ automatic peak brightness calibration, and HGiG of HDR10+ GAMING TVs
 #ifndef ENABLE_NVAPI
 #define ENABLE_NVAPI 0
 #endif // ENABLE_NVAPI
@@ -2823,7 +2824,7 @@ namespace
 #endif
 
 #if ENABLE_NVAPI
-      Display::InitNVApi();
+      Display::NVAPI::Init();
 #endif
 
       com_ptr<IDXGIDevice1> native_dxgi_device;
@@ -3014,6 +3015,10 @@ namespace
       {
           callback.second();
       }
+
+#if ENABLE_NVAPI
+      Display::NVAPI::DeInit();
+#endif
 
       device->destroy_private_data<DeviceData>();
    }
@@ -3251,8 +3256,15 @@ namespace
       if (native_swapchain3 != nullptr)
       {
          const std::unique_lock lock_reshade(s_mutex_reshade);
-         Display::GetHDRMaxLuminance(native_swapchain3, device_data.default_user_peak_white, srgb_white_level);
+         Display::GetHDRMaxLuminance(native_swapchain3, device_data.default_user_peak_white, srgb_white_level); // TODO: detect when the display changes and update peak brightness calibration, and set HDR10+ on the new display too etc
          Display::IsHDRSupportedAndEnabled(swapchain_desc.OutputWindow, hdr_supported_display, hdr_enabled_display, native_swapchain3);
+#if ENABLE_NVAPI
+         if (hdr_enabled_display)
+         {
+            // Enable HDR10+ GAMING if supported, it generally makes Samsung displays more accurate, so there's no reason to not enable it really.
+            Display::NVAPI::SetDisplayOutputMode(game_window, NV_DISPLAY_OUTPUT_MODE_HDR10PLUS_GAMING, false, false);
+         }
+#endif
          const bool window_changed = game_window != swapchain_desc.OutputWindow;
          if (window_changed)
          {
@@ -3397,10 +3409,6 @@ namespace
             ADD_OVERLAY_WARNING("Your current game output resolution has an aspect ratio of 1:1 (a squared resolution), that might cause issues with texture upgrades by aspect ratio, given that shadow maps and other things are often rendered in squared textures.");
          }
       }
-
-#if ENABLE_NVAPI // TODO: finish this... Make it optional, feed the game metadata (peak brightness, color gamut etc)
-      Display::EnableHdr10PlusDisplayOutput(game_window);
-#endif
 
       {
          // TODO: put code to track all recently created resources and late upgraded them if the size/aspect ratio now matches the swapchain (some games resize the swapchain after resources, so in that case we should handle indirect upgrades like this)
@@ -14362,6 +14370,12 @@ namespace
                         Display::SetHDREnabled(game_window);
                         bool dummy_bool;
                         Display::IsHDRSupportedAndEnabled(game_window, dummy_bool, hdr_enabled_display, swapchain); // This should always succeed, so we don't fallback to SDR in case it didn't
+
+#if ENABLE_NVAPI
+                        // Enable HDR10+ GAMING if supported, it generally makes Samsung displays more accurate, so there's no reason to not enable it really.
+                        // For now we only do this if we are also enforcing HDR enabled on the display.
+                        Display::NVAPI::SetDisplayOutputMode(game_window, NV_DISPLAY_OUTPUT_MODE_HDR10PLUS_GAMING, false, false);
+#endif
                      }
                      if (!reshade::get_config_value(runtime, NAME, "ScenePeakWhite", cb_luma_global_settings.ScenePeakWhite) || cb_luma_global_settings.ScenePeakWhite <= 0.f)
                      {
@@ -14370,7 +14384,7 @@ namespace
                      if (use_os_reference_white_level)
                      {
                         float hdr_paper_white = 80.f;
-                        if (Display::GetSDRWhiteLevel(0, hdr_paper_white))
+                        if (Display::GetSDRWhiteLevel(game_window, hdr_paper_white))
                         {
                            cb_luma_global_settings.ScenePaperWhite = hdr_paper_white;
                            cb_luma_global_settings.UIPaperWhite = hdr_paper_white;
@@ -14522,13 +14536,14 @@ namespace
                   ImGui::SetTooltip("Display Mode. Greyed out if HDR is not supported.\nThe HDR display calibration (peak white brightness) is retrieved from the OS (Windows 11 HDR user calibration or display EDID),\nonly adjust it if necessary.\nIt's suggested to only play the game in SDR while the display is in SDR mode (with gamma 2.2, not sRGB) (avoid SDR mode in HDR).");
                }
                ImGui::SameLine();
-               // Show a reset button to enable HDR in the game if we are playing SDR in HDR
+               // Show a reset button to enable HDR in the game if we are playing SDR in HDR (same for HDR on SDR, we try to match the game to the display)
                if ((display_mode == DisplayModeType::SDR && hdr_enabled_display) || (display_mode >= DisplayModeType::HDR && !hdr_enabled_display))
                {
                   ImGui::PushID("Display Mode");
                   if (ImGui::SmallButton(ICON_FK_UNDO))
                   {
                      display_mode = hdr_enabled_display ? DisplayModeType::HDR : DisplayModeType::SDR;
+                     // Don't toggle HDR/SDR on the display here, we are matching the game state to the display state
                      ChangeDisplayMode(display_mode, false, device_data.GetMainNativeSwapchain().get());
                   }
                   ImGui::PopID();
@@ -16216,7 +16231,7 @@ void Init(bool async)
       if (reshade::get_config_value(runtime, NAME, "UseOSReferenceWhiteLevel", use_os_reference_white_level) && use_os_reference_white_level)
       {
          float hdr_paper_white = 80.f;
-         if (Display::GetSDRWhiteLevel(0, hdr_paper_white))
+         if (Display::GetSDRWhiteLevel(game_window, hdr_paper_white))
          {
             cb_luma_global_settings.ScenePaperWhite = hdr_paper_white;
             cb_luma_global_settings.UIPaperWhite = hdr_paper_white;

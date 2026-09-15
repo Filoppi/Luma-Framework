@@ -1,5 +1,7 @@
 #pragma once
 
+#include <icm.h> // Color profiles (see "HasUserHDRColorProfile()")
+
 #if ENABLE_NVAPI
 #include "nvapi.h"
 
@@ -16,624 +18,394 @@
 #define NVIDIA_API_ERROR_MSG(expression, x) (void)(expression); (void)x
 #define NVIDIA_API_INFO_MSG(x) (void)x
 #endif
-#endif
+#endif // ENABLE_NVAPI
+
+// Allows falling back on the legacy Windows "Advanced Color" display APIs to check for and engage HDR, on Windows versions older than 11 24H2.
+// These can't distinguish between HDR and "Advanced Color" in SDR (from Windows 11 22H2), so they can report HDR as enabled when it isn't, or engage the wrong mode.
+// Without them, older Windows versions can only detect HDR through the swapchain.
+#ifndef ENABLE_LEGACY_ADVANCED_COLOR
+#define ENABLE_LEGACY_ADVANCED_COLOR 0
+#endif // ENABLE_LEGACY_ADVANCED_COLOR
 
 namespace Display
 {
 #if ENABLE_NVAPI
-	bool InitNVApi()
+	namespace NVAPI
 	{
-		NvAPI_Status status = NvAPI_Initialize();
-		if (status != NVAPI_OK) {
-			NvAPI_ShortString error;
-			NvAPI_GetErrorMessage(status, error);
-			printf("NVAPI init failed: 0x%x - %s\n", status, error); // Likely a non NV GPU
-			return false;
+		bool hasInit = false;
+
+		bool Init()
+		{
+			// No need to init locally more than once for now
+			if (hasInit)
+			{
+				return true;
+			}
+
+			// This will return "NVAPI_LIBRARYNOTFOUND" if Nvidia drivers aren't installed
+			NvAPI_Status status = NvAPI_Initialize();
+			if (status != NVAPI_OK)
+			{
+				NvAPI_ShortString error;
+				NvAPI_GetErrorMessage(status, error);
+				printf("NVAPI init failed: 0x%x - %s\n", status, error);
+				return false;
+			}
+		
+			assert(!hasInit);
+			hasInit = true;
+			return true;
 		}
 
-		return true;
-	}
-
-	void DeInitNVApi()
-	{
-		NvAPI_Status status = NvAPI_Unload();
-		NVIDIA_API_ERROR_MSG(status != NVAPI_OK, status);
-	}
-
-	NvU32 GetNvapiDisplayIdFromHwnd(HWND hWnd, ID3D11Device* device = nullptr)
-	{
-		HMONITOR hMonitor = MonitorFromWindow(hWnd, MONITOR_DEFAULTTONEAREST);
-
-		MONITORINFOEX monitorInfo = {};
-		monitorInfo.cbSize = sizeof(MONITORINFOEX);
-		if (GetMonitorInfo(hMonitor, &monitorInfo))
+		bool DeInit()
 		{
-			std::wstring_convert<std::codecvt_utf8_utf16<wchar_t>> converter;
-			std::string displayName = converter.to_bytes(monitorInfo.szDevice);
+			if (!hasInit)
+			{
+				return true;
+			}
+
+			NvAPI_Status status = NvAPI_Unload();
+			NVIDIA_API_ERROR_MSG(status != NVAPI_OK, status);
+			if (status != NVAPI_OK)
+			{
+				assert(false);
+				return false;
+			}
+
+			assert(hasInit);
+			hasInit = false;
+			return true;
+		}
+
+		NvU32 GetNvapiDisplayIdFromHwnd(HWND hWnd, HMONITOR hMonitor = 0, bool fallbackOnPrimary = false)
+		{
+			if (hMonitor == 0)
+			{
+				hMonitor = MonitorFromWindow(hWnd, MONITOR_DEFAULTTONEAREST);
+				// Might happen if "hWnd" is 0/invalid
+				if (fallbackOnPrimary && hMonitor == 0)
+				{
+					hMonitor = MonitorFromWindow(hWnd, MONITOR_DEFAULTTOPRIMARY);
+				}
+				else if (hMonitor == 0)
+				{
+					return 0;
+				}
+			}
+
+			MONITORINFOEXW monitorInfo = {};
+			monitorInfo.cbSize = sizeof(monitorInfo);
+			if (!GetMonitorInfoW(hMonitor, &monitorInfo))
+				return 0;
+
+			// szDevice is a wide GDI name like L"\\.\DISPLAY1"; NVAPI wants narrow.
+			const int wlen = static_cast<int>(wcslen(monitorInfo.szDevice));
+			const int len  = WideCharToMultiByte(CP_UTF8, 0, monitorInfo.szDevice, wlen, nullptr, 0, nullptr, nullptr);
+			std::string displayName(len, '\0');
+			WideCharToMultiByte(CP_UTF8, 0, monitorInfo.szDevice, wlen, displayName.data(), len, nullptr, nullptr);
 
 			NvU32 displayId = 0;
 			if (NvAPI_DISP_GetDisplayIdByDisplayName(displayName.c_str(), &displayId) == NVAPI_OK)
-			{
 				return displayId;
-			}
+		
+			// 0 is never used by valid NV displays ID
+			return 0;
 		}
 
-		return 0;
-	}
-
-#if 0 // TODO: delete?
-	NvDisplayHandle GetNvapiDisplayFromHwnd(ID3D11Device* device, HWND hWnd)
-	{
-#if 1
-		UINT gpu_index = 0;
-		com_ptr<IDXGIDevice> dxgi_device;
-		HRESULT hr = device->QueryInterface(&dxgi_device);
-		if (SUCCEEDED(hr))
+		NvAPI_Status GetDisplayCapabilities( NvU32 displayId, NV_HDR_CAPABILITIES& hdrCapabilities)
 		{
-			com_ptr<IDXGIAdapter> adapter;
-			hr = dxgi_device->GetAdapter(&adapter);
-			if (SUCCEEDED(hr))
-			{
-#if 0
-				DXGI_ADAPTER_DESC adapter_desc;
-				hr = adapter->GetDesc(&adapter_desc);
-				if (SUCCEEDED(hr)) { }
-#endif
-
-				com_ptr<IDXGIFactory7> factory;
-				CreateDXGIFactory1(IID_PPV_ARGS(&factory));
-
-				com_ptr<IDXGIAdapter1> enum_adapter;
-				while (factory->EnumAdapters1(gpu_index, &enum_adapter) != DXGI_ERROR_NOT_FOUND)
-				{
-					if (enum_adapter.get() == adapter.get()) break;
-					++gpu_index;
-				}
-			}
-		}
-		assert(SUCCEEDED(hr));
-#endif
-
-		//HMONITOR hMonitor = MonitorFromWindow(hWnd, MONITOR_DEFAULTTONEAREST);
-		HMONITOR hMonitor = MonitorFromWindow(0, MONITOR_DEFAULTTOPRIMARY);
-
-#if 0
-		MONITORINFOEX monitorInfo = {};
-		monitorInfo.cbSize = sizeof(MONITORINFOEX);
-		if (GetMonitorInfo(hMonitor, &monitorInfo))
-		{
-			DISPLAY_DEVICE displayDevice = {};
-			displayDevice.cb = sizeof(DISPLAY_DEVICE);
-			if (EnumDisplayDevices(monitorInfo.szDevice, 0, &displayDevice, 0))
-			{
-				NvAPI_SYS_GetDisplayIdFromGpuAndOutputId(gpu_index, )
-				return displayDevice.DeviceName; // or DeviceString for a human-readable name
-			}
-		}
-#endif
-
-#if 0
-		// Get connected displays to NVidia GPUs
-		NvU32 displayIdCount = 0;
-		NV_GPU_DISPLAYIDS displayIdArray[NVAPI_MAX_HEADS_PER_GPU] = {};
-		displayIdArray[0].version = NV_GPU_DISPLAYIDS_VER;
-		NvU32 flags = 0;
-		result = NvAPI_GPU_GetConnectedDisplayIds(gpuArray[gpuIndex], nullptr, &displayIdCount, flags);
-		NVIDIA_API_ERROR_MSG(result != NVAPI_OK, result);
-		result = NvAPI_GPU_GetConnectedDisplayIds(gpuArray[gpuIndex], displayIdArray, &displayIdCount, flags);
-		NVIDIA_API_ERROR_MSG(result != NVAPI_OK, result);
-		NvAPI_ShortString name = "";
-
-		if (result != NVAPI_OK)
-		{
-			continue;
-		}
-		for (NvU32 displayIndex = 0; displayIndex < displayIdCount; ++displayIndex)
-		{
-			NvDisplayHandle handle = NULL;
-			result = NvAPI_EnumNvidiaDisplayHandle(displayIndex, &handle);
-			NVIDIA_API_ERROR_MSG(result != NVAPI_OK, result);
-			result = NvAPI_GetAssociatedNvidiaDisplayName(handle, name);
-			NVIDIA_API_ERROR_MSG(result != NVAPI_OK, result);
-			displayInfo.push_back({ displayIdArray[displayIndex].displayId, name });
-		}
-#endif
-
-		NvDisplayHandle nv_display_handle = 0;
-		for (NvU32 i = 0; NvAPI_EnumNvidiaDisplayHandle(i, &nv_display_handle) == NVAPI_OK; ++i)
-		{
-			// Get Windows display name from NVAPI
-			NvAPI_ShortString display_name;
-			NvU32 output_id = 0;
-			if (NvAPI_GetAssociatedNvidiaDisplayName(nv_display_handle, display_name) == NVAPI_OK)
-			{
-				// Convert NVAPI display name to an HMONITOR
-				DISPLAY_DEVICEA dd = {};
-				dd.cb = sizeof(dd);
-				if (EnumDisplayDevicesA(display_name, 0, &dd, 0))
-				{
-					MONITORINFOEXA mi = {};
-					mi.cbSize = sizeof(mi);
-					if (GetMonitorInfoA(hMonitor, &mi))
-					{
-						if (_stricmp(mi.szDevice, dd.DeviceName) == 0)
-						{
-							NvAPI_GetAssociatedDisplayOutputId(nv_display_handle, &output_id);
-							break;
-						}
-					}
-				}
-			}
-		}
-
-		return nv_display_handle;
-	}
-#endif
-
-	struct DisplayID
-	{
-		DisplayID(NvU32 _id, const NvAPI_ShortString& _name)
-			: id(_id), name()
-		{
-			strncpy_s(name, _name, NVAPI_SHORT_STRING_MAX);
-			for (int i = 0; i < NVAPI_SHORT_STRING_MAX; i++)
-			{
-				str_name += name[i];
-			}
-		};
-
-		NvU32 id;
-		NvAPI_ShortString name;
-		std::string str_name;
-	};
-
-	NvAPI_Status CheckIfNvidiaGpu()
-	{
-		NvAPI_Status result = NVAPI_OK;
-		// Get connected NVidia GPUs to Computer
-		NvU32 gpuCount = 0;
-		NvPhysicalGpuHandle gpuArray[NVAPI_MAX_PHYSICAL_GPUS] = {};
-		result = NvAPI_EnumPhysicalGPUs(gpuArray, &gpuCount);
-		NVIDIA_API_ERROR_MSG(result != NVAPI_OK, result);
-		if (result != NVAPI_OK)
-		{
-			return result;
-		}
-		return NVAPI_OK;
-	}
-
-	NvAPI_Status GetGpuName(std::string& gpu_name)
-	{
-		// Get connected NVidia GPUs to Computer
-		NvU32 gpuCount = 0;
-		NvPhysicalGpuHandle gpuArray[NVAPI_MAX_PHYSICAL_GPUS] = {};
-		NvAPI_Status result = NvAPI_EnumPhysicalGPUs(gpuArray, &gpuCount);
-		NVIDIA_API_ERROR_MSG(result != NVAPI_OK, result);
-		if (result != NVAPI_OK)
-		{
-			return result;
-		}
-
-		NvAPI_ShortString name = "";
-		for (NvU32 gpuIndex = 0; gpuIndex < gpuCount; ++gpuIndex)
-		{
-			NvAPI_GPU_GetFullName(gpuArray[gpuIndex], name);
-			int i;
-			std::string s = "";
-			for (i = 0; i < NVAPI_SHORT_STRING_MAX; i++)
-			{
-				s = s + name[i];
-			}
-			gpu_name = s; // TODO: display index...?
-		}
-
-		return NVAPI_OK;
-	}
-
-	NvAPI_Status GetMonitorIdAndName(OUT std::vector<DisplayID>& displayInfo)
-	{
-		displayInfo.clear();
-		NvAPI_Status result = NVAPI_OK;
-
-		// Get connected NVidia GPUs to Computer
-		NvU32 gpuCount = 0;
-		NvPhysicalGpuHandle gpuArray[NVAPI_MAX_PHYSICAL_GPUS] = {};
-		result = NvAPI_EnumPhysicalGPUs(gpuArray, &gpuCount);
-		NVIDIA_API_ERROR_MSG(result != NVAPI_OK, result);
-		if (result != NVAPI_OK)
-		{
-			return result;
-		}
-
-		for (NvU32 gpuIndex = 0; gpuIndex < gpuCount; ++gpuIndex)
-		{
-			// Get connected displays to NVidia GPUs
-			NvU32 displayIdCount = 0;
-			NV_GPU_DISPLAYIDS displayIdArray[NVAPI_MAX_HEADS_PER_GPU] = {};
-			displayIdArray[0].version = NV_GPU_DISPLAYIDS_VER;
-			NvU32 flags = 0;
-			result = NvAPI_GPU_GetConnectedDisplayIds(gpuArray[gpuIndex], nullptr, &displayIdCount, flags);
-			NVIDIA_API_ERROR_MSG(result != NVAPI_OK, result);
-			result = NvAPI_GPU_GetConnectedDisplayIds(gpuArray[gpuIndex], displayIdArray, &displayIdCount, flags);
-			NVIDIA_API_ERROR_MSG(result != NVAPI_OK, result);
-			NvAPI_ShortString name = "";
-
+			memset(&hdrCapabilities, 0, sizeof(hdrCapabilities));
+			hdrCapabilities.version = NV_HDR_CAPABILITIES_VER; // Latest (e.g. NV_HDR_CAPABILITIES_VER3)
+			hdrCapabilities.driverExpandDefaultHdrParameters = 1; // In case the display EDID didn't contain some metadata, the driver fills it up with its best guessed values
+			NvAPI_Status result = NvAPI_Disp_GetHdrCapabilities(displayId, &hdrCapabilities);
+			NVIDIA_API_ERROR_MSG(NVAPI_OK != result, result);
+		
+			// Don't exclusively check "NVAPI_INCOMPATIBLE_STRUCT_VERSION" as we aren't sure it'd always returned
 			if (result != NVAPI_OK)
 			{
-				continue;
+				memset(&hdrCapabilities, 0, sizeof(hdrCapabilities));
+				hdrCapabilities.version = NV_HDR_CAPABILITIES_VER2;
+				hdrCapabilities.driverExpandDefaultHdrParameters = 1;
+				result = NvAPI_Disp_GetHdrCapabilities(displayId, &hdrCapabilities);
+				NVIDIA_API_ERROR_MSG(NVAPI_OK != result, result);
+			
+				if (result != NVAPI_OK)
+				{
+					memset(&hdrCapabilities, 0, sizeof(hdrCapabilities));
+					hdrCapabilities.version = NV_HDR_CAPABILITIES_VER1;
+					hdrCapabilities.driverExpandDefaultHdrParameters = 1;
+					result = NvAPI_Disp_GetHdrCapabilities(displayId, &hdrCapabilities);
+					NVIDIA_API_ERROR_MSG(NVAPI_OK != result, result);
+				}
 			}
-			for (NvU32 displayIndex = 0; displayIndex < displayIdCount; ++displayIndex)
+
+			return result;
+		}
+
+		NvAPI_Status TurnOffHDROnDisplay(NvU32 displayId)
+		{
+			NV_HDR_COLOR_DATA hdrColorData = {};
+			hdrColorData.version = NV_HDR_COLOR_DATA_VER; // Latest (e.g. NV_HDR_COLOR_DATA_VE2)
+			hdrColorData.cmd = NV_HDR_CMD_SET;
+			hdrColorData.static_metadata_descriptor_id = NV_STATIC_METADATA_TYPE_1;
+			hdrColorData.hdrMode = NV_HDR_MODE_OFF;
+			NvAPI_Status result = NvAPI_Disp_HdrColorControl(displayId, &hdrColorData);
+			NVIDIA_API_ERROR_MSG(NVAPI_OK != result, result);
+
+			// Try again with version 1 (probably useless)
+			if (result != NVAPI_OK)
 			{
-				NvDisplayHandle handle = NULL;
-				result = NvAPI_EnumNvidiaDisplayHandle(displayIndex, &handle);
-				NVIDIA_API_ERROR_MSG(result != NVAPI_OK, result);
-				result = NvAPI_GetAssociatedNvidiaDisplayName(handle, name);
-				NVIDIA_API_ERROR_MSG(result != NVAPI_OK, result);
-				displayInfo.push_back({ displayIdArray[displayIndex].displayId, name });
+				hdrColorData.version = NV_HDR_COLOR_DATA_VER1;
+				result = NvAPI_Disp_HdrColorControl(displayId, &hdrColorData);
+				NVIDIA_API_ERROR_MSG(NVAPI_OK != result, result);
 			}
+
+			return result;
 		}
 
-		if (displayInfo.empty())
+		// Enables HDR on the display, and automatically disables it when the application closes (unless it was already on)
+		NvAPI_Status TurnOnHDROnDisplay(NvU32 displayId)
 		{
-			NVIDIA_API_INFO_MSG("NvApi: No displays obtained from NVidia GPU.");
-		}
-		else
-		{
-			NVIDIA_API_INFO_MSG("NvApi: Displays obtained from NVidia GPU.");
-		}
-
-		return NVAPI_OK;
-	}
-
-	NvAPI_Status GetMonitorId(NvU32& displayId, const std::string& name)
-	{
-		displayId = 0;
-		NvAPI_Status result = NvAPI_DISP_GetDisplayIdByDisplayName(name.c_str(), &displayId);
-		NVIDIA_API_ERROR_MSG(NVAPI_OK != result, result);
-		return result;
-	}
-
-	NvAPI_Status GetMonitorCapabilities( NvU32 displayId, NV_HDR_CAPABILITIES& hdrCapabilities)
-	{
-		memset(&hdrCapabilities, 0, sizeof(hdrCapabilities));
-
-		hdrCapabilities.version = NV_HDR_CAPABILITIES_VER;
-		hdrCapabilities.driverExpandDefaultHdrParameters = 1;
-		NvAPI_Status result = NvAPI_Disp_GetHdrCapabilities(displayId, &hdrCapabilities);
-		NVIDIA_API_ERROR_MSG(NVAPI_OK != result, result);
-
-		if (result != NVAPI_OK)
-		{
-			hdrCapabilities.version = NV_HDR_CAPABILITIES_VER2;
-			hdrCapabilities.driverExpandDefaultHdrParameters = 1;
-			result = NvAPI_Disp_GetHdrCapabilities(displayId, &hdrCapabilities);
-			NVIDIA_API_ERROR_MSG(NVAPI_OK != result, result);
-		}
-		if (result != NVAPI_OK)
-		{
-			hdrCapabilities.version = NV_HDR_CAPABILITIES_VER1;
-			hdrCapabilities.driverExpandDefaultHdrParameters = 1;
-			result = NvAPI_Disp_GetHdrCapabilities(displayId, &hdrCapabilities);
-			NVIDIA_API_ERROR_MSG(NVAPI_OK != result, result);
-		}
-
-		return result;
-	}
-
-	NvAPI_Status SetHdr10Metadata(NvU32 displayId, NV_HDR_METADATA& hdr10Metadata)
-	{
-		hdr10Metadata.version = NV_HDR_METADATA_VER;
-		NvAPI_Status result = NvAPI_Disp_SetSourceHdrMetadata(displayId, &hdr10Metadata);
-		NVIDIA_API_ERROR_MSG(NVAPI_OK != result, result);
-		return result;
-	}
-
-	NvAPI_Status TurnOffHdr(NvU32 displayId)
-	{
-		NV_HDR_COLOR_DATA hdrColorData = {};
-		memset(&hdrColorData, 0, sizeof(hdrColorData));
-
-		hdrColorData.version = NV_HDR_COLOR_DATA_VER;
-		hdrColorData.cmd = NV_HDR_CMD_SET;
-		hdrColorData.static_metadata_descriptor_id = NV_STATIC_METADATA_TYPE_1;
-		hdrColorData.hdrMode = NV_HDR_MODE_OFF;
-		NvAPI_Status result = NvAPI_Disp_HdrColorControl(displayId, &hdrColorData);
-		NVIDIA_API_ERROR_MSG(NVAPI_OK != result, result);
-
-		// Try again with version 1 (probably useless)
-		if (result != NVAPI_OK)
-		{
-			hdrColorData.version = NV_HDR_COLOR_DATA_VER1;
-			result = NvAPI_Disp_HdrColorControl(displayId, &hdrColorData);
-			NVIDIA_API_ERROR_MSG(NVAPI_OK != result, result);
-		}
-
-		return result;
-	}
-
-	NvAPI_Status TurnOnHdr(NvU32 displayId)
-	{
-		NV_HDR_COLOR_DATA hdrColorData = {};
-		memset(&hdrColorData, 0, sizeof(hdrColorData));
-
-		hdrColorData.version = NV_HDR_COLOR_DATA_VER;
-		hdrColorData.cmd = NV_HDR_CMD_SET;
-		hdrColorData.static_metadata_descriptor_id = NV_STATIC_METADATA_TYPE_1;
-		hdrColorData.hdrMode = NV_HDR_MODE_UHDA; // scRGB HDR in, HDR10 out
-		NvAPI_Status result = NvAPI_Disp_HdrColorControl(displayId, &hdrColorData);
-		NVIDIA_API_ERROR_MSG(NVAPI_OK != result, result);
-
-		// Try again with version 1 (probably useless)
-		if (result != NVAPI_OK)
-		{
-			hdrColorData.version = NV_HDR_COLOR_DATA_VER1;
-			result = NvAPI_Disp_HdrColorControl(displayId, &hdrColorData);
-			NVIDIA_API_ERROR_MSG(NVAPI_OK != result, result);
-		}
-
-		return result;
-	}
-
-	NvAPI_Status SetOutputMode(NvU32 displayId, NV_DISPLAY_OUTPUT_MODE mode)
-	{
-		NvAPI_Status result = NVAPI_OK;
-		result = NvAPI_Disp_SetOutputMode(displayId, &mode);
-		NVIDIA_API_ERROR_MSG(NVAPI_OK != result, result);
-		return result;
-	}
-
-	NvAPI_Status GetOutputMode(NvU32 displayId, NV_DISPLAY_OUTPUT_MODE& mode)
-	{
-		NvAPI_Status result = NVAPI_OK;
-		result = NvAPI_Disp_GetOutputMode(displayId, &mode);
-		NVIDIA_API_ERROR_MSG(NVAPI_OK != result, result);
-		return result;
-	}
-
-	NvAPI_Status SetToneMappingMode(NvU32 displayId, NV_HDR_TONEMAPPING_METHOD mode)
-	{
-		NvAPI_Status result = NVAPI_OK;
-		result = NvAPI_Disp_SetHdrToneMapping(displayId, mode);
-		NVIDIA_API_ERROR_MSG(NVAPI_OK != result, result);
-		return result;
-	}
-
-	NvAPI_Status GetToneMappingMode(NvU32 displayId, NV_HDR_TONEMAPPING_METHOD& mode)
-	{
-		NvAPI_Status result = NVAPI_OK;
-		result = NvAPI_Disp_GetHdrToneMapping(displayId, &mode);
-		NVIDIA_API_ERROR_MSG(NVAPI_OK != result, result);
-		return result;
-	}
-
-	NvAPI_Status SetColorSpace(NvU32 displayId, NV_COLORSPACE_TYPE color_space)
-	{
-		NvAPI_Status result = NVAPI_OK;
-		result = NvAPI_Disp_SetSourceColorSpace(displayId, color_space);
-		NVIDIA_API_ERROR_MSG(NVAPI_OK != result, result);
-		return result;
-	}
-
-	NvAPI_Status GetColorSpace(NvU32 displayId, NV_COLORSPACE_TYPE& color_space)
-	{
-		NvAPI_Status result = NVAPI_OK;
-		result = NvAPI_Disp_GetSourceColorSpace(displayId, &color_space, NvU64(GetCurrentProcessId()));
-		NVIDIA_API_ERROR_MSG(NVAPI_OK != result, result);
-		return result;
-	}
-
-	struct DisplayChromaticities
-	{
-		DisplayChromaticities(float rx,
-			float ry,
-			float gx,
-			float gy,
-			float bx,
-			float by,
-			float wx,
-			float wy)
-			: redX(rx),
-			redY(ry),
-			greenX(gx),
-			greenY(gy),
-			blueX(bx),
-			blueY(by),
-			whiteX(wx),
-			whiteY(wy)
-		{
-		}
-
-		float redX;
-		float redY;
-		float greenX;
-		float greenY;
-		float blueX;
-		float blueY;
-		float whiteX;
-		float whiteY;
-	};
-
-	bool IsHdr10PlusDisplayOutput(HWND hWnd)
-	{
-		NvU32 DisplayId = GetNvapiDisplayIdFromHwnd(hWnd);
-		NV_HDR_CAPABILITIES HdrCapabilities = {};
-		NvAPI_Status result = GetMonitorCapabilities(DisplayId, HdrCapabilities);
-		NVIDIA_API_ERROR_MSG(result != NVAPI_OK, result);
-		return HdrCapabilities.isHdr10PlusGamingSupported;
-	}
-
-	bool IsHdr10DisplayOutput(HWND hWnd)
-	{
-		NvU32 DisplayId = GetNvapiDisplayIdFromHwnd(hWnd);
-		NV_HDR_CAPABILITIES HdrCapabilities = {};
-		NvAPI_Status result = GetMonitorCapabilities(DisplayId, HdrCapabilities);
-		NVIDIA_API_ERROR_MSG(result != NVAPI_OK, result);
-		return HdrCapabilities.isST2084EotfSupported;
-	}
-
-	bool EnableHdr10PlusDisplayOutput(HWND hWnd)
-	{
-		//TODO: branch out in case of failures
-		NvU32 DisplayId = GetNvapiDisplayIdFromHwnd(hWnd);
-
-		NvAPI_Status result = TurnOnHdr(DisplayId);
-		NVIDIA_API_ERROR_MSG(result != NVAPI_OK, result);
-
-		result = SetOutputMode(DisplayId, NV_DISPLAY_OUTPUT_MODE_HDR10PLUS_GAMING);
-		NVIDIA_API_ERROR_MSG(result != NVAPI_OK, result);
-
-		result = SetToneMappingMode(DisplayId, NV_HDR_TONEMAPPING_GPU);
-		//result = SetToneMappingMode(DisplayId, NV_HDR_TONEMAPPING_APP); // Need for GPU?
-		NVIDIA_API_ERROR_MSG(result != NVAPI_OK, result);
-
-		result = SetColorSpace(DisplayId, NV_COLORSPACE_REC2100);
-		//result = SetColorSpace(DisplayId, NV_COLORSPACE_xRGB); // Try linear scRGB HDR. Seemengly doesn't work
-		NVIDIA_API_ERROR_MSG(result != NVAPI_OK, result);
-
-		NV_HDR_CAPABILITIES HdrCapabilities = {};
-		result = GetMonitorCapabilities(DisplayId, HdrCapabilities);
-		NVIDIA_API_ERROR_MSG(result != NVAPI_OK, result);
-
-		NV_HDR_METADATA Hdr10MetadataNv = {};
-		Hdr10MetadataNv.displayPrimary_x0 = HdrCapabilities.display_data.displayPrimary_x0;
-		Hdr10MetadataNv.displayPrimary_y0 = HdrCapabilities.display_data.displayPrimary_y0;
-		Hdr10MetadataNv.displayPrimary_x1 = HdrCapabilities.display_data.displayPrimary_x1;
-		Hdr10MetadataNv.displayPrimary_y1 = HdrCapabilities.display_data.displayPrimary_y1;
-		Hdr10MetadataNv.displayPrimary_x2 = HdrCapabilities.display_data.displayPrimary_x2;
-		Hdr10MetadataNv.displayPrimary_y2 = HdrCapabilities.display_data.displayPrimary_y2;
-		Hdr10MetadataNv.displayWhitePoint_x = HdrCapabilities.display_data.displayWhitePoint_x;
-		Hdr10MetadataNv.displayWhitePoint_y = HdrCapabilities.display_data.displayWhitePoint_y;
-		Hdr10MetadataNv.max_display_mastering_luminance = HdrCapabilities.display_data.desired_content_max_luminance;
-		Hdr10MetadataNv.max_frame_average_light_level = HdrCapabilities.display_data.desired_content_max_frame_average_luminance;
-		Hdr10MetadataNv.min_display_mastering_luminance = HdrCapabilities.display_data.desired_content_min_luminance;
-		Hdr10MetadataNv.max_content_light_level = static_cast<NvU16>(HdrCapabilities.display_data.desired_content_max_luminance);
-		Hdr10MetadataNv.max_display_mastering_luminance = 10000;
-		Hdr10MetadataNv.max_frame_average_light_level = 10000;
-		Hdr10MetadataNv.min_display_mastering_luminance = 0;
-		Hdr10MetadataNv.max_content_light_level = static_cast<NvU16>(10000);
-		result = SetHdr10Metadata(DisplayId, Hdr10MetadataNv);
-		NVIDIA_API_ERROR_MSG(result != NVAPI_OK, result);
-
-		NV_DISPLAY_OUTPUT_MODE outputMode = NV_DISPLAY_OUTPUT_MODE_SDR;
-		result = GetOutputMode(DisplayId, outputMode);
-		NVIDIA_API_ERROR_MSG(result != NVAPI_OK, result);
-		assert(outputMode == NV_DISPLAY_OUTPUT_MODE_HDR10PLUS_GAMING);
-
-		return (result == NVAPI_OK);
-	}
-
-	bool EnableHdr10DisplayOutput(HWND hWnd)
-	{
-		NvU32 DisplayId = GetNvapiDisplayIdFromHwnd(hWnd);
-		NvAPI_Status result = TurnOnHdr(DisplayId);
-		result = SetOutputMode(DisplayId, NV_DISPLAY_OUTPUT_MODE_HDR10);
-		NVIDIA_API_ERROR_MSG(result != NVAPI_OK, result);
-		SetColorSpace(DisplayId, NV_COLORSPACE_REC2100);
-		return (result == NVAPI_OK);
-	}
-
-	bool DisableHdr10PlusDisplayOutput(HWND hWnd)
-	{
-		NvU32 DisplayId = GetNvapiDisplayIdFromHwnd(hWnd);
-		NvAPI_Status result = SetOutputMode(DisplayId, NV_DISPLAY_OUTPUT_MODE_HDR10);
-		NVIDIA_API_ERROR_MSG(result != NVAPI_OK, result);
-		return (result == NVAPI_OK);
-	}
-
-	bool DisableHdr10DisplayOutput(HWND hWnd)
-	{
-		NvU32 DisplayId = GetNvapiDisplayIdFromHwnd(hWnd);
-		NvAPI_Status result = SetOutputMode(DisplayId, NV_DISPLAY_OUTPUT_MODE_SDR);
-		result = TurnOffHdr(DisplayId);
-		NVIDIA_API_ERROR_MSG(result != NVAPI_OK, result);
-		return (result == NVAPI_OK);
-	}
-
-	bool IsHdr10PlusEnabled(HWND hWnd)
-	{
-		NvU32 DisplayId = GetNvapiDisplayIdFromHwnd(hWnd);
-		NV_DISPLAY_OUTPUT_MODE outputMode = NV_DISPLAY_OUTPUT_MODE_SDR;
-		NvAPI_Status result = GetOutputMode(DisplayId, outputMode);
-		NVIDIA_API_ERROR_MSG(result != NVAPI_OK, result);
-		return (outputMode == NV_DISPLAY_OUTPUT_MODE_HDR10PLUS_GAMING);
-	}
-
-	bool IsHdr10Enabled(HWND hWnd)
-	{
-		NvU32 DisplayId = GetNvapiDisplayIdFromHwnd(hWnd);
-		NV_DISPLAY_OUTPUT_MODE outputMode = NV_DISPLAY_OUTPUT_MODE_SDR;
-		NvAPI_Status result = GetOutputMode(DisplayId, outputMode);
-		NVIDIA_API_ERROR_MSG(result != NVAPI_OK, result);
-		return (outputMode == NV_DISPLAY_OUTPUT_MODE_HDR10);
-	}
-
-	bool SetMetadataHdr(NvU32 DisplayId, NV_HDR_METADATA& HdrMetadata)
-	{
-		NvAPI_Status result = SetHdr10Metadata(DisplayId, HdrMetadata);
-		NVIDIA_API_ERROR_MSG(result != NVAPI_OK, result);
-		return (result == NVAPI_OK);
-	}
-
-	bool GetHdrCapabilities(NvU32 DisplayId, NV_HDR_CAPABILITIES& HdrCapabilities)
-	{
-		NvAPI_Status result = GetMonitorCapabilities(DisplayId, HdrCapabilities);
-		NVIDIA_API_ERROR_MSG(result != NVAPI_OK, result);
-		return (result == NVAPI_OK);
-	}
-
-	void SetSDR(NvU32 DisplayId)
-	{
-		TurnOffHdr(DisplayId);
-		SetColorSpace(DisplayId, NV_COLORSPACE_sRGB);
-	}
+			NV_HDR_COLOR_DATA hdrColorData = {};
+			hdrColorData.version = NV_HDR_COLOR_DATA_VER;
+			hdrColorData.cmd = NV_HDR_CMD_SET;
+			hdrColorData.static_metadata_descriptor_id = NV_STATIC_METADATA_TYPE_1;
+			// Described as scRGB HDR by internal comments, but it's referring to the old implementation or the Windows window composition space.
+			// This allows both scRGB HDR and HDR10 swapchains, and outputs HDR10 like the DXGI HDR mode (it likely just engages that nowadays).
+			hdrColorData.hdrMode = NV_HDR_MODE_UHDA;
+		
+#if 0 // These are seemingly ignored in HDR10/HDR10+ modes, and are only for DV. Comments about them are confusing though.
+			NV_COLOR_DATA colorData = {};
+			colorData.version = NV_COLOR_DATA_VER;
+			colorData.size = sizeof(colorData);
+			colorData.cmd = NV_COLOR_CMD_GET;
+			NvAPI_Disp_ColorControl(displayId, &colorData);
+			// Preserve the current user values to avoid overriding them for lower quality defaults.
+			hdrColorData.hdrColorFormat = (NV_COLOR_FORMAT)colorData.data.colorFormat;
+			hdrColorData.hdrDynamicRange = (NV_DYNAMIC_RANGE)colorData.data.dynamicRange;
+			hdrColorData.hdrBpc = colorData.data.bpc;
+#elif 0
+			// Ideally we'd set the highest quality possible for all but there's no easy way to query for it.
+			hdrColorData.hdrColorFormat = NV_COLOR_FORMAT_AUTO;
+			hdrColorData.hdrDynamicRange = NV_DYNAMIC_RANGE_AUTO;
+			hdrColorData.hdrBpc = NV_BPC_DEFAULT;
 #endif
 
-	// Returns false if failed or if HDR is not engaged (but the white luminance can still be used).
-	bool GetHDRMaxLuminance(IDXGISwapChain* swapChain, float& maxLuminance, float defaultMaxLuminance = 80.f /*Windows sRGB standard luminance*/)
-	{
-		maxLuminance = defaultMaxLuminance;
+			NvAPI_Status result = NvAPI_Disp_HdrColorControl(displayId, &hdrColorData);
+			NVIDIA_API_ERROR_MSG(NVAPI_OK != result, result);
 
-		com_ptr<IDXGIOutput> output;
-		if (FAILED(swapChain->GetContainingOutput(&output)))
-		{
-			return false;
+			// Try again with version 1 (probably useless)
+			// We don't exclusively check "NVAPI_INCOMPATIBLE_STRUCT_VERSION" as we aren't sure it'd always returned
+			if (result != NVAPI_OK)
+			{
+				hdrColorData.version = NV_HDR_COLOR_DATA_VER1;
+				result = NvAPI_Disp_HdrColorControl(displayId, &hdrColorData);
+				NVIDIA_API_ERROR_MSG(NVAPI_OK != result, result);
+			}
+
+			return result;
 		}
 
-		com_ptr<IDXGIOutput6> output6;
-		if (FAILED(output->QueryInterface(&output6)))
+		bool IsHDR10PlusSupportedOnDisplay(HWND hWnd)
 		{
-			return false;
+			NvU32 displayId = GetNvapiDisplayIdFromHwnd(hWnd);
+			NV_HDR_CAPABILITIES hdrCapabilities = {};
+			NvAPI_Status result = GetDisplayCapabilities(displayId, hdrCapabilities);
+			NVIDIA_API_ERROR_MSG(result != NVAPI_OK, result);
+			return hdrCapabilities.isHdr10PlusGamingSupported;
 		}
 
-		DXGI_OUTPUT_DESC1 desc1;
-		if (FAILED(output6->GetDesc1(&desc1)))
+		bool IsHDR10SupportedOnDisplay(HWND hWnd)
 		{
-			return false;
+			NvU32 displayId = GetNvapiDisplayIdFromHwnd(hWnd);
+			NV_HDR_CAPABILITIES hdrCapabilities = {};
+			NvAPI_Status result = GetDisplayCapabilities(displayId, hdrCapabilities);
+			NVIDIA_API_ERROR_MSG(result != NVAPI_OK, result);
+			return hdrCapabilities.isST2084EotfSupported;
 		}
 
-		// Note: this might end up being outdated if a new display is added/removed,
-		// or if HDR is toggled on them after swapchain creation (though it seems to be consistent between SDR and HDR).
-		maxLuminance = desc1.MaxLuminance;
-
-		// HDR is not supported (this only works if HDR is enaged on the monitor that currently contains the swapchain)
-		if (desc1.ColorSpace != DXGI_COLOR_SPACE_RGB_FULL_G2084_NONE_P2020
-			&& desc1.ColorSpace != DXGI_COLOR_SPACE_RGB_FULL_G10_NONE_P709)
+		bool IsHDR10PlusEnabledOnDisplay(HWND hWnd)
 		{
-			return false;
+			NvU32 displayId = GetNvapiDisplayIdFromHwnd(hWnd);
+			NV_DISPLAY_OUTPUT_MODE outputMode = NV_DISPLAY_OUTPUT_MODE_SDR;
+			NvAPI_Status result = NvAPI_Disp_GetOutputMode(displayId, &outputMode);
+			NVIDIA_API_ERROR_MSG(result != NVAPI_OK, result);
+			return outputMode == NV_DISPLAY_OUTPUT_MODE_HDR10PLUS_GAMING;
 		}
 
-		return true;
+		bool IsHDR10EnabledOnDisplay(HWND hWnd)
+		{
+			NvU32 displayId = GetNvapiDisplayIdFromHwnd(hWnd);
+			NV_DISPLAY_OUTPUT_MODE outputMode = NV_DISPLAY_OUTPUT_MODE_SDR;
+			NvAPI_Status result = NvAPI_Disp_GetOutputMode(displayId, &outputMode);
+			NVIDIA_API_ERROR_MSG(result != NVAPI_OK, result);
+			// HDR10+ is also HDR10
+			return outputMode == NV_DISPLAY_OUTPUT_MODE_HDR10 || outputMode == NV_DISPLAY_OUTPUT_MODE_HDR10PLUS_GAMING;
+		}
+	
+		// Returns the absolute peak brightness of the display the window is contained in.
+		// Note that the accuracy of these values is limited, relying on the user calibration from DXGI might be better.
+		// Returns <= 0 if HDR10+ is not supported by the display.
+		float GetHDR10PlusDisplayPeakBrightness(HWND hWnd, HMONITOR hMonitor = 0)
+		{
+			// HDR10+ GAMING index to nits mapping, from Samsung docs
+			static constexpr std::array<float, 16> nitValues = {
+				100.f,  // 0
+				200.f,  // 1
+				300.f,  // 2
+				400.f,  // 3
+				500.f,  // 4
+				600.f,  // 5
+				800.f,  // 6
+				1000.f, // 7
+				1200.f, // 8
+				1500.f, // 9
+				2000.f, // 10
+				2500.f, // 11
+				3000.f, // 12
+				4000.f, // 13
+				6000.f, // 14
+				8000.f  // 15
+			};
+
+			NvU32 displayId = GetNvapiDisplayIdFromHwnd(hWnd, hMonitor);
+			if (displayId == 0)
+				return 0.f;
+
+			NV_HDR_CAPABILITIES hdrCapabilities = {};
+			if (GetDisplayCapabilities(displayId, hdrCapabilities) != NVAPI_OK || !hdrCapabilities.isHdr10PlusGamingSupported)
+				return 0.f;
+
+			// Always safe
+			return nitValues[hdrCapabilities.hdr10plus_vsvdb.peak_luminance_index];
+		}
+
+		bool SetDisplayOutputMode(HWND hWnd, NV_DISPLAY_OUTPUT_MODE displayOutputMode, bool allowEnableHDROnDisplay = true, bool allowDisableHDROnDisplay = false)
+		{
+			if (!hasInit)
+				return false;
+
+			NvU32 displayId = GetNvapiDisplayIdFromHwnd(hWnd); // Note: we could force fallback on the primary display here, which would be more likely to be right than not (but not guaranteed)
+			if (displayId == 0)
+			{
+				printf("SetDisplayOutputMode failed to retrieve an NV display ID, likely because the Window isn't on an NV GPU");
+				return false;
+			}
+
+			bool isHDR = displayOutputMode == NV_DISPLAY_OUTPUT_MODE_HDR10 || displayOutputMode == NV_DISPLAY_OUTPUT_MODE_HDR10PLUS_GAMING;
+			bool isHDR10PlusGaming = displayOutputMode == NV_DISPLAY_OUTPUT_MODE_HDR10PLUS_GAMING;
+
+			NvAPI_Status result = NVAPI_OK;
+
+			NV_HDR_CAPABILITIES hdrCapabilities = {};
+			result = GetDisplayCapabilities(displayId, hdrCapabilities);
+
+			// Fall back on HDR10 if HDR10+ is not supported on the display.
+			// If HDR10 isn't supported, we print an error but we shouldn't have gotten here.
+			if (result == NVAPI_OK && isHDR10PlusGaming && !hdrCapabilities.isHdr10PlusGamingSupported)
+			{
+				isHDR10PlusGaming = false;
+				displayOutputMode = NV_DISPLAY_OUTPUT_MODE_HDR10;
+			}
+
+			if (isHDR && allowEnableHDROnDisplay)
+			{
+				result = TurnOnHDROnDisplay(displayId);
+			}
+			else if (!isHDR && allowDisableHDROnDisplay)
+			{
+				result = TurnOffHDROnDisplay(displayId);
+			}
+			// We continue even if we couldn't toggle HDR properly on the display
+
+			// Early out if we were already in the target mode, to avoid the display changing mode more than necessary
+			NV_DISPLAY_OUTPUT_MODE currentDisplayOutputMode = NV_DISPLAY_OUTPUT_MODE_SDR;
+			result = NvAPI_Disp_GetOutputMode(displayId, &currentDisplayOutputMode);
+			if (result == NVAPI_OK && currentDisplayOutputMode == displayOutputMode)
+			{
+				return true;
+			}
+
+			// The output mode seems to be partially be linked with the display HDR state,
+			// however if we change the display HDR state from within the application, it's good to also enforce the new output mode.
+			// Note: this succeeds over DisplayPort but then doesn't work.
+			NV_DISPLAY_OUTPUT_MODE tempDisplayOutputMode = displayOutputMode;
+			result = NvAPI_Disp_SetOutputMode(displayId, &tempDisplayOutputMode);
+			NVIDIA_API_ERROR_MSG(result != NVAPI_OK, result);
+			bool outputModeSetSuccessful = result == NVAPI_OK;
+
+			// Fallback on standard HDR10 if engaging HDR10+ failed for some reason
+			if (isHDR10PlusGaming && !outputModeSetSuccessful && result != NVAPI_RESOURCE_IN_USE)
+			{
+				isHDR10PlusGaming = false;
+				displayOutputMode = NV_DISPLAY_OUTPUT_MODE_HDR10;
+				tempDisplayOutputMode = displayOutputMode;
+				result = NvAPI_Disp_SetOutputMode(displayId, &tempDisplayOutputMode);
+				outputModeSetSuccessful = result == NVAPI_OK;
+			}
+
+#if 0 // This works but is theoretically only used by GPU side tonemapping. It might be useful to inform the TV we are already tonemapping the game to its capabilities, however this might also have downsides.
+			// Cannot continue if we didn't engage HDR10/HDR10+ properly, and nothing more to do in SDR
+			if (!outputModeSetSuccessful || !isHDR)
+				return true;
+
+			// TODO: is it even useful to set the HDR10 metadata to the exact same HGiG display capabilities (and what the game would tonemap to)?
+			if (isHDR10PlusGaming)
+			{
+				// HDR10+ GAMING index to nits mapping, from Samsung docs
+				constexpr std::array<uint16_t, 16> nit_values = {
+					100,  // 0
+					200,  // 1
+					300,  // 2
+					400,  // 3
+					500,  // 4
+					600,  // 5
+					800,  // 6
+					1000, // 7
+					1200, // 8
+					1500, // 9
+					2000, // 10
+					2500, // 11
+					3000, // 12
+					4000, // 13
+					6000, // 14
+					8000  // 15
+				};
+				// TODO: auto calibration (semi accurate)
+				hdrCapabilities.hdr10plus_vsvdb.peak_luminance_index;
+				hdrCapabilities.hdr10plus_vsvdb.full_frame_peak_luminance_index;
+				return nit_values[hdrCapabilities.hdr10plus_vsvdb.peak_luminance_index];
+
+				NV_HDR_METADATA Hdr10MetadataNv = {};
+				Hdr10MetadataNv.displayPrimary_x0 = hdrCapabilities.display_data.displayPrimary_x0;
+				Hdr10MetadataNv.displayPrimary_y0 = hdrCapabilities.display_data.displayPrimary_y0;
+				Hdr10MetadataNv.displayPrimary_x1 = hdrCapabilities.display_data.displayPrimary_x1;
+				Hdr10MetadataNv.displayPrimary_y1 = hdrCapabilities.display_data.displayPrimary_y1;
+				Hdr10MetadataNv.displayPrimary_x2 = hdrCapabilities.display_data.displayPrimary_x2;
+				Hdr10MetadataNv.displayPrimary_y2 = hdrCapabilities.display_data.displayPrimary_y2;
+				Hdr10MetadataNv.displayWhitePoint_x = hdrCapabilities.display_data.displayWhitePoint_x;
+				Hdr10MetadataNv.displayWhitePoint_y = hdrCapabilities.display_data.displayWhitePoint_y;
+				Hdr10MetadataNv.max_display_mastering_luminance = hdrCapabilities.display_data.desired_content_max_luminance;
+				Hdr10MetadataNv.min_display_mastering_luminance = hdrCapabilities.display_data.desired_content_min_luminance;
+				Hdr10MetadataNv.max_content_light_level = static_cast<NvU16>(hdrCapabilities.display_data.desired_content_max_luminance);
+				Hdr10MetadataNv.max_frame_average_light_level = hdrCapabilities.display_data.desired_content_max_frame_average_luminance;
+				Hdr10MetadataNv.version = NV_HDR_METADATA_VER;
+				result = NvAPI_Disp_SetSourceHdrMetadata(displayId, &Hdr10MetadataNv);
+				NVIDIA_API_ERROR_MSG(result != NVAPI_OK, result);
+			}
+#endif
+
+			return outputModeSetSuccessful;
+		}
 	}
+#endif // ENABLE_NVAPI
 
+	// The new HDR checks are only available from Windows 11 SDK 10.0.26100.0. The code is declared if NTDDI_VERSION is >= NTDDI_WIN11_GA, however the functions likely fail until NTDDI_WIN11_GE (10.0.26100.0).
+	// If c++ had "static warning" these would have been one. Disable them locally to fall back on older features that might not work as well.
 	#ifndef NTDDI_WIN11_GE
-	#define NTDDI_WIN11_GE 0x0A000010
-	#endif
-
-	// Only available from Windows 11 SDK 10.0.26100.0
-	#if NTDDI_VERSION >= NTDDI_WIN11_GE
-	#else
-	// If c++ had "static warning" this would have been one.
-	static_assert(false, "Your Windows SDK is too old and lacks some features to check/engage for HDR on the display. Either upgrade to \"Windows 11 SDK 10.0.26100.0\" or disable this assert locally (the code will fall back on older features that might not work as well).");
+	static_assert(false, "Your Windows SDK is too old and lacks some features to check/engage for HDR on the display. Please upgrade to \"Windows 11 SDK 10.0.26100.0\".");
+	#elif NTDDI_VERSION < NTDDI_WIN11_GA
+	static_assert(false, "NTDDI_VERSION must be at least NTDDI_WIN11_GA to expose the newer HDR display configuration structures.");
 	#endif
 
 	bool GetDisplayConfigPathInfo(HWND hwnd, HMONITOR fallbackMonitor, DISPLAYCONFIG_PATH_INFO& outPathInfo)
@@ -689,10 +461,10 @@ namespace Display
 		return false;
 	}
 
-	bool GetColorInfo(HWND hwnd, DISPLAYCONFIG_GET_ADVANCED_COLOR_INFO& outColorInfo)
+	bool GetColorInfo(HWND hwnd, DISPLAYCONFIG_GET_ADVANCED_COLOR_INFO& outColorInfo, HMONITOR fallbackMonitor = 0)
 	{
 		DISPLAYCONFIG_PATH_INFO pathInfo{};
-		if (GetDisplayConfigPathInfo(hwnd, 0, pathInfo))
+		if (GetDisplayConfigPathInfo(hwnd, fallbackMonitor, pathInfo))
 		{
 			DISPLAYCONFIG_GET_ADVANCED_COLOR_INFO colorInfo{};
 			colorInfo.header.type = DISPLAYCONFIG_DEVICE_INFO_GET_ADVANCED_COLOR_INFO;
@@ -709,11 +481,11 @@ namespace Display
 		return false;
 	}
 
-	#if NTDDI_VERSION >= NTDDI_WIN11_GE
-	bool GetColorInfo2(HWND hwnd, DISPLAYCONFIG_GET_ADVANCED_COLOR_INFO_2& outColorInfo2)
+	#if defined(NTDDI_WIN11_GE) && NTDDI_VERSION >= NTDDI_WIN11_GA
+	bool GetColorInfo2(HWND hwnd, DISPLAYCONFIG_GET_ADVANCED_COLOR_INFO_2& outColorInfo2, HMONITOR fallbackMonitor = 0)
 	{
 		DISPLAYCONFIG_PATH_INFO pathInfo{};
-		if (GetDisplayConfigPathInfo(hwnd, 0, pathInfo))
+		if (GetDisplayConfigPathInfo(hwnd, fallbackMonitor, pathInfo))
 		{
 			DISPLAYCONFIG_GET_ADVANCED_COLOR_INFO_2 colorInfo2{};
 			colorInfo2.header.type = DISPLAYCONFIG_DEVICE_INFO_GET_ADVANCED_COLOR_INFO_2;
@@ -731,19 +503,19 @@ namespace Display
 	}
 	#endif
 
-	// Pass in the game window (e.g. retrieve it from the swapchain), or 0 to fall back on the primary display.
+	// Pass in the game window (e.g. retrieve it from the swapchain) and an optional fallback monitor. 0 on both to use the primary display.
 	// Optionally pass in the swapchain pointer to fall back to checking on the swapchain.
 	// If HDR is enabled, it's automatically also supported.
-   bool IsHDRSupportedAndEnabled(HWND hwnd /*= 0*/, bool& supported, bool& enabled, IDXGISwapChain3* swapChain = nullptr)
+   bool IsHDRSupportedAndEnabled(HWND hwnd /*= 0*/, bool& supported, bool& enabled, IDXGISwapChain3* swapChain = nullptr, HMONITOR fallbackMonitor = 0)
 	{
 		// Default to not supported for the unknown/failed states
 		supported = false;
 		enabled = false;
 
-	#if NTDDI_VERSION >= NTDDI_WIN11_GE
+	#if defined(NTDDI_WIN11_GE) && NTDDI_VERSION >= NTDDI_WIN11_GA
 		// This will only succeed from Windows 11 24H2
 		DISPLAYCONFIG_GET_ADVANCED_COLOR_INFO_2 colorInfo2{};
-		if (GetColorInfo2(hwnd, colorInfo2))
+		if (GetColorInfo2(hwnd, colorInfo2, fallbackMonitor))
 		{
 			// Note: we don't currently consider "DISPLAYCONFIG_ADVANCED_COLOR_MODE_WCG" as an HDR mode.
 			// WCG seemingly allows for a wider color range and bit depth, without a higher brightness peak,
@@ -763,15 +535,18 @@ namespace Display
 		}
 	#endif
 
+	#if ENABLE_LEGACY_ADVANCED_COLOR
 		// Older Windows versions need to fall back to a simpler implementation.
+		// Note: from Windows 11 22H2 (build 22621), "Advanced Color" can also be enabled in SDR, so this returns false positives there (until 24H2, where the check above succeeds).
 		DISPLAYCONFIG_GET_ADVANCED_COLOR_INFO colorInfo{};
-		if (GetColorInfo(hwnd, colorInfo))
+		if (GetColorInfo(hwnd, colorInfo, fallbackMonitor))
 		{
 			enabled = colorInfo.advancedColorEnabled;
 			assert(!enabled || (colorInfo.advancedColorSupported && !colorInfo.advancedColorForceDisabled));
 			supported = enabled || (colorInfo.advancedColorSupported && !colorInfo.advancedColorForceDisabled);
 			return true;
 		}
+	#endif
 
 		if (swapChain)
 		{
@@ -792,33 +567,33 @@ namespace Display
 				}
 			}
 
-			UINT color_space_supported = 0;
+			UINT colorSpaceSupported = 0;
          // Note: this function is weird and it will return true in case the swapchain was set to HDR, even if the display actually doesn't support it.
 			// It might also not support true sometimes even if the display is in HDR mode.
-			if (SUCCEEDED(swapChain->CheckColorSpaceSupport(DXGI_COLOR_SPACE_RGB_FULL_G2084_NONE_P2020, &color_space_supported)))
+			if (SUCCEEDED(swapChain->CheckColorSpaceSupport(DXGI_COLOR_SPACE_RGB_FULL_G2084_NONE_P2020, &colorSpaceSupported)))
 			{
-				supported |= color_space_supported & DXGI_SWAP_CHAIN_COLOR_SPACE_SUPPORT_FLAG_PRESENT;
-				color_space_supported = 0;
+				supported |= colorSpaceSupported & DXGI_SWAP_CHAIN_COLOR_SPACE_SUPPORT_FLAG_PRESENT;
+				colorSpaceSupported = 0;
 			}
 			// Note that "DXGI_COLOR_SPACE_RGB_FULL_G10_NONE_P709" doesn't seem to ever be supported on swapchains unless it's currently enabled.
 			// Hopefully checking it anyway is future proof, and won't cause any damage.
-			if (SUCCEEDED(swapChain->CheckColorSpaceSupport(DXGI_COLOR_SPACE_RGB_FULL_G10_NONE_P709, &color_space_supported)))
+			if (SUCCEEDED(swapChain->CheckColorSpaceSupport(DXGI_COLOR_SPACE_RGB_FULL_G10_NONE_P709, &colorSpaceSupported)))
 			{
-				supported |= color_space_supported & DXGI_SWAP_CHAIN_COLOR_SPACE_SUPPORT_FLAG_PRESENT;
+				supported |= colorSpaceSupported & DXGI_SWAP_CHAIN_COLOR_SPACE_SUPPORT_FLAG_PRESENT;
 			}
 		}
 
-		return false;
+		return true;
 	}
 
 	// Returns true if the display has been successfully set to the target SDR/HDR mode, or if it already was.
 	// Returns false in case of an unknown error.
-	bool SetHDREnabled(HWND hwnd, bool enabled = true)
+	bool SetHDREnabled(HWND hwnd, bool enabled = true, HMONITOR fallbackMonitor = 0)
 	{
-	#if NTDDI_VERSION >= NTDDI_WIN11_GE
+	#if defined(NTDDI_WIN11_GE) && NTDDI_VERSION >= NTDDI_WIN11_GA
 		// This will only succeed from Windows 11 24H2
 		DISPLAYCONFIG_GET_ADVANCED_COLOR_INFO_2 colorInfo2{};
-		if (GetColorInfo2(hwnd, colorInfo2))
+		if (GetColorInfo2(hwnd, colorInfo2, fallbackMonitor))
 		{
 			if (colorInfo2.highDynamicRangeSupported && (!enabled || !colorInfo2.advancedColorLimitedByPolicy) && (colorInfo2.activeColorMode == DISPLAYCONFIG_ADVANCED_COLOR_MODE_HDR) != enabled)
 			{
@@ -828,23 +603,24 @@ namespace Display
 				setHDRState.header.adapterId = colorInfo2.header.adapterId;
 				setHDRState.header.id = colorInfo2.header.id;
 				setHDRState.enableHdr = enabled;
-				enabled = (ERROR_SUCCESS == DisplayConfigSetDeviceInfo(&setHDRState.header));
+				const bool succeeded = (ERROR_SUCCESS == DisplayConfigSetDeviceInfo(&setHDRState.header));
 	#ifndef NDEBUG
-				// Verify that Windows reports HDR as enabled by the user, even if it was an application to enable it.
+				// Verify that Windows now reports HDR as enabled (sometimes it might get delayed?).
 				// The function above seemingly turns on "DISPLAYCONFIG_GET_ADVANCED_COLOR_INFO_2::highDynamicRangeUserEnabled" too.
-				assert(!enabled || !GetColorInfo2(hwnd, colorInfo2) || colorInfo2.activeColorMode == DISPLAYCONFIG_ADVANCED_COLOR_MODE_HDR);
+				assert(!succeeded || !enabled || !GetColorInfo2(hwnd, colorInfo2, fallbackMonitor) || colorInfo2.activeColorMode == DISPLAYCONFIG_ADVANCED_COLOR_MODE_HDR);
 	#endif
-				return enabled == (bool)setHDRState.enableHdr;
+				return succeeded;
 			}
 			return (colorInfo2.activeColorMode == DISPLAYCONFIG_ADVANCED_COLOR_MODE_HDR) == enabled;
 		}
 	#endif
 
+	#if ENABLE_LEGACY_ADVANCED_COLOR
 		// Note: older Windows versions didn't allow to distinguish between HDR and "Advanced Color",
 		// so it seems like this possibly has a small chance of breaking your display state until you manually toggle HDR again or change resolution etc.
 		// It's not clear if that was a separate issue or if it was caused by a mismatch between HDR and WCG modes.
 		DISPLAYCONFIG_GET_ADVANCED_COLOR_INFO colorInfo{};
-		if (GetColorInfo(hwnd, colorInfo))
+		if (GetColorInfo(hwnd, colorInfo, fallbackMonitor))
 		{
 			if (colorInfo.advancedColorSupported && (!enabled || !colorInfo.advancedColorForceDisabled) && static_cast<bool>(colorInfo.advancedColorEnabled) != enabled)
 			{
@@ -854,34 +630,36 @@ namespace Display
 				setAdvancedColorState.header.adapterId = colorInfo.header.adapterId;
 				setAdvancedColorState.header.id = colorInfo.header.id;
 				setAdvancedColorState.enableAdvancedColor = enabled;
-				enabled = (ERROR_SUCCESS == DisplayConfigSetDeviceInfo(&setAdvancedColorState.header));
-				return enabled == (bool)setAdvancedColorState.enableAdvancedColor;
+				bool succeeded = (ERROR_SUCCESS == DisplayConfigSetDeviceInfo(&setAdvancedColorState.header));
+				return succeeded;
 			}
 			return static_cast<bool>( colorInfo.advancedColorEnabled ) == enabled;
 		}
+	#endif
 
 		return false;
 	}
 
-   bool GetSDRWhiteLevel(HWND hwnd, float& nits)
-   {
-      DISPLAYCONFIG_PATH_INFO pathInfo{};
-      if (GetDisplayConfigPathInfo(hwnd, 0, pathInfo))
-      {
-         DISPLAYCONFIG_SDR_WHITE_LEVEL sdrWhite = {};
-         sdrWhite.header.type = DISPLAYCONFIG_DEVICE_INFO_GET_SDR_WHITE_LEVEL;
-         sdrWhite.header.size = sizeof(sdrWhite);
-			sdrWhite.header.adapterId = pathInfo.targetInfo.adapterId;
-			sdrWhite.header.id = pathInfo.targetInfo.id;
-			auto result = DisplayConfigGetDeviceInfo(&sdrWhite.header);
+	// TODO: update every frame
+	bool GetSDRWhiteLevel(HWND hwnd, float& nits, HMONITOR fallbackMonitor = 0)
+	{
+		DISPLAYCONFIG_PATH_INFO pathInfo{};
+		if (GetDisplayConfigPathInfo(hwnd, fallbackMonitor, pathInfo))
+		{
+			DISPLAYCONFIG_SDR_WHITE_LEVEL sdrWhiteLevel = {};
+			sdrWhiteLevel.header.type = DISPLAYCONFIG_DEVICE_INFO_GET_SDR_WHITE_LEVEL;
+			sdrWhiteLevel.header.size = sizeof(sdrWhiteLevel);
+			sdrWhiteLevel.header.adapterId = pathInfo.targetInfo.adapterId;
+			sdrWhiteLevel.header.id = pathInfo.targetInfo.id;
+			auto result = DisplayConfigGetDeviceInfo(&sdrWhiteLevel.header);
 			if (result == ERROR_SUCCESS)
 			{
-            nits = (float)sdrWhite.SDRWhiteLevel / 1000.0f * 80.0f;
+				nits = (float)sdrWhiteLevel.SDRWhiteLevel / 1000.0f * 80.0f;
 				return true;
 			}
-      }
-      return false;
-   }
+		}
+		return false;
+	}
 
 	#define DISPLAYCONFIG_DEVICE_INFO_SET_SDR_WHITE_LEVEL (DISPLAYCONFIG_DEVICE_INFO_TYPE)0xFFFFFFEE
 	typedef struct __declspec(align(4)) _DISPLAYCONFIG_SET_SDR_WHITE_LEVEL
@@ -892,10 +670,10 @@ namespace Display
 	} DISPLAYCONFIG_SET_SDR_WHITE_LEVEL;
 
 	// NOTE: Undocumented Windows feature. USE AT YOUR OWN RISK.
-	bool SetSDRWhiteLevel(HWND hwnd, float nits = srgb_white_level)
+	bool SetSDRWhiteLevel(HWND hwnd, float nits = srgb_white_level, HMONITOR fallbackMonitor = 0)
 	{
 		DISPLAYCONFIG_GET_ADVANCED_COLOR_INFO colorInfo{};
-		if (GetColorInfo(hwnd, colorInfo))
+		if (GetColorInfo(hwnd, colorInfo, fallbackMonitor))
 		{
 			DISPLAYCONFIG_SET_SDR_WHITE_LEVEL setSdrWhiteLevel{};
 			setSdrWhiteLevel.header.type = DISPLAYCONFIG_DEVICE_INFO_SET_SDR_WHITE_LEVEL;
@@ -909,5 +687,105 @@ namespace Display
 			return succeeded;
 		}
 		return false;
+	}
+
+	// Note: these are dynamically loaded as they are only available on recent Windows versions
+	using ColorProfileGetDisplayDefaultPtr = HRESULT(WINAPI*)(WCS_PROFILE_MANAGEMENT_SCOPE, LUID, UINT32, COLORPROFILETYPE, COLORPROFILESUBTYPE, LPWSTR*);
+	using ColorProfileGetDisplayUserScopePtr = HRESULT(WINAPI*)(LUID, UINT32, WCS_PROFILE_MANAGEMENT_SCOPE*);
+	static HMODULE GetMscmsModule()
+	{
+		// Do it all dynamically so we don't need to import "Mscms.lib"
+		static HMODULE MscmsModule = LoadLibraryExW(L"mscms.dll", nullptr, LOAD_LIBRARY_SEARCH_SYSTEM32);
+		return MscmsModule;
+	}
+	static ColorProfileGetDisplayDefaultPtr GetColorProfileGetDisplayDefault()
+	{
+		#pragma warning(suppress: 4191)
+		static ColorProfileGetDisplayDefaultPtr Function = GetMscmsModule() ? reinterpret_cast<ColorProfileGetDisplayDefaultPtr>(GetProcAddress(GetMscmsModule(), "ColorProfileGetDisplayDefault")) : nullptr;
+		return Function;
+	}
+	static ColorProfileGetDisplayUserScopePtr GetColorProfileGetDisplayUserScope()
+	{
+		#pragma warning(suppress: 4191)
+		static ColorProfileGetDisplayUserScopePtr Function = GetMscmsModule() ? reinterpret_cast<ColorProfileGetDisplayUserScopePtr>(GetProcAddress(GetMscmsModule(), "ColorProfileGetDisplayUserScope")) : nullptr;
+		return Function;
+	}
+
+	bool HasUserHDRColorProfile(HWND hwnd, HMONITOR fallbackMonitor = 0)
+	{
+		const ColorProfileGetDisplayDefaultPtr GetDisplayDefault = GetColorProfileGetDisplayDefault();
+		const ColorProfileGetDisplayUserScopePtr GetDisplayUserScope = GetColorProfileGetDisplayUserScope();
+		if (!GetDisplayDefault || !GetDisplayUserScope)
+			return false;
+
+		DISPLAYCONFIG_PATH_INFO pathInfo{};
+		if (!GetDisplayConfigPathInfo(hwnd, fallbackMonitor, pathInfo))
+			return false;
+
+		WCS_PROFILE_MANAGEMENT_SCOPE scope = WCS_PROFILE_MANAGEMENT_SCOPE_SYSTEM_WIDE;
+		if (FAILED(GetDisplayUserScope(pathInfo.targetInfo.adapterId, pathInfo.sourceInfo.id, &scope)) || scope != WCS_PROFILE_MANAGEMENT_SCOPE_CURRENT_USER)
+			return false;
+
+		PWSTR profileName = nullptr;
+		const HRESULT result = GetDisplayDefault(WCS_PROFILE_MANAGEMENT_SCOPE_CURRENT_USER, pathInfo.targetInfo.adapterId, pathInfo.sourceInfo.id, CPT_ICC, CPST_EXTENDED_DISPLAY_COLOR_MODE, &profileName);
+		const bool hasProfile = SUCCEEDED(result) && profileName && profileName[0] != L'\0';
+
+		if (profileName)
+			LocalFree(profileName);
+
+		return hasProfile;
+	}
+
+	// Returns false if failed or if HDR is not engaged (but the white luminance can still be used).
+	bool GetHDRMaxLuminance(IDXGISwapChain* swapChain, float& maxLuminance, float defaultMaxLuminance = 80.f /*Windows sRGB standard luminance*/)
+	{
+		maxLuminance = defaultMaxLuminance;
+
+		com_ptr<IDXGIOutput> output;
+		if (FAILED(swapChain->GetContainingOutput(&output)))
+		{
+			return false;
+		}
+
+		com_ptr<IDXGIOutput6> output6;
+		if (FAILED(output->QueryInterface(&output6)))
+		{
+			return false;
+		}
+
+		DXGI_OUTPUT_DESC1 outputDesc1;
+		if (FAILED(output6->GetDesc1(&outputDesc1)))
+		{
+			return false;
+		}
+
+		// Note: this might end up being outdated if a new display is added/removed,
+		// or if HDR is toggled on them after swapchain creation (though it seems to be consistent between SDR and HDR).
+		maxLuminance = outputDesc1.MaxLuminance;
+
+#if ENABLE_NVAPI
+		// Override the peak brightness from the Windows calibration with the HDR10+ GAMING one, if supported (we automatically engage it when enabling HDR).
+		// The DXGI display metadata isn't HDR10+ aware, as HDR10+ is vendor specific.
+		// The HDR10+ peak brightness is limited to one of 16 values, however the HDR10+ GAMING mode might assume a signal with a peak matching it, so using it might be safer.
+		// If the user has an HDR color profile (e.g. from the Windows HDR Calibration app), we follow that instead, as they might prefer a dimmer presentation.
+		// Note: we check "NVAPI::hasInit" instead of calling "NVAPI::Init()" again, to avoid spamming init failures on non Nvidia GPUs.
+		if (NVAPI::hasInit && !HasUserHDRColorProfile(0, outputDesc1.Monitor))
+		{
+			const float hdr10PlusPeakBrightness = NVAPI::GetHDR10PlusDisplayPeakBrightness(0, outputDesc1.Monitor);
+			if (hdr10PlusPeakBrightness > 0.f)
+			{
+				maxLuminance = hdr10PlusPeakBrightness;
+			}
+		}
+#endif
+
+		// HDR is not supported (this only works if HDR is enaged on the monitor that currently contains the swapchain)
+		if (outputDesc1.ColorSpace != DXGI_COLOR_SPACE_RGB_FULL_G2084_NONE_P2020
+			&& outputDesc1.ColorSpace != DXGI_COLOR_SPACE_RGB_FULL_G10_NONE_P709)
+		{
+			return false;
+		}
+
+		return true;
 	}
 }

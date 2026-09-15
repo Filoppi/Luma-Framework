@@ -4,7 +4,6 @@
 // #define ENABLE_FIDELITY_SK 1
 
 #define DISABLE_AUTO_DEBUGGER 1
-// #define ENABLE_NVAPI 1
 // #define DISABLE_SWAPCHAIN_FLIP_MODEL 1
 
 #include "..\..\Core\core.hpp"

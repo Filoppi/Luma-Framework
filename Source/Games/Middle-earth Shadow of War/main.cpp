@@ -108,7 +108,7 @@ namespace DisplayMode
          if (use_os_reference_white_level)
          {
             float hdr_paper_white = 80.f;
-            if (Display::GetSDRWhiteLevel(0, hdr_paper_white))
+            if (Display::GetSDRWhiteLevel(game_window, hdr_paper_white))
             {
                cb_luma_global_settings.ScenePaperWhite = hdr_paper_white;
                cb_luma_global_settings.UIPaperWhite = hdr_paper_white;
@@ -150,7 +150,8 @@ namespace DisplayMode
          if (!has_file) MessageBoxA(game_window, "For proper HDR upgrades, we need the game to launch in SDR mode.\n\nLuma will try to disable Windows HDR and relaunch.\nThis will become automated if successful.", "Relaunch Required", MB_OK | MB_ICONINFORMATION);
          
          // disable HDR
-         if (Display::SetHDREnabled(game_window, false))
+         // TODO: hook the HDR compatibility funcs to make the game think HDR isn't supported
+         if (!Display::SetHDREnabled(game_window, false))
          {
             MessageBoxA(game_window, "Failed to disable Windows HDR.\n\nPlease disable it manually and relaunch the game.", "HDR Disable Failed", MB_OK | MB_ICONERROR);
             std::exit(1);
