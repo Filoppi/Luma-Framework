@@ -1,5 +1,5 @@
-// ME2 stage-1 tonemap: color-grade LUT only.
+// ME2LE stage-1 tonemap: LUT grade; no motion blur, film grain, or filmic LUT.
 #define TM_HAS_MOTIONBLUR 0
 #define TM_HAS_GRAIN      0
 #define TM_HAS_FILMIC     0
-#include "Tonemap_ME12_LUT_Body.hlsl"
+#include "Tonemap_ME12LE_LUT_Body.hlsl"

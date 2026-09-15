@@ -1,7 +1,7 @@
 // SMAA Ultra replacement for the trilogy-wide MiniEngine FXAA chain.
 // Reference: https://github.com/iryoku/smaa
-// One gamma-encoded post snapshot feeds both color-edge detection and neighborhood blending; stage 2 decodes the
-// result later, so this path needs neither a linearization shader nor a second color copy.
+// Color-edge detection reads the gamma-encoded post snapshot; neighborhood blending reads its linear decode
+// (Luma_MELE_SMAALinearize) and re-encodes, so stage 2 still decodes a gamma result.
 
 #include "../Includes/Common.hlsl"
 
@@ -83,6 +83,8 @@ void smaa_neighborhood_blending_vs(uint id : SV_VertexID, out float4 position : 
 
 float4 smaa_neighborhood_blending_ps(float4 position : SV_Position, float2 texcoord : TEXCOORD0, float4 offset : TEXCOORD1) : SV_Target
 {
-   // tex0 = gamma post color; tex1 = blend weights.
-   return SMAANeighborhoodBlendingPS(texcoord, offset, tex0, tex1);
+   // tex0 = linear post color; tex1 = blend weights. Re-encode to the buffer's gamma.
+   float4 color = SMAANeighborhoodBlendingPS(texcoord, offset, tex0, tex1);
+   color.rgb = linear_to_gamma(color.rgb, GCT_MIRROR);
+   return color;
 }

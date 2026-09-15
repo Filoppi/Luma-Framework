@@ -147,9 +147,9 @@
       </LinkLibraryDependencies>
     </ProjectReference>
     <PostBuildEvent>
-      <Command>IF DEFINED LUMA_ME1_BIN_PATH ( xcopy /Y "$(TargetDir)*$(SolutionName)-$(ProjectName).addon" "%LUMA_ME1_BIN_PATH%" || exit /B 0 )
-IF DEFINED LUMA_ME2_BIN_PATH ( xcopy /Y "$(TargetDir)*$(SolutionName)-$(ProjectName).addon" "%LUMA_ME2_BIN_PATH%" || exit /B 0 )
-IF DEFINED LUMA_ME3_BIN_PATH ( xcopy /Y "$(TargetDir)*$(SolutionName)-$(ProjectName).addon" "%LUMA_ME3_BIN_PATH%" || exit /B 0 )</Command>
+      <Command>IF DEFINED LUMA_ME1LE_BIN_PATH ( xcopy /Y "$(TargetDir)*$(SolutionName)-$(ProjectName).addon" "%LUMA_ME1LE_BIN_PATH%" || exit /B 0 )
+IF DEFINED LUMA_ME2LE_BIN_PATH ( xcopy /Y "$(TargetDir)*$(SolutionName)-$(ProjectName).addon" "%LUMA_ME2LE_BIN_PATH%" || exit /B 0 )
+IF DEFINED LUMA_ME3LE_BIN_PATH ( xcopy /Y "$(TargetDir)*$(SolutionName)-$(ProjectName).addon" "%LUMA_ME3LE_BIN_PATH%" || exit /B 0 )</Command>
     </PostBuildEvent>
   </ItemDefinitionGroup>
   <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Publishing-Release|x64'">
@@ -197,9 +197,9 @@ IF DEFINED LUMA_ME3_BIN_PATH ( xcopy /Y "$(TargetDir)*$(SolutionName)-$(ProjectN
       </LinkLibraryDependencies>
     </ProjectReference>
     <PostBuildEvent>
-      <Command>IF DEFINED LUMA_ME1_BIN_PATH ( xcopy /Y "$(TargetDir)*$(SolutionName)-$(ProjectName).addon" "%LUMA_ME1_BIN_PATH%" || exit /B 0 )
-IF DEFINED LUMA_ME2_BIN_PATH ( xcopy /Y "$(TargetDir)*$(SolutionName)-$(ProjectName).addon" "%LUMA_ME2_BIN_PATH%" || exit /B 0 )
-IF DEFINED LUMA_ME3_BIN_PATH ( xcopy /Y "$(TargetDir)*$(SolutionName)-$(ProjectName).addon" "%LUMA_ME3_BIN_PATH%" || exit /B 0 )</Command>
+      <Command>IF DEFINED LUMA_ME1LE_BIN_PATH ( xcopy /Y "$(TargetDir)*$(SolutionName)-$(ProjectName).addon" "%LUMA_ME1LE_BIN_PATH%" || exit /B 0 )
+IF DEFINED LUMA_ME2LE_BIN_PATH ( xcopy /Y "$(TargetDir)*$(SolutionName)-$(ProjectName).addon" "%LUMA_ME2LE_BIN_PATH%" || exit /B 0 )
+IF DEFINED LUMA_ME3LE_BIN_PATH ( xcopy /Y "$(TargetDir)*$(SolutionName)-$(ProjectName).addon" "%LUMA_ME3LE_BIN_PATH%" || exit /B 0 )</Command>
     </PostBuildEvent>
   </ItemDefinitionGroup>
   <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Test-Release|x64'">
@@ -247,9 +247,9 @@ IF DEFINED LUMA_ME3_BIN_PATH ( xcopy /Y "$(TargetDir)*$(SolutionName)-$(ProjectN
       </LinkLibraryDependencies>
     </ProjectReference>
     <PostBuildEvent>
-      <Command>IF DEFINED LUMA_ME1_BIN_PATH ( xcopy /Y "$(TargetDir)*$(SolutionName)-$(ProjectName).addon" "%LUMA_ME1_BIN_PATH%" || exit /B 0 )
-IF DEFINED LUMA_ME2_BIN_PATH ( xcopy /Y "$(TargetDir)*$(SolutionName)-$(ProjectName).addon" "%LUMA_ME2_BIN_PATH%" || exit /B 0 )
-IF DEFINED LUMA_ME3_BIN_PATH ( xcopy /Y "$(TargetDir)*$(SolutionName)-$(ProjectName).addon" "%LUMA_ME3_BIN_PATH%" || exit /B 0 )</Command>
+      <Command>IF DEFINED LUMA_ME1LE_BIN_PATH ( xcopy /Y "$(TargetDir)*$(SolutionName)-$(ProjectName).addon" "%LUMA_ME1LE_BIN_PATH%" || exit /B 0 )
+IF DEFINED LUMA_ME2LE_BIN_PATH ( xcopy /Y "$(TargetDir)*$(SolutionName)-$(ProjectName).addon" "%LUMA_ME2LE_BIN_PATH%" || exit /B 0 )
+IF DEFINED LUMA_ME3LE_BIN_PATH ( xcopy /Y "$(TargetDir)*$(SolutionName)-$(ProjectName).addon" "%LUMA_ME3LE_BIN_PATH%" || exit /B 0 )</Command>
     </PostBuildEvent>
   </ItemDefinitionGroup>
   <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Development-Release|x64'">
@@ -297,9 +297,9 @@ IF DEFINED LUMA_ME3_BIN_PATH ( xcopy /Y "$(TargetDir)*$(SolutionName)-$(ProjectN
       </LinkLibraryDependencies>
     </ProjectReference>
     <PostBuildEvent>
-      <Command>IF DEFINED LUMA_ME1_BIN_PATH ( xcopy /Y "$(TargetDir)*$(SolutionName)-$(ProjectName).addon" "%LUMA_ME1_BIN_PATH%" || exit /B 0 )
-IF DEFINED LUMA_ME2_BIN_PATH ( xcopy /Y "$(TargetDir)*$(SolutionName)-$(ProjectName).addon" "%LUMA_ME2_BIN_PATH%" || exit /B 0 )
-IF DEFINED LUMA_ME3_BIN_PATH ( xcopy /Y "$(TargetDir)*$(SolutionName)-$(ProjectName).addon" "%LUMA_ME3_BIN_PATH%" || exit /B 0 )</Command>
+      <Command>IF DEFINED LUMA_ME1LE_BIN_PATH ( xcopy /Y "$(TargetDir)*$(SolutionName)-$(ProjectName).addon" "%LUMA_ME1LE_BIN_PATH%" || exit /B 0 )
+IF DEFINED LUMA_ME2LE_BIN_PATH ( xcopy /Y "$(TargetDir)*$(SolutionName)-$(ProjectName).addon" "%LUMA_ME2LE_BIN_PATH%" || exit /B 0 )
+IF DEFINED LUMA_ME3LE_BIN_PATH ( xcopy /Y "$(TargetDir)*$(SolutionName)-$(ProjectName).addon" "%LUMA_ME3LE_BIN_PATH%" || exit /B 0 )</Command>
     </PostBuildEvent>
   </ItemDefinitionGroup>
   <ItemGroup>

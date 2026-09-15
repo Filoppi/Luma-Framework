@@ -76,7 +76,7 @@ void main(
 #if ENABLE_VIDEO_AUTO_HDR
       [branch] if (auto_hdr)
       {
-         // Linear 1 lands at UI Paper White after relative transport and final composition.
+         // Linear 1 lands at UI Paper White once the transport ratio and Game Paper White are applied.
          const float peakNits = lerp(sRGB_WhiteLevelNits, VIDEO_AUTO_HDR_PEAK_NITS, saturate(LumaSettings.GameSettings.VideoAutoHDRBoost));
          lin = PumboAutoHDR(lin, peakNits, LumaSettings.UIPaperWhiteNits);
       }

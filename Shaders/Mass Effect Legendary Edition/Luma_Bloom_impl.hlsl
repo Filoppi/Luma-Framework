@@ -4,7 +4,7 @@
 // effective intensity and the prefilter reads threshold from GameSettings.BloomThreshold. Note the native pass
 // weights every tap and only then accumulates, while the shared prefilter blurs first and calls this on the sum.
 
-// DrawBloom binds only b11; main.cpp explicitly preserves live LumaSettings in b13 for the prefilter.
+// DrawBloom binds only b11; main.cpp binds live LumaSettings at b13 before calling it, for the prefilter.
 #include "Includes/Common.hlsl"
 
 // Vanilla bloom was bounded to [0,1] by its R16G16B16A16_UNORM target alone; the bright pass clamps nothing.
@@ -13,7 +13,7 @@
 static const float kMELE_BloomCap = 4.0;
 
 // Native max-channel soft knee; the tonemap applies BloomTint downstream.
-float3 me1_bloom_threshold(float3 color)
+float3 mele_bloom_threshold(float3 color)
 {
    // Restores the floor half of that [0,1] bound: negative values would blur in and be subtracted by the
    // composite, reading as a hue shift rather than as darkening. Non-finite ones poison a whole Gaussian kernel.
@@ -29,7 +29,7 @@ float3 me1_bloom_threshold(float3 color)
    return color * (min(mch, ceiling) / max(mch, 1e-6));
 }
 
-#define LUMA_BLOOM_THRESHOLD_FUNCTION(color) me1_bloom_threshold(color)
+#define LUMA_BLOOM_THRESHOLD_FUNCTION(color) mele_bloom_threshold(color)
 #define LUMA_BLOOM_SCALE                     0.25                  // 4 bilinear taps * 0.0625 = 0.25 of their mean.
 #define LUMA_BLOOM_TINT                      float3(1.0, 1.0, 1.0) // Tonemap applies BloomTint downstream.
 
