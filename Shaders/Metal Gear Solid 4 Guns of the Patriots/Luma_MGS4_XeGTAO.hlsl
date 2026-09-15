@@ -385,8 +385,6 @@ void XeGTAO_MainPass(uint2 pixCoord, float2 localNoise, float3 viewspaceNormal, 
 
         float screenspaceRadius = effectRadius * rcp(max(abs(pixelDirRBViewspaceSizeAtCenterZ.x), 1e-6));
 
-
-
         // this is the min distance to start sampling from to avoid sampling from the center pixel (no useful data obtained from sampling center pixel)
         const float minS = pixelTooCloseThreshold * rcp(screenspaceRadius);
 
@@ -779,11 +777,12 @@ void denoise_pass_cs(uint2 dtid : SV_DispatchThreadID)
 Texture2D<float> tex0 : register(t0); // Final AO
 Texture2D<float> tex1 : register(t1); // Linear depth
 
-// TODO: read back the scene instead of doing this...? We have the pre decal and hair opaque scene ready for binding for example
+// TODO: read back the scene instead of doing this...? We have the pre decal and hair opaque scene ready for binding for example. Or just read it back, undo fog, do AO, re-apply fog.
 #ifndef MGS4_GTAO_FOG_BASE_COLOR
-#define MGS4_GTAO_FOG_BASE_COLOR 0.333
+#define MGS4_GTAO_FOG_BASE_COLOR (1.0 / 3.0)
 #endif
 
+// Pointless
 #ifndef MGS4_GTAO_FOG_MULTIPLIER
 #define MGS4_GTAO_FOG_MULTIPLIER 1.0
 #endif
@@ -822,7 +821,7 @@ float4 apply_ps(float4 position : SV_Position) : SV_Target0
     if (fogAmount <= 0.0)
         return float4(visibility.xxx, 1.0);
 
-    // Approximate the unfogged surface as a neutral 0.333 color.
+    // Approximate the unfogged surface as a neutral guessed color.
     float surfaceContribution = max(MGS4_GTAO_FOG_BASE_COLOR, 1e-6) * (1.0 - fogAmount);
     float3 fogContribution = max(GamePSCB0[11].rgb, 0.0) * fogAmount;
     float3 estimatedColor = surfaceContribution + fogContribution;

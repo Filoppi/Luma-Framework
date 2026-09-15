@@ -1078,6 +1078,7 @@ BOOL APIENTRY DllMain(HMODULE hModule, DWORD ul_reason_for_call, LPVOID lpReserv
 #if DEVELOPMENT
       forced_shader_names.emplace(std::stoul("83AC2129", nullptr, 16), "Shadow Map");
       forced_shader_names.emplace(std::stoul("5A82035B", nullptr, 16), "Sky");
+      forced_shader_names.emplace(std::stoul("72D2BE50", nullptr, 16), "Sky");
       forced_shader_names.emplace(std::stoul("F3EC0381", nullptr, 16), "Sky"); // There's probably many more
       forced_shader_names.emplace(std::stoul("8EBC590F", nullptr, 16), "Wind");
       forced_shader_names.emplace(std::stoul("38875909", nullptr, 16), "Wind");

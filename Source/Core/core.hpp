@@ -5243,6 +5243,7 @@ namespace
    {
       if (!device_data.has_drawn_sr)
          return false;
+      // TODO: cache this
       for (const auto& entry : auto_texture_format_upgrade_shader_hashes)
       {
          if (entry.second.scale)
@@ -5377,8 +5378,7 @@ namespace
                   rtv_texture->GetDesc(&rtv_desc);
                   const float aspect = (float)rtv_desc.Width / (float)rtv_desc.Height;
                   const float out_aspect = device_data.output_resolution.x / device_data.output_resolution.y;
-                  render_scale_active = (rtv_desc.Width < device_data.output_resolution.x || rtv_desc.Height < device_data.output_resolution.y)
-                     && std::abs(aspect / out_aspect - 1.0f) < 0.01f;
+                  render_scale_active = (rtv_desc.Width < device_data.output_resolution.x || rtv_desc.Height < device_data.output_resolution.y) && std::abs(aspect / out_aspect - 1.0f) < 0.01f;
                }
                else
                   render_scale_active = false;
@@ -5391,6 +5391,7 @@ namespace
 
          game->UpdateLumaInstanceDataCB(cb_luma_instance_data, cmd_list_data, device_data);
 
+         // TODO: add a faster comparison mechanism through a dirt flag, this is slow to be called every draw call
          if (force_update || cmd_list_data.force_cb_luma_instance_data_dirty || memcmp(&cmd_list_data.cb_luma_instance_data, &cb_luma_instance_data, sizeof(cb_luma_instance_data)) != 0)
          {
             cmd_list_data.cb_luma_instance_data = cb_luma_instance_data;

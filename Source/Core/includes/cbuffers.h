@@ -88,8 +88,10 @@ namespace CB
 
       float2 RenderResolutionScale;
       float2 PreviousRenderResolutionScale;
-      
+
       uint RenderScaleActive;
+
+      // Make sure the game data below is aligned to 4x 32bit variables
       float3 Padding1;
 
       LumaGameData GameData; // Custom games data, with a per game struct

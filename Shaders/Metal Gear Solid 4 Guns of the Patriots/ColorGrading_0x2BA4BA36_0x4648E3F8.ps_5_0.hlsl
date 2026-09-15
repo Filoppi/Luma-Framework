@@ -232,11 +232,6 @@ void main(
     forceVanillaSDR = true;
 #endif
 
-    // -------------------------------------------------------------------------
-    // Film grain
-    // -------------------------------------------------------------------------
-
-#if HAS_COLOR_PALETTE && ENABLE_FILM_GRAIN
     float2 nativeAspectRatios = float2(16.0, 9.0);
     float nativeAspectRatio = nativeAspectRatios.x / nativeAspectRatios.y;
 #if 1
@@ -255,6 +250,11 @@ void main(
     float2 currentAspectRatios = nativeAspectRatios;
 #endif
 
+    // -------------------------------------------------------------------------
+    // Film grain
+    // -------------------------------------------------------------------------
+
+#if HAS_COLOR_PALETTE && ENABLE_FILM_GRAIN
     float2 lutIndexUV = position.xy * (currentAspectRatios / renderSize);
     lutIndexUV = lutIndexUV * 0.5 + lutIndexOffset;
 
@@ -522,6 +522,9 @@ void main(
     // -------------------------------------------------------------------------
     // Radial vignette
     // -------------------------------------------------------------------------
+
+    // Luma: compensate for the vignette edges looking too stretched in UW, this makes them take a more natural shape
+    vignetteCoord.x = pow(abs(vignetteCoord.x), relativeAspectRatio) * Sign_Fast(vignetteCoord.x);
 
     float radius = length(vignetteCoord.xy); // UW friendly (stretched vignette)
     float vignette = saturate(radius * vignetteScale + vignetteBias);

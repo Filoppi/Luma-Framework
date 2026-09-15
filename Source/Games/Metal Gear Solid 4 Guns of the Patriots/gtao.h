@@ -271,7 +271,7 @@ namespace MGS4GTAO
       scene_srv->GetResource(scene_resource.put());
       data.scene_resource = scene_resource;
       data.scene_frame = frame;
-      // Clear this flag so we search for it again in the next frame, or re-use the old alternatively
+      // Clear these flags so we search for them again in the next frame, or re-use the old alternatively
       data.found_proj_mat_constant_buffer = false;
       data.found_fog_constant_buffer = false;
       data.composed_scene_rtv.reset();
@@ -300,7 +300,7 @@ namespace MGS4GTAO
       const uint32_t frame = cb_luma_global_settings.FrameIndex;
       if (context->GetType() != D3D11_DEVICE_CONTEXT_IMMEDIATE || data.scene_frame != frame || data.last_drawn_frame == frame || !data.composed_scene_rtv)
          return false;
-      // Only try on the first one, the following ones aren't directly after the composition
+      // Only try on the first one after the translucency composition, the following ones aren't directly after the composition
       data.last_drawn_frame = frame;
 
       // The camera isn't known until the game's constant buffer has been found once
@@ -338,7 +338,7 @@ namespace MGS4GTAO
       data.gtao_constants.viewport_size[1] = resources.height;
       data.gtao_constants.viewport_pixel_size[0] = 1.f / float(resources.width);
       data.gtao_constants.viewport_pixel_size[1] = 1.f / float(resources.height);
-      data.gtao_constants.found_fog_cb = data.fog_constant_buffer.get() ? 1 : 0;
+      data.gtao_constants.found_fog_cb = data.fog_constant_buffer.get() ? 1 : 0; // We keep the old one in case we weren't able to find a new
       D3D11_MAPPED_SUBRESOURCE mapped;
       if (FAILED(context->Map(data.gtao_constant_buffer.get(), 0, D3D11_MAP_WRITE_DISCARD, 0, &mapped)))
          return false;
@@ -351,12 +351,12 @@ namespace MGS4GTAO
       graphics_state.Cache(context, device_data.uav_max_count);
       compute_state.Cache(context, device_data.uav_max_count);
 
-      context->OMSetRenderTargets(0, nullptr, nullptr);
-      ID3D11Buffer* const fog_cb = data.fog_constant_buffer.get();
-      context->CSSetConstantBuffers(fog_constant_buffer_slot, 1, &fog_cb); // TODO: not needed here?
-      ID3D11Buffer* const camera_cb = data.proj_mat_constant_buffer.get();
-      context->CSSetConstantBuffers(camera_constant_buffer_slot, 1, &camera_cb);
       ID3D11Buffer* const gtao_cb = data.gtao_constant_buffer.get();
+      ID3D11Buffer* const camera_cb = data.proj_mat_constant_buffer.get();
+      ID3D11Buffer* const fog_cb = data.fog_constant_buffer.get();
+
+      context->OMSetRenderTargets(0, nullptr, nullptr);
+      context->CSSetConstantBuffers(camera_constant_buffer_slot, 1, &camera_cb);
       context->CSSetConstantBuffers(gtao_constant_buffer_slot, 1, &gtao_cb);
       ID3D11SamplerState* sampler = device_data.sampler_state_point.get();
       context->CSSetSamplers(0, 1, &sampler);
@@ -403,7 +403,6 @@ namespace MGS4GTAO
       context->PSSetShaderResources(1, 1, &linear_depth_srv);
       // Reuse the opaque VS fog parameters and the depth scale in the final AO application.
       context->PSSetConstantBuffers(fog_constant_buffer_slot, 1, &fog_cb);
-      context->PSSetConstantBuffers(camera_constant_buffer_slot, 1, &camera_cb);
       context->PSSetConstantBuffers(gtao_constant_buffer_slot, 1, &gtao_cb);
       DrawCustomPixelShader(context, device_data.default_depth_stencil_state.get(), data.multiply_rgb_blend_state.get(), nullptr,
          copy_vs->second.get(), apply_ps->second.get(), resources.final_ao.srv.get(), data.composed_scene_rtv.get(), resources.width, resources.height);
