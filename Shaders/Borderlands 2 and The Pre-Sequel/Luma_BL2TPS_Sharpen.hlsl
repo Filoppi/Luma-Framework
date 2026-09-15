@@ -1,6 +1,6 @@
-// RCAS sharpening for the SMAA output: runs after the neighborhood blend on the gamma LDR, before the copy back into
-// the LDR buffer (Display Composition does paper-white + scRGB downstream). paperWhite = 1.0; the sharpness slider is
-// the knob, RCAS_LIMIT bounds the lobe so bright pixels don't over-sharpen.
+// RCAS sharpening for the SMAA output: runs after the neighborhood blend on the gamma LDR and writes the LDR RTV
+// (Display Composition does paper-white + scRGB downstream). paperWhite = 1.0; the sharpness slider is the knob,
+// RCAS_LIMIT bounds the lobe so bright pixels don't over-sharpen.
 
 #include "../Includes/RCAS.hlsl"
 

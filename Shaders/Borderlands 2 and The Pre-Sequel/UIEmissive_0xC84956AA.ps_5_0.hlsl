@@ -2,7 +2,7 @@
 // o0 = min(color, 4) * vertexColor.w + vertexColor.xyz can exceed 1.0; vanilla's 8-bit UNORM backbuffer clamped that
 // for free, Luma's fp16 LDR does not, and since it draws POST-tonemap the overshoot bypasses DICE and the paper-white
 // scale blows the icon to ~10000 nits. Fix: re-add the saturate. Body verbatim from the dgVoodoo ps_5_0 disasm; the
-// cb3 and/or pairs are dgVoodoo's texture-format bit emulation (mask+set), kept exactly via asint.
+// cb3 and/or pairs are dgVoodoo's texture-format bit emulation (mask+set), kept exactly via asuint/asfloat.
 
 Texture2D<float4> t0 : register(t0);
 Texture2D<float4> t1 : register(t1);

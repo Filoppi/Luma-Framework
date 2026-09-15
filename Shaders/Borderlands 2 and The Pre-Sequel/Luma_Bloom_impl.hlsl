@@ -9,14 +9,17 @@
 // Karis firefly weighting runs before this (DrawKarisAverage); no TAA to hide sparkle.
 
 // clang-format off
-#include "Includes/Common.hlsl"   // game-local: LumaGameSettings - keep FIRST (see the tonemap's include note)
-#include "../Includes/Color.hlsl" // GetLuminance, gamma helpers used by Bloom.hlsl
+#include "Includes/Common.hlsl" // game-local: LumaGameSettings - keep FIRST (see the tonemap's include note).
+// It reaches the shared Common, and Color.hlsl with it, so Bloom.hlsl below needs no separate include.
 // clang-format on
 
 float3 bl2_bloom_threshold(float3 color)
 {
    // Non-finite or negative taps would poison a whole Gaussian kernel and read as a hue shift downstream.
-   color = (IsAnyNaN_Strict(color) || any(isinf(color))) ? 0.0 : max(color, 0.0);
+   // The sign of a finite tap is free here because it is clamped either way, so one ordered range test states
+   // the whole condition: a finite tap of any sign passes, both infinities exceed FLT_MAX, and NaN fails the
+   // comparison outright. Same set as the NaN bit test plus isinf, fewer instructions.
+   color = all(abs(color) <= FLT_MAX) ? max(color, 0.0) : 0.0;
    const float mch = max3(color);
    // Native shape: the WHOLE sample is kept once it passes, over a ramp of 2.0 above the threshold. Raw scene, no rescale.
    const float weight = saturate((mch - LumaSettings.GameSettings.BloomThreshold) * 0.5);
