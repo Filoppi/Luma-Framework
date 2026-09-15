@@ -29,6 +29,10 @@
     <ProjectName>Mass Effect Legendary Edition</ProjectName>
     <VCProjectUpgraderObjectName>NoUpgrade</VCProjectUpgraderObjectName>
   </PropertyGroup>
+  <PropertyGroup>
+    <!-- Packaging defaults to off; enable via Project Properties -> Luma Properties -> Package after build. -->
+    <LumaPackage>false</LumaPackage>
+  </PropertyGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.Default.props" />
   <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Development-Debug|x64'" Label="Configuration">
     <ConfigurationType>DynamicLibrary</ConfigurationType>
@@ -53,6 +57,13 @@
     <PlatformToolset>v145</PlatformToolset>
   </PropertyGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.props" />
+  <ItemGroup>
+    <!-- Luma per-game feature toggles shown in Project Properties -> Configuration
+         Properties -> Luma Properties (schema: ..\Luma.Properties.xml). -->
+    <PropertyPageSchema Include="$(MSBuildThisFileDirectory)..\Luma.Properties.xml">
+      <Context>Project</Context>
+    </PropertyPageSchema>
+  </ItemGroup>
   <ImportGroup Label="ExtensionSettings">
   </ImportGroup>
   <ImportGroup Label="PropertySheets">
@@ -306,6 +317,8 @@ IF DEFINED LUMA_ME3LE_BIN_PATH ( xcopy /Y "$(TargetDir)*$(SolutionName)-$(Projec
     <ClCompile Include="..\..\Core\unity_build.cpp" />
     <ClCompile Include="main.cpp" />
   </ItemGroup>
+  <!-- Apply feature settings after the final per-configuration properties. -->
+  <Import Project="..\Luma.DXP.props" Condition="Exists('..\Luma.DXP.props')" />
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
   <ImportGroup Label="ExtensionTargets">
   </ImportGroup>
