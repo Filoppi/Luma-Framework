@@ -4,6 +4,10 @@
 #define ENABLE_IMPROVED_BLUR 1
 #endif
 
+#ifndef ENABLE_BLOOM
+#define ENABLE_BLOOM 1
+#endif
+
 Texture2D<float4> t6 : register(t6);
 Texture2D<float4> t5 : register(t5);
 Texture2D<float4> t4 : register(t4);
@@ -28,6 +32,11 @@ void main(
   float2 v2 : TEXCOORD0,
   out float4 o0 : SV_TARGET0)
 {
+#if !ENABLE_BLOOM
+  o0 = float4(0.0, 0.0, 0.0, 1.0);
+  return;
+#endif
+
   float4 r0,r1;
   r0.xyzw = t1.Sample(s1_s, v2.xy).xyzw;
   r0.xyz = r0.xyz / r0.www;

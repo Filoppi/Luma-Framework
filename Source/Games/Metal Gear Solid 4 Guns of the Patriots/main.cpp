@@ -23,7 +23,7 @@ namespace
 
    // User settings:
    bool enable_smaa = true;
-   bool enable_gtao = true;
+   bool enable_gtao = false; // TODO1: disable by default?
    uint fix_bloom_scaling_type = 1;
    uint shadow_maps_resolution_multiplier = 2;
 
@@ -31,7 +31,7 @@ namespace
 
    // This cannot be disabled. We have a UAV fallback and the whole UI geometry is apparently 2D with no overlapping layers,
    // however UAVs don't guarantee any sync between draw calls, so they will flicker.
-   constexpr bool use_rov_for_ui = false; // TODO1: fix UAV tooltips
+   constexpr bool allow_rov_for_ui = false; // TODO1: fix UAV tooltips
 }
 
 struct GameDeviceDataMetalGearSolid4 final : public GameDeviceData
@@ -47,7 +47,7 @@ struct GameDeviceDataMetalGearSolid4 final : public GameDeviceData
    CustomPixelShaderPassData correct_subtractive_blends_data;
 
    // Assume it's supported to begin with if we use it. Matches the "ENABLE_ROV_UI" shader define.
-   bool rov_supported = use_rov_for_ui;
+   bool rov_supported = allow_rov_for_ui;
 
    // The Rasterizer Ordered View (UAV) the UI shaders compose themselves through, and the texture it was created for.
    // Keeping a reference on that texture guarantees its pointer can't be recycled by another one while we cache a view of it.
@@ -102,10 +102,11 @@ public:
          {"ENABLE_FILM_GRAIN", '1', true, false, "Allows disabling the game's film grain effect (it's not always present)", 1},
          {"ENABLE_VIGNETTE", '1', true, false, "Allows disabling the game's vignette effect (not always used) (best left at default)", 1},
          {"ENABLE_MOTION_BLUR", '1', true, false, "Allows disabling the game's additive motion blur effect", 1},
+         {"ENABLE_BLOOM", '1', true, false, "Allows disabling the game's bloom (best left at default)", 1},
          {"ENABLE_HDR_BOOST", '1', true, false, "Enable a faint HDR boosting effect (applies to videos too)", 1},
          {"ENABLE_VANILLA_UI", '0', true, false, "Clamp the UI to SDR to preserve the original look (note: this can be slow)", 1},
          {"ENABLE_UI_TONEMAP", '0', true, false, "Avoid the UI going beyond the peak brightness, generally unnecessary and slow", 1},
-         {"ENABLE_ROV_UI", use_rov_for_ui ? '1' : '0' /*GameDeviceDataMetalGearSolid4::rov_supported*/, true, true, "Automatically set if ROV is supported by the GPU (and enabled in the mod). Allows for faster+safe HDR UI blends", 1},
+         {"ENABLE_ROV_UI", allow_rov_for_ui ? '1' : '0' /*GameDeviceDataMetalGearSolid4::rov_supported*/, true, true, "Automatically set if ROV is supported by the GPU (and enabled in the mod). Allows for faster+safe HDR UI blends", 1},
       };
       shader_defines_data.append_range(game_shader_defines_data);
 
@@ -162,7 +163,7 @@ public:
       D3D11_FEATURE_DATA_D3D11_OPTIONS2 options_2 = {};
       HRESULT hr = native_device->CheckFeatureSupport(D3D11_FEATURE_D3D11_OPTIONS2, &options_2,  sizeof(options_2));
       // Pretend it's not supported if it's globally disabled
-      if (!use_rov_for_ui)
+      if (!allow_rov_for_ui)
          options_2.ROVsSupported = FALSE;
       // The GPU and driver support Rasterizer Ordered Views (it might actually always be if the game booted, but we don't know).
       if (SUCCEEDED(hr) && game_device_data.rov_supported != (bool)options_2.ROVsSupported)
@@ -288,7 +289,14 @@ public:
       ImGui::EndDisabled();
 
       if (ImGui::Checkbox("Enable GTAO", &enable_gtao))
+      {
+         // Reset all data
+         if (!enable_gtao)
+         {
+            MGS4GTAO::Clear(game_device_data.gtao_data);
+         }
          reshade::set_config_value(runtime, NAME, "EnableGTAO", enable_gtao);
+      }
       if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
          ImGui::SetTooltip("Adds ambient occlusion.");
 
@@ -307,65 +315,101 @@ public:
 
          auto& gtao_data = GetGameDeviceData(device_data).gtao_data;
 
-         constexpr float game_scale_to_m = 1000.f; // Game was in mm
-         float effect_radius = gtao_data.constants.effect_radius * game_scale_to_m;
-         float radius_scaling_min_depth = gtao_data.constants.radius_scaling_min_depth * game_scale_to_m;
-         float radius_scaling_max_depth = gtao_data.constants.radius_scaling_max_depth * game_scale_to_m;
+         constexpr float game_scale_to_m = 1.f / 1000.f; // Game was in mm
 
-         ImGui::SliderFloat("GTAO Radius", &effect_radius, 0.01f, 5.f, "%.1f", ImGuiSliderFlags_Logarithmic);
-         ImGui::SliderFloat("GTAO Intensity", &gtao_data.constants.final_value_power, 0.1f, 5.f, "%.2f", ImGuiSliderFlags_Logarithmic);
+         float effect_radius = gtao_data.gtao_constants.effect_radius * game_scale_to_m;
+         if (ImGui::SliderFloat("GTAO Radius", &effect_radius, 0.01f, 5.f, "%.01f", ImGuiSliderFlags_Logarithmic))
+         {
+            gtao_data.gtao_constants.effect_radius = effect_radius / game_scale_to_m;
+         }
+         ImGui::SliderFloat("GTAO Intensity", &gtao_data.gtao_constants.final_value_power, 0.1f, 5.f, "%.2f", ImGuiSliderFlags_Logarithmic);
 
-         static bool gtao_radius_distance_scaling = gtao_data.constants.radius_scaling_multiplier != 1.f;
-         static float gtao_radius_scaling_multiplier = gtao_data.constants.radius_scaling_multiplier;
+         static bool gtao_radius_distance_scaling = gtao_data.gtao_constants.radius_scaling_multiplier != 1.f;
+         static float gtao_radius_scaling_multiplier = gtao_data.gtao_constants.radius_scaling_multiplier;
          ImGui::Checkbox("GTAO Radius Distance Scaling", &gtao_radius_distance_scaling);
          if (gtao_radius_distance_scaling)
          {
-            ImGui::SliderFloat("GTAO Radius Scaling Min Depth", &radius_scaling_min_depth, 0.1f, 100.f, "%.0f", ImGuiSliderFlags_Logarithmic);
-            ImGui::SliderFloat("GTAO Radius Scaling Max Depth", &radius_scaling_max_depth, 10.f, 2000.f, "%.0f", ImGuiSliderFlags_Logarithmic);
-            gtao_data.constants.radius_scaling_min_depth = radius_scaling_min_depth / game_scale_to_m;
-            gtao_data.constants.radius_scaling_max_depth = radius_scaling_max_depth / game_scale_to_m;
+            float radius_scaling_min_depth = gtao_data.gtao_constants.radius_scaling_min_depth * game_scale_to_m;
+            if (ImGui::SliderFloat("GTAO Radius Scaling Min Depth", &radius_scaling_min_depth, 0.1f, 100.f, "%.1f", ImGuiSliderFlags_Logarithmic))
+            {
+               gtao_data.gtao_constants.radius_scaling_min_depth = radius_scaling_min_depth / game_scale_to_m;
+            }
+            float radius_scaling_max_depth = gtao_data.gtao_constants.radius_scaling_max_depth * game_scale_to_m;
+            if (ImGui::SliderFloat("GTAO Radius Scaling Max Depth", &radius_scaling_max_depth, 10.f, 2000.f, "%.1f", ImGuiSliderFlags_Logarithmic))
+            {
+               gtao_data.gtao_constants.radius_scaling_max_depth = radius_scaling_max_depth / game_scale_to_m;
+            }
 
             ImGui::SliderFloat("GTAO Radius Scaling Multiplier", &gtao_radius_scaling_multiplier, 1.f, 100.f, "%.1f", ImGuiSliderFlags_Logarithmic);
          }
-         gtao_data.constants.radius_scaling_multiplier = gtao_radius_distance_scaling ? gtao_radius_scaling_multiplier : 1.f;
+         gtao_data.gtao_constants.radius_scaling_multiplier = gtao_radius_distance_scaling ? gtao_radius_scaling_multiplier : 1.f;
 
          ImGui::NewLine();
 
-         ImGui::Text("GTAO Camera Constant Buffer: %s", gtao_data.constant_buffer ? "Found" : "Not Found");
+         ImGui::Text("GTAO Camera Constant Buffer: %s", gtao_data.proj_mat_constant_buffer ? "Found" : "Not Found");
+         ImGui::Text("GTAO Fog Constant Buffer: %s", gtao_data.fog_constant_buffer ? "Found" : "Not Found");
       }
    }
 #endif
 
-   // Draws without a specific callback, the opaque scene raster (which has the camera projection GTAO needs) is among them
    DrawOrDispatchOverrideType OnDrawOrDispatch(ID3D11Device* native_device, ID3D11DeviceContext* native_device_context, CommandListData& cmd_list_data, DeviceData& device_data, reshade::api::shader_stage stages, const ShaderHashesList<OneShaderPerPipeline>& original_shader_hashes, bool is_custom_pass, bool& updated_cbuffers, std::function<void()>* original_draw_dispatch_func) override
    {
       auto& game_device_data = GetGameDeviceData(device_data);
       // The first vertex+pixel that draws on the scene color texture with depth writes should have the projection matrix for GTAO, cache it!
-      if (enable_gtao && game_device_data.gtao_data.scene_resource && !game_device_data.gtao_data.found_constant_buffer && game_device_data.gtao_data.scene_frame != cb_luma_global_settings.FrameIndex && (stages & (reshade::api::shader_stage::vertex | reshade::api::shader_stage::pixel)) == (reshade::api::shader_stage::vertex | reshade::api::shader_stage::pixel))
+      if (enable_gtao &&
+         (!game_device_data.gtao_data.found_proj_mat_constant_buffer || !game_device_data.gtao_data.found_fog_constant_buffer) &&
+         game_device_data.gtao_data.scene_resource &&
+         game_device_data.gtao_data.scene_frame != cb_luma_global_settings.FrameIndex &&
+         (stages & (reshade::api::shader_stage::vertex | reshade::api::shader_stage::pixel)) == (reshade::api::shader_stage::vertex | reshade::api::shader_stage::pixel))
       {
+         // TODO: move to GTAO file!
+
          ComPtr<ID3D11RenderTargetView> rtv;
          native_device_context->OMGetRenderTargets(1, rtv.put(), nullptr);
 
          com_ptr<ID3D11DepthStencilState> depth_stencil_state;
          native_device_context->OMGetDepthStencilState(&depth_stencil_state, nullptr);
-         
+
          if (depth_stencil_state && rtv)
          {
             ComPtr<ID3D11Resource> rtv_resource;
             D3D11_DEPTH_STENCIL_DESC depth_stencil_desc;
             depth_stencil_state->GetDesc(&depth_stencil_desc);
-            
+
             rtv->GetResource(rtv_resource.put());
 
             // The first few writes are the sky and they don't use the right cb layout. They don't write depth.
             if (game_device_data.gtao_data.scene_resource == rtv_resource && depth_stencil_desc.DepthEnable && depth_stencil_desc.DepthWriteMask != D3D11_DEPTH_WRITE_MASK_ZERO)
             {
-               ComPtr<ID3D11Buffer> cb;
-               native_device_context->VSGetConstantBuffers(0, 1, cb.put());
-               if (cb)
+               // Wait until we have a mesh that draws with shadow maps to make sure we are a proper mesh, otherwise the fog data isn't in the CB
+               com_ptr<ID3D11ShaderResourceView> ps_srvs[7];
+               native_device_context->PSGetShaderResources(0, static_cast<UINT>(std::size(ps_srvs)), &ps_srvs[0]);
+               for (int i = 0; i < static_cast<int>(std::size(ps_srvs)); ++i)
                {
-                  game_device_data.gtao_data.constant_buffer = cb;
-                  game_device_data.gtao_data.found_constant_buffer = true;
+                  if (!ps_srvs[i])
+                     continue;
+
+                  D3D11_SHADER_RESOURCE_VIEW_DESC srv_desc;
+                  ps_srvs[i]->GetDesc(&srv_desc);
+                  if (srv_desc.Format == DXGI_FORMAT_R32_FLOAT)
+                  {
+                     ComPtr<ID3D11Buffer> fog_cb;
+                     native_device_context->PSGetConstantBuffers(0, 1, fog_cb.put());
+                     if (fog_cb && !game_device_data.gtao_data.found_fog_constant_buffer)
+                     {
+                        game_device_data.gtao_data.fog_constant_buffer = fog_cb;
+                        game_device_data.gtao_data.found_fog_constant_buffer = true;
+                     }
+                     break;
+                  }
+               }
+
+               ComPtr<ID3D11Buffer> pj_cb;
+               native_device_context->VSGetConstantBuffers(0, 1, pj_cb.put());
+               if (pj_cb && !game_device_data.gtao_data.found_proj_mat_constant_buffer)
+               {
+                  game_device_data.gtao_data.proj_mat_constant_buffer = pj_cb;
+                  game_device_data.gtao_data.found_proj_mat_constant_buffer = true;
                }
             }
          }
@@ -682,7 +726,7 @@ public:
       auto DrawWithOriginalPixelShader = [&](bool force_custom_shader = false) -> void
          {
             // If we don't use ROV, we can just use the custom shader anyway as it branches out of the UAV writes, not adding a relevant cost against the original shader (which might have saturates that clamp HDR output)
-            if (!use_rov_for_ui || force_custom_shader)
+            if (!allow_rov_for_ui || force_custom_shader)
             {
                if (original_draw_dispatch_func && *original_draw_dispatch_func)
                {
@@ -1032,6 +1076,9 @@ BOOL APIENTRY DllMain(HMODULE hModule, DWORD ul_reason_for_call, LPVOID lpReserv
 #endif
 
 #if DEVELOPMENT
+      forced_shader_names.emplace(std::stoul("83AC2129", nullptr, 16), "Shadow Map");
+      forced_shader_names.emplace(std::stoul("5A82035B", nullptr, 16), "Sky");
+      forced_shader_names.emplace(std::stoul("F3EC0381", nullptr, 16), "Sky"); // There's probably many more
       forced_shader_names.emplace(std::stoul("8EBC590F", nullptr, 16), "Wind");
       forced_shader_names.emplace(std::stoul("38875909", nullptr, 16), "Wind");
       forced_shader_names.emplace(std::stoul("F6D774C4", nullptr, 16), "Frost Particles");

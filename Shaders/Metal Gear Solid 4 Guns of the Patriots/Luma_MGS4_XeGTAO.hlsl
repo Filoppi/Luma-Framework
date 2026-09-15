@@ -5,6 +5,7 @@
 // Reference: https://github.com/GameTechDev/XeGTAO
 // MGS4: full-resolution device depth, linearized before filtering; spatial noise (no TAA), two denoise passes.
 
+// Whether this is the apply shader or not
 #ifndef MGS4_GTAO_APPLY
 #define MGS4_GTAO_APPLY 0
 #endif
@@ -20,6 +21,11 @@ cbuffer GameCamera : register(b8)
     float4 GameVSCB0[14];
 }
 
+cbuffer GameMeshData : register(b7)
+{
+    float4 GamePSCB0[14];
+}
+
 cbuffer LumaGTAO : register(b9)
 {
     uint2 ViewportSize;
@@ -32,7 +38,7 @@ cbuffer LumaGTAO : register(b9)
     float RadiusScalingMinDepth;
     float RadiusScalingMaxDepth;
     float RadiusScalingMultiplier;
-    float Padding;
+    uint FoundFogCB;
 }
 
 #if !MGS4_GTAO_APPLY
@@ -113,7 +119,6 @@ void InitCamera()
 
 //
 
-#define XE_GTAO_DEPTH_MIP_LEVELS 5.0
 #define XE_GTAO_OCCLUSION_TERM_SCALE 1.5
 
 #define XE_GTAO_PI 3.1415926535897932384626433832795
@@ -314,6 +319,9 @@ float3 XeGTAO_CalculateNormal(float4 edges, float3 center, float3 left, float3 r
 
 void XeGTAO_MainPass(uint2 pixCoord, float2 localNoise, float3 viewspaceNormal, Texture2D sourceViewspaceDepth, SamplerState depthSampler, RWTexture2D<unorm float2> outWorkingAOTermAndEdges)
 {
+    // Follow the allocated depth chain; no matching C++/HLSL mip-count constants are needed.
+    uint depthWidth, depthHeight, depthMipLevels;
+    sourceViewspaceDepth.GetDimensions(0, depthWidth, depthHeight, depthMipLevels);
     float2 normalizedScreenPos = (pixCoord + 0.5) * VIEWPORT_PIXEL_SIZE;
 
     float4 valuesUL = sourceViewspaceDepth.GatherRed(depthSampler, float2(pixCoord * VIEWPORT_PIXEL_SIZE));
@@ -449,7 +457,7 @@ void XeGTAO_MainPass(uint2 pixCoord, float2 localNoise, float3 viewspaceNormal, 
                 float sampleOffsetLength = length(sampleOffset);
 
                 // note: when sampling, using point_point_point or point_point_linear sampler works, but linear_linear_linear will cause unwanted interpolation between neighbouring depth values on the same MIP level!
-                const float mipLevel = clamp(log2(sampleOffsetLength) - DEPTH_MIP_SAMPLING_OFFSET, 0.0, (XE_GTAO_DEPTH_MIP_LEVELS - 1.0));
+                const float mipLevel = clamp(log2(sampleOffsetLength) - DEPTH_MIP_SAMPLING_OFFSET, 0.0, (float(depthMipLevels) - 1.0));
 
                 // Snap to pixel center (more correct direction math, avoids artifacts due to sampling pos not matching depth texel center - messes up slope - but adds other
                 // artifacts due to them being pushed off the slice). Also use full precision for high res cases.
@@ -666,6 +674,7 @@ RWTexture2D<float> out_working_depth_mip1 : register(u1);
 RWTexture2D<float> out_working_depth_mip2 : register(u2);
 RWTexture2D<float> out_working_depth_mip3 : register(u3);
 RWTexture2D<float> out_working_depth_mip4 : register(u4);
+RWTexture2D<float> out_downsampled_depth : register(u7); // Generated in a separate dispatch.
 RWTexture2D<unorm float2> ao_term_and_edges : register(u5);
 
 #if XE_GTAO_FINAL_APPLY
@@ -730,6 +739,24 @@ void prefilter_depths16x16_cs(uint2 dtid : SV_DispatchThreadID, uint2 gtid : SV_
     XeGTAO_PrefilterDepths16x16(dtid, gtid, tex0, smp, out_working_depth_mip0, out_working_depth_mip1, out_working_depth_mip2, out_working_depth_mip3, out_working_depth_mip4);
 }
 
+[numthreads(8, 8, 1)]
+void downsample_depth_cs(uint2 dtid : SV_DispatchThreadID)
+{
+    uint2 outputSize;
+    out_downsampled_depth.GetDimensions(outputSize.x, outputSize.y);
+    if (any(dtid >= outputSize)) return;
+
+    // tex0 exposes only the preceding mip, rebased to mip 0. Clamp axes already at one texel.
+    uint2 sourceSize;
+    tex0.GetDimensions(sourceSize.x, sourceSize.y);
+    uint2 sourceCoord = dtid * 2;
+    float depth0 = tex0.Load(int3(min(sourceCoord, sourceSize - 1), 0)).x;
+    float depth1 = tex0.Load(int3(min(sourceCoord + uint2(1, 0), sourceSize - 1), 0)).x;
+    float depth2 = tex0.Load(int3(min(sourceCoord + uint2(0, 1), sourceSize - 1), 0)).x;
+    float depth3 = tex0.Load(int3(min(sourceCoord + uint2(1, 1), sourceSize - 1), 0)).x;
+    out_downsampled_depth[dtid] = XeGTAO_DepthMIPFilter(depth0, depth1, depth2, depth3);
+}
+
 [numthreads(XE_GTAO_NUMTHREADS_X, XE_GTAO_NUMTHREADS_Y, 1)]
 void main_pass_cs(uint2 dtid : SV_DispatchThreadID)
 {
@@ -752,39 +779,57 @@ void denoise_pass_cs(uint2 dtid : SV_DispatchThreadID)
 Texture2D<float> tex0 : register(t0); // Final AO
 Texture2D<float> tex1 : register(t1); // Linear depth
 
-// The opaque VS writes COLOR2 = clip.w * VS CB0[13].x + VS CB0[13].y. For its perspective projection,
-// clip.w is positive linear view depth. Use the accompanying .zw as the opaque PS's fog bounds (PS CB0[10].zw).
-// The PS also multiplies by PS CB0[11].w; approximate it with the captured value until that buffer is available.
+// TODO: read back the scene instead of doing this...? We have the pre decal and hair opaque scene ready for binding for example
+#ifndef MGS4_GTAO_FOG_BASE_COLOR
+#define MGS4_GTAO_FOG_BASE_COLOR 0.333
+#endif
+
 #ifndef MGS4_GTAO_FOG_MULTIPLIER
 #define MGS4_GTAO_FOG_MULTIPLIER 1.0
 #endif
-//TODO1
-#ifndef MGS4_GTAO_FOG_PROTECTION
-#define MGS4_GTAO_FOG_PROTECTION 0.0 // 0 disables suppression; values above 1 protect more of the fogged scene.
-#endif
 
+// The opaque VS writes COLOR2 = clip.w * VS CB0[13].x + VS CB0[13].y. For its perspective projection,
+// clip.w is positive linear view depth. Use the accompanying .zw as the opaque PS's fog bounds (PS CB0[10].zw).
+// The PS also multiplies by PS CB0[11].w; approximate it with the captured value until that buffer is available.
 float EstimateFogAmount(float viewspaceDepth)
 {
-    float4 fogParams = GameVSCB0[13];
-    // The pyramid contains scaled linear depth; the game's fog coefficients expect original game units.
+    // Mesh PS CB:
+    // row 10 = fog scale, bias, minimum, maximum
+    // row 11 = fog RGB and strength
+    float4 fogParams = GamePSCB0[10];
+    // GTAO depth is scaled; fog expects the game's original depth units.
     float gameViewDepth = viewspaceDepth / max(DepthScale, 1e-6);
     float fogCoordinate = gameViewDepth * fogParams.x + fogParams.y;
     float fogAmount = clamp(fogCoordinate, fogParams.z, max(fogParams.z, fogParams.w));
-    return saturate(fogAmount * MGS4_GTAO_FOG_MULTIPLIER);
+    return saturate(fogAmount * GamePSCB0[11].w * MGS4_GTAO_FOG_MULTIPLIER);
 }
 
-// Draws on the composed scene with multiplicative RGB blending. Scene RGB is encoded using alpha as a scale (RGB / A),
-// alpha isn't written, and the decode is linear in RGB, so this is the same as decoding, darkening and re-encoding.
-// The decoded color is gamma 2.2, so AO is converted to gamma space, which is the same as darkening in linear.
 float4 apply_ps(float4 position : SV_Position) : SV_Target0
 {
     int3 pixel = int3(position.xy, 0);
+
     float viewspaceDepth = tex1.Load(pixel);
-    float visibility = viewspaceDepth >= FarDepth ? 1.0 : saturate(tex0.Load(pixel));
-    // Approximate fog preservation by reducing AO strength in proportion to the estimated fog contribution.
-    // Do this after denoising and before gamma conversion. Exact preservation would require separating the fog color.
-    float fogProtection = saturate(EstimateFogAmount(viewspaceDepth) * MGS4_GTAO_FOG_PROTECTION);
-    visibility = lerp(visibility, 1.0, fogProtection);
-    return float4(pow(visibility, 1.0 / 2.2).xxx, 1.0);
+    if (viewspaceDepth >= FarDepth)
+    	return 1.0;
+
+    float visibility = pow(saturate(tex0.Load(pixel)), 1.0 / 2.2);
+
+    // No captured mesh fog CB: use ordinary GTAO.
+    if (FoundFogCB == 0)
+        return float4(visibility.xxx, 1.0);
+
+    float fogAmount = EstimateFogAmount(viewspaceDepth);
+    if (fogAmount <= 0.0)
+        return float4(visibility.xxx, 1.0);
+
+    // Approximate the unfogged surface as a neutral 0.333 color.
+    float surfaceContribution = max(MGS4_GTAO_FOG_BASE_COLOR, 1e-6) * (1.0 - fogAmount);
+    float3 fogContribution = max(GamePSCB0[11].rgb, 0.0) * fogAmount;
+    float3 estimatedColor = surfaceContribution + fogContribution;
+    // Protect the estimated fog contribution from AO darkening.
+    float3 surfaceShare = saturate(surfaceContribution / max(estimatedColor, 1e-6));
+    float3 multiplier = 1.0 - (1.0 - visibility) * surfaceShare;
+
+    return float4(multiplier, 1.0);
 }
 #endif // MGS4_GTAO_APPLY

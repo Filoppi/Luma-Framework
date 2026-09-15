@@ -4,6 +4,11 @@
 #define ENABLE_LUMA 1
 #endif
 
+// TODO1: add to the missing blur shaders
+#ifndef ENABLE_BLOOM
+#define ENABLE_BLOOM 1
+#endif
+
 Texture2D<float4> t3 : register(t3);
 Texture2D<float4> t2 : register(t2);
 Texture2D<float4> t1 : register(t1);
@@ -29,6 +34,11 @@ void main(
   float2 v4 : TEXCOORD4,
   out float4 o0 : SV_TARGET0)
 {
+#if !ENABLE_BLOOM
+  o0 = float4(0.0, 0.0, 0.0, 1.0);
+  return;
+#endif
+
   float4 r0,r1;
 
   r0.xyz = t1.Sample(s1_s, w2.xy).xyz;
