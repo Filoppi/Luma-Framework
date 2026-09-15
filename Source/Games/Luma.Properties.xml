@@ -26,6 +26,10 @@
                   DisplayName="FSR (FidelityFX)"
                   Description="Links AMD FidelityFX Super Resolution libraries."
                   Category="Features" />
+    <BoolProperty Name="UseLumaNVAPI"
+                  DisplayName="NVAPI"
+                  Description="Links NVIDIA NVAPI (on by default), used to engage HDR10+ GAMING and read the HDR10+ peak brightness on NVIDIA GPUs. Harmless on other GPUs."
+                  Category="Features" />
     <BoolProperty Name="UseLumaFastNoise"
                   DisplayName="FAST noise textures"
                   Description="Compiles the FAST noise texture loader and packages the project-wide Global/Textures/FAST frames."

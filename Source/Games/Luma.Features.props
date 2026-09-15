@@ -5,6 +5,8 @@
     <UseLumaNGX Condition="'$(UseLumaNGX)'==''">false</UseLumaNGX>
     <UseLumaFSR Condition="'$(UseLumaFSR)'==''">false</UseLumaFSR>
     <UseLumaFastNoise Condition="'$(UseLumaFastNoise)'==''">false</UseLumaFastNoise>
+    <!-- On by default: NVAPI is a static lib that loads the driver's DLL at runtime, so it's harmless on non NVIDIA GPUs (init just fails). -->
+    <UseLumaNVAPI Condition="'$(UseLumaNVAPI)'==''">true</UseLumaNVAPI>
   </PropertyGroup>
 
   <PropertyGroup Condition="'$(UseLumaDXP)'=='true'">
@@ -36,6 +38,14 @@
     <LumaFSRLibSuffix Condition="'$(Configuration)'!='Development-Debug'"></LumaFSRLibSuffix>
   </PropertyGroup>
 
+  <PropertyGroup Condition="'$(UseLumaNVAPI)'=='true'">
+    <LumaNVAPIRoot>$(MSBuildThisFileDirectory)..\External\NVAPI</LumaNVAPIRoot>
+    <LumaNVAPILibDir Condition="'$(Platform)'=='Win32'">$(LumaNVAPIRoot)\x86</LumaNVAPILibDir>
+    <LumaNVAPILibDir Condition="'$(Platform)'!='Win32'">$(LumaNVAPIRoot)\amd64</LumaNVAPILibDir>
+    <LumaNVAPILibName Condition="'$(Platform)'=='Win32'">nvapi.lib</LumaNVAPILibName>
+    <LumaNVAPILibName Condition="'$(Platform)'!='Win32'">nvapi64.lib</LumaNVAPILibName>
+  </PropertyGroup>
+
   <ItemDefinitionGroup>
     <ClCompile Condition="'$(UseLumaDXP)'=='true'">
       <!-- PreprocessorDefinitions metadata overrides the CharacterSet-derived
@@ -55,6 +65,10 @@
     <ClCompile Condition="'$(UseLumaFastNoise)'=='true'">
       <PreprocessorDefinitions>UNICODE;_UNICODE;ENABLE_FAST_NOISE_TEXTURES=1;%(PreprocessorDefinitions)</PreprocessorDefinitions>
     </ClCompile>
+    <ClCompile Condition="'$(UseLumaNVAPI)'=='true'">
+      <AdditionalIncludeDirectories>$(LumaNVAPIRoot);%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+      <PreprocessorDefinitions>UNICODE;_UNICODE;ENABLE_NVAPI=1;%(PreprocessorDefinitions)</PreprocessorDefinitions>
+    </ClCompile>
     <Link Condition="'$(UseLumaDXP)'=='true'">
       <AdditionalDependencies>dxpatcher.lib;Ole32.lib;%(AdditionalDependencies)</AdditionalDependencies>
     </Link>
@@ -65,6 +79,10 @@
     <Link Condition="'$(UseLumaFSR)'=='true'">
       <AdditionalLibraryDirectories>$(LumaFSRRoot)\libs;%(AdditionalLibraryDirectories)</AdditionalLibraryDirectories>
       <AdditionalDependencies>ffx_backend_dx11_x64$(LumaFSRLibSuffix).lib;ffx_fsr3_x64$(LumaFSRLibSuffix).lib;ffx_frameinterpolation_x64$(LumaFSRLibSuffix).lib;ffx_fsr3upscaler_x64$(LumaFSRLibSuffix).lib;ffx_opticalflow_x64$(LumaFSRLibSuffix).lib;%(AdditionalDependencies)</AdditionalDependencies>
+    </Link>
+    <Link Condition="'$(UseLumaNVAPI)'=='true'">
+      <AdditionalLibraryDirectories>$(LumaNVAPILibDir);%(AdditionalLibraryDirectories)</AdditionalLibraryDirectories>
+      <AdditionalDependencies>$(LumaNVAPILibName);%(AdditionalDependencies)</AdditionalDependencies>
     </Link>
   </ItemDefinitionGroup>
 
