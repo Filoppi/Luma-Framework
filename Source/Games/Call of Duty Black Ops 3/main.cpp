@@ -2599,12 +2599,12 @@ public:
       // defines_need_recompilation = true;
    }
 
-   // std::unique_ptr<std::byte[]> ModifyShaderByteCode(const std::byte* code, size_t& size, reshade::api::pipeline_subobject_type type, uint64_t shader_hash, const std::byte* shader_object, size_t shader_object_size) override
+   // std::unique_ptr<std::byte[]> PatchShaderBytecodeSync(const std::byte* code, size_t& size, reshade::api::pipeline_subobject_type type, uint64_t shader_hash, const std::byte* shader_object, size_t shader_object_size) override
    // {
    //    //gatekeep: not ps & not 0x1B4B234D
    //    if (type != reshade::api::pipeline_subobject_type::pixel_shader || shader_hash != static_cast<uint64_t>(0x1B4B234D))
    //       return nullptr;
-   //    message(reshade::log::level::info, "ModifyShaderByteCode(): In!");
+   //    message(reshade::log::level::info, "PatchShaderBytecodeSync(): In!");
    //
    //    std::unique_ptr<std::byte[]> new_code = nullptr;
    //
@@ -2639,7 +2639,7 @@ public:
    //    std::memcpy(new_code.get() + insert_byte_pos + patch.size(), code + insert_byte_pos, sizeof(uint32_t));
    //
    //    size = new_size;
-   //    message(reshade::log::level::info, "ModifyShaderByteCode(): Success!");
+   //    message(reshade::log::level::info, "PatchShaderBytecodeSync(): Success!");
    //
    //    return new_code;
    // }

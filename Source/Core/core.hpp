@@ -4912,7 +4912,7 @@ namespace
 #if DX12
             cmd_list_data.pipeline_state_original_graphics_shader_hashes.pixel_shaders.clear();
 #else
-            cmd_list_data.pipeline_state_original_graphics_shader_hashes.pixel_shaders[0] = UINT64_MAX;
+            cmd_list_data.pipeline_state_original_graphics_shader_hashes.pixel_shaders[0] = SHADER_HASH_NONE;
 #endif
             cmd_list_data.pipeline_state_has_custom_pixel_shader = false;
          }
@@ -4925,8 +4925,12 @@ namespace
          cmd_list_data.draw_callback = nullptr;
          for (const auto& [shader_hashes, callback] : draw_callbacks_by_shader_hashes)
          {
-            if (callback && cmd_list_data.pipeline_state_original_graphics_shader_hashes.ContainsAll(shader_hashes))
+            // TODO: bind a "enabled()" labda so we could skip the expensive hash check if
+            // e.g. a previous draw call had not run. We could also limit the amount of times.
+            // Or even better, hash the current vs+ps state and compare it to a fast map with the same hashed state for the filtered shaders. So it'd just be one lookup per shader bind.
+            if (cmd_list_data.pipeline_state_original_graphics_shader_hashes.ContainsAll(shader_hashes))
             {
+               ASSERT(callback); // Game won't crash, this is just useless and weird
                cmd_list_data.draw_callback = callback;
                break;
             }
@@ -4962,8 +4966,9 @@ namespace
          cmd_list_data.dispatch_callback = nullptr;
          for (const auto& [shader_hashes, callback] : dispatch_callbacks_by_shader_hashes)
          {
-            if (callback && cmd_list_data.pipeline_state_original_compute_shader_hashes.ContainsAll(shader_hashes))
+            if (cmd_list_data.pipeline_state_original_compute_shader_hashes.ContainsAll(shader_hashes))
             {
+               ASSERT(callback); // Game won't crash, this is just useless and weird
                cmd_list_data.dispatch_callback = callback;
                break;
             }
@@ -4972,7 +4977,7 @@ namespace
          cmd_list_data.auto_compute_texture_format_upgrades = nullptr;
          if (cmd_list_data.pipeline_state_original_compute_shader.handle != 0)
          {
-            const auto auto_texture_format_upgrade_shader_hashes_it = auto_texture_format_upgrade_shader_hashes.find(uint32_t(cmd_list_data.pipeline_state_original_compute_shader_hashes.pixel_shaders[0]));
+            const auto auto_texture_format_upgrade_shader_hashes_it = auto_texture_format_upgrade_shader_hashes.find(uint32_t(cmd_list_data.pipeline_state_original_compute_shader_hashes.compute_shaders[0]));
             if (auto_texture_format_upgrade_shader_hashes_it != auto_texture_format_upgrade_shader_hashes.end())
             {
                cmd_list_data.auto_compute_texture_format_upgrades = &(auto_texture_format_upgrade_shader_hashes_it->second);
@@ -5126,6 +5131,9 @@ namespace
    void OnBindRenderTargetsAndDepthStencil(reshade::api::command_list* cmd_list, uint32_t count, const reshade::api::resource_view* rtvs, reshade::api::resource_view dsv)
    {
       SKIP_UNSUPPORTED_DEVICE_API(cmd_list->get_device()->get_api());
+
+      if (enable_chain_indirect_texture_format_upgrades == ChainTextureFormatUpgradesType::None && !enable_indirect_texture_format_upgrades)
+         return;
 
       std::vector<reshade::api::resource_view> replaced_rtvs;
       bool any_replaced = false;
@@ -6465,7 +6473,6 @@ namespace
                      if (!cmd_list_data.any_upgraded_cs_uavs)
                         break;
                   }
-
                }
 
                // List of dummy RTV and UAV indexes to upgrade. We set all of them, as this is for the forced upgrades branch.
@@ -8820,10 +8827,12 @@ namespace
       {
       default:
       break;
-#if !defined(GAME_PERSONA_5_ROYAL) && !defined(GAME_METAPHOR_REFANTAZIO) && !defined(GAME_FAR_CRY_5)
       case reshade::api::descriptor_type::texture_unordered_access_view:
       case reshade::api::descriptor_type::texture_shader_resource_view:
       {
+         if (enable_chain_indirect_texture_format_upgrades == ChainTextureFormatUpgradesType::None && !enable_indirect_texture_format_upgrades)
+            break;
+
          reshade::api::descriptor_table_update replaced_update = update;
          std::vector<reshade::api::resource_view> replaced_descriptors;
          bool any_replaced = false;
@@ -8964,7 +8973,6 @@ namespace
          }
          break;
       }
-#endif
       case reshade::api::descriptor_type::constant_buffer:
       {
          for (uint32_t i = 0; i < update.count; i++)
