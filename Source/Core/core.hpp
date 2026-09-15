@@ -8820,7 +8820,7 @@ namespace
       {
       default:
       break;
-#if !defined(GAME_PERSONA_5_ROYAL) && !defined(GAME_METAPHOR_REFANTAZIO)
+#if !defined(GAME_PERSONA_5_ROYAL) && !defined(GAME_METAPHOR_REFANTAZIO) && !defined(GAME_FAR_CRY_5)
       case reshade::api::descriptor_type::texture_unordered_access_view:
       case reshade::api::descriptor_type::texture_shader_resource_view:
       {

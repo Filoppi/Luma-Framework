@@ -1,0 +1,24 @@
+<?xml version="1.0" encoding="utf-8"?>
+<Project ToolsVersion="4.0" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
+  <ItemGroup>
+    <ClCompile Include="main.cpp" />
+    <ClCompile Include="..\..\Core\unity_build.cpp" />
+    <ClCompile Include="..\..\External\reshade\deps\minhook\src\buffer.c" />
+    <ClCompile Include="..\..\External\reshade\deps\minhook\src\hook.c" />
+    <ClCompile Include="..\..\External\reshade\deps\minhook\src\trampoline.c" />
+    <ClCompile Include="..\..\External\reshade\deps\minhook\src\hde\hde64.c" />
+  </ItemGroup>
+  <ItemGroup>
+    <ClInclude Include="borderless_hdr.h" />
+    <ClInclude Include="camera_probe.h" />
+    <ClInclude Include="gpu_probe.h" />
+    <ClInclude Include="image_probe.h" />
+    <ClInclude Include="native_upload_hooks.h" />
+    <ClInclude Include="perf_probe.h" />
+    <ClInclude Include="reporter_control.h" />
+    <ClInclude Include="test_control.h" />
+    <ClInclude Include="upload_probe.h" />
+    <ClInclude Include="upload_snapshot.h" />
+    <ClInclude Include="validation.h" />
+  </ItemGroup>
+</Project>
