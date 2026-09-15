@@ -1,8 +1,9 @@
 // SMAA implementation for Borderlands GOTY Enhanced (replaces the game's compute FXAA resolve pass).
 // Reference: https://github.com/iryoku/smaa
 // ULTRA preset + color edge detection + depth predication (the game exposes a full-res depth buffer).
-// Input color is scene-referred (linear, scRGB HDR), so edge detection
-// runs on an sRGB-encoded copy (see Luma_SMAA_LinearTosRGB_CS) and blending on the linear copy.
+// Input color is the game's post-process buffer, stored in GAMMA space (POST_PROCESS_SPACE_TYPE 0, 1.0 = paper
+// white) and fp16, so highlights run past 1. Edge detection reads it as stored; blending reads its linear decode
+// (Luma_BL_SMAALinearize) and re-encodes.
 
 #include "../Includes/Common.hlsl"
 
@@ -19,8 +20,16 @@ cbuffer SmaaMetricsCB : register(b1)
 
 #define SMAA_RT_METRICS SmaaRtMetrics
 #define SMAA_PRESET_ULTRA
-#define SMAA_PREDICATION 1
+#define SMAA_PREDICATION       1
 #define SMAA_PREDICATION_SCALE SmaaPredication.x
+// Predication budget:
+//  - flat threshold  = SCALE * SMAA_THRESHOLD           = 2.0 * 0.05       = 0.10 (rejects texture colour noise)
+//  - silhouette thr  = SCALE * SMAA_THRESHOLD * (1-STR) = 2.0 * 0.05 * 0.5 = 0.05 (= plain ULTRA base; predication
+//    only relaxes geometric edges back to base sensitivity, never below).
+// THRESHOLD is 0.5 because Luma_BL_DepthExtract.hlsl feeds a unitless edge-ness in [0,1], not a depth: the
+// half-way point simply means "the extract called this a silhouette". Calibrate its tolerance, not this number.
+#define SMAA_PREDICATION_STRENGTH  0.5
+#define SMAA_PREDICATION_THRESHOLD 0.5
 #define SMAA_CUSTOM_SL
 SamplerState LinearSampler : register(s0);
 SamplerState PointSampler : register(s1);
@@ -58,8 +67,8 @@ void smaa_edge_detection_vs(uint id : SV_VertexID, out float4 position : SV_Posi
 
 float2 smaa_edge_detection_ps(float4 position : SV_Position, float2 texcoord : TEXCOORD0, float4 offset[3] : TEXCOORD1) : SV_Target
 {
-   // tex0 = colorTexGamma (sRGB-encoded scene color)
-   // tex1 = predicationTex (scene depth)
+   // tex0 = colorTexGamma (stored scene snapshot)
+   // tex1 = predicationTex (plane-deviation edge mask)
    return SMAAColorEdgeDetectionPS(texcoord, offset, tex0, tex1);
 }
 
@@ -85,6 +94,8 @@ void smaa_neighborhood_blending_vs(uint id : SV_VertexID, out float4 position : 
 
 float4 smaa_neighborhood_blending_ps(float4 position : SV_Position, float2 texcoord : TEXCOORD0, float4 offset : TEXCOORD1) : SV_Target
 {
-   // tex0 = colorTex (linear copy), tex1 = blendTex
-   return SMAANeighborhoodBlendingPS(texcoord, offset, tex0, tex1);
+   // tex0 = colorTex (linear copy), tex1 = blendTex. Re-encode to the canvas' gamma.
+   float4 color = SMAANeighborhoodBlendingPS(texcoord, offset, tex0, tex1);
+   color.rgb = linear_to_gamma(color.rgb, GCT_MIRROR);
+   return color;
 }
