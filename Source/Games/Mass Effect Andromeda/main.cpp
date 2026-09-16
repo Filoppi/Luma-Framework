@@ -1202,11 +1202,20 @@ public: // OnMapBufferRegion is referenced from DllMain (DLL_PROCESS_DETACH unre
       ImGui::PushTextWrapPos(0.f);
       ImGui::Text(
          "Luma for \"Mass Effect: Andromeda\" is developed by DristoforColumb and is open source and free.\n"
-         "It replaces the game's TAA with DLSS or FSR (Native AA) and the game's FXAA with SMAA, plus 16x "
-         "anisotropic filtering.\n"
-         "Set in-game Anti-Aliasing to TAA for DLSS/FSR, or to FXAA for SMAA.\n"
-         "Thanks to the Luma team and contributors.");
+         "It replaces the game's TAA with DLAA or FSR 3 native anti-aliasing and its FXAA with SMAA, plus 16x anisotropic filtering.\n"
+         "Set Anti-Aliasing in the game's video settings to TAA for DLAA and FSR 3, or to FXAA for SMAA.\n"
+         "Thanks to the Luma team and contributors.\n"
+         "If you enjoy it, consider donating.");
       ImGui::PopTextWrapPos();
+
+      ImGui::NewLine();
+      ImGui::PushStyleColor(ImGuiCol_Button, IM_COL32(70, 134, 0, 255));
+      ImGui::PushStyleColor(ImGuiCol_ButtonHovered, IM_COL32(70 + 9, 134 + 9, 0, 255));
+      ImGui::PushStyleColor(ImGuiCol_ButtonActive, IM_COL32(70 + 18, 134 + 18, 0, 255));
+      static const std::string donation_link = std::string("Buy DristoforColumb a Coffee on ko-fi ") + std::string(ICON_FK_OK);
+      if (ImGui::Button(donation_link.c_str()))
+         ShellExecuteA(nullptr, "open", "https://ko-fi.com/dristoforcolumb", nullptr, nullptr, SW_SHOWNORMAL);
+      ImGui::PopStyleColor(3);
 
       ImGui::NewLine();
       static const std::string social_link = std::string("Join our \"HDR Den\" Discord ") + std::string(ICON_FK_SEARCH);
@@ -1258,13 +1267,6 @@ BOOL APIENTRY DllMain(HMODULE hModule, DWORD ul_reason_for_call, LPVOID lpReserv
       // per-frame by the active AA mode in OnPresent.
       enable_samplers_upgrade = true; // boot-time only
       samplers_upgrade_mode = 4;
-
-      // Default DLSS preset: J (Transformer v1, FP16, log-domain internals). On current DLLs "Default"
-      // resolves to L/M — Transformer v2, FP8, inferring directly in linear space — which hue-crushes
-      // MEA's 40k+ single-channel emissive peaks into green garbage frames (J/K render them clean; L is
-      // meant for Ultra Performance upscaling anyway, not DLAA). Only a boot default: the user's saved
-      // "DLSSRenderPreset" config is loaded after this and overrides it.
-      dlss_render_preset = 10; // NVSDK_NGX_DLSS_Hint_Render_Preset_J
 
       game = new MassEffectAndromeda();
    }
