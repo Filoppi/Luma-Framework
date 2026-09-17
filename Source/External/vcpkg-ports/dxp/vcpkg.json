@@ -1,6 +1,6 @@
 {
   "name": "dxp",
-  "version-string": "0.5.2",
+  "version-string": "0.6.0",
   "description": "DirectXShaderPatcher: deterministic, declarative shader patching for DXBC (SM5) and DXIL (SM6) shader containers",
   "homepage": "https://github.com/Izueh/DirectXShaderPatcher",
   "license": "MIT",

@@ -130,6 +130,11 @@ steps:
               capture: ld_resource
       emit:
         - opcode: ld
+          extended_opcodes:
+            - type: resource_dim
+              resource_dim: {dimension: 8, structure_stride: 0}
+            - type: resource_type
+              resource_return_type: [5, 5, 5, 5]
           operands:
             - type: temp
               capture: ld_dest

@@ -154,26 +154,28 @@ steps:
             - type: immediate32
               immediates_u32: [127, 127, 0, 0]
         - opcode: ld
-          # extended_opcode:
-          #   dimension: texture2darray
-          #   return_type: [float, float, float, float]
+          extended_opcodes:
+            - type: resource_dim
+              resource_dim: {dimension: 8, structure_stride: 0}
+            - type: resource_type
+              resource_return_type: [5, 5, 5, 5]
           operands:
             - type: temp
               handle: { name: sampled_noise }
-              components: { selection_mode: mask, value: x }
+              components: {selection_mode: mask, value: x }
             - type: temp
               handle: { name: noise_uv }
-              components: { selection_mode: swizzle, value: xyzw }
+              components: {selection_mode: swizzle, value: xyzw }
             - type: resource
               handle: { name: fast_noise }
-              components: { selection_mode: swizzle, value: xyzw }
+              components: {selection_mode: swizzle, value: xyzw }
         - opcode: mov
           saturate: true
           operands:
             - capture: noise_value
             - type: temp
               handle: { name: sampled_noise }
-              components: { selection_mode: select, value: x }
+              components: {selection_mode: select, value: x }
         - opcode: ge
           operands:
             - capture: discard_target
@@ -235,26 +237,28 @@ steps:
             - type: immediate32
               immediates_u32: [127, 127, 0, 0]
         - opcode: ld
-          # extended_opcode:
-          #   dimension: texture2darray
-          #   return_type: [float, float, float, float]
+          extended_opcodes:
+            - type: resource_dim
+              resource_dim: {dimension: 8, structure_stride: 0}
+            - type: resource_type
+              resource_return_type: [5, 5, 5, 5]
           operands:
             - type: temp
               handle: { name: sampled_noise }
-              components: { selection_mode: mask, value: x }
+              components: {selection_mode: mask, value: x }
             - type: temp
               handle: { name: noise_uv }
-              components: { selection_mode: swizzle, value: xyzw }
+              components: {selection_mode: swizzle, value: xyzw }
             - type: resource
               handle: { name: fast_noise }
-              components: { selection_mode: swizzle, value: xyzw }
+              components: {selection_mode: swizzle, value: xyzw }
         - opcode: mov
           saturate: true
           operands:
             - capture: hair_dither_dst
             - type: temp
               handle: { name: sampled_noise }
-              components: { selection_mode: select, value: x }
+              components: {selection_mode: select, value: x }
 
   # Branch 3: clamped 16-phase bayer discard (hair fade materials). The
   # original clamps the threshold to full opacity when alpha >= clamp_z:
@@ -329,26 +333,28 @@ steps:
             - type: immediate32
               immediates_u32: [127, 127, 0, 0]
         - opcode: ld
-          # extended_opcode:
-          #   dimension: texture2darray
-          #   return_type: [float, float, float, float]
+          extended_opcodes:
+            - type: resource_dim
+              resource_dim: {dimension: 8, structure_stride: 0}
+            - type: resource_type
+              resource_return_type: [5, 5, 5, 5]
           operands:
             - type: temp
               handle: { name: sampled_noise }
-              components: { selection_mode: mask, value: x }
+              components: {selection_mode: mask, value: x }
             - type: temp
               handle: { name: noise_uv }
-              components: { selection_mode: swizzle, value: xyzw }
+              components: {selection_mode: swizzle, value: xyzw }
             - type: resource
               handle: { name: fast_noise }
-              components: { selection_mode: swizzle, value: xyzw }
+              components: {selection_mode: swizzle, value: xyzw }
         - opcode: mov
           saturate: true
           operands:
             - capture: clamped_phase
             - type: temp
               handle: { name: sampled_noise }
-              components: { selection_mode: select, value: x }
+              components: {selection_mode: select, value: x }
         - opcode: min
           operands:
             - type: temp
