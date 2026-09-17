@@ -13,26 +13,10 @@ namespace
     float g_jitter_y;
     bool g_has_drawn_lightning;
 
-    bool is_jitter(float x)
+    // MSVC still has no `constexpr std::round`!
+    constexpr int constexpr_round(float x)
     {
-        // Base jitters (x, y) in range [-0.5, 0.5], for "r_AntialiasingTAAPattern 4" (the game setting).
-        // ( 0.0625, -0.1875), (-0.0625,  0.1875),
-        // ( 0.3125,  0.0625), (-0.1875, -0.3125),
-        // (-0.3125,  0.3125), (-0.4375, -0.0625),
-        // ( 0.1875,  0.4375), ( 0.4375, -0.4375)
-        //
-        // We only need to check for x jitters in range [-1, 1], y jitters will match.
-        static constexpr std::array x_jitters = { 0.0625f * 2.0f, 0.3125f * 2.0f, -0.3125f * 2.0f, 0.1875f * 2.0f, -0.0625f * 2.0f, -0.1875f * 2.0f, -0.4375f * 2.0f, 0.4375f * 2.0f }; 
-        
-        constexpr float eps = 1e-5f;
-        for (int i = 0; i < x_jitters.size(); ++i)
-        {
-            if (std::abs(x - x_jitters[i]) < eps)
-            {
-                return true;
-            }
-        }
-        return false;
+       return x < 0.0f ? (int)(x - 0.5f) : (int)(x + 0.5f);
     }
 }
 
@@ -59,6 +43,7 @@ public:
        {
           reshade::register_event<reshade::addon_event::map_buffer_region>(KingdomComeDeliverance::OnMapBufferRegion);
           reshade::register_event<reshade::addon_event::unmap_buffer_region>(KingdomComeDeliverance::OnUnmapBufferRegion);
+          reshade::register_event<reshade::addon_event::finish_present>(OnFinishPresent);
        }
     }
 
@@ -80,13 +65,16 @@ public:
         auto& device_data = *device->get_private_data<DeviceData>();
         auto& game_device_data = GetGameDeviceData(device_data);
 
-        auto buffer = (ID3D11Buffer*)resource.handle;
-        D3D11_BUFFER_DESC desc;
-        buffer->GetDesc(&desc);
-
-        if ((desc.BindFlags & D3D11_BIND_CONSTANT_BUFFER) && desc.ByteWidth >= 256)
+        if (!g_has_drawn_lightning)
         {
-           game_device_data.mapped_cbs[resource.handle] = *data;
+            auto buffer = (ID3D11Buffer*)resource.handle;
+            D3D11_BUFFER_DESC desc;
+            buffer->GetDesc(&desc);
+
+            if (desc.BindFlags == D3D11_BIND_CONSTANT_BUFFER && desc.ByteWidth == 256)
+            {
+                game_device_data.mapped_cbs[resource.handle] = *data;
+            }
         }
     }
 
@@ -95,37 +83,49 @@ public:
         auto& device_data = *device->get_private_data<DeviceData>();
         auto& game_device_data = GetGameDeviceData(device_data);
 
+        // The CB we are after, from Lightning_0x0181192D_CS.
+        //
+        // cbuffer PER_BATCH : register(b0)
+        // {
+        //   float4 GiSettings : packoffset(c0);
+        //   float4 TPLParams : packoffset(c1);
+        //   float4 FrustumTL : packoffset(c2);
+        //   float4 FrustumBL : packoffset(c3);
+        //   float4 WorldViewPos : packoffset(c4);
+        //   float4 PS_NearFarClipDist : packoffset(c5);
+        //   float4 ProjParams : packoffset(c6); // ProjMatrix._m00, ProjMatrix._m11, ProjMatrix._m20, ProjMatrix._m21
+        //   float4 ForwGiIntegrationMode : packoffset(c7);
+        //   float4 SunDir : packoffset(c8);
+        //   float4 PS_ScreenSize : packoffset(c9);
+        //   float4 SSDOParams : packoffset(c10);
+        //   float4 FrustumTR : packoffset(c11);
+        //   float4 ScreenSize : packoffset(c12); // w, h, 1/w, 1/h
+        //   float4 g_vVisAreasParams[64] : packoffset(c13);
+        // }
         if (!g_has_drawn_lightning && game_device_data.mapped_cbs.contains(resource.handle))
         {
            auto data = (float4*)game_device_data.mapped_cbs[resource.handle];
 
-           // The CB we are after, from Lightning_0x0181192D_CS.
+           // Base jitters (x, y) in range [-0.5, 0.5], for "r_AntialiasingTAAPattern 4" (the game setting).
+           // ( 0.0625, -0.1875), (-0.0625,  0.1875),
+           // ( 0.3125,  0.0625), (-0.1875, -0.3125),
+           // (-0.3125,  0.3125), (-0.4375, -0.0625),
+           // ( 0.1875,  0.4375), ( 0.4375, -0.4375)
            //
-           // cbuffer PER_BATCH : register(b0)
-           // {
-           //   float4 GiSettings : packoffset(c0);
-           //   float4 TPLParams : packoffset(c1);
-           //   float4 FrustumTL : packoffset(c2);
-           //   float4 FrustumBL : packoffset(c3);
-           //   float4 WorldViewPos : packoffset(c4);
-           //   float4 PS_NearFarClipDist : packoffset(c5);
-           //   float4 ProjParams : packoffset(c6); // ProjMatrix._m00, ProjMatrix._m11, ProjMatrix._m20, ProjMatrix._m21
-           //   float4 ForwGiIntegrationMode : packoffset(c7);
-           //   float4 SunDir : packoffset(c8);
-           //   float4 PS_ScreenSize : packoffset(c9);
-           //   float4 SSDOParams : packoffset(c10);
-           //   float4 FrustumTR : packoffset(c11);
-           //   float4 ScreenSize : packoffset(c12); // w, h, 1/w, 1/h
-           //   float4 g_vVisAreasParams[64] : packoffset(c13);
-           // }
-           //
-
-           if (is_jitter(data[6].z * device_data.render_resolution.x))
+           // We only need to check for x jitters in range [-1, 1], y jitters will match.
+           switch ((int)std::round(data[6].z * device_data.render_resolution.x * 16.0f))
            {
-              g_jitter_x = data[6].z;
-              g_jitter_y = data[6].w;
+               case constexpr_round(0.0625f * 2.0f * 16.0f):
+               case constexpr_round(0.3125f * 2.0f * 16.0f):
+               case constexpr_round(-0.3125f * 2.0f * 16.0f):
+               case constexpr_round(0.1875f * 2.0f * 16.0f):
+               case constexpr_round(-0.0625f * 2.0f * 16.0f):
+               case constexpr_round(-0.1875f * 2.0f * 16.0f):
+               case constexpr_round(-0.4375f * 2.0f * 16.0f):
+               case constexpr_round(0.4375f * 2.0f * 16.0f):
+                   g_jitter_x = data[6].z;
+                   g_jitter_y = data[6].w;
            }
-           game_device_data.mapped_cbs.erase(resource.handle);
         }
     }
 
@@ -135,55 +135,6 @@ public:
 
         if (original_shader_hashes.Contains(shader_hashes_Lightning))
         {
-            // TODO: Remove this after we are sure that we can reliably catch this CB on Map/Unmap.
-            #if 0
-            if (device_data.sr_type != SR::Type::None)
-            {
-                // Get CB0 and its description.
-                ComPtr<ID3D11Buffer> cb;
-                native_device_context->CSGetConstantBuffers(0, 1, cb.put());
-                D3D11_BUFFER_DESC desc;
-                cb->GetDesc(&desc);
-
-                // Create staging buffer.
-                desc.Usage = D3D11_USAGE_STAGING;
-                desc.BindFlags = 0;
-                desc.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
-                desc.MiscFlags = 0;
-                ComPtr<ID3D11Buffer> buffer_staging;
-                native_device->CreateBuffer(&desc, nullptr, buffer_staging.put());
-
-                native_device_context->CopyResource(buffer_staging.get(), cb.get());
-
-                // Map for CPU read.
-                D3D11_MAPPED_SUBRESOURCE mapped;
-                ensure(native_device_context->Map(buffer_staging.get(), 0, D3D11_MAP_READ, 0, &mapped), >= 0);
-
-                // cbuffer PER_BATCH : register(b0)
-                // {
-                //   float4 GiSettings : packoffset(c0);
-                //   float4 TPLParams : packoffset(c1);
-                //   float4 FrustumTL : packoffset(c2);
-                //   float4 FrustumBL : packoffset(c3);
-                //   float4 WorldViewPos : packoffset(c4);
-                //   float4 PS_NearFarClipDist : packoffset(c5);
-                //   float4 ProjParams : packoffset(c6); // ProjMatrix._m00, ProjMatrix._m11, ProjMatrix._m20, ProjMatrix._m21
-                //   float4 ForwGiIntegrationMode : packoffset(c7);
-                //   float4 SunDir : packoffset(c8);
-                //   float4 PS_ScreenSize : packoffset(c9);
-                //   float4 SSDOParams : packoffset(c10);
-                //   float4 FrustumTR : packoffset(c11);
-                //   float4 ScreenSize : packoffset(c12); // w, h, 1/w, 1/h
-                //   float4 g_vVisAreasParams[64] : packoffset(c13);
-                // }
-                auto data = (float4*)mapped.pData;
-                g_jitter_x = data[6].z;
-                g_jitter_y = data[6].w;
-
-                native_device_context->Unmap(buffer_staging.get(), 0);
-            }
-            #endif
-
             g_has_drawn_lightning = true;
             return DrawOrDispatchOverrideType::None;
         }
@@ -247,7 +198,7 @@ public:
                 settings_data.mvs_y_scale = device_data.render_resolution.y;
 
                 settings_data.render_preset = dlss_render_preset;
-                settings_data.auto_exposure = false;
+                settings_data.auto_exposure = true;
 
                 sr_implementations[device_data.sr_type]->UpdateSettings(sr_instance_data, native_device_context, settings_data);
 
@@ -299,8 +250,14 @@ public:
     void OnPresent(ID3D11Device* native_device, DeviceData& device_data) override
     {
         auto& game_device_data = GetGameDeviceData(device_data);
+        auto& managed_resources = game_device_data.managed_resources;
 
         g_has_drawn_lightning = false;
+        game_device_data.mapped_cbs.clear();
+
+        // We have to rebind RTV and DSV after present for `DXGI_SWAP_EFFECT_FLIP_DISCARD` to work properly in videos and loading screens.
+        // FIXME: In fullscreen exclusive videos and loading screens are still broken.
+        device_data.primary_command_list->OMGetRenderTargets(1, managed_resources.render_target_views["on_present"_h].put(), managed_resources.depth_stencil_views["on_present"_h].put());
 
         if (!custom_texture_mip_lod_bias_offset)
         {
@@ -314,6 +271,15 @@ public:
                device_data.texture_mip_lod_bias_offset = 0.0f;
             }
         }
+    }
+
+    static void OnFinishPresent(reshade::api::command_queue* queue, reshade::api::swapchain* swapchain)
+    {
+        auto& device_data = *queue->get_device()->get_private_data<DeviceData>();
+        auto& game_device_data = GetGameDeviceData(device_data);
+        auto& managed_resources = game_device_data.managed_resources;
+
+        device_data.primary_command_list->OMSetRenderTargets(1, &managed_resources.render_target_views["on_present"_h], managed_resources.depth_stencil_views["on_present"_h].get());
     }
 
     void PrintImGuiAbout() override
