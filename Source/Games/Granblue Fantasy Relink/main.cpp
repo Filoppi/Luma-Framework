@@ -7,7 +7,10 @@
 #define ENABLE_UI_SCALING 0
 #define ENABLE_POST_DRAW_DISPATCH_CALLBACK 1
 #define CHECK_GRAPHICS_API_COMPATIBILITY 1
-#define V2_0_5
+#define V2_0_6
+// Testing: disable the compiled-constants fallback so signature-scan failures
+// are loud (hooks skipped, error logged) instead of silently using stale addresses.
+#define GBFR_DISABLE_ADDRESS_FALLBACK 0
 
 #include <d3d11.h>
 #include "..\..\Core\core.hpp"
@@ -684,7 +687,8 @@ public:
 
       ResolveGBFRAddresses();
 
-      if (!g_rt_creation_hook)
+      // Guard against unresolved addresses (scan failure with GBFR_DISABLE_ADDRESS_FALLBACK)
+      if (!g_rt_creation_hook && g_resolved_addresses.initialize_dx11_rendering_pipeline)
       {
          g_rt_creation_hook = safetyhook::create_inline(
             g_resolved_addresses.initialize_dx11_rendering_pipeline,
@@ -694,7 +698,7 @@ public:
       PatchJitterPhases();
 
 #ifdef PATCH_JITTER_TABLE_INIT
-      if (!g_taa_init_hook)
+      if (!g_taa_init_hook && g_resolved_addresses.temporal_aa_component_init)
       {
          g_taa_init_hook = safetyhook::create_inline(
             g_resolved_addresses.temporal_aa_component_init,
@@ -702,7 +706,11 @@ public:
       }
 #endif
 
-      if (!g_jitter_write_hook)
+      if (!g_jitter_write_hook && g_resolved_addresses.jitter_write_site
+#if defined(V2_0_3) || defined(V2_0_4) || defined(V2_0_5) || defined(V2_0_6)
+          && g_resolved_addresses.jitter_phase_counter
+#endif
+         )
       {
          g_jitter_write_hook = safetyhook::create_mid(
             g_resolved_addresses.jitter_write_site,
@@ -1202,13 +1210,26 @@ public:
          ImGui::EndTable();
       }
 
-      if (ImGui::BeginTable("gbfr_address_info", 2, ImGuiTableFlags_BordersInnerH | ImGuiTableFlags_RowBg | ImGuiTableFlags_SizingStretchProp))
+      if (ImGui::BeginTable("gbfr_address_info", 4, ImGuiTableFlags_BordersInnerH | ImGuiTableFlags_RowBg | ImGuiTableFlags_SizingStretchProp))
       {
          ImGui::TableSetupColumn("Address", ImGuiTableColumnFlags_WidthStretch);
          ImGui::TableSetupColumn("Value", ImGuiTableColumnFlags_WidthStretch);
+         ImGui::TableSetupColumn("RVA", ImGuiTableColumnFlags_WidthStretch);
+         ImGui::TableSetupColumn("Source", ImGuiTableColumnFlags_WidthStretch);
          ImGui::TableHeadersRow();
 
-         const auto draw_data_addr_row = [](const char* label, uintptr_t addr)
+         const uintptr_t module_base = reinterpret_cast<uintptr_t>(GetModuleHandleA(nullptr));
+
+         // Look up the scan status for this address label (nullptr = compiled constants only)
+         const auto get_scan_result = [](const char* label) -> const GBFRScanResult*
+         {
+            for (const auto& r : g_gbfr_scan_results)
+               if (r.name != nullptr && std::strcmp(r.name, label) == 0)
+                  return &r;
+            return nullptr;
+         };
+
+         const auto draw_addr_row = [&](const char* label, uintptr_t addr)
          {
             ImGui::TableNextRow();
             ImGui::TableSetColumnIndex(0);
@@ -1218,39 +1239,43 @@ public:
                ImGui::Text("0x%llX", static_cast<unsigned long long>(addr));
             else
                ImGui::TextUnformatted("N/A");
-         };
-
-         const auto draw_code_addr_row = [](const char* label, void* addr)
-         {
-            const uintptr_t active_addr = reinterpret_cast<uintptr_t>(addr);
-            ImGui::TableNextRow();
-            ImGui::TableSetColumnIndex(0);
-            ImGui::TextUnformatted(label);
-            ImGui::TableSetColumnIndex(1);
-            if (active_addr != 0)
-               ImGui::Text("0x%llX", static_cast<unsigned long long>(active_addr));
+            ImGui::TableSetColumnIndex(2);
+            if (addr != 0)
+               ImGui::Text("0x%llX", static_cast<unsigned long long>(addr - module_base));
             else
                ImGui::TextUnformatted("N/A");
+            ImGui::TableSetColumnIndex(3);
+            if (const GBFRScanResult* r = get_scan_result(label))
+            {
+               if (r->from_scan)
+                  ImGui::Text("scan, %u match(es)", r->match_count);
+               else if (r->resolved)
+                  ImGui::TextUnformatted("compiled");
+               else
+                  ImGui::TextUnformatted("unresolved");
+            }
+            else
+               ImGui::TextUnformatted("compiled");
          };
 
-         draw_code_addr_row("InitializeDX11RenderingPipeline", g_resolved_addresses.initialize_dx11_rendering_pipeline);
-         draw_code_addr_row("Jitter Write Site", g_resolved_addresses.jitter_write_site);
+         draw_addr_row("InitializeDX11RenderingPipeline", reinterpret_cast<uintptr_t>(g_resolved_addresses.initialize_dx11_rendering_pipeline));
+         draw_addr_row("Jitter Write Site", reinterpret_cast<uintptr_t>(g_resolved_addresses.jitter_write_site));
 #ifdef PATCH_JITTER_TABLE_INIT
-         draw_code_addr_row("TemporalAAComponentInit", g_resolved_addresses.temporal_aa_component_init);
+         draw_addr_row("TemporalAAComponentInit", reinterpret_cast<uintptr_t>(g_resolved_addresses.temporal_aa_component_init));
 #endif
 
-         draw_data_addr_row("g_renderWidth", g_resolved_addresses.render_width);
-         draw_data_addr_row("g_renderHeight", g_resolved_addresses.render_height);
+         draw_addr_row("g_renderWidth", g_resolved_addresses.render_width);
+         draw_addr_row("g_renderHeight", g_resolved_addresses.render_height);
 #ifdef V1_3_2
-         draw_data_addr_row("g_camera", g_resolved_addresses.camera_global);
+         draw_addr_row("g_camera", g_resolved_addresses.camera_global);
 #endif
-         draw_data_addr_row("g_camera_index", g_resolved_addresses.camera_index);
-         draw_data_addr_row("g_camera_table", g_resolved_addresses.camera_table);
-         draw_data_addr_row("g_taa_running_flag", g_resolved_addresses.taa_running_flag);
-         draw_data_addr_row("g_taa_render_scale_flag_ptr", g_resolved_addresses.taa_render_scale_flag_ptr);
-         draw_data_addr_row("g_taa_settings_obj", g_resolved_addresses.taa_settings_global);
-         draw_data_addr_row("g_jitter_phase_counter", g_resolved_addresses.jitter_phase_counter);
-         draw_data_addr_row("TAA Reset Flag", g_resolved_addresses.taa_reset_flag);
+         draw_addr_row("g_camera_index", g_resolved_addresses.camera_index);
+         draw_addr_row("g_camera_table", g_resolved_addresses.camera_table);
+         draw_addr_row("g_taa_running_flag", g_resolved_addresses.taa_running_flag);
+         draw_addr_row("g_taa_render_scale_flag_ptr", g_resolved_addresses.taa_render_scale_flag_ptr);
+         draw_addr_row("g_taa_settings_obj", g_resolved_addresses.taa_settings_global);
+         draw_addr_row("g_jitter_phase_counter", g_resolved_addresses.jitter_phase_counter);
+         draw_addr_row("TAA Reset Flag", g_resolved_addresses.taa_reset_flag);
 
          ImGui::EndTable();
       }

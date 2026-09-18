@@ -10,26 +10,63 @@
 //   - V2_0_2  : Game version 2.0.2 (DLC)
 //   - V2_0_3  : Game version 2.0.3
 //   - V2_0_4  : Game version 2.0.4
-//   - V2_0_5  : Game version 2.0.5 (Current)
+//   - V2_0_5  : Game version 2.0.5
+//   - V2_0_6  : Game version 2.0.6 (Current)
 // ============================================================
 
-#ifndef V2_0_5
-#define V2_0_5
+// Default to the current version when no version macro is defined.
+#if !defined(V1_3_2) && !defined(V2_0_2) && !defined(V2_0_3) && !defined(V2_0_4) && !defined(V2_0_5) && !defined(V2_0_6)
+#define V2_0_6
 #endif
 
 // ============================================================
-// v2.0.5 - Current
+// v2.0.6 - Current
+// ============================================================
+#ifdef V2_0_6
+
+// Code Addresses (RVA from module base)
+//   kInitializeDX11RenderingPipeline_RVA: shifted +0x3E0 from v2.0.5 (0x7F4760 -> 0x7F4B40)
+constexpr uintptr_t kInitializeDX11RenderingPipeline_RVA = 0x007F4B40;
+// JitterWrite: Entry point of TemporalAntiAliasingComponent::trans
+//   v2.0.5: 0x2160A60 | v2.0.6: 0x2161080 (+0x820 from v2.0.5)
+constexpr uintptr_t kJitterWrite_RVA = 0x002161080;
+// TAA Component Init: Entry point (push rsi — prologue start)
+//   v2.0.5: 0x21608B0 | v2.0.6: 0x2160ED0 (+0x620 from v2.0.5)
+constexpr uintptr_t kTemporalAntiAliasingComponent_Init_RVA = 0x02160ED0;
+
+// Data Addresses (RVA from module base)
+//   Data globals shifted by +0x1000 (render/camera) or +0x1040 (TAA settings/flags) from v2.0.5
+constexpr uintptr_t kRenderWidth_RVA = 0x06B832D8;  // +0x1000
+constexpr uintptr_t kRenderHeight_RVA = 0x06B832DC; // +0x1000
+constexpr uintptr_t kCameraIndex_RVA = 0x070207C0;  // +0x1040
+constexpr uintptr_t kCameraTable_RVA = 0x054BD3A0;  // +0x1000
+// TAASettingsGlobal: 16-byte xmmword buffer
+constexpr uintptr_t kTAASettingsGlobal_RVA = 0x0703EF70; // +0x1040
+// TAARunningFlag: Pointer (qword) to the TAA running flag byte (double-deref)
+constexpr uintptr_t kTAARunningFlag_RVA = 0x07373888; // +0x1040
+constexpr uintptr_t kTAARenderScaleFlagPointer_RVA = 0x07032290; // +0x1040
+// JitterPhaseCounter: Global phase counter
+constexpr uintptr_t kJitterPhaseCounter_RVA = 0x0703E910; // +0x1040
+constexpr uintptr_t kTAAResetFlag_RVA = 0x07373560; // +0x1040
+
+#endif // V2_0_6
+
+// ============================================================
+// v2.0.5
 // ============================================================
 #ifdef V2_0_5
 
 // Code Addresses (RVA from module base)
 //   kInitializeDX11RenderingPipeline_RVA: shifted +0x340 from v2.0.4 (0x7F4420 -> 0x7F4760)
+//   v2.0.6: 0x7F4B40
 constexpr uintptr_t kInitializeDX11RenderingPipeline_RVA = 0x007F4760;
 // JitterWrite: Entry point of TemporalAntiAliasingComponent::trans
 //   v2.0.4: 0x2160960 | v2.0.5: 0x2160A60 (+0x100 from v2.0.4)
+//   v2.0.6: 0x2161080
 constexpr uintptr_t kJitterWrite_RVA = 0x002160A60;
 // TAA Component Init: Entry point (push rsi — prologue start)
 //   v2.0.4: 0x21607B0 | v2.0.5: 0x21608B0 (+0x100 from v2.0.4)
+//   v2.0.6: 0x2160ED0
 constexpr uintptr_t kTemporalAntiAliasingComponent_Init_RVA = 0x021608B0;
 
 // Data Addresses (RVA from module base)

@@ -1,12 +1,108 @@
 #include "system.h"
 
 #include "assert.h"
+#include <emmintrin.h>
+#include <intrin.h>
 
 // For "GetFileVersionInfoSize" etc
 #pragma comment(lib, "Version.lib")
 
 namespace System
 {
+   namespace {
+      // Byte frequency table for SIMD anchor-byte selection
+      static constexpr unsigned char byte_frequencies[256] = {
+         0xFF,0xFB,0xF2,0xEE,0xEC,0xE7,0xDC,0xC8,0xED,0xB7,0xCC,0xC0,0xD3,0xCD,0x89,0xFA,
+         0xF3,0xD6,0x8D,0x83,0xC1,0xAA,0x7A,0x72,0xC6,0x60,0x3E,0x2E,0x98,0x69,0x39,0x7C,
+         0xEB,0x76,0x24,0x34,0xF9,0x50,0x04,0x07,0xE5,0xAC,0x53,0x65,0x9B,0x4D,0x6D,0x5C,
+         0xDA,0x93,0x7F,0xCB,0x92,0x49,0x43,0x09,0xBA,0x8E,0x1E,0x91,0x8A,0x5B,0x11,0xA1,
+         0xE8,0xF5,0x9E,0xAD,0xEF,0xE6,0x79,0x7B,0xFE,0xE0,0x1F,0x54,0xE4,0xBD,0x7D,0x6A,
+         0xDF,0x67,0x7E,0xA4,0xB6,0xAF,0x88,0xA0,0xC3,0xA9,0x26,0x77,0xD1,0x71,0x61,0xC2,
+         0x9A,0xCA,0x29,0x9F,0xD8,0xE2,0xD0,0x6E,0xB4,0xB8,0x25,0x3C,0xBF,0x73,0xB5,0xCF,
+         0xD4,0x01,0xCE,0xBE,0xF1,0xDB,0x52,0x37,0x9D,0x63,0x02,0x6B,0x80,0x45,0x2B,0x95,
+         0xE1,0xC4,0x36,0xF0,0xD5,0xE3,0x57,0x9C,0xB1,0xF7,0x82,0xFC,0x42,0xF6,0x18,0x33,
+         0xD2,0x48,0x05,0x0F,0x41,0x1D,0x03,0x27,0x70,0x10,0x00,0x08,0x55,0x16,0x2F,0x0E,
+         0x94,0x35,0x2C,0x40,0x6F,0x3B,0x1C,0x28,0x90,0x68,0x81,0x4B,0x56,0x30,0x2A,0x3D,
+         0x97,0x17,0x06,0x13,0x32,0x0B,0x5A,0x75,0xA5,0x86,0x78,0x4F,0x2D,0x51,0x46,0x5F,
+         0xE9,0xDE,0xA2,0xDD,0xC9,0x4C,0xAB,0xBB,0xC7,0xB9,0x74,0x8F,0xF8,0x6C,0x85,0x8B,
+         0xC5,0x84,0x8C,0x66,0x21,0x23,0x64,0x59,0xA3,0x87,0x44,0x58,0x3A,0x0D,0x12,0x19,
+         0xAE,0x5E,0x3F,0x38,0x31,0x22,0x0A,0x14,0xF4,0xD9,0x20,0xB0,0xB2,0x1A,0x0C,0x15,
+         0xB3,0x47,0x5D,0xEA,0x4A,0x1B,0x99,0xBC,0xD7,0xA6,0x62,0x4E,0xA8,0x96,0xA7,0xFD
+      };
+
+      // SIMD anchor-byte scan for a single memory region (used internally by ScanModuleForPattern)
+      static std::vector<std::byte*> ScanRegionWithSIMD(const std::byte* base, size_t size,
+         std::span<const BytePattern> pattern, bool stop_at_first)
+      {
+         // Find anchor byte (least frequent = fewest false positives)
+         uint8_t anchor = 0;
+         size_t anchor_idx = SIZE_MAX;
+         size_t min_freq = SIZE_MAX;
+         std::vector<std::pair<size_t, uint8_t>> verify_pairs;
+
+         for (size_t j = 0; j < pattern.size(); ++j)
+         {
+            if (!pattern[j].wildcard)
+            {
+               uint8_t val = static_cast<uint8_t>(pattern[j].value);
+               verify_pairs.emplace_back(j, val);
+               if (byte_frequencies[val] < min_freq)
+               {
+                  min_freq = byte_frequencies[val];
+                  anchor = val;
+                  anchor_idx = j;
+               }
+            }
+         }
+         if (anchor_idx == SIZE_MAX || size < pattern.size())
+            return {};
+
+         const size_t candidate_count = size - pattern.size() + 1;
+         const uint8_t* data = reinterpret_cast<const uint8_t*>(base);
+         std::vector<std::byte*> matches;
+
+         // x64 guarantees SSE2. A vector covers candidate starts, not the whole
+         // pattern, so verify every anchor hit before accepting it.
+         const __m128i needle = _mm_set1_epi8(static_cast<char>(anchor));
+         size_t offset = 0;
+         for (; candidate_count - offset >= 16; offset += 16)
+         {
+            const auto cmp = _mm_cmpeq_epi8(
+               _mm_loadu_si128(reinterpret_cast<const __m128i*>(data + offset + anchor_idx)), needle);
+            uint32_t mask = static_cast<uint32_t>(_mm_movemask_epi8(cmp));
+            while (mask)
+            {
+               unsigned long bit = 0;
+               _BitScanForward(&bit, mask);
+               const size_t pos = offset + bit;
+               bool ok = true;
+               for (const auto& [idx, val] : verify_pairs)
+                  if (data[pos + idx] != val) { ok = false; break; }
+               if (ok)
+               {
+                  matches.push_back(const_cast<std::byte*>(base + pos));
+                  if (stop_at_first) return matches;
+               }
+               mask &= mask - 1;
+            }
+         }
+         for (; offset < candidate_count; ++offset)
+         {
+            if (data[offset + anchor_idx] != anchor)
+               continue;
+            bool ok = true;
+            for (const auto& [idx, val] : verify_pairs)
+               if (data[offset + idx] != val) { ok = false; break; }
+            if (ok)
+            {
+               matches.push_back(const_cast<std::byte*>(base + offset));
+               if (stop_at_first) return matches;
+            }
+         }
+         return matches;
+      }
+   }
+
    std::filesystem::path GetSystemPath()
    {
       WCHAR buf[4096];
@@ -55,7 +151,7 @@ namespace System
                   VS_FIXEDFILEINFO* verInfo = (VS_FIXEDFILEINFO*)lpBuffer;
                   if (verInfo->dwSignature == 0xfeef04bd)
                   {
-                     // Combine into a single 64-bit value: v1.v2.v3.v4. This can 
+                     // Combine into a single 64-bit value: v1.v2.v3.v4. This can
                      file_version |= static_cast<uint64_t>((verInfo->dwFileVersionMS >> 16) & 0xFFFF) << 48; // v1
                      file_version |= static_cast<uint64_t>((verInfo->dwFileVersionMS >> 0) & 0xFFFF) << 32;  // v2
                      file_version |= static_cast<uint64_t>((verInfo->dwFileVersionLS >> 16) & 0xFFFF) << 16; // v3
@@ -151,6 +247,11 @@ namespace System
    }
 
    std::vector<std::byte*> ScanMemoryForPattern(const std::byte* base, size_t size, const std::vector<BytePattern>& pattern, bool stop_at_first)
+   {
+      return ScanMemoryForPattern(base, size, std::span<const BytePattern>(pattern), stop_at_first);
+   }
+
+   std::vector<std::byte*> ScanMemoryForPattern(const std::byte* base, size_t size, std::span<const BytePattern> pattern, bool stop_at_first)
    {
       if (base == nullptr || pattern.size() == 0 || pattern.size() > size)
          return {};
@@ -303,4 +404,60 @@ namespace System
 
       return nullptr; // No suitable block found
    }
+
+   std::vector<std::byte*> ScanModuleForPattern(const std::vector<BytePattern>& pattern, bool stop_at_first)
+   {
+      return ScanModuleForPattern(std::span<const BytePattern>(pattern), stop_at_first);
+   }
+
+   std::vector<std::byte*> ScanModuleForPattern(std::span<const BytePattern> pattern, bool stop_at_first)
+   {
+      std::vector<std::byte*> matches;
+      if (pattern.empty())
+         return matches;
+
+      const std::byte* base = reinterpret_cast<const std::byte*>(GetModuleHandle(nullptr));
+      if (base == nullptr)
+         return matches;
+
+      const auto* dos_header = reinterpret_cast<const IMAGE_DOS_HEADER*>(base);
+      if (dos_header->e_magic != IMAGE_DOS_SIGNATURE || dos_header->e_lfanew < 0)
+         return matches;
+      const auto* pe_header = reinterpret_cast<const IMAGE_NT_HEADERS*>(base + dos_header->e_lfanew);
+      if (pe_header->Signature != IMAGE_NT_SIGNATURE)
+         return matches;
+
+      const auto* first_section = IMAGE_FIRST_SECTION(pe_header);
+      for (int i = 0; i < pe_header->FileHeader.NumberOfSections; ++i, ++first_section)
+      {
+         if (!(first_section->Characteristics & IMAGE_SCN_MEM_EXECUTE))
+            continue;
+
+         const uintptr_t section_start = reinterpret_cast<uintptr_t>(base) + first_section->VirtualAddress;
+         const uintptr_t section_end = section_start + first_section->Misc.VirtualSize;
+         MEMORY_BASIC_INFORMATION mbi = {};
+         uintptr_t cur = section_start;
+         while (cur < section_end &&
+                VirtualQuery(reinterpret_cast<const void*>(cur), &mbi, sizeof(mbi)) == sizeof(mbi))
+         {
+            const uintptr_t region_end = reinterpret_cast<uintptr_t>(mbi.BaseAddress) + mbi.RegionSize;
+            const uintptr_t scan_end = (region_end < section_end) ? region_end : section_end;
+            const DWORD protection = mbi.Protect & 0xFF;
+            if (mbi.State == MEM_COMMIT && !(mbi.Protect & PAGE_GUARD) &&
+                protection != PAGE_NOACCESS && protection != 0 && scan_end > cur)
+            {
+               auto page_matches = ScanRegionWithSIMD(reinterpret_cast<const std::byte*>(cur),
+                  scan_end - cur, pattern, stop_at_first);
+               matches.insert(matches.end(), page_matches.begin(), page_matches.end());
+               if (stop_at_first && !matches.empty())
+                  goto done;
+            }
+            if (region_end <= cur) break;
+            cur = region_end;
+         }
+      }
+done:
+      return matches;
+   }
+
 }

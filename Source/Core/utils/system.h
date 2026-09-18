@@ -4,6 +4,8 @@
 #include <shlobj.h>
 #include <string>
 #include <filesystem>
+#include <span>
+#include <vector>
 
 namespace System
 {
@@ -56,9 +58,11 @@ namespace System
       Data,
    };
 
-   // Returns all matches.
-   // This just scans for a value, there's no "??" support in the pattern.
+   // Returns all matches. The BytePattern overload supports "??" wildcard bytes.
    std::vector<std::byte*> ScanMemoryForPattern(const std::byte* base, size_t size, const std::vector<BytePattern>& pattern, bool stop_at_first = false);
+   std::vector<std::byte*> ScanMemoryForPattern(const std::byte* base, size_t size, std::span<const BytePattern> pattern, bool stop_at_first = false);
+   std::vector<std::byte*> ScanModuleForPattern(const std::vector<BytePattern>& pattern, bool stop_at_first = false);
+   std::vector<std::byte*> ScanModuleForPattern(std::span<const BytePattern> pattern, bool stop_at_first = false);
    std::vector<std::byte*> ScanMemoryForPattern(const std::byte* base, size_t size, const std::byte* pattern, size_t pattern_size, bool stop_at_first = false);
    std::vector<std::byte*> ScanMemoryForPattern(const std::byte* base, size_t size, const std::vector<std::byte>& pattern, bool stop_at_first = false);
    std::vector<std::byte*> ScanMemoryForPattern(const std::byte* base, size_t size, const std::vector<uint8_t>& pattern, bool stop_at_first = false);

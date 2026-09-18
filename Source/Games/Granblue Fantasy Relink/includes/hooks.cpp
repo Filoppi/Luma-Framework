@@ -3,36 +3,332 @@
 #include "hooks.hpp"
 #include "common.hpp"
 
+namespace
+{
+   constexpr size_t kTransScanWindow = 0x500;
+
+   struct Signature
+   {
+      const char* name;
+      std::span<const System::BytePattern> pattern;
+      int disp_pos;
+      int insn_len;
+      int adjust;
+   };
+
+   constexpr std::array<System::BytePattern, 93> kPipelinePattern = {{
+      0x55, 0x41, 0x57, 0x41, 0x56, 0x41, 0x55, 0x41, 0x54, 0x56,
+      0x57, 0x53, 0x48, 0x81, 0xEC, 0x18, 0x01, 0x00, 0x00, 0x48,
+      0x8D, 0xAC, 0x24, 0x80, 0x00, 0x00, 0x00, 0xC5, 0x78, 0x29,
+      0x95, 0x80, 0x00, 0x00, 0x00, 0xC5, 0x78, 0x29, 0x4D, 0x70,
+      0xC5, 0x78, 0x29, 0x45, 0x60, 0xC5, 0xF8, 0x29, 0x7D, 0x50,
+      0xC5, 0xF8, 0x29, 0x75, 0x40, 0x48, 0xC7, 0x45, 0x38, 0xFE,
+      0xFF, 0xFF, 0xFF, 0x48, 0x89, 0xD6, 0x48, 0x89, 0xC8, 0x48,
+      0x89, 0x4D, 0x20, 0x48, 0x39, 0x0D, System::ANY, System::ANY, System::ANY, System::ANY,
+      0x75, 0x3B, 0x48, 0x39, 0x35, System::ANY, System::ANY, System::ANY, System::ANY, 0x75,
+      0x32, 0xB0, 0x01
+   }};
+
+   constexpr std::array<System::BytePattern, 48> kTransPattern = {{
+      0x55, 0x41, 0x57, 0x41, 0x56, 0x56, 0x57, 0x53, 0x48, 0x81,
+      0xEC, 0xB8, 0x00, 0x00, 0x00, 0x48, 0x8D, 0xAC, 0x24, 0x80,
+      0x00, 0x00, 0x00, 0x48, 0xC7, 0x45, 0x30, 0xFE, 0xFF, 0xFF,
+      0xFF, 0x48, 0x89, 0x55, 0xE0, 0x48, 0x89, 0xCE, 0x8B, 0x05,
+      System::ANY, System::ANY, System::ANY, System::ANY, 0x48, 0x83, 0xF8, 0x0B
+   }};
+
+   constexpr std::array<System::BytePattern, 27> kInitPattern = {{
+      0x56, 0x48, 0x83, 0xEC, 0x40, 0xC5, 0xF8, 0x29, 0x7C, 0x24,
+      0x30, 0xC5, 0xF8, 0x29, 0x74, 0x24, 0x20, 0x48, 0x89, 0xCE,
+      0x48, 0x8D, 0x0D, System::ANY, System::ANY, System::ANY, System::ANY
+   }};
+
+   constexpr std::array<System::BytePattern, 9> kRenderWidthPattern = {{
+      0x8B, 0x05, System::ANY, System::ANY, System::ANY, System::ANY, 0x48, 0x8B, 0x0D
+   }};
+
+   constexpr std::array<System::BytePattern, 9> kRenderHeightPattern = {{
+      0x8B, 0x05, System::ANY, System::ANY, System::ANY, System::ANY, 0x48, 0x8B, 0x15
+   }};
+
+   constexpr std::array<System::BytePattern, 10> kCameraIndexPattern = {{
+      0x8B, 0x05, System::ANY, System::ANY, System::ANY, System::ANY, 0x48, 0x83, 0xF8, 0x0B
+   }};
+
+   constexpr std::array<System::BytePattern, 10> kCameraTablePattern = {{
+      0x48, 0x8D, 0x0D, System::ANY, System::ANY, System::ANY, System::ANY, 0x48, 0x8B, 0x1C
+   }};
+
+   constexpr std::array<System::BytePattern, 10> kTAASettingsPattern = {{
+      0x48, 0x8B, 0x3D, System::ANY, System::ANY, System::ANY, System::ANY, 0x48, 0x8D, 0x05
+   }};
+
+   constexpr std::array<System::BytePattern, 10> kTAARunningPattern = {{
+      0x48, 0x8B, 0x05, System::ANY, System::ANY, System::ANY, System::ANY, 0x80, 0x38, 0x00
+   }};
+
+   constexpr std::array<System::BytePattern, 10> kTAAScalePattern = {{
+      0x48, 0x8B, 0x0D, System::ANY, System::ANY, System::ANY, System::ANY, 0xF6, 0x41, 0x65
+   }};
+
+   constexpr std::array<System::BytePattern, 12> kJitterPhasePattern = {{
+      0x48, 0x8B, 0x05, System::ANY, System::ANY, System::ANY, System::ANY, 0x89, 0xC1, 0x80,
+      0xE1, 0x3F
+   }};
+
+   constexpr std::array<System::BytePattern, 9> kTAAResetPattern = {{
+      0x80, 0x3D, System::ANY, System::ANY, System::ANY, System::ANY, 0x01, 0x75, 0x07
+   }};
+
+   constexpr std::array<Signature, 3> kCodeSignatures = {{
+      {"InitializeDX11RenderingPipeline", kPipelinePattern, 0, 0, 0},
+      {"Jitter Write Site", kTransPattern, 0, 0, 0},
+      {"TemporalAAComponentInit", kInitPattern, 0, 0, 0},
+   }};
+
+   constexpr std::array<Signature, 9> kDataSignatures = {{
+      {"g_renderWidth", kRenderWidthPattern, 2, 6, 0},
+      {"g_renderHeight", kRenderHeightPattern, 2, 6, 0},
+      {"g_camera_index", kCameraIndexPattern, 2, 6, 0},
+      {"g_camera_table", kCameraTablePattern, 3, 7, 0},
+      {"g_taa_settings_obj", kTAASettingsPattern, 3, 7, -8},
+      {"g_taa_running_flag", kTAARunningPattern, 3, 7, 0},
+      {"g_taa_render_scale_flag_ptr", kTAAScalePattern, 3, 7, 0},
+      {"g_jitter_phase_counter", kJitterPhasePattern, 3, 7, 0},
+      {"TAA Reset Flag", kTAAResetPattern, 2, 7, 0},
+   }};
+
+   // "reshade::log::message" doesn't take varargs, so format first
+   template <typename... Args>
+   void gbfr_log(reshade::log::level level, const char* fmt, const Args&... args)
+   {
+      char buffer[512];
+      std::snprintf(buffer, sizeof(buffer), fmt, args...);
+      reshade::log::message(level, buffer);
+   }
+
+   // Phase 1: scan a globally-unique code signature; the match address IS the function entry
+   void resolve_code_address(size_t index, const char* name, void** target,
+                            const std::vector<std::byte*>& matches, uintptr_t base, uintptr_t fallback_rva)
+   {
+      auto& r = g_gbfr_scan_results[index];
+      r.name = name;
+      r.match_count = static_cast<unsigned>(matches.size());
+
+      const uintptr_t scan_addr = (matches.size() == 1)
+                                       ? reinterpret_cast<uintptr_t>(matches[0])
+                                       : 0;
+      const bool from_scan = (scan_addr != 0);
+
+      if (from_scan)
+         *target = reinterpret_cast<void*>(scan_addr);
+      else if (g_gbfr_fallback_enabled)
+         *target = reinterpret_cast<void*>(base + fallback_rva);
+      else
+         *target = nullptr;
+
+      r.address = reinterpret_cast<uintptr_t>(*target);
+      r.from_scan = from_scan;
+      r.resolved = (*target != nullptr);
+
+      if (from_scan)
+         gbfr_log(reshade::log::level::info,
+            "GBFR: %s @ 0x%llX (scan, %u match(es))", name, r.address, r.match_count);
+      else
+         gbfr_log(
+            g_gbfr_fallback_enabled ? reshade::log::level::warning : reshade::log::level::error,
+            "GBFR: %s @ 0x%llX (%s, %u match(es))", name, r.address,
+            g_gbfr_fallback_enabled ? "fallback" : "scan failed, fallback disabled", r.match_count);
+   }
+
+   // Phase 2: scan a data-reference signature inside the trans window; the constant
+   // address is derived from each match's own disp32 (convergence required)
+   void resolve_data_address(size_t index, const char* name, uintptr_t* target,
+                            const Signature& sig, uintptr_t window_addr,
+                            uintptr_t base, uintptr_t fallback_rva)
+   {
+      auto& r = g_gbfr_scan_results[index];
+      r.name = name;
+
+      std::vector<std::byte*> matches;
+      uintptr_t derived = 0;
+      bool converged = false;
+      if (window_addr != 0)
+      {
+         matches = System::ScanMemoryForPattern(
+            reinterpret_cast<const std::byte*>(window_addr), kTransScanWindow, sig.pattern, false);
+
+         // Convergence: all matches must resolve to the same rip-relative address
+         if (!matches.empty())
+         {
+            converged = true;
+            for (const std::byte* match : matches)
+            {
+               int32_t disp = 0;
+               std::memcpy(&disp, match + sig.disp_pos, sizeof(disp));
+               const uintptr_t ref =
+                  reinterpret_cast<uintptr_t>(match + sig.insn_len) +
+                  static_cast<uintptr_t>(static_cast<int64_t>(disp));
+               const uintptr_t ref_adjusted =
+                  ref + static_cast<uintptr_t>(static_cast<int64_t>(sig.adjust));
+               if (derived == 0)
+                  derived = ref_adjusted;
+               else if (ref_adjusted != derived)
+                  converged = false;
+            }
+         }
+      }
+      r.match_count = static_cast<unsigned>(matches.size());
+
+      const bool from_scan = (converged && derived != 0);
+      if (from_scan)
+         *target = derived;
+      else if (g_gbfr_fallback_enabled)
+         *target = base + fallback_rva;
+      else
+         *target = 0;
+
+      r.address = *target;
+      r.from_scan = from_scan;
+      r.resolved = (*target != 0);
+
+      if (from_scan)
+         gbfr_log(reshade::log::level::info,
+            "GBFR: %s @ 0x%llX (scan, %u match(es))", name, r.address, r.match_count);
+      else
+         gbfr_log(
+            g_gbfr_fallback_enabled ? reshade::log::level::warning : reshade::log::level::error,
+            "GBFR: %s @ 0x%llX (%s, %u match(es))", name, r.address,
+            g_gbfr_fallback_enabled ? "fallback" : "scan failed, fallback disabled", r.match_count);
+   }
+}
+
 bool ResolveGBFRAddresses()
 {
    const uintptr_t base = reinterpret_cast<uintptr_t>(GetModuleHandleA(nullptr));
    if (base == 0)
       return false;
 
-   // Hook/function targets (code addresses)
-   g_resolved_addresses.initialize_dx11_rendering_pipeline = reinterpret_cast<void*>(base + kInitializeDX11RenderingPipeline_RVA);
-   g_resolved_addresses.jitter_write_site = reinterpret_cast<void*>(base + kJitterWrite_RVA);
+   if (g_gbfr_addresses_resolved.load(std::memory_order_acquire))
+   {
+      for (const auto& r : g_gbfr_scan_results)
+         if (r.name != nullptr && !r.resolved)
+            return false;
+      return true;
+   }
+
+#if defined(V2_0_4) || defined(V2_0_5) || defined(V2_0_6)
+   // Runtime scan covers v2.0.4+ (function layout identical across 2.0.4/2.0.5/2.0.6)
+   constexpr bool scan_enabled = true;
+#else
+   // Older versions keep compiled constants (layouts differ, patterns not validated)
+   constexpr bool scan_enabled = false;
+#endif
+
+#ifndef GBFR_DISABLE_ADDRESS_FALLBACK
+   g_gbfr_fallback_enabled = true;
+#else
+   // Testing mode: scan failures must not silently fall back to compiled constants
+   g_gbfr_fallback_enabled = false;
+#endif
+
+   auto& addr = g_resolved_addresses;
+
+   if (!scan_enabled)
+   {
+      reshade::log::message(reshade::log::level::info,
+         "GBFR: signature scan not applicable for this version, using compiled constants");
+      // Compiled constants (no scan)
+      g_gbfr_scan_results[0] = {"InitializeDX11RenderingPipeline", base + kInitializeDX11RenderingPipeline_RVA, true, false, 0};
+      addr.initialize_dx11_rendering_pipeline = reinterpret_cast<void*>(base + kInitializeDX11RenderingPipeline_RVA);
+      g_gbfr_scan_results[1] = {"Jitter Write Site", base + kJitterWrite_RVA, true, false, 0};
+      addr.jitter_write_site = reinterpret_cast<void*>(base + kJitterWrite_RVA);
 #ifdef PATCH_JITTER_TABLE_INIT
-   g_resolved_addresses.temporal_aa_component_init = reinterpret_cast<void*>(base + kTemporalAntiAliasingComponent_Init_RVA);
+      g_gbfr_scan_results[2] = {"TemporalAAComponentInit", base + kTemporalAntiAliasingComponent_Init_RVA, true, false, 0};
+      addr.temporal_aa_component_init = reinterpret_cast<void*>(base + kTemporalAntiAliasingComponent_Init_RVA);
 #endif
-
-   // Data addresses
-   g_resolved_addresses.render_width = base + kRenderWidth_RVA;
-   g_resolved_addresses.render_height = base + kRenderHeight_RVA;
-   g_resolved_addresses.camera_index = base + kCameraIndex_RVA;
-   g_resolved_addresses.camera_table = base + kCameraTable_RVA;
-   g_resolved_addresses.taa_settings_global = base + kTAASettingsGlobal_RVA;
-#if defined(V2_0_3) || defined(V2_0_4) || defined(V2_0_5)
-   g_resolved_addresses.taa_running_flag = base + kTAARunningFlag_RVA;
-   g_resolved_addresses.taa_render_scale_flag_ptr = base + kTAARenderScaleFlagPointer_RVA;
+      g_gbfr_scan_results[3] = {"g_renderWidth", base + kRenderWidth_RVA, true, false, 0};
+      addr.render_width = base + kRenderWidth_RVA;
+      g_gbfr_scan_results[4] = {"g_renderHeight", base + kRenderHeight_RVA, true, false, 0};
+      addr.render_height = base + kRenderHeight_RVA;
+      g_gbfr_scan_results[5] = {"g_camera_index", base + kCameraIndex_RVA, true, false, 0};
+      addr.camera_index = base + kCameraIndex_RVA;
+      g_gbfr_scan_results[6] = {"g_camera_table", base + kCameraTable_RVA, true, false, 0};
+      addr.camera_table = base + kCameraTable_RVA;
+      g_gbfr_scan_results[7] = {"g_taa_settings_obj", base + kTAASettingsGlobal_RVA, true, false, 0};
+      addr.taa_settings_global = base + kTAASettingsGlobal_RVA;
+#if defined(V2_0_3) || defined(V2_0_4) || defined(V2_0_5) || defined(V2_0_6)
+      g_gbfr_scan_results[8] = {"g_taa_running_flag", base + kTAARunningFlag_RVA, true, false, 0};
+      addr.taa_running_flag = base + kTAARunningFlag_RVA;
+      g_gbfr_scan_results[9] = {"g_taa_render_scale_flag_ptr", base + kTAARenderScaleFlagPointer_RVA, true, false, 0};
+      addr.taa_render_scale_flag_ptr = base + kTAARenderScaleFlagPointer_RVA;
 #endif
-   g_resolved_addresses.jitter_phase_counter = base + kJitterPhaseCounter_RVA;
+      g_gbfr_scan_results[10] = {"g_jitter_phase_counter", base + kJitterPhaseCounter_RVA, true, false, 0};
+      addr.jitter_phase_counter = base + kJitterPhaseCounter_RVA;
+      g_gbfr_scan_results[11] = {"TAA Reset Flag", base + kTAAResetFlag_RVA, true, false, 0};
+      addr.taa_reset_flag = base + kTAAResetFlag_RVA;
 #ifdef V1_3_2
-   g_resolved_addresses.camera_global = base + kCameraGlobal_RVA;
+      addr.camera_global = base + kCameraGlobal_RVA;
 #endif
-   g_resolved_addresses.taa_reset_flag = base + kTAAResetFlag_RVA;
+      g_gbfr_addresses_resolved.store(true, std::memory_order_release);
+      return true;
+   }
 
-   return true;
+   // Phase 1: code signatures (globally unique; the match address is the function entry)
+   const std::vector<std::byte*> pipeline_matches = System::ScanModuleForPattern(
+      kCodeSignatures[0].pattern, false);
+   resolve_code_address(0, kCodeSignatures[0].name, &addr.initialize_dx11_rendering_pipeline,
+                        pipeline_matches, base, kInitializeDX11RenderingPipeline_RVA);
+
+   const std::vector<std::byte*> trans_matches = System::ScanModuleForPattern(
+      kCodeSignatures[1].pattern, false);
+   resolve_code_address(1, kCodeSignatures[1].name, &addr.jitter_write_site,
+                        trans_matches, base, kJitterWrite_RVA);
+
+#ifdef PATCH_JITTER_TABLE_INIT
+   const std::vector<std::byte*> init_matches = System::ScanModuleForPattern(
+      kCodeSignatures[2].pattern, false);
+   resolve_code_address(2, kCodeSignatures[2].name, &addr.temporal_aa_component_init,
+                        init_matches, base, kTemporalAntiAliasingComponent_Init_RVA);
+#endif
+
+   // Phase 2: data signatures, scoped to the trans function window
+   const uintptr_t trans_window_addr = g_gbfr_scan_results[1].resolved ? g_gbfr_scan_results[1].address : 0;
+   resolve_data_address(3, kDataSignatures[0].name, &addr.render_width,
+                        kDataSignatures[0], trans_window_addr, base, kRenderWidth_RVA);
+   resolve_data_address(4, kDataSignatures[1].name, &addr.render_height,
+                        kDataSignatures[1], trans_window_addr, base, kRenderHeight_RVA);
+   resolve_data_address(5, kDataSignatures[2].name, &addr.camera_index,
+                        kDataSignatures[2], trans_window_addr, base, kCameraIndex_RVA);
+   resolve_data_address(6, kDataSignatures[3].name, &addr.camera_table,
+                        kDataSignatures[3], trans_window_addr, base, kCameraTable_RVA);
+   resolve_data_address(7, kDataSignatures[4].name, &addr.taa_settings_global,
+                        kDataSignatures[4], trans_window_addr, base, kTAASettingsGlobal_RVA);
+#if defined(V2_0_3) || defined(V2_0_4) || defined(V2_0_5) || defined(V2_0_6)
+   resolve_data_address(8, kDataSignatures[5].name, &addr.taa_running_flag,
+                        kDataSignatures[5], trans_window_addr, base, kTAARunningFlag_RVA);
+   resolve_data_address(9, kDataSignatures[6].name, &addr.taa_render_scale_flag_ptr,
+                        kDataSignatures[6], trans_window_addr, base, kTAARenderScaleFlagPointer_RVA);
+#endif
+   resolve_data_address(10, kDataSignatures[7].name, &addr.jitter_phase_counter,
+                        kDataSignatures[7], trans_window_addr, base, kJitterPhaseCounter_RVA);
+   resolve_data_address(11, kDataSignatures[8].name, &addr.taa_reset_flag,
+                        kDataSignatures[8], trans_window_addr, base, kTAAResetFlag_RVA);
+
+   const bool all_resolved = [&]()
+   {
+      for (const auto& r : g_gbfr_scan_results)
+         if (r.name != nullptr && !r.resolved)
+            return false;
+      return true;
+   }();
+
+   gbfr_log(all_resolved ? reshade::log::level::info : reshade::log::level::warning,
+      "GBFR: address resolution %s (%s)", all_resolved ? "complete" : "INCOMPLETE",
+      g_gbfr_fallback_enabled ? "fallback available" : "fallback disabled (GBFR_DISABLE_ADDRESS_FALLBACK)");
+
+   g_gbfr_addresses_resolved.store(true, std::memory_order_release);
+   return all_resolved;
 }
 
 bool TryReadCameraJitter(float2& out_jitter)
@@ -77,7 +373,7 @@ bool TryReadCameraJitter(float2& out_jitter)
 
 void OnJitterWrite(safetyhook::Context& ctx)
 {
-#if defined(V2_0_3) || defined(V2_0_4) || defined(V2_0_5)
+#if defined(V2_0_3) || defined(V2_0_4) || defined(V2_0_5) || defined(V2_0_6)
    // v2.0.3+: Jitter stored in TAA component table at [rcx + 8*(phase&0x3F) + 0x28]
    // ctx.rcx = TemporalAntiAliasingComponent*, phase counter is global
    const uint8_t phase = *reinterpret_cast<const uint8_t*>(g_resolved_addresses.jitter_phase_counter);
@@ -94,7 +390,7 @@ void OnJitterWrite(safetyhook::Context& ctx)
    g_hook_globals.table_jitter_valid.store(true, std::memory_order_release);
 #ifdef PATCH_JITTER_TABLE_INIT
    // Capture phase index for the init hook — source differs per version.
-#if defined(V2_0_3) || defined(V2_0_4) || defined(V2_0_5)
+#if defined(V2_0_3) || defined(V2_0_4) || defined(V2_0_5) || defined(V2_0_6)
    const uint8_t phase_idx = *reinterpret_cast<const uint8_t*>(g_resolved_addresses.jitter_phase_counter);
 #else
    const uint8_t phase_idx = *reinterpret_cast<const uint8_t*>(ctx.rsi + kTAAJitterPhaseIndexOffset);
@@ -177,7 +473,7 @@ bool IsTAARunningThisFrame()
 
    const bool last_known = s_last_taa_running.load(std::memory_order_acquire);
 
-#if defined(V2_0_3) || defined(V2_0_4) || defined(V2_0_5)
+#if defined(V2_0_3) || defined(V2_0_4) || defined(V2_0_5) || defined(V2_0_6)
    // v2.0.3+: qword_147371338 is a POINTER to the TAA running flag byte.
    // Verified in TemporalAntiAliasingComponent::trans (RVA 0x215F9C0):
    //   mov rax, cs:qword_147371338  (RVA 0x7371338) — load pointer
@@ -227,7 +523,7 @@ bool IsTAARunningThisFrame()
 
 bool TryGetSettingsObject(uintptr_t& out_settings_obj)
 {
-#if defined(V2_0_3) || defined(V2_0_4) || defined(V2_0_5)
+#if defined(V2_0_3) || defined(V2_0_4) || defined(V2_0_5) || defined(V2_0_6)
    // v2.0.3+: kTAASettingsGlobal_RVA is a 16-byte xmmword buffer, not a pointer.
    // No settings object to dereference.
    out_settings_obj = 0;

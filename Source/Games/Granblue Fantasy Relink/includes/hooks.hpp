@@ -1,5 +1,8 @@
 #pragma once
 
+#include <array>
+#include <atomic>
+
 #include "hook_constants.hpp"
 #include "safetyhook.hpp"
 
@@ -59,6 +62,22 @@ inline auto& g_taa_init_hook = g_hook_globals.taa_init_hook;
 inline auto& g_device_data_ptr = g_hook_globals.device_data_ptr;
 inline auto& g_native_device_ptr = g_hook_globals.native_device_ptr;
 inline GBFRResolvedAddresses g_resolved_addresses;
+
+// Per-constant status from ResolveGBFRAddresses() — for logging and the UI debug table.
+struct GBFRScanResult
+{
+   const char* name = nullptr; // nullptr = entry not applicable for this version
+   uintptr_t address = 0; // Resolved absolute address (scan or fallback)
+   bool resolved = false; // True if a usable address is present
+   bool from_scan = false; // True if resolved via signature scan
+   unsigned match_count = 0; // Pattern match count at the reference site
+};
+
+// One entry per hook constant (same order as the signatures in hooks.cpp)
+constexpr size_t kGBFRSignatureCount = 12;
+inline std::array<GBFRScanResult, kGBFRSignatureCount> g_gbfr_scan_results = {};
+inline std::atomic<bool> g_gbfr_addresses_resolved{false}; // Guard against re-resolution
+inline bool g_gbfr_fallback_enabled = true; // Set in ResolveGBFRAddresses() per compile (GBFR_DISABLE_ADDRESS_FALLBACK)
 
 bool ResolveGBFRAddresses();
 
