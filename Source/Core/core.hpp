@@ -5726,18 +5726,39 @@ namespace
          {
             IDXGISwapChain* native_swapchain = (IDXGISwapChain*)(swapchain->get_native());
 
-            UINT back_buffer_index = 0;
-            com_ptr<IDXGISwapChain3> native_swapchain3;
-            // The cast pointer is actually the same, we are just making sure the type is right (it should always be).
-            // This would always be 1 in DX11, even if two buffers were requested.
-            if (SUCCEEDED(native_swapchain->QueryInterface(&native_swapchain3)))
-            {
-               back_buffer_index = native_swapchain3->GetCurrentBackBufferIndex();
-            }
+            // The DX11 ReShade backend exposes a single logical back buffer. Avoid
+            // indexing Luma's logical state with a native flip-model buffer index.
+            const UINT back_buffer_index = swapchain->get_current_back_buffer_index();
             com_ptr<ID3D11Texture2D> back_buffer;
-            native_swapchain->GetBuffer(back_buffer_index, IID_PPV_ARGS(&back_buffer));
-            assert(back_buffer != nullptr && swapchain_data.back_buffers.size() >= back_buffer_index + 1);
-            assert(swapchain_data.display_composition_rtvs.size() >= back_buffer_index + 1);
+            const HRESULT get_buffer_hr = native_swapchain != nullptr
+               ? native_swapchain->GetBuffer(back_buffer_index, IID_PPV_ARGS(&back_buffer))
+               : E_FAIL;
+
+            bool tracked_back_buffer = false;
+            size_t tracked_back_buffer_count = 0;
+            size_t display_composition_rtv_count = 0;
+            if (SUCCEEDED(get_buffer_hr) && back_buffer != nullptr)
+            {
+               const std::shared_lock lock_swapchain(swapchain_data.mutex);
+               tracked_back_buffer_count = swapchain_data.back_buffers.size();
+               display_composition_rtv_count = swapchain_data.display_composition_rtvs.size();
+               tracked_back_buffer = swapchain_data.back_buffers.contains(reinterpret_cast<uint64_t>(back_buffer.get()));
+            }
+
+            if (FAILED(get_buffer_hr) || back_buffer == nullptr || !tracked_back_buffer || back_buffer_index >= display_composition_rtv_count)
+            {
+               // Do not interrupt the end-of-frame work below: it resets per-frame
+               // game state and releases resources queued for destruction.
+               static std::atomic<bool> warning_sent;
+               if (!warning_sent.exchange(true, std::memory_order_relaxed))
+               {
+                  OverlayLog::AddWarning(
+                     "Display composition skipped: GetBuffer({}) returned 0x{:08X}; tracked buffers={}, RTVs={}, tracked={}.",
+                     back_buffer_index, static_cast<uint32_t>(get_buffer_hr), tracked_back_buffer_count,
+                     display_composition_rtv_count, tracked_back_buffer);
+               }
+               goto AfterDisplayComposition;
+            }
 
             D3D11_TEXTURE2D_DESC target_desc;
             back_buffer->GetDesc(&target_desc);
@@ -6123,6 +6144,8 @@ namespace
             }
          }
       }
+
+   AfterDisplayComposition:
 
 #if DEVELOPMENT
       // Clear at the end of every frame and re-capture it in the next frame if its still available
