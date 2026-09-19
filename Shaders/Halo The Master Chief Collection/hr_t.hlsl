@@ -5,7 +5,7 @@
 #include "../Includes/ColorGradingLUT.hlsl"
 
 #define HALO3_TONEMAP 0
-#define BLOOM_MAKEUP 1.36
+#define BLOOM_MAKEUP 1.126
 
 struct ToneMapInfo {
   float3 x;   // HDR output
