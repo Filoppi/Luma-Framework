@@ -1,5 +1,5 @@
-// Bink movie pass (YUV->RGB: planes Y=t0 U=t1 V=t2, matrix rows PsConstants[8..10], constant [11].x, alpha [11].w)
-// straight onto the canvas, never through the scene passes. Restores the vanilla clamp, then a LIGHT PumboAutoHDR.
+// Mass Effect (2007) - Bink movie pass (YUV->RGB) straight onto the canvas, never through the scene passes. Restores
+// the vanilla clamp, then a LIGHT PumboAutoHDR.
 
 // clang-format off
 #include "Includes/Common.hlsl"       // game-local: pulls GameCBuffers (LumaGameSettings VideoAutoHDR* fields) + shared Common
@@ -7,7 +7,7 @@
 // clang-format on
 
 // Light AutoHDR on movies. Peak kept low: Bink is low-bitrate and pushing peak amplifies block artifacts.
-// PumboAutoHDR self-noops in SDR (peak == paper white), so no display branch is needed.
+// PumboAutoHDR self-noops in SDR (display peak == paper white), so no display branch is needed.
 #ifndef ENABLE_VIDEO_AUTO_HDR
 #define ENABLE_VIDEO_AUTO_HDR 1
 #endif

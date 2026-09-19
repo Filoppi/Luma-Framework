@@ -8,8 +8,8 @@
 namespace CB
 {
 // Grade controls, drawn in DrawImGuiSettings (main.cpp), read in Luma_ME1_Tonemap.hlsl unless noted. HDR tonemap path
-// only, except Exposure and the bloom fields, which apply on the vanilla SDR path too (bloom only when the uber pass
-// runs).
+// only, except Exposure and the bloom fields, which apply on the vanilla SDR path too (bloom only when the uber or the
+// standalone DOFAndBloom blend runs).
 struct LumaGameSettings
 {
    float Exposure;          // exposure multiplier (1 = vanilla). Applied scene-referred, pre-grade.
@@ -36,7 +36,7 @@ struct LumaGameSettings
 struct LumaGameData
 {
    // 1 when UberPostProcessBlend ran this frame (its replacement left LINEAR HDR in the intermediate), 0 when the
-   // engine skipped it and the gamma pass reads the RAW fp16 scene, where it must run the whole HDR block itself.
+   // engine skipped it and the gamma pass reads the ungraded fp16 scene, where it must run the whole HDR block itself.
    float UberRanThisFrame;
 };
 } // namespace CB
