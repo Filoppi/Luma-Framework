@@ -412,6 +412,7 @@ struct GameDeviceDataMetaphorReFantazio final : public GameDeviceData
    ComPtr<ID3D11UnorderedAccessView> merged_texture_uav;
    ComPtr<ID3D11ShaderResourceView> merged_texture_srv;
    ComPtr<ID3D11RenderTargetView> merged_texture_rtv;
+   ComPtr<ID3D11Texture2D> exposure_texture;
 
    // constant buffers
    ComPtr<ID3D11Buffer> cbuffer_prev_data;
@@ -830,6 +831,33 @@ public:
          native_device->CreateShaderResourceView(game_device_data.noise_texture.get(),
             nullptr,
             game_device_data.noise_texture_srv.put());
+      }
+
+      {
+          D3D11_TEXTURE2D_DESC desc = {};
+          desc.Width = 1;
+          desc.Height = 1;
+          desc.Usage = D3D11_USAGE_IMMUTABLE;
+          desc.ArraySize = 1;
+          desc.Format = DXGI_FORMAT_R16_FLOAT;
+          desc.SampleDesc.Count = 1;
+          desc.SampleDesc.Quality = 0;
+          desc.BindFlags = D3D11_BIND_SHADER_RESOURCE;
+          desc.CPUAccessFlags = 0;
+          desc.MiscFlags = 0;
+          desc.MipLevels = 1;
+
+          uint16_t one_as_fp16 = 0x3c00; // DLSS runs after main tonemap so we can just set exposure to 1
+
+          D3D11_SUBRESOURCE_DATA subresource_data;
+          subresource_data.pSysMem = &one_as_fp16;
+          subresource_data.SysMemPitch = 2;
+          subresource_data.SysMemSlicePitch = 2;
+
+
+          native_device->CreateTexture2D(&desc,
+              &subresource_data,
+              game_device_data.exposure_texture.put());
       }
 
       ComPtr<ID3D11RasterizerState> scene_ui_rasterizer_state;
@@ -2536,7 +2564,7 @@ public:
             settings_data.render_width = device_data.render_resolution.x;
             settings_data.render_height = device_data.render_resolution.y;
             settings_data.dynamic_resolution = false;
-            settings_data.hdr = false;
+            settings_data.hdr = true;
             settings_data.inverted_depth = false;
             settings_data.mvs_jittered = false;
             settings_data.render_preset = dlss_render_preset;
@@ -2604,6 +2632,7 @@ public:
             draw_data.output_color = game_device_data.resolve_texture.get();
             draw_data.motion_vectors = game_device_data.scaled_motion_vectors.get();
             draw_data.depth_buffer = context_data.depth_texture.get();
+            draw_data.exposure = game_device_data.exposure_texture.get();
             draw_data.render_width = device_data.render_resolution.x;
             draw_data.render_height = device_data.render_resolution.y;
             draw_data.bias_mask = context_data.particle_texture ? game_device_data.bias_mask.get() : nullptr;
