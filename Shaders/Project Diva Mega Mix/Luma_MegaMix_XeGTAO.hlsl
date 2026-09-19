@@ -524,7 +524,6 @@ void XeGTAO_ComputeViewspaceNormal(const uint2 pixCoord, const GTAOConstants con
 ///////////////////////
 
 // Smooths viewspace normal using its neighbors.
-// TODO: modded from AI fart, there must be better algorithm? but is it also faster?
 void XeGTAO_SmoothViewspaceNormal(const uint2 pixCoord, const GTAOConstants consts)
 {
     Texture2D sourceViewspaceDepth32 = t0;
@@ -555,8 +554,8 @@ void XeGTAO_SmoothViewspaceNormal(const uint2 pixCoord, const GTAOConstants cons
         return;
     }
 
-    // stepUV
-    const float normalSmoothViewRadius = (EFFECT_RADIUS + (centerZ * EFFECT_RADIUS_DISTANCE_SCALE)) * RADIUS_MULTIPLIER * NORMAL_SMOOTH_SCALE; // TODO: dont copy main pass?
+    // stepUV (close = wider)
+    const float normalSmoothViewRadius = (EFFECT_RADIUS + (centerZ * EFFECT_RADIUS_DISTANCE_SCALE)) * RADIUS_MULTIPLIER * NORMAL_SMOOTH_SCALE; // TODO: dont copy main pass / use diff coeffs?
     const float2 viewspacePixelSizeAtDepth = centerZ * abs(consts.NDCToViewMul);
     const float2 stepUV = normalSmoothViewRadius * rcp(max(viewspacePixelSizeAtDepth, 1e-6));
 #if XE_GTAO_NORMALSMOOTH_2ND
@@ -584,7 +583,7 @@ void XeGTAO_SmoothViewspaceNormal(const uint2 pixCoord, const GTAOConstants cons
         const float4 depthWeights = saturate(depthDiff + 1.0);
 
         // normal-similarity term catches silhouettes/corners where depth stays smooth but the normal doesn't (plain depth bilateral would miss these)
-        float4 normalWeights = saturate(float4(dot(centerNormal, leftN), dot(centerNormal, rightN), dot(centerNormal, topN), dot(centerNormal, bottomN)));
+        float4 normalWeights = saturate(float4(dot(centerNormal, leftN), dot(centerNormal, rightN), dot(centerNormal, topN), dot(centerNormal, bottomN))); // TODO: weights is from AI fart. is there better?
         normalWeights *= normalWeights;
 
         const float4 weights = depthWeights * normalWeights;
@@ -594,38 +593,6 @@ void XeGTAO_SmoothViewspaceNormal(const uint2 pixCoord, const GTAOConstants cons
 
         smoothedNormal = normalize(normalSum * rcp(weightSum));
     }
-
-#if XEGTAO_NORMALSMOOTH_QUALITY == 2 //TODO: this doesnt do crap
-    stepUV *= 0.66; 
-    { 
-        const float leftZ   = sourceViewspaceDepth16.SampleLevel(depthSampler, sampleUV + float2(-1,  0) * stepUVScaled, DEPTH_MIP_SAMPLING_NORMALSSMOOTH).x;
-        const float rightZ  = sourceViewspaceDepth16.SampleLevel(depthSampler, sampleUV + float2( 1,  0) * stepUVScaled, DEPTH_MIP_SAMPLING_NORMALSSMOOTH).x;
-        const float topZ    = sourceViewspaceDepth16.SampleLevel(depthSampler, sampleUV + float2( 0, -1) * stepUVScaled, DEPTH_MIP_SAMPLING_NORMALSSMOOTH).x;
-        const float bottomZ = sourceViewspaceDepth16.SampleLevel(depthSampler, sampleUV + float2( 0,  1) * stepUVScaled, DEPTH_MIP_SAMPLING_NORMALSSMOOTH).x;
-
-        const float3 leftN   = NormalsDenormalize(sourceViewspaceNormal.SampleLevel(normalSampler, sampleUV + float2(-1,  0) * stepUVScaled, 0).xyz);
-        const float3 rightN  = NormalsDenormalize(sourceViewspaceNormal.SampleLevel(normalSampler, sampleUV + float2( 1,  0) * stepUVScaled, 0).xyz);
-        const float3 topN    = NormalsDenormalize(sourceViewspaceNormal.SampleLevel(normalSampler, sampleUV + float2( 0, -1) * stepUVScaled, 0).xyz);
-        const float3 bottomN = NormalsDenormalize(sourceViewspaceNormal.SampleLevel(normalSampler, sampleUV + float2( 0,  1) * stepUVScaled, 0).xyz);
-
-        const float4 depthDiff = abs(float4(leftZ, rightZ, topZ, bottomZ) - centerZ);
-        const float4 depthWeights = saturate(depthDiff + 1.0);
-
-        // normal-similarity term catches silhouettes/corners where depth stays smooth but the normal doesn't (plain depth bilateral would miss these)
-        float4 normalWeights = saturate(float4(dot(centerNormal, leftN), dot(centerNormal, rightN), dot(centerNormal, topN), dot(centerNormal, bottomN)));
-        normalWeights *= normalWeights;
-
-        const float4 weights = depthWeights * normalWeights;
-
-        float3 normalSum = centerNormal + leftN * weights.x + rightN * weights.y + topN * weights.z + bottomN * weights.w;
-        float weightSum = 1.0 + dot(weights, 1.0.xxxx);
-
-        float3 smoothedNormal1 = normalize(normalSum * rcp(weightSum));   
-
-        // blend with 1st
-        smoothedNormal = normalize(smoothedNormal + smoothedNormal1);
-    }
-#endif
 
     outputNormal[pixCoord] = float4(NormalsNormalize(smoothedNormal), viewspaceNormal4.w);
     // outputNormal[pixCoord] = NormalsNormalize(smoothedNormal);  
@@ -676,7 +643,7 @@ void XeGTAO_MainPassCS(uint2 pixCoord, float2 localNoise, const GTAOConstants co
     // outWorkingAOTermAndEdges[pixCoord] = float2(viewspaceNormal.x * 0.5 + 0.5, 1); return;
 
 #if 1
-    // depth Gather
+    // depth Gather //TODO: why does this become offset from prev passes?!?!?! if not, we can skip 2 Gathers
     float4 valuesUL   = sourceViewspaceDepth16.GatherRed(depthSampler, sampleUV            );
     float4 valuesBR   = sourceViewspaceDepth16.GatherRed(depthSampler, sampleUV, int2(1, 1));
     float viewspaceZ  = valuesUL.y;
@@ -897,39 +864,25 @@ void XeGTAO_MainPassCS(uint2 pixCoord, float2 localNoise, const GTAOConstants co
 
 #if XEGTAO_FOG == 1
         // fog (decrease if fog is bright) (some material skip fog by g_shader_flags) (some materials use height color, while others depth, all by g_shader_flags)
-        #if 0
-            float fogHLuma = GetLuminance(g_fog_height_color.xyz) * g_fog_height_color.w; // color can be > 1 //TODO: is w even used?
-            float fogLuma = fogHLuma;
-            fogLuma = saturate(fogLuma); //clean
+        float fogHLuma = GetLuminance(g_fog_height_color.xyz) * g_fog_height_color.w;
+        float fogDLuma = GetLuminance(g_fog_depth_color.xyz) * g_fog_depth_color.w;
+        float fogLuma = max(fogHLuma, fogDLuma);
 
-            float fogNear = max(g_fog_height_params.y, g_fog_state_params.y);
-            float fogFar = max(g_fog_height_params.z, g_fog_state_params.z);
-            float fogScore = smoothstep(fogNear, fogFar, viewspaceZ) * fogLuma;
-            fogScore = sqrt(fogScore);
-        #elif 0
-            float fogHLuma = GetLuminance(g_fog_height_color.xyz) * g_fog_height_color.w;
-            float fogDLuma = GetLuminance(g_fog_depth_color.xyz) * g_fog_depth_color.w;
+        // float fogHScore = smoothstep(g_fog_height_params.y, g_fog_height_params.z, viewspaceZ) /* * g_fog_height_params.x */;
+        // float fogSScore = smoothstep(g_fog_state_params.y, g_fog_state_params.z, viewspaceZ) /* * g_fog_state_params.x */;
+        float fogHScore = saturate(InverseLerp(g_fog_height_params.y, g_fog_height_params.z, viewspaceZ)) /* * g_fog_height_params.x */;
+        float fogSScore = saturate(InverseLerp(g_fog_state_params.y, g_fog_state_params.z, viewspaceZ)) /* * g_fog_state_params.x */;
+        float fogScore = fogSScore/* max(fogHScore, fogSScore) */;
+        fogScore = pow(fogScore, 0.777); // curve
+        fogScore *= fogLuma; // color
 
-            float fogHScore = smoothstep(g_fog_height_params.y, g_fog_height_params.z, viewspaceZ) * fogHLuma;
-            float fogSScore = smoothstep(g_fog_state_params.y , g_fog_state_params.z, viewspaceZ) * fogDLuma;
-            float fogScore = min(fogHScore, fogSScore);
-            fogScore = sqrt(fogScore);
-        #elif 1
-            float fogHLuma = GetLuminance(g_fog_height_color.xyz) * g_fog_height_color.w;
-            float fogDLuma = GetLuminance(g_fog_depth_color.xyz) * g_fog_depth_color.w;
-            float fogLuma = lerp(fogHLuma, fogDLuma, fogHLuma > fogDLuma ? 0.1 : 0.9);
-
-            float fogHScore = smoothstep(g_fog_height_params.y, g_fog_height_params.z, viewspaceZ) * fogLuma;
-            float fogSScore = smoothstep(g_fog_state_params.y, g_fog_state_params.z, viewspaceZ) * fogLuma;
-            float fogScore = min(fogHScore, fogSScore);
-            fogScore = sqrt(fogScore);
-        #endif
-
-
-        // fogScore = saturate(fogScore); //clean
-        // fogScore *= fogScore; //curved
         visibility = max(visibility, fogScore);
 #endif
+
+        // Depth fade
+        float depthFade = InverseLerp( DEPTH_LINEAR_MAX * 0.88, DEPTH_LINEAR_MAX, viewspaceZ);
+        depthFade = saturate(depthFade);
+        visibility = max(visibility, depthFade);
 
         // Final visibility
 		visibility = pow(visibility, /* FINAL_VALUE_POWER * */ GS.XeGTAOFinalPower); 
@@ -1293,129 +1246,6 @@ float4 apply_ps(float4 sv_pos : SV_Position0) : SV_Target0
             }
 
             ao = (sumWeight >= 1e-6) ? (sumAO / sumWeight) : ao;
-        #elif 0
-            float highDepth = XeGTAO_ClampDepth(XeGTAO_ScreenSpaceToViewSpaceDepth(tFullDepth32.Load(int3(pixCoord, 0)).x)); //center
-            const float depth_weight_factor = highDepth * 100; // distance scaled
-
-            float4 aoQuadA = tAO.GatherRed(sPoint, uv);
-            float4 aoQuadB = tAO.GatherRed(sPoint, uv, int2(DVS1, DVS1));
-            float ao = aoQuadA.y; //center
-            float4 depthQuadA = tHalfDepth16.GatherRed(sPoint, uv);
-            float4 depthQuadB = tHalfDepth16.GatherRed(sPoint, uv, int2(DVS1, DVS1)); // 2nd quad not as good as using normals
-
-            float sumAO = 0.0;
-            float sumWeight = 0.0;
-            [unroll] for (int i = 0; i < 4; i++)
-            {
-                float weightA = highDepth > depthQuadA[i] ? exp2(-abs(highDepth - depthQuadA[i]) * depth_weight_factor) : 0;
-                sumAO += aoQuadA[i] * weightA;
-                sumWeight += weightA;
-
-                float weightB = highDepth < depthQuadB[i] ? exp2(-abs(highDepth - depthQuadB[i]) * depth_weight_factor) : 0;
-                sumAO += aoQuadB[i] * weightB;
-                sumWeight += weightB;
-            }
-
-            ao = (sumWeight >= 1e-6) ? (sumAO / sumWeight) : ao;
-        #elif 0
-            float highDepth = XeGTAO_ClampDepth(XeGTAO_ScreenSpaceToViewSpaceDepth(tFullDepth32.Load(int3(pixCoord, 0)).x)); //center
-            const float depth_weight_factor = highDepth * 100; // distance scaled
-            float ao = 1;
-            {
-                float4 aoQuad = tAO.GatherRed(sPoint, uv); ao = aoQuad.y; //center
-                float4 depthQuad = tHalfDepth16.GatherRed(sPoint, uv);
-
-                float sumAO = 0.0;
-                float sumWeight = 0.0;
-                [unroll] for (int i = 0; i < 4; i++)
-                {
-                    float sampleAO = aoQuad[i];
-                    float lowDepth = depthQuad[i];
-                    float weight = highDepth < lowDepth ? exp2(-abs(highDepth - lowDepth) * depth_weight_factor) : 0;
-                    sumAO += sampleAO * weight;
-                    sumWeight += weight;
-                }
-
-                ao = (sumWeight >= 1e-6) ? (sumAO / sumWeight) : ao;
-            }
-            {
-                float4 aoQuad = tAO.GatherRed(sPoint, uv, int2(DVS1, DVS1));
-                float4 depthQuad = tHalfDepth16.GatherRed(sPoint, uv, int2(DVS1, DVS1));
-
-                float sumAO = 0.0;
-                float sumWeight = 0.0;
-                [unroll] for (int i = 0; i < 4; i++)
-                {
-                    float sampleAO = aoQuad[i];
-                    float lowDepth = depthQuad[i];
-                    float weight = highDepth > lowDepth ? exp2(-abs(highDepth - lowDepth) * depth_weight_factor) : 0;
-                    sumAO += sampleAO * weight;
-                    sumWeight += weight;
-                }
-
-                ao = (sumWeight >= 1e-6) ? (sumAO / sumWeight) : ao;
-            }
-        #elif 0
-            // NDC to View
-            GTAOConstants c = (GTAOConstants)0;
-            c.ViewportSize = viewportSize;
-            c.ViewportPixelSize = viewportPixelSize;
-            c = GetNDCToView(c);
-
-            // full res depth & normals
-            float3 viewspaceNormal;
-            float viewspaceZ;
-            {
-                float4 valuesUL   = finalpass_origdepth.GatherRed(sPoint, float2(uv));
-                float4 valuesBR   = finalpass_origdepth.GatherRed(sPoint, float2(uv), int2(1, 1));
-                viewspaceZ        = XeGTAO_ClampDepth(XeGTAO_ScreenSpaceToViewSpaceDepth(valuesUL.y));
-                float pixLZ       = XeGTAO_ClampDepth(XeGTAO_ScreenSpaceToViewSpaceDepth(valuesUL.x));
-                float pixTZ       = XeGTAO_ClampDepth(XeGTAO_ScreenSpaceToViewSpaceDepth(valuesUL.z));
-                float pixRZ       = XeGTAO_ClampDepth(XeGTAO_ScreenSpaceToViewSpaceDepth(valuesBR.z));
-                float pixBZ       = XeGTAO_ClampDepth(XeGTAO_ScreenSpaceToViewSpaceDepth(valuesBR.x));
-                float4 edgesLRTB  = XeGTAO_CalculateEdges(viewspaceZ, pixLZ, pixRZ, pixTZ, pixBZ);
-                float3 CENTER   = XeGTAO_ComputeViewspacePosition(normalizedScreenPos, viewspaceZ, c);
-                float3 LEFT     = XeGTAO_ComputeViewspacePosition(normalizedScreenPos + float2(-1,  0) * c.ViewportPixelSize, pixLZ, c);
-                float3 RIGHT    = XeGTAO_ComputeViewspacePosition(normalizedScreenPos + float2( 1,  0) * c.ViewportPixelSize, pixRZ, c);
-                float3 TOP      = XeGTAO_ComputeViewspacePosition(normalizedScreenPos + float2( 0, -1) * c.ViewportPixelSize, pixTZ, c);
-                float3 BOTTOM   = XeGTAO_ComputeViewspacePosition(normalizedScreenPos + float2( 0,  1) * c.ViewportPixelSize, pixBZ, c);
-                viewspaceNormal = XeGTAO_CalculateNormal(edgesLRTB, CENTER, LEFT, RIGHT, TOP, BOTTOM);
-            }
-            // return float4(viewspaceNormal.xyz * 0.5 + 0.5, 1);
-            // ao *= max3(viewspaceNormal.xyz) * 0.0001; // debug test perf (nearly free)
-
-            float highDepth = viewspaceZ;
-            float3 highNormal = viewspaceNormal;
-            float ao = tAO.SampleLevel(sPoint, uv, 0).x;
-
-            float sumAO = 0.0;
-            float sumWeight = 0.0;
-
-            float4 aoQuad = tAO.GatherRed(sPoint, uv);
-            float4 depthQuad = tHalfDepth16.GatherRed(sPoint, uv);
-            float4 normalRQuad = tHalfNormals.GatherRed(sPoint, uv); // TOO SLOW!
-            float4 normalGQuad = tHalfNormals.GatherGreen(sPoint, uv); // TOO SLOW!
-            float4 normalBQuad = tHalfNormals.GatherBlue(sPoint, uv); // TOO SLOW!
-
-            const float wSpatial = exp2(-0.5 * 0.5);
-            const float depth_weight_factor = viewspaceZ * 100;
-
-            [unroll] for (int i = 0; i < 4; i++)
-            {
-                float sampleAO = aoQuad[i];
-                float lowDepth = depthQuad[i];
-                float3 lowNormal = NormalsDenormalize(float3(normalRQuad[i], normalGQuad[i], normalBQuad[i]));
-
-                float wDepth = exp2(-abs(highDepth - lowDepth) * depth_weight_factor);
-                float dotN = max(0.0, dot(highNormal, lowNormal));
-                float wNormal = pow(dotN, 16.0);
-
-                float weight = wDepth * wNormal * wSpatial;
-                sumAO += sampleAO * weight;
-                sumWeight += weight;
-            }
-
-            ao = (sumWeight >= 1e-6) ? (sumAO / sumWeight) : ao;
         #elif 1
             // NDC to View
             GTAOConstants c = (GTAOConstants)0;
@@ -1543,235 +1373,5 @@ float4 apply_ps(float4 sv_pos : SV_Position0) : SV_Target0
 
     return float4(x, color.w);
 }
-
-//     // Single 2x2-quad Gather layout (per HLSL spec, components ordered
-//     // starting bottom-left, going counter-clockwise: x=BL, y=TL, z=TR, w=BR)
-//     // aoUL covers the quad whose top-left is at 'uv'
-//     // aoBR covers the quad offset by (1,1) texels
-//     float4 aoUL = t1.GatherRed(s1, uv, 0          /* + 1 */); // BL, TL, TR, BR of upper-left quad
-//     float4 aoBR = t1.GatherRed(s1, uv, int2(1, 1) /* + 1 */); // BL, TL, TR, BR of lower-right quad
-//     float4 aoUR = t1.GatherRed(s1, uv, int2(1, 0) /* + 1 */); // needed for TR/BR corner diagonals
-//     float4 aoBL = t1.GatherRed(s1, uv, int2(0, 1) /* + 1 */); // needed for BL/TL corner diagonals
-// 
-//     // float4 eUL = t1.GatherGreen(s1, uv,            + 1);
-//     // float4 eBR = t1.GatherGreen(s1, uv, int2(1, 1) + 1);
-//     // float4 eUR = t1.GatherGreen(s1, uv, int2(1, 0) + 1);
-//     // float4 eBL = t1.GatherGreen(s1, uv, int2(0, 1) + 1);
-// 
-//     // Cross taps (same as before)
-//     float aoC = aoUL.z; // TR of upper-left quad == center-ish texel
-//     float aoL = aoUL.y; // TL
-//     float aoT = aoUL.w; // wait — verify against your Gather() component order below
-//     float aoR = aoBR.z;
-//     float aoB = aoBR.y;
-// 
-//     // NOTE: Gather() component ordering differs by API/compiler docs you may be
-//     // using (some engines document x=TL,y=TR,z=BR,w=BL). Confirm against your
-//     // existing working cross-taps above before trusting the corner extraction —
-//     // match whichever ordering makes your ORIGINAL aoC/aoL/aoT/aoR/aoB taps
-//     // line up with real neighbors, then apply the same ordering below.
-// 
-//     // Diagonal / corner taps — free, from the same 4 Gather calls
-//     float aoTL = aoUL.x;
-//     float aoTR = aoUR.y;
-//     float aoBL_ = aoBL.w;
-//     float aoBR_ = aoBR.x;
-// 
-//     float eC   = 1/* eUL.z */;
-//     float eL   = 1/* eUL.y */;
-//     float eT   = 1/* eUL.w */;
-//     float eR   = 1/* eBR.z */;
-//     float eB   = 1/* eBR.y */;
-//     float eTL  = 1/* eUL.x */;
-//     float eTR  = 1/* eUR.y */;
-//     float eBL_ = 1/* eBL.w */;
-//     float eBR_ = 1/* eBR.x */;
-// 
-//     // --- Bilateral-style weighted blend (replaces flat /5 average) ---
-//     // Gaussian spatial weights for a 3x3 kernel (sigma ~1), corners lighter
-//     static const float wCenter = 0.25;
-//     static const float wCross  = 0.125; // 4 of these
-//     static const float wCorner = 0.0625; // 4 of these
-//     // (0.25 + 4*0.125 + 4*0.0625 == 1.0)
-// 
-//     // static const float wCenter = 1/9.f;
-//     // static const float wCross  = 4/9.f; // 4 of these
-//     // static const float wCorner = 4/9.f; // 4 of these
-// 
-//     float sumW  = wCenter * eC;
-//     float sumAO = aoC * wCenter * eC;
-// 
-//     sumW  += wCross * eL; sumAO += aoL * wCross * eL;
-//     sumW  += wCross * eR; sumAO += aoR * wCross * eR;
-//     sumW  += wCross * eT; sumAO += aoT * wCross * eT;
-//     sumW  += wCross * eB; sumAO += aoB * wCross * eB;
-// 
-//     sumW  += wCorner * eTL; sumAO += aoTL * wCorner * eTL;
-//     sumW  += wCorner * eTR; sumAO += aoTR * wCorner * eTR;
-//     sumW  += wCorner * eBL_; sumAO += aoBL_ * wCorner * eBL_;
-//     sumW  += wCorner * eBR_; sumAO += aoBR_ * wCorner * eBR_;
-// 
-//     float ao0 = sumAO / max(sumW, 1e-5); // edge-aware 3x3 blend, now includes diagonals
-//     float ao1 = aoC;                     // slight edge bleed (unchanged)
-//     // float ao2 = max3(max3(max3(aoC, aoL, aoT), max3(aoR, aoB, aoTL), aoTR), aoBL_, aoBR_); // heavy edge bleed, now over full 3x3
-//     // float ao2 = max3(max3(aoC, aoL, aoT), aoR, aoB); // heavy edge bleed
-// 
-//     // merge ao (unchanged blend logic)
-//     float ao = saturate(ao0);
-//     ao = max((ao + (ao1 * 6)) / (1 + 6), ao);
-//     // ao = max((ao + (ao2 * DVS1)) / (1 + DVS1), ao);
-
-    // GTAOConstants c = (GTAOConstants)0;
-
-    // // NDC to View
-    // c.ViewportSize = viewportSize;
-    // c.ViewportPixelSize = viewportPixelSize;
-    // float Pxx = dot(g_projection_view[0].xyz, g_view[0].xyz);
-    // float Pyy = dot(g_projection_view[1].xyz, g_view[1].xyz);
-    // float tanHalfFovX = 1.0 / Pxx;
-    // float tanHalfFovY = 1.0 / Pyy;
-    // c.NDCToViewMul = float2(2.0, -2.0) * float2(tanHalfFovX, tanHalfFovY);
-    // c.NDCToViewAdd = float2(-1.0, 1.0) * float2(tanHalfFovX, tanHalfFovY);
-    // c.NDCToViewMul_x_PixelSize = c.NDCToViewMul * c.ViewportPixelSize;
-
-    // // full res edges
-    // float4 valuesUL   = finalpass_origdepth.GatherRed(s0, float2(uv));
-    // float4 valuesBR   = finalpass_origdepth.GatherRed(s0, float2(uv), int2(1, 1));
-    //     float viewspaceZ  = XeGTAO_ScreenSpaceToViewSpaceDepth(valuesUL.y);
-    //     float pixLZ       = XeGTAO_ScreenSpaceToViewSpaceDepth(valuesUL.x);
-    //     float pixTZ       = XeGTAO_ScreenSpaceToViewSpaceDepth(valuesUL.z);
-    //     float pixRZ       = XeGTAO_ScreenSpaceToViewSpaceDepth(valuesBR.z);
-    //     float pixBZ       = XeGTAO_ScreenSpaceToViewSpaceDepth(valuesBR.x);
-    // float4 edgesLRTB  = XeGTAO_CalculateEdges(viewspaceZ, pixLZ, pixRZ, pixTZ, pixBZ);
-    // // edgesLRTB = sqrt(edgesLRTB);
-    // // edgesLRTB = max(0.22, edgesLRTB);
-    // 
-    // float ao1 = 0/* (aoC) + (aoL * edgesLRTB.x) + (aoT * edgesLRTB.z) + (aoR * edgesLRTB.y) + (aoB * edgesLRTB.w) */;
-
-//     // Joint Bilateral Upsample
-//     // https://github.com/BarbatosBachiko/Reshade-Shaders/blob/2a68ea7f2c22620f0ef93c19ebf1b7094b897747/Shaders/BaBa_XeGTAO.fx#L536
-//     {
-//         float highDepth = viewspaceZ;
-//         float3 highNormal = viewspaceNormal;
-// 
-//         float sumAO = 0.0;
-//         float sumWeight = 0.0;
-//         
-//         float2 baseUV = uv;
-//         
-//         float depth_weight_factor = /* 0.1 * */ viewspaceZ /* 1.0 / (0.1 * viewspaceZ + 1e-6) */;
-// 
-//         [unroll] for (int x = -1; x <= 1; x++)
-//         {
-//             [unroll] for (int y = -1; y <= 1; y++)
-//             {
-//                 if (x == 0 && y == 0) continue; // center
-//                 if (x == 1 && y == 1) continue; // corner
-//                 if (x == 1 && y == -1) continue; // corner
-//                 if (x == -1 && y == 1) continue; // corner
-//                 if (x == -1 && y == -1) continue; // corner
-//                 
-//                 float2 sampleUV = uv + float2(x,y) * (viewportPixelSize * 2); // offset (2x of viewport res moves 1x half res)
-// 
-//                 float sampleAO = tAO.SampleLevel(sPoint, sampleUV, 0).x; // ao at offset
-//                 //   return float4(sampleAO.xxx, 1);
-//                 float3 lowNormal = NormalsDenormalize(tHalfNormals.SampleLevel(sPoint, sampleUV, 0).xyz); // half res normals at offset
-//                 float lowDepth = tHalfDepth16.SampleLevel(sPoint, sampleUV, 0).x; // half res normals at offset
-//                 
-//                 // crazy maths for weights
-//                 float wDepth = exp(-abs(highDepth - lowDepth) * depth_weight_factor);
-//                 float dotN = max(0.0, dot(highNormal, lowNormal));
-//                 float wNormal = pow(dotN, 16.0);
-//                 float wSpatial = exp(-0.5 * float(x * x + y * y));
-// 
-//                 float weight = wDepth * wNormal * wSpatial;
-//                 sumAO += sampleAO * weight;
-//                 sumWeight += weight;
-//             }
-//         }
-// 
-//         ao = (sumWeight >= 1e-6) ? (sumAO / sumWeight) : ao;
-//     }
-
-
-//     // NDC to View
-//     GTAOConstants c = (GTAOConstants)0;
-//     c.ViewportSize = viewportSize;
-//     c.ViewportPixelSize = viewportPixelSize;
-// #if 1
-//     float Pxx = dot(g_projection_view[0].xyz, g_view[0].xyz); //TODOL: why is this not working!?!?
-//     float Pyy = dot(g_projection_view[1].xyz, g_view[1].xyz);
-//     float tanHalfFovX = 1.0 / Pxx;
-//     float tanHalfFovY = 1.0 / Pyy;
-//     c.NDCToViewMul = float2(2.0, -2.0) * float2(tanHalfFovX, tanHalfFovY);
-//     c.NDCToViewAdd = float2(-1.0, 1.0) * float2(tanHalfFovX, tanHalfFovY);
-//     c.NDCToViewMul_x_PixelSize = c.NDCToViewMul * c.ViewportPixelSize;
-// #else       
-//     float tanHalfFOV = tan(20 * XE_GTAO_PI_OVER_360);
-//     float aspect = c.ViewportSize.x / c.ViewportSize.y;
-//     c.NDCToViewMul = float2(2.0, -2.0) * float2(aspect * tanHalfFOV, tanHalfFOV);
-//     c.NDCToViewAdd = float2(-1.0, 1.0) * float2(aspect * tanHalfFOV, tanHalfFOV);
-//     c.NDCToViewMul_x_PixelSize = c.NDCToViewMul * c.ViewportPixelSize;
-// #endif
-//
-//     // full res depth & normals
-//     float3 viewspaceNormal;
-//     float viewspaceZ;
-//     {
-//         float4 valuesUL   = finalpass_origdepth.GatherRed(sPoint, float2(uv));
-//         float4 valuesBR   = finalpass_origdepth.GatherRed(sPoint, float2(uv), int2(1, 1));
-//         viewspaceZ        = XeGTAO_ClampDepth(XeGTAO_ScreenSpaceToViewSpaceDepth(valuesUL.y));
-//         float pixLZ       = XeGTAO_ClampDepth(XeGTAO_ScreenSpaceToViewSpaceDepth(valuesUL.x));
-//         float pixTZ       = XeGTAO_ClampDepth(XeGTAO_ScreenSpaceToViewSpaceDepth(valuesUL.z));
-//         float pixRZ       = XeGTAO_ClampDepth(XeGTAO_ScreenSpaceToViewSpaceDepth(valuesBR.z));
-//         float pixBZ       = XeGTAO_ClampDepth(XeGTAO_ScreenSpaceToViewSpaceDepth(valuesBR.x));
-//         float4 edgesLRTB  = XeGTAO_CalculateEdges(viewspaceZ, pixLZ, pixRZ, pixTZ, pixBZ);
-//         float3 CENTER   = XeGTAO_ComputeViewspacePosition(normalizedScreenPos, viewspaceZ, c);
-//         float3 LEFT     = XeGTAO_ComputeViewspacePosition(normalizedScreenPos + float2(-1,  0) * c.ViewportPixelSize, pixLZ, c);
-//         float3 RIGHT    = XeGTAO_ComputeViewspacePosition(normalizedScreenPos + float2( 1,  0) * c.ViewportPixelSize, pixRZ, c);
-//         float3 TOP      = XeGTAO_ComputeViewspacePosition(normalizedScreenPos + float2( 0, -1) * c.ViewportPixelSize, pixTZ, c);
-//         float3 BOTTOM   = XeGTAO_ComputeViewspacePosition(normalizedScreenPos + float2( 0,  1) * c.ViewportPixelSize, pixBZ, c);
-//         viewspaceNormal = XeGTAO_CalculateNormal(edgesLRTB, CENTER, LEFT, RIGHT, TOP, BOTTOM);
-//     }
-//     // return float4(viewspaceNormal.xyz * 0.5 + 0.5, 1);
-//     // ao *= max3(viewspaceNormal.xyz) * 0.0001; // debug test perf (nearly free)
-// 
-//     // Joint Bilateral Upsample (super frugal ahh)
-//     // Weights modded from: https://github.com/BarbatosBachiko/Reshade-Shaders/blob/2a68ea7f2c22620f0ef93c19ebf1b7094b897747/Shaders/BaBa_XeGTAO.fx#L536
-//     {
-//         float highDepth = viewspaceZ;
-//         float3 highNormal = viewspaceNormal;
-// 
-//         float sumAO = 0.0;
-//         float sumWeight = 0.0;
-// 
-//         float4 aoQuad = tAO.GatherRed(sPoint, uv);
-//         float4 depthQuad = tHalfDepth16.GatherRed(sPoint, uv);
-//         // float4 normalRQuad = tHalfNormals.GatherRed(sPoint, uv); // TOO SLOW!
-//         // float4 normalGQuad = tHalfNormals.GatherGreen(sPoint, uv);
-//         // float4 normalBQuad = tHalfNormals.GatherBlue(sPoint, uv);
-// 
-//         const float wSpatial = exp(-0.5 * 0.5);
-//         const float depth_weight_factor = viewspaceZ * 100;
-// 
-//         [unroll] for (int i = 0; i < 4; i++)
-//         {
-//             float sampleAO = aoQuad[i];
-//             float lowDepth = depthQuad[i];
-//             // float3 lowNormal = NormalsDenormalize(float3(normalRQuad[i], normalGQuad[i], normalBQuad[i]));
-// 
-//             // wDepth
-//             float wDepth = exp(-abs(highDepth - lowDepth) * depth_weight_factor);
-// 
-//             // float dotN = max(0.0, dot(highNormal, lowNormal));
-//             // float wNormal = pow(dotN, 16.0);
-// 
-//             float weight = wDepth /* * wNormal */ * wSpatial;
-//             sumAO += sampleAO * weight;
-//             sumWeight += weight;
-//         }
-// 
-//         ao = (sumWeight >= 1e-6) ? (sumAO / sumWeight) : ao;
-//     }
 
 #endif // __XE_GTAO_HLSLI__

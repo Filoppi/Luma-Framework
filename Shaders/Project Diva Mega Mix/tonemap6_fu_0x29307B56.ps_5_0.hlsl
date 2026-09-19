@@ -82,8 +82,7 @@ void main(
   // r0.xyz = min(float3(0.800000012,0.800000012,0.800000012), r0.xyz);
 
   colorUntonemapped = r0.xyz; //TODO: verify... somehow
-  //colorUntonemapped = gamma_to_linear(colorUntonemapped, GCT_POSITIVE, 2.2);
-  colorUntonemapped = gamma_sRGB_to_linear(colorUntonemapped, GCT_POSITIVE);
+  colorUntonemapped = DecodeIntermediate(max(0, colorUntonemapped));
 
   r0.xyz = /* saturate */(r0.xyz * g_tone_scale.xyz + g_tone_offset.xyz);
 
@@ -101,6 +100,5 @@ void main(
   o0.xyz = r1.xxx ? r1.yzw : r0.xyz;
   o0.w = r0.w;
   
-  Tonemap_Out(o0);
   return;
 }
