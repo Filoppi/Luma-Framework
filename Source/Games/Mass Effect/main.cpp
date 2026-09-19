@@ -30,6 +30,9 @@ static constexpr uint32_t kCopyPassHash = 0x1E37D75B;
 // UE3 DOFAndBloomGather, REPLACED: bloom and DoF blur share one quarter-res target, so only it can drop the glow.
 static constexpr uint32_t kDofBloomGatherHash = 0x56854256;  // QualityBloom=TRUE, 16 taps
 static constexpr uint32_t kDofBloomGather4Hash = 0x28F8DB16; // QualityBloom=FALSE, 4 taps
+// UE3 DOFAndBloomBlend, REPLACED: the standalone DoF/bloom composite of uber-less chains (Space_PostProcess_DOF2, the
+// default UI chains). It composites the Luma glow there, since the replaced gather drops the native one.
+static constexpr uint32_t kDofBloomBlendHash = 0x218D4AE2;
 // UE3 FilterPixelShader, 9 taps, NOT replaced: PS cb4[10..18] weights and VS cb4[25..29] offsets set the glow radius.
 static constexpr uint32_t kBloomFilterHash = 0x6A1129DF;
 
@@ -39,9 +42,10 @@ static constexpr uint32_t kGammaCorrectionHash_v281 = 0x3BEF1CD6;
 static constexpr uint32_t kCopyPassHash_v281 = 0xDDEAEB7C;
 static constexpr uint32_t kDofBloomGatherHash_v281 = 0x4B65EEAE;
 static constexpr uint32_t kDofBloomGather4Hash_v281 = 0xAA369C00;
+static constexpr uint32_t kDofBloomBlendHash_v281 = 0x63B94FF3;
 static constexpr uint32_t kBloomFilterHash_v281 = 0x464E33BB;
 
-// Luma bloom pyramid mip 0 for the grade replacements; clear of t0 (scene) and t1 (blur), the only slots they declare.
+// Luma bloom pyramid mip 0 for the uber/blend replacements; clear of t0 (scene) and t1 (blur), the only slots they declare.
 static constexpr uint32_t kLumaBloomSlot = 6;
 // One sigma per mip, count taken FROM the array so the two cannot drift (MELE). Blended 0.5/0.5 = energy-preserving.
 static constexpr float g_bloom_sigmas[] = {1.5f, 2.f, 2.f, 2.f, 1.f, 0.5f};
@@ -64,7 +68,8 @@ static bool g_smaa_pred_measure = false; // one-shot: log the mask's coverage ab
 static bool g_dump_pass_cb = false;
 #endif
 
-// Mirrored into GameSettings.LumaBloomEnable for both the grade and the replaced gather: one switch swaps the blooms.
+// Mirrored into GameSettings.LumaBloomEnable for the composites (uber, blend) and the replaced gather: one switch swaps
+// the blooms.
 static bool g_luma_bloom_enable = true;
 
 struct MassEffectGameDeviceData final : public GameDeviceData
@@ -209,8 +214,33 @@ class MassEffect final : public Game
       return *static_cast<MassEffectGameDeviceData*>(device_data.game);
    }
 
-   // Look injected shaders up with find(): operator[] default-inserts on a miss, mutating a map core's draw helpers
-   // read.
+#if ENABLE_BLOOM
+   // Pyramid off the fp16 LINEAR scene at t0, pre-glow, bound at t6 for the pass compositing it: the uber, or the
+   // standalone DOFAndBloom blend on uber-less chains (no cooked chain has both, so the glow is never doubled).
+   static void BindLumaBloom(ID3D11Device* native_device, ID3D11DeviceContext* native_device_context, DeviceData& device_data, ID3D11ShaderResourceView* srv_scene)
+   {
+      auto& gd = GetGameDeviceData(device_data);
+      gd.srv_luma_bloom.reset(); // DrawBloom AddRef's its mip 0 into this
+      if (g_luma_bloom_enable && srv_scene)
+      {
+         DrawStateStack<DrawStateStackType::FullGraphics> bloom_state;
+         bloom_state.Cache(native_device_context, device_data.uav_max_count);
+
+         // Karis average first: no TAA, so fireflies die spatially. The sigmas are in mip texels: resolution-independent.
+         ComPtr<ID3D11ShaderResourceView> srv_karis;
+         DrawKarisAverage(native_device, native_device_context, device_data, srv_scene, srv_karis.put());
+         if (srv_karis)
+            DrawBloom(native_device, native_device_context, device_data, srv_karis.get(), (int)std::size(g_bloom_sigmas), g_bloom_sigmas, gd.srv_luma_bloom.put());
+
+         bloom_state.Restore(native_device_context);
+      }
+      // Bound every time, null included (the composite gates on LumaBloomEnable): a stale slot samples garbage.
+      ID3D11ShaderResourceView* bloom_srv = gd.srv_luma_bloom.get();
+      native_device_context->PSSetShaderResources(kLumaBloomSlot, 1, &bloom_srv);
+   }
+#endif
+
+   // Look injected shaders up with find(): operator[] default-inserts on a miss, mutating a map core's draw helpers read.
    template <typename ShaderMap>
    static auto FindShader(const ShaderMap& shaders, uint32_t name)
    {
@@ -553,7 +583,7 @@ class MassEffect final : public Game
 public:
    void OnInit(bool async) override
    {
-      // Game-specific toggles consumed by both replaced passes (Luma_ME1_Tonemap.hlsl).
+      // Game-specific toggles consumed by the uber and gamma replacements (Luma_ME1_Tonemap.hlsl).
       std::vector<ShaderDefineData> game_shader_defines_data = {
          {"TONEMAP_TYPE", '1', true, false, "0 - SDR: Vanilla (clamped reference)\n1 - HDR: extended native grade + MacLeod-Boynton hue + DICE display map"},
       };
@@ -950,28 +980,20 @@ public:
 #endif
 
 #if ENABLE_BLOOM
-         // Pyramid off the fp16 LINEAR scene at t0, pre-glow. Karis average first: no TAA, so fireflies die spatially.
-         gd.srv_luma_bloom.reset(); // DrawBloom AddRef's its mip 0 into this
-         if (g_luma_bloom_enable && gd.srv_scene)
-         {
-            DrawStateStack<DrawStateStackType::FullGraphics> bloom_state;
-            bloom_state.Cache(native_device_context, device_data.uav_max_count);
-
-            ComPtr<ID3D11ShaderResourceView> srv_karis;
-            DrawKarisAverage(native_device, native_device_context, device_data, gd.srv_scene.get(), srv_karis.put());
-            // The sigmas are in mip texels, so nothing here is resolution-dependent.
-            if (srv_karis)
-               DrawBloom(native_device, native_device_context, device_data, srv_karis.get(), (int)std::size(g_bloom_sigmas), g_bloom_sigmas, gd.srv_luma_bloom.put());
-
-            bloom_state.Restore(native_device_context);
-         }
-         {
-            // Bound every frame, null included (composite gates on LumaBloomEnable): a stale slot samples garbage.
-            ID3D11ShaderResourceView* bloom_srv = gd.srv_luma_bloom.get();
-            native_device_context->PSSetShaderResources(kLumaBloomSlot, 1, &bloom_srv);
-         }
+         BindLumaBloom(native_device, native_device_context, device_data, gd.srv_scene.get());
 #endif
       }
+
+#if ENABLE_BLOOM
+      // Uber-less chains composite DoF and bloom here instead: the replacement adds the Luma glow the uber would have.
+      if (is_immediate && ContainsPixelShader(original_shader_hashes, kDofBloomBlendHash, kDofBloomBlendHash_v281))
+      {
+         SetLumaConstantBuffers(native_device_context, cmd_list_data, device_data, reshade::api::shader_stage::pixel, LumaConstantBufferType::LumaSettings);
+         ComPtr<ID3D11ShaderResourceView> srv_blend_scene;
+         native_device_context->PSGetShaderResources(0, 1, srv_blend_scene.put());
+         BindLumaBloom(native_device, native_device_context, device_data, srv_blend_scene.get());
+      }
+#endif
 
       if (is_immediate && !device_data.has_drawn_main_post_processing && IsFinalColorPass(original_shader_hashes))
       {
@@ -1103,7 +1125,7 @@ public:
       // Inside the guard because it drives the Luma pyramid alone: with no pyramid there is nothing for it to scale.
       reshade::get_config_value(nullptr, NAME, "BloomIntensity", cb_luma_global_settings.GameSettings.BloomIntensity);
       reshade::get_config_value(nullptr, NAME, "LumaBloomEnable", g_luma_bloom_enable);
-      cb_luma_global_settings.GameSettings.LumaBloomEnable = g_luma_bloom_enable ? 1.f : 0.f; // mirror to both shaders
+      cb_luma_global_settings.GameSettings.LumaBloomEnable = g_luma_bloom_enable ? 1.f : 0.f; // mirror to the shaders
       reshade::get_config_value(nullptr, NAME, "BloomThreshold", cb_luma_global_settings.GameSettings.BloomThreshold);
 #endif
       reshade::get_config_value(nullptr, NAME, "Contrast", cb_luma_global_settings.GameSettings.Contrast);
@@ -1156,7 +1178,7 @@ public:
 #endif
 
       // --- Grade (read in Luma_ME1_Tonemap.hlsl via LumaSettings.GameSettings). HDR tonemap path only except Exposure
-      // and the bloom fields, which apply on the vanilla SDR path too (bloom only when the uber pass runs). ---
+      // and the bloom fields, which apply on the vanilla SDR path too (bloom only when the uber or blend runs). ---
       auto& gs = cb_luma_global_settings.GameSettings;
       ImGui::SeparatorText("Grade");
 

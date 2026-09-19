@@ -13,7 +13,8 @@
 // MacLeodBoynton::HueOnlyBT2020 rebuilds on the signal's own purity; DICE rolloff to the user's peak/paper white;
 // SimpleGamutClip and back to BT.709; user saturation; the engine fade last, through the vanilla curve.
 // The engine SKIPS the uber in elevators and some loading scenes; main.cpp reports that through
-// LumaData.GameData.UberRanThisFrame and the gamma replacement then runs the HDR block itself off the RAW scene.
+// LumaData.GameData.UberRanThisFrame and the gamma replacement then runs the HDR block itself off the ungraded scene
+// (DoF and the Luma glow composited by the standalone DOFAndBloom blend 0x218D4AE2 when that chain has one).
 // Measured cb4 exponents: uber 1.0, copy 1.0, gamma 0.625 = 1/1.6 (the game's DisplayGamma), so the intermediate
 // holds linear graded light. main.cpp hands that exponent over as GameSettings.DisplayGammaInverse, since the
 // grade needs it but it lives in another pass. Two dgVoodoo rules hold throughout: every fetch is followed by an
@@ -161,12 +162,12 @@ float3 FinishME1HDR(float3 color)
 }
 #endif
 
-// Stage 1: UberPostProcessBlend -> fp16 intermediate. LINEAR light (1.0 = paper white) in HDR, the untouched
-// vanilla value in SDR. `sceneUV` is TEXCOORD1 (t0), `blurUV` TEXCOORD0 (t1) - the original samples t0 with v6.
-float3 RunME1Tonemap(float2 blurUV, float2 sceneUV, out float sceneDepth)
+// The scene mix, exactly as vanilla, shared by the uber and the standalone DOFAndBloom blend (same rows, same
+// interpolators): depth-driven DoF weight, the combined DoF/native-bloom contribution at x4 and the Luma glow in the
+// numerator. Returns (numerator, weight sum); each pass divides with its own guard. `sceneUV` is TEXCOORD1 (t0),
+// `blurUV` TEXCOORD0 (t1) - the original samples t0 with v6.
+float4 ME1SceneMix(float2 blurUV, float2 sceneUV, out float sceneDepth)
 {
-   // 1. Scene mix, exactly as vanilla: depth-driven DoF weight, the combined DoF/native-bloom contribution at x4,
-   // normalized by the weight sum.
    float4 scene = ApplyDgvMask(SceneColorTexture.Sample(SceneColorTextureSampler_s, sceneUV), DgvMaskT0, DgvFillT0);
 
    // UE3 packs scene depth in the fp16 alpha. Handed back so the entry point writes it into the target alpha without a
@@ -176,14 +177,19 @@ float3 RunME1Tonemap(float2 blurUV, float2 sceneUV, out float sceneDepth)
 
    float4 blurred = ApplyDgvMask(BlurredImage.Sample(BlurredImageSampler_s, blurUV), DgvMaskT1, DgvFillT1);
    // The engine's combined DoF blur + native bloom target, stored pre-divided by 4, hence the x4; vanilla's unorm view
-   // also capped it at 4.0, a cap the fp16 upgrade lifted. NEVER scale blurContribution by BloomIntensity: DoF and bloom
-   // are SUMMED into this buffer, so the term carries defocused scene, not only glow.
-   const float3 blurContribution = blurred.xyz * 4.0;
-   const float weightSum = blurred.w * 4.0 + sceneWeight;
-
+   // also capped it at 4.0, a cap the fp16 upgrade lifted. NEVER scale the blur by BloomIntensity: DoF and bloom are
+   // SUMMED into this buffer, so the term carries defocused scene, not only glow.
    // The Luma glow goes into the numerator, where the vanilla glow was, so the DoF weight sum divides it too.
-   float3 untonemapped = scene.xyz * sceneWeight + blurContribution + LumaBloom(sceneUV);
-   untonemapped *= (abs(weightSum) > 0.0) ? rcp(weightSum) : FLT_MAX; // rcp guard, as the original does
+   return float4(scene.xyz * sceneWeight + blurred.xyz * 4.0 + LumaBloom(sceneUV), blurred.w * 4.0 + sceneWeight);
+}
+
+// Stage 1: UberPostProcessBlend -> fp16 intermediate. LINEAR light (1.0 = paper white) in HDR, the untouched
+// vanilla value in SDR.
+float3 RunME1Tonemap(float2 blurUV, float2 sceneUV, out float sceneDepth)
+{
+   // 1. Scene mix.
+   const float4 mix = ME1SceneMix(blurUV, sceneUV, sceneDepth);
+   float3 untonemapped = mix.xyz * ((abs(mix.w) > 0.0) ? rcp(mix.w) : FLT_MAX); // rcp guard, as the original does
 
    // Exposure, scene-referred / pre-grade: the SDR reference derives from the same value, so the grade tracks it.
    untonemapped *= LumaSettings.GameSettings.Exposure;
@@ -224,7 +230,7 @@ float3 RunME1Tonemap(float2 blurUV, float2 sceneUV, out float sceneDepth)
 }
 
 // Stage 2: FGammaCorrection (PS 0x17CE0932) -> the canvas, the frame's LAST colour pass before the HUD.
-// Reads scene A: stage 1's LINEAR HDR when the uber ran, the RAW fp16 scene when it was skipped. Own register map.
+// Reads scene A: stage 1's LINEAR HDR when the uber ran, the ungraded fp16 scene when it was skipped. Own register map.
 #define GcColorScale   PsConstants[8]  // .xyz ColorScale
 #define GcOverlayColor PsConstants[10] // .xyz OverlayColor, .w its blend weight (this pass's fade)
 #define GcInverseGamma PsConstants[11] // .x inverse display gamma (measured 0.625 = 1/1.6, the game's DisplayGamma default)
@@ -263,10 +269,10 @@ float3 RunME1GammaCorrection(float2 sceneUV)
    }
    else
    {
-      // Gamma-only frame: the RAW fp16 scene, no DoF, no bloom, no uber grade, so the whole HDR block runs here off
-      // this pass's own extended grade. GradeGCExtended applies GcInverseGamma itself, so the decode is a plain
-      // gamma_to_linear (NOT VanillaToLinear, which would apply the display gamma twice). No Luma bloom: the pyramid is
-      // injected at the uber draw.
+      // Gamma-only frame: the fp16 scene with no uber grade (DoF and bloom only if a standalone blend ran), so the
+      // whole HDR block runs here off this pass's own extended grade. GradeGCExtended applies GcInverseGamma itself, so
+      // the decode is a plain gamma_to_linear (NOT VanillaToLinear, which would apply the display gamma twice). No Luma
+      // bloom injected here: the uber or the blend composites it.
       float3 untonemapped = scene.xyz * LumaSettings.GameSettings.Exposure;
       outColor = FinishME1HDR(gamma_to_linear(GradeGCExtended(untonemapped)));
    }

@@ -1,5 +1,6 @@
-// Mass Effect (2007) - Luma HDR bloom pyramid (core DrawBloom). Input = the grade's scene texture (PS t0):
-// fp16, LINEAR, pre-glow, no gamma decode. Threshold 1.0 = the game's bright-pass; knee = half.
+// Mass Effect (2007) - Luma HDR bloom pyramid (core DrawBloom). Input = the compositing pass's scene texture (PS t0
+// of the uber or the DOFAndBloom blend), Karis-averaged: fp16, LINEAR, pre-glow, no gamma decode. Threshold 1.0 = the
+// game's bright-pass; knee = half.
 
 // clang-format off
 #include "Includes/Common.hlsl" // game-local: pulls GameCBuffers (LumaSettings) before the shared includes
