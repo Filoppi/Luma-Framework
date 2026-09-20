@@ -25,11 +25,12 @@ void main(
 	o0.w = r0.w;
 	if (LumaSettings.DisplayMode == 1)
 	{
-		o0.xyz = r0.xyz;
+		float gamePaperWhite = LumaSettings.GamePaperWhiteNits / sRGB_WhiteLevelNits;
+		o0.xyz = gamma_to_linear(linear_to_sRGB_gamma(r0.xyz, GCT_MIRROR), GCT_MIRROR) * gamePaperWhite;
 	}
 	else
 	{
-		r0.xyz = log2(r0.xyz);
+		r0.xyz = log2(max(r0.xyz, 0.0f));
 		r0.xyz = gamma * r0.xyz;
 		o0.xyz = exp2(r0.xyz);
 	}

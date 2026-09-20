@@ -834,30 +834,29 @@ public:
       }
 
       {
-          D3D11_TEXTURE2D_DESC desc = {};
-          desc.Width = 1;
-          desc.Height = 1;
-          desc.Usage = D3D11_USAGE_IMMUTABLE;
-          desc.ArraySize = 1;
-          desc.Format = DXGI_FORMAT_R16_FLOAT;
-          desc.SampleDesc.Count = 1;
-          desc.SampleDesc.Quality = 0;
-          desc.BindFlags = D3D11_BIND_SHADER_RESOURCE;
-          desc.CPUAccessFlags = 0;
-          desc.MiscFlags = 0;
-          desc.MipLevels = 1;
+         D3D11_TEXTURE2D_DESC desc = {};
+         desc.Width = 1;
+         desc.Height = 1;
+         desc.Usage = D3D11_USAGE_IMMUTABLE;
+         desc.ArraySize = 1;
+         desc.Format = DXGI_FORMAT_R16_FLOAT;
+         desc.SampleDesc.Count = 1;
+         desc.SampleDesc.Quality = 0;
+         desc.BindFlags = D3D11_BIND_SHADER_RESOURCE;
+         desc.CPUAccessFlags = 0;
+         desc.MiscFlags = 0;
+         desc.MipLevels = 1;
 
-          uint16_t one_as_fp16 = 0x3c00; // DLSS runs after main tonemap so we can just set exposure to 1
+         uint16_t one_as_fp16 = 0x3c00; // DLSS runs after main tonemap so we can just set exposure to 1
 
-          D3D11_SUBRESOURCE_DATA subresource_data;
-          subresource_data.pSysMem = &one_as_fp16;
-          subresource_data.SysMemPitch = 2;
-          subresource_data.SysMemSlicePitch = 2;
+         D3D11_SUBRESOURCE_DATA subresource_data;
+         subresource_data.pSysMem = &one_as_fp16;
+         subresource_data.SysMemPitch = 2;
+         subresource_data.SysMemSlicePitch = 2;
 
-
-          native_device->CreateTexture2D(&desc,
-              &subresource_data,
-              game_device_data.exposure_texture.put());
+         native_device->CreateTexture2D(&desc,
+            &subresource_data,
+            game_device_data.exposure_texture.put());
       }
 
       ComPtr<ID3D11RasterizerState> scene_ui_rasterizer_state;
@@ -1652,9 +1651,9 @@ public:
          overrideType = DrawOrDispatchOverrideType::Replaced;
       }
       else if (SrActive(device_data) &&
-          original_shader_hashes.pixel_shaders.size() > 0 &&
-          (original_shader_hashes.pixel_shaders.front() == 0xA7108284 || // tonemap background
-             original_shader_hashes.pixel_shaders.front() == 0xC1787BC6))
+               original_shader_hashes.pixel_shaders.size() > 0 &&
+               (original_shader_hashes.pixel_shaders.front() == 0xA7108284 || // tonemap background
+                  original_shader_hashes.pixel_shaders.front() == 0xC1787BC6))
       {
          CommitSkinCache(native_device_context, context_data);
 
@@ -1745,9 +1744,9 @@ public:
          }
       }
       else if (context_data.frame_progress.Reached(FrameProgress::OpaqueRenderingStarted) &&
-          !context_data.frame_progress.Reached(FrameProgress::BackgroundTonemapped) &&
-          !context_data.frame_progress.Reached(FrameProgress::LutApplied) &&
-          !context_data.frame_progress.Reached(FrameProgress::AddedParticles))
+               !context_data.frame_progress.Reached(FrameProgress::BackgroundTonemapped) &&
+               !context_data.frame_progress.Reached(FrameProgress::LutApplied) &&
+               !context_data.frame_progress.Reached(FrameProgress::AddedParticles))
       {
          if (!SrActive(device_data) ||
              original_shader_hashes.vertex_shaders.empty() ||
@@ -3023,6 +3022,279 @@ public:
          ImGui::SetTooltip("Requires restart.");
       }
 
+      if (enable_hdr)
+      {
+         auto ChangeDisplayMode = [&](DisplayModeType display_mode, bool enable_hdr_on_display = true, IDXGISwapChain3* swapchain = nullptr)
+         {
+            int display_mode_i = int(display_mode);
+            reshade::set_config_value(runtime, NAME, "DisplayMode", display_mode_i);
+            cb_luma_global_settings.DisplayMode = display_mode;
+            OnDisplayModeChanged();
+            if (display_mode >= DisplayModeType::HDR)
+            {
+               if (enable_hdr_on_display)
+               {
+                  Display::SetHDREnabled(game_window);
+                  bool dummy_bool;
+                  Display::IsHDRSupportedAndEnabled(game_window, dummy_bool, hdr_enabled_display, swapchain); // This should always succeed, so we don't fallback to SDR in case it didn't
+
+#if ENABLE_NVAPI
+                  // Enable HDR10+ GAMING if supported, it generally makes Samsung displays more accurate, so there's no reason to not enable it really.
+                  // For now we only do this if we are also enforcing HDR enabled on the display.
+                  Display::NVAPI::SetDisplayOutputMode(game_window, NV_DISPLAY_OUTPUT_MODE_HDR10PLUS_GAMING, false, false);
+#endif
+               }
+               if (!reshade::get_config_value(runtime, NAME, "ScenePeakWhite", cb_luma_global_settings.ScenePeakWhite) || cb_luma_global_settings.ScenePeakWhite <= 0.f)
+               {
+                  cb_luma_global_settings.ScenePeakWhite = device_data.default_user_peak_white;
+               }
+               if (use_os_reference_white_level)
+               {
+                  float hdr_paper_white = 80.f;
+                  if (Display::GetSDRWhiteLevel(game_window, hdr_paper_white))
+                  {
+                     cb_luma_global_settings.ScenePaperWhite = hdr_paper_white;
+                     cb_luma_global_settings.UIPaperWhite = hdr_paper_white;
+                  }
+                  else
+                  {
+                     use_os_reference_white_level = false;
+                  }
+               }
+               if (!use_os_reference_white_level)
+               {
+                  if (!reshade::get_config_value(runtime, NAME, "ScenePaperWhite", cb_luma_global_settings.ScenePaperWhite))
+                  {
+                     cb_luma_global_settings.ScenePaperWhite = default_paper_white;
+                  }
+                  if (!reshade::get_config_value(runtime, NAME, "UIPaperWhite", cb_luma_global_settings.UIPaperWhite))
+                  {
+                     cb_luma_global_settings.UIPaperWhite = default_paper_white;
+                  }
+               }
+               // Align all the parameters for the SDR on HDR mode (the game paper white can still be changed)
+               if (display_mode >= DisplayModeType::SDRInHDR)
+               {
+                  // For now we don't default to 203 nits game paper white when changing to this mode
+                  cb_luma_global_settings.UIPaperWhite = cb_luma_global_settings.ScenePaperWhite;
+                  cb_luma_global_settings.ScenePeakWhite = cb_luma_global_settings.ScenePaperWhite; // No, we don't want "default_peak_white" here
+               }
+            }
+            else
+            {
+               cb_luma_global_settings.ScenePeakWhite = display_mode == DisplayModeType::SDR ? srgb_white_level : (display_mode >= DisplayModeType::SDRInHDR ? default_paper_white : default_peak_white);
+               cb_luma_global_settings.ScenePaperWhite = display_mode == DisplayModeType::SDR ? srgb_white_level : default_paper_white;
+               cb_luma_global_settings.UIPaperWhite = display_mode == DisplayModeType::SDR ? srgb_white_level : default_paper_white;
+            }
+         };
+
+         auto DrawScenePaperWhite = [&](bool has_separate_ui_paper_white = true)
+         {
+            static const char* scene_paper_white_name = "Scene Paper White";
+            static const char* paper_white_name = "Paper White";
+
+            assert(!use_os_reference_white_level || !has_separate_ui_paper_white); // "use_os_reference_white_level" mode only uses one slider (scene paper white)!
+            if (ImGui::Checkbox("Link to OS Reference White Level", &use_os_reference_white_level))
+            {
+               if (use_os_reference_white_level)
+               {
+                  // Note: this is not fully "safe" to do, so let's rely on users manually setting this instead.
+                  // Clamp to the range accepted by Windows 11 as of 2026, otherwise it fails.
+                  if (!Display::SetSDRWhiteLevel(game_window, std::clamp(cb_luma_global_settings.ScenePaperWhite, 80.f, 480.f)))
+                  {
+                     use_os_reference_white_level = false;
+                  }
+               }
+
+               reshade::set_config_value(runtime, NAME, "UseOSReferenceWhiteLevel", use_os_reference_white_level);
+            }
+            if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
+            {
+               ImGui::SetTooltip("Links Luma's HDR Paper White value to the Windows SDR content brightness slider (Reference/Diffuse White Level).\nThis makes the game cursor brightness match the one of the game.");
+            }
+
+            const float max_white_level = use_os_reference_white_level ? 480.f : 500.f; // Windows SDR Reference White Level max is 480 nits! We use 500 otherwise (both are hardcoded elsewhere too!)
+
+            if (ImGui::SliderFloat(has_separate_ui_paper_white ? scene_paper_white_name : paper_white_name, &cb_luma_global_settings.ScenePaperWhite, srgb_white_level, max_white_level, "%.f"))
+            {
+               cb_luma_global_settings.ScenePaperWhite = max(cb_luma_global_settings.ScenePaperWhite, 0.0);
+               reshade::set_config_value(runtime, NAME, "ScenePaperWhite", cb_luma_global_settings.ScenePaperWhite);
+
+               if (use_os_reference_white_level)
+               {
+                  Display::SetSDRWhiteLevel(game_window, cb_luma_global_settings.ScenePaperWhite);
+                  // Assumes "has_separate_ui_paper_white" being false, "cb_luma_global_settings.UIPaperWhite" is updated later
+               }
+            }
+            if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
+            {
+               ImGui::SetTooltip("The \"average\" brightness of the game scene.\nChange this to your liking, just don't get too close to the peak white.\nHigher does not mean better (especially if you struggle to read UI text), the brighter the image is, the lower the dynamic range (contrast) is.\nThe in game settings brightness is best left at default.");
+            }
+            // Warnings
+            if (cb_luma_global_settings.ScenePaperWhite > cb_luma_global_settings.ScenePeakWhite)
+            {
+               ImGui::SameLine();
+               if (ImGui::SmallButton(ICON_FK_WARNING))
+               {
+                  cb_luma_global_settings.ScenePaperWhite = default_paper_white;
+                  reshade::set_config_value(runtime, NAME, "ScenePaperWhite", cb_luma_global_settings.ScenePaperWhite);
+
+                  if (use_os_reference_white_level)
+                  {
+                     Display::SetSDRWhiteLevel(game_window, cb_luma_global_settings.ScenePaperWhite);
+                  }
+               }
+               if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
+               {
+                  ImGui::SetTooltip("Your Paper White setting is greater than your Peak White setting, the image will either look bad or broken.");
+               }
+            }
+            // Reset button
+            ImGui::SameLine();
+            if (cb_luma_global_settings.ScenePaperWhite != default_paper_white)
+            {
+               ImGui::PushID(has_separate_ui_paper_white ? scene_paper_white_name : paper_white_name);
+               if (ImGui::SmallButton(ICON_FK_UNDO))
+               {
+                  cb_luma_global_settings.ScenePaperWhite = default_paper_white;
+                  reshade::set_config_value(runtime, NAME, "ScenePaperWhite", cb_luma_global_settings.ScenePaperWhite);
+
+                  if (use_os_reference_white_level)
+                  {
+                     Display::SetSDRWhiteLevel(game_window, cb_luma_global_settings.ScenePaperWhite);
+                  }
+               }
+               ImGui::PopID();
+            }
+            else
+            {
+               const auto& style = ImGui::GetStyle();
+               ImVec2 size = ImGui::CalcTextSize(ICON_FK_UNDO);
+               size.x += style.FramePadding.x;
+               size.y += style.FramePadding.y;
+               ImGui::InvisibleButton("", ImVec2(size.x, size.y));
+            }
+         };
+
+         DisplayModeType display_mode = cb_luma_global_settings.DisplayMode;
+         int display_mode_max = 1;
+         ImGui::BeginDisabled(!hdr_supported_display);
+         static_assert(sizeof(display_mode) == sizeof(int));
+         if (ImGui::SliderInt("Display Mode", reinterpret_cast<int*>(&display_mode), 0, display_mode_max, display_mode_preset_strings[(size_t)display_mode], ImGuiSliderFlags_NoInput))
+         {
+            ChangeDisplayMode(display_mode, true, device_data.GetMainNativeSwapchain().get());
+         }
+         ImGui::EndDisabled();
+         if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
+         {
+            ImGui::SetTooltip("Display Mode. Greyed out if HDR is not supported.\nThe HDR display calibration (peak white brightness) is retrieved from the OS (Windows 11 HDR user calibration or display EDID),\nonly adjust it if necessary.\nIt's suggested to only play the game in SDR while the display is in SDR mode (with gamma 2.2, not sRGB) (avoid SDR mode in HDR).");
+         }
+         ImGui::SameLine();
+         // Show a reset button to enable HDR in the game if we are playing SDR in HDR (same for HDR on SDR, we try to match the game to the display)
+         if ((display_mode == DisplayModeType::SDR && hdr_enabled_display) || (display_mode >= DisplayModeType::HDR && !hdr_enabled_display))
+         {
+            ImGui::PushID("Display Mode");
+            if (ImGui::SmallButton(ICON_FK_UNDO))
+            {
+               display_mode = hdr_enabled_display ? DisplayModeType::HDR : DisplayModeType::SDR;
+               // Don't toggle HDR/SDR on the display here, we are matching the game state to the display state
+               ChangeDisplayMode(display_mode, false, device_data.GetMainNativeSwapchain().get());
+            }
+            ImGui::PopID();
+         }
+         else
+         {
+            const auto& style = ImGui::GetStyle();
+            ImVec2 size = ImGui::CalcTextSize(ICON_FK_UNDO);
+            size.x += style.FramePadding.x;
+            size.y += style.FramePadding.y;
+            ImGui::InvisibleButton("", ImVec2(size.x, size.y));
+         }
+
+         const bool mod_active = IsModActive(device_data);
+         const bool has_separate_ui_paper_white = GetShaderDefineCompiledNumericalValue(UI_DRAW_TYPE_HASH) >= 1 && !use_os_reference_white_level;
+         if (display_mode == DisplayModeType::HDR)
+         {
+            ImGui::BeginDisabled(!mod_active);
+            // We should this even if "IsModActive()" is false
+            if (ImGui::SliderFloat("Scene Peak White", &cb_luma_global_settings.ScenePeakWhite, 400.0, 10000.f, "%.f"))
+            {
+               if (cb_luma_global_settings.ScenePeakWhite == device_data.default_user_peak_white)
+               {
+                  reshade::set_config_value(runtime, NAME, "ScenePeakWhite", 0.f); // Store it as 0 to highlight that it's default (whatever the current or next display peak white is)
+               }
+               else
+               {
+                  reshade::set_config_value(runtime, NAME, "ScenePeakWhite", cb_luma_global_settings.ScenePeakWhite);
+               }
+            }
+            if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
+            {
+               ImGui::SetTooltip("Set this to the brightest nits value your display (TV/Monitor) can emit.\nDirectly calibrating in Windows is suggested.");
+            }
+            ImGui::SameLine();
+            if (cb_luma_global_settings.ScenePeakWhite != device_data.default_user_peak_white)
+            {
+               ImGui::PushID("Scene Peak White");
+               if (ImGui::SmallButton(ICON_FK_UNDO))
+               {
+                  cb_luma_global_settings.ScenePeakWhite = device_data.default_user_peak_white;
+                  reshade::set_config_value(runtime, NAME, "ScenePeakWhite", 0.f);
+               }
+               ImGui::PopID();
+            }
+            else
+            {
+               const auto& style = ImGui::GetStyle();
+               ImVec2 size = ImGui::CalcTextSize(ICON_FK_UNDO);
+               size.x += style.FramePadding.x;
+               size.y += style.FramePadding.y;
+               ImGui::InvisibleButton("", ImVec2(size.x, size.y));
+            }
+            ImGui::EndDisabled();
+            DrawScenePaperWhite(has_separate_ui_paper_white && mod_active);
+            constexpr bool supports_custom_ui_paper_white_scaling = true; // Currently all "post_process_space_define_index" modes support it (modify the tooltip otherwise)
+            if (has_separate_ui_paper_white)
+            {
+               ImGui::BeginDisabled(!supports_custom_ui_paper_white_scaling || !mod_active);
+               if (ImGui::SliderFloat("UI Paper White", supports_custom_ui_paper_white_scaling ? &cb_luma_global_settings.UIPaperWhite : &cb_luma_global_settings.ScenePaperWhite, srgb_white_level, 500.f, "%.f"))
+               {
+                  cb_luma_global_settings.UIPaperWhite = max(cb_luma_global_settings.UIPaperWhite, 0.0);
+                  reshade::set_config_value(runtime, NAME, "UIPaperWhite", cb_luma_global_settings.UIPaperWhite);
+               }
+               if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
+               {
+                  ImGui::SetTooltip("The peak brightness of the User Interface (with the exception of the 2D cursor, which is driven by the Windows SDR White Level).\nHigher does not mean better, change this to your liking.");
+               }
+               ImGui::SameLine();
+               if (cb_luma_global_settings.UIPaperWhite != default_paper_white)
+               {
+                  ImGui::PushID("UI Paper White");
+                  if (ImGui::SmallButton(ICON_FK_UNDO))
+                  {
+                     cb_luma_global_settings.UIPaperWhite = default_paper_white;
+                     reshade::set_config_value(runtime, NAME, "UIPaperWhite", cb_luma_global_settings.UIPaperWhite);
+                  }
+                  ImGui::PopID();
+               }
+               else
+               {
+                  const auto& style = ImGui::GetStyle();
+                  ImVec2 size = ImGui::CalcTextSize(ICON_FK_UNDO);
+                  size.x += style.FramePadding.x;
+                  size.y += style.FramePadding.y;
+                  ImGui::InvisibleButton("", ImVec2(size.x, size.y));
+               }
+               ImGui::EndDisabled();
+            }
+            // Force them to always be match if we automate the calibration, independently of the UI type of the mod
+            else if (use_os_reference_white_level)
+            {
+               cb_luma_global_settings.UIPaperWhite = cb_luma_global_settings.ScenePaperWhite;
+            }
+         }
+      }
+
       const char* upscaling_mode_names[] = {
          "Auto",
          "Yes",
@@ -3326,8 +3598,8 @@ BOOL APIENTRY DllMain(HMODULE hModule, DWORD ul_reason_for_call, LPVOID lpReserv
       else
       {
          swapchain_upgrade_type = SwapchainUpgradeType::None;
-         force_disable_display_composition = true;
       }
+      force_disable_display_composition = true;
    }
 
    return TRUE;

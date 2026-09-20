@@ -55,8 +55,8 @@ public:
          D3D11_SHADER_RESOURCE_VIEW_DESC srvd = {};
          srvd.Format = DXGI_FORMAT_R32_TYPELESS;
          srvd.ViewDimension = D3D11_SRV_DIMENSION_BUFFEREX;
-         srvd.Buffer.FirstElement = 0;
-         srvd.Buffer.NumElements = new_capacity / 4;
+         srvd.BufferEx.FirstElement = 0;
+         srvd.BufferEx.NumElements = new_capacity / 4;
          srvd.BufferEx.Flags = D3D11_BUFFEREX_SRV_FLAG_RAW;
          device->CreateShaderResourceView(buffer.get(), &srvd, srv.put());
       }
