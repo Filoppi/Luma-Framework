@@ -83,54 +83,6 @@ namespace DisplayMode
    
    static bool is_first = true;
    constexpr auto flag_file = "Luma_AlwaysHDRLaunch";
-   
-   // Change to HDR and set brightness settings //TODO: Make ChangeDisplayMode() publicly available from core.hpp
-   void ChangeDisplayModeHDR(reshade::api::effect_runtime* runtime, bool enable_hdr_on_display = true, IDXGISwapChain3* swapchain = nullptr)
-   {
-      DisplayModeType display_mode = DisplayModeType::HDR;
-      int display_mode_i = int(DisplayModeType::HDR);
-      reshade::set_config_value(runtime, NAME, "DisplayMode", display_mode_i);
-      cb_luma_global_settings.DisplayMode = display_mode;
-      OnDisplayModeChanged();
-      if (display_mode >= DisplayModeType::HDR)
-      {
-         if (enable_hdr_on_display)
-         {
-            Display::SetHDREnabled(game_window);
-            bool dummy_bool;
-            Display::IsHDRSupportedAndEnabled(game_window, dummy_bool, hdr_enabled_display, swapchain);
-         }
-         if (!reshade::get_config_value(runtime, NAME, "ScenePeakWhite", cb_luma_global_settings.ScenePeakWhite) || cb_luma_global_settings.ScenePeakWhite <= 0.f)
-         {
-            cb_luma_global_settings.ScenePeakWhite = default_paper_white;
-         }
-         
-         if (use_os_reference_white_level)
-         {
-            float hdr_paper_white = 80.f;
-            if (Display::GetSDRWhiteLevel(game_window, hdr_paper_white))
-            {
-               cb_luma_global_settings.ScenePaperWhite = hdr_paper_white;
-               cb_luma_global_settings.UIPaperWhite = hdr_paper_white;
-            }
-            else
-            {
-               use_os_reference_white_level = false;
-            }
-         }
-         else
-         {
-            if (!reshade::get_config_value(runtime, NAME, "ScenePaperWhite", cb_luma_global_settings.ScenePaperWhite))
-            {
-               cb_luma_global_settings.ScenePaperWhite = default_paper_white;
-            }
-            if (!reshade::get_config_value(runtime, NAME, "UIPaperWhite", cb_luma_global_settings.UIPaperWhite))
-            {
-               cb_luma_global_settings.UIPaperWhite = default_paper_white;
-            }
-         }
-      }
-   };
 
    // Forces user to launch in SDR mode for proper HDR upgrades.
    static void OnInitSwapchain(reshade::api::swapchain* swapchain)
@@ -185,12 +137,7 @@ namespace DisplayMode
          
          std::exit(0); //exit
       }
-      else
-      {
-         ChangeDisplayModeHDR(nullptr);
-      }
       
-
       is_first = false;
    }
 }
