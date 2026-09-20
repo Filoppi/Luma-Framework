@@ -3,6 +3,8 @@
 #define ALLOW_SHADERS_DUMPING 0
 #define ENABLE_DRAW_DISPATCH_DATA_CACHE 1
 
+//define ENABLE_FLICKERING_WORKAROUND 1
+
 #include "..\..\Core\core.hpp"
 
 #include "ShaderPatches\ShaderPatches.h"
@@ -566,6 +568,9 @@ public:
    {
       std::vector<ShaderDefineData> game_shader_defines_data = {
          {"ENABLE_HDR_BOOST", '1', true, false, "Enable a \"Fake\" HDR boosting effect.", 1},
+#if ENABLE_FLICKERING_WORKAROUND
+         {"ENABLE_FLICKERING_WORKAROUND", '1', true, true},
+#endif
       };
       shader_defines_data.append_range(game_shader_defines_data);
 
@@ -3022,6 +3027,7 @@ public:
          ImGui::SetTooltip("Requires restart.");
       }
 
+#if ENABLE_FLICKERING_WORKAROUND
       if (enable_hdr)
       {
          auto ChangeDisplayMode = [&](DisplayModeType display_mode, bool enable_hdr_on_display = true, IDXGISwapChain3* swapchain = nullptr)
@@ -3294,6 +3300,7 @@ public:
             }
          }
       }
+#endif
 
       const char* upscaling_mode_names[] = {
          "Auto",
@@ -3594,12 +3601,15 @@ BOOL APIENTRY DllMain(HMODULE hModule, DWORD ul_reason_for_call, LPVOID lpReserv
       {
          swapchain_format_upgrade_type = TextureFormatUpgradesType::AllowedEnabled;
          swapchain_upgrade_type = SwapchainUpgradeType::scRGB;
+#if ENABLE_FLICKERING_WORKAROUND
+         force_disable_display_composition = true;
+#endif
       }
       else
       {
          swapchain_upgrade_type = SwapchainUpgradeType::None;
+         force_disable_display_composition = true;
       }
-      force_disable_display_composition = true;
    }
 
    return TRUE;

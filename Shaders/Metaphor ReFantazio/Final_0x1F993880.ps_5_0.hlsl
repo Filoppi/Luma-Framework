@@ -25,8 +25,12 @@ void main(
 	o0.w = r0.w;
 	if (LumaSettings.DisplayMode == 1)
 	{
+	#if ENABLE_FLICKERING_WORKAROUND
 		float gamePaperWhite = LumaSettings.GamePaperWhiteNits / sRGB_WhiteLevelNits;
 		o0.xyz = gamma_to_linear(linear_to_sRGB_gamma(r0.xyz, GCT_MIRROR), GCT_MIRROR) * gamePaperWhite;
+	#else
+		o0.xyz = r0.xyz;
+	#endif
 	}
 	else
 	{
