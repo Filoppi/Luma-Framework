@@ -1075,7 +1075,7 @@ public:
 
       // Native Shaders: Display Composition replacement
       native_shaders_definitions.erase(CompileTimeStringHash("Display Composition"));
-      native_shaders_definitions.emplace(CompileTimeStringHash("Display Composition"), ShaderDefinition{"Luma_DisplayComposition1", reshade::api::pipeline_subobject_type::pixel_shader});
+      native_shaders_definitions.emplace(CompileTimeStringHash("Display Composition"), ShaderDefinition{"Luma_HaloMCC_DisplayComposition", reshade::api::pipeline_subobject_type::pixel_shader});
 
       // XeGTAOHandler & BloomHandler
       XeGTAOHandler::OnInit();
