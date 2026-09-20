@@ -692,66 +692,21 @@ namespace
    
    ///////////////////////////////////
 
-   // Clear Indirect Upgrades Handler
-   namespace ClearIndirectUpgradesHandler
-   {
-      bool is_queued = false;
-      void Request()
-      {
-         is_queued = true;
-      }
-      void OnReShadePresent(reshade::api::effect_runtime* runtime)
-      {
-         // return when not queued
-         if (!is_queued) return;
-         is_queued = false;
-
-         // log
-         message(reshade::log::level::info, "Clearing indirect upgrades");
-
-         // clear old upgrades
-         DeviceData& device_data = *runtime->get_device()->get_private_data<DeviceData>();
-         std::unordered_map<uint64_t, uint64_t> original_resource_views_to_mirrored_upgraded_resource_views;
-         std::unordered_map<uint64_t, ResourceUpgradeManager::IndirectUpgradedResource> original_resources_to_mirrored_upgraded_resources;
-         std::shared_lock lock_device_read(device_data.mutex);
-
-         // clear in runtime device
-         // TODO: we now have functions to do these
-         if (!device_data.resource_upgrades.original_resources_to_mirrored_upgraded_resources.empty())
-         {
-            lock_device_read.unlock();
-            {
-               std::unique_lock lock_device_write(device_data.mutex);
-               original_resource_views_to_mirrored_upgraded_resource_views = device_data.resource_upgrades.original_resource_views_to_mirrored_upgraded_resource_views;
-               original_resources_to_mirrored_upgraded_resources = device_data.resource_upgrades.original_resources_to_mirrored_upgraded_resources;
-               device_data.resource_upgrades.original_resource_views_to_mirrored_upgraded_resource_views.clear();
-               device_data.resource_upgrades.original_resources_to_mirrored_upgraded_resources.clear();
-            }
-            for (const auto& original_resource_view_to_mirrored_upgraded_resource_view : original_resource_views_to_mirrored_upgraded_resource_views)
-               runtime->get_device()->destroy_resource_view({ original_resource_view_to_mirrored_upgraded_resource_view.second });
-            for (const auto& original_resource_to_mirrored_upgraded_resource : original_resources_to_mirrored_upgraded_resources)
-               runtime->get_device()->destroy_resource({ original_resource_to_mirrored_upgraded_resource.second.mirror_handle });
-         }
-      }
-   }
-   
-   ///////////////////////////////////
-
    // Optimization to avoid heavy indirect upgrades scanning
    namespace WarmupDirectAndIndirectHandler
    {
       int warmup_frames = 0;
-      ChainTextureFormatUpgradesType warmup_end = ChainTextureFormatUpgradesType::DirectDependencies;
-      void Start(int frames = 4, ChainTextureFormatUpgradesType type = ChainTextureFormatUpgradesType::DirectAndIndirectDependencies, ChainTextureFormatUpgradesType end_type = ChainTextureFormatUpgradesType::DirectDependencies)
+      ResourceUpgradeManager::ChainTextureFormatUpgradesType warmup_end = ResourceUpgradeManager::ChainTextureFormatUpgradesType::DirectDependencies;
+      void Start(int frames = 4, ResourceUpgradeManager::ChainTextureFormatUpgradesType type = ResourceUpgradeManager::ChainTextureFormatUpgradesType::DirectAndIndirectDependencies, ResourceUpgradeManager::ChainTextureFormatUpgradesType end_type = ResourceUpgradeManager::ChainTextureFormatUpgradesType::DirectDependencies)
       {
          warmup_frames = frames;
-         enable_chain_indirect_texture_format_upgrades = type;
+         ResourceUpgradeManager::enable_chain_indirect_texture_format_upgrades = type;
          warmup_end = end_type;
       }
       void OnPresent()
       {
          if (warmup_frames > -1) warmup_frames--;
-         if (warmup_frames == 0) enable_chain_indirect_texture_format_upgrades = warmup_end;
+         if (warmup_frames == 0) ResourceUpgradeManager::enable_chain_indirect_texture_format_upgrades = warmup_end;
       }
    }
    
@@ -905,12 +860,8 @@ namespace
       // SubGame state
       SubGame curr = Unknown;
       SubGame over = Unknown;
-      bool best_resource_unorm_disallow = false;
-      void SetSubGame(SubGame new_game)
+      void SetSubGame(SubGame new_game, DeviceData& device_data)
       {
-         // wait for clean up...
-         if (ClearIndirectUpgradesHandler::is_queued) return;
-         
          // resolve override
          if (over != Unknown) new_game = over;
          
@@ -930,7 +881,7 @@ namespace
          // completely changed, so clear indirect upgrades
          if (is_completely_changed)
          {
-            ClearIndirectUpgradesHandler::Request();
+            device_data.resource_upgrades.InvalidateAllIndirectUpgradedResources();
             curr = Unknown;
             return;
          }
@@ -953,85 +904,87 @@ namespace
          BloomHandler::OnSubGameChange(prev, curr);
          
          // reset upgrades params
-         enable_chain_indirect_texture_format_upgrades = ChainTextureFormatUpgradesType::DirectDependencies;
+         ResourceUpgradeManager::enable_chain_indirect_texture_format_upgrades = ResourceUpgradeManager::ChainTextureFormatUpgradesType::DirectDependencies;
 #if DAV_CORE
          best_resource_unorm = false; //TODO: Luma needs this or something better for core.hpp!
 #endif
          ignore_upgraded_samplers = true;
          
          // clear old hashes
-         auto_texture_format_upgrade_shader_hashes.clear();
+         ResourceUpgradeManager::auto_texture_format_upgrade_shader_hashes.clear();
          
          // set new Indirect Upgrades hashes
-         auto_texture_format_upgrade_shader_hashes[0x5B190892] = AutoTextureFormatUpgradeShaderHash{ std::vector<uint8_t>{ 0 }, std::vector<uint8_t>() }; //ui blurdown00
-         auto_texture_format_upgrade_shader_hashes[0x3CC502A9] = AutoTextureFormatUpgradeShaderHash{ std::vector<uint8_t>{ 0 }, std::vector<uint8_t>() }; //ui blurdown00 subsequent blurring
-         auto_texture_format_upgrade_shader_hashes[0xF207E935] = AutoTextureFormatUpgradeShaderHash{ std::vector<uint8_t>{ 0 }, std::vector<uint8_t>() }; //ui blur settings 0
-         auto_texture_format_upgrade_shader_hashes[0xE45B4EB7] = AutoTextureFormatUpgradeShaderHash{ std::vector<uint8_t>{ 0 }, std::vector<uint8_t>() }; //ui blur settings subsequent downsample
+         ResourceUpgradeManager::auto_texture_format_upgrade_shader_hashes[0x5B190892] = AutoTextureFormatUpgradeShaderHash{ std::vector<uint8_t>{ 0 }, std::vector<uint8_t>() }; //ui blurdown00
+         ResourceUpgradeManager::auto_texture_format_upgrade_shader_hashes[0x3CC502A9] = AutoTextureFormatUpgradeShaderHash{ std::vector<uint8_t>{ 0 }, std::vector<uint8_t>() }; //ui blurdown00 subsequent blurring
+         ResourceUpgradeManager::auto_texture_format_upgrade_shader_hashes[0xF207E935] = AutoTextureFormatUpgradeShaderHash{ std::vector<uint8_t>{ 0 }, std::vector<uint8_t>() }; //ui blur settings 0
+         ResourceUpgradeManager::auto_texture_format_upgrade_shader_hashes[0xE45B4EB7] = AutoTextureFormatUpgradeShaderHash{ std::vector<uint8_t>{ 0 }, std::vector<uint8_t>() }; //ui blur settings subsequent downsample
          switch (curr)
          {
             case Halo1Classic:
-               auto_texture_format_upgrade_shader_hashes[0xB70CC18B] = AutoTextureFormatUpgradeShaderHash{ std::vector<uint8_t>{ 0 }, std::vector<uint8_t>() }; //fxaa
-               // if (!best_resource_unorm_disallow) best_resource_unorm = true; //TODO: Luma needs this or something better for core.hpp!
+               ResourceUpgradeManager::auto_texture_format_upgrade_shader_hashes[0xB70CC18B] = AutoTextureFormatUpgradeShaderHash{ std::vector<uint8_t>{ 0 }, std::vector<uint8_t>() }; //fxaa
                WarmupDirectAndIndirectHandler::Start();
                break;
             case Halo1Anniversary:
-               // auto_texture_format_upgrade_shader_hashes[0xDCC32775] = AutoTextureFormatUpgradeShaderHash{ std::vector<uint8_t>{ 0 }, std::vector<uint8_t>() }; //transparency combine
-               // auto_texture_format_upgrade_shader_hashes[0x700325CF] = AutoTextureFormatUpgradeShaderHash{ std::vector<uint8_t>{ 0 }, std::vector<uint8_t>() }; //downsample (exposure)
-               // auto_texture_format_upgrade_shader_hashes[0xB70CC18B] = AutoTextureFormatUpgradeShaderHash{ std::vector<uint8_t>{ 0 }, std::vector<uint8_t>() }; //fxaa
+               // ResourceUpgradeManager::auto_texture_format_upgrade_shader_hashes[0xDCC32775] = AutoTextureFormatUpgradeShaderHash{ std::vector<uint8_t>{ 0 }, std::vector<uint8_t>() }; //transparency combine
+               // ResourceUpgradeManager::auto_texture_format_upgrade_shader_hashes[0x700325CF] = AutoTextureFormatUpgradeShaderHash{ std::vector<uint8_t>{ 0 }, std::vector<uint8_t>() }; //downsample (exposure)
+               // ResourceUpgradeManager::auto_texture_format_upgrade_shader_hashes[0xB70CC18B] = AutoTextureFormatUpgradeShaderHash{ std::vector<uint8_t>{ 0 }, std::vector<uint8_t>() }; //fxaa
 #if DAV_CORE
-               best_resource_unorm = true;
+               best_resource_unorm = true; //TODO: Luma needs this or something better for core.hpp!
 #endif
                break;
             case Halo2Classic:
-               auto_texture_format_upgrade_shader_hashes[0xD39821CB] = AutoTextureFormatUpgradeShaderHash{ std::vector<uint8_t>{ 0 }, std::vector<uint8_t>() }; //blit
+               ResourceUpgradeManager::auto_texture_format_upgrade_shader_hashes[0xD39821CB] = AutoTextureFormatUpgradeShaderHash{ std::vector<uint8_t>{ 0 }, std::vector<uint8_t>() }; //blit
 #if DAV_CORE
-               if (!best_resource_unorm_disallow) best_resource_unorm = true; //TODO: Luma needs this or something better for core.hpp!
+               best_resource_unorm = true; //TODO: Luma needs this or something better for core.hpp!
 #endif
                break;
             case Halo2Anniversary:
-               auto_texture_format_upgrade_shader_hashes[0x87F940A3] = AutoTextureFormatUpgradeShaderHash{ std::vector<uint8_t>{ 0 }, std::vector<uint8_t>() }; //dof down 0
-               auto_texture_format_upgrade_shader_hashes[0xBF5A726E] = AutoTextureFormatUpgradeShaderHash{ std::vector<uint8_t>{ 0 }, std::vector<uint8_t>() }; //dof down 1
-               auto_texture_format_upgrade_shader_hashes[0xC5A027C1] = AutoTextureFormatUpgradeShaderHash{ std::vector<uint8_t>{ 0 }, std::vector<uint8_t>() }; //dof final
-               auto_texture_format_upgrade_shader_hashes[0x8D11B112] = AutoTextureFormatUpgradeShaderHash{ std::vector<uint8_t>{ 0 }, std::vector<uint8_t>() }; //t00
-               auto_texture_format_upgrade_shader_hashes[0xBDDD9A3C] = AutoTextureFormatUpgradeShaderHash{ std::vector<uint8_t>{ 0 }, std::vector<uint8_t>() }; //t01
-               auto_texture_format_upgrade_shader_hashes[0xE5A32080] = AutoTextureFormatUpgradeShaderHash{ std::vector<uint8_t>{ 0 }, std::vector<uint8_t>() }; //t02
-               auto_texture_format_upgrade_shader_hashes[0x60449413] = AutoTextureFormatUpgradeShaderHash{ std::vector<uint8_t>{ 0 }, std::vector<uint8_t>() }; //t03
-               auto_texture_format_upgrade_shader_hashes[0xB5D334B0] = AutoTextureFormatUpgradeShaderHash{ std::vector<uint8_t>{ 0 }, std::vector<uint8_t>() }; //aa
-               auto_texture_format_upgrade_shader_hashes[0x9EC6DFC8] = AutoTextureFormatUpgradeShaderHash{ std::vector<uint8_t>{ 0 }, std::vector<uint8_t>() }; //blit
-               auto_texture_format_upgrade_shader_hashes[0xBF5A726E] = AutoTextureFormatUpgradeShaderHash{ std::vector<uint8_t>{ 0 }, std::vector<uint8_t>() }; //after blit downsample blur (concussion)
-               auto_texture_format_upgrade_shader_hashes[0x3D30DAB7] = AutoTextureFormatUpgradeShaderHash{ std::vector<uint8_t>{ 0 }, std::vector<uint8_t>() }; //some generic copy that runs after CopyResource()
+               ResourceUpgradeManager::auto_texture_format_upgrade_shader_hashes[0x87F940A3] = AutoTextureFormatUpgradeShaderHash{ std::vector<uint8_t>{ 0 }, std::vector<uint8_t>() }; //dof down 0
+               ResourceUpgradeManager::auto_texture_format_upgrade_shader_hashes[0xBF5A726E] = AutoTextureFormatUpgradeShaderHash{ std::vector<uint8_t>{ 0 }, std::vector<uint8_t>() }; //dof down 1
+               ResourceUpgradeManager::auto_texture_format_upgrade_shader_hashes[0xC5A027C1] = AutoTextureFormatUpgradeShaderHash{ std::vector<uint8_t>{ 0 }, std::vector<uint8_t>() }; //dof final
+               ResourceUpgradeManager::auto_texture_format_upgrade_shader_hashes[0x8D11B112] = AutoTextureFormatUpgradeShaderHash{ std::vector<uint8_t>{ 0 }, std::vector<uint8_t>() }; //t00
+               ResourceUpgradeManager::auto_texture_format_upgrade_shader_hashes[0xBDDD9A3C] = AutoTextureFormatUpgradeShaderHash{ std::vector<uint8_t>{ 0 }, std::vector<uint8_t>() }; //t01
+               ResourceUpgradeManager::auto_texture_format_upgrade_shader_hashes[0xE5A32080] = AutoTextureFormatUpgradeShaderHash{ std::vector<uint8_t>{ 0 }, std::vector<uint8_t>() }; //t02
+               ResourceUpgradeManager::auto_texture_format_upgrade_shader_hashes[0x60449413] = AutoTextureFormatUpgradeShaderHash{ std::vector<uint8_t>{ 0 }, std::vector<uint8_t>() }; //t03
+               ResourceUpgradeManager::auto_texture_format_upgrade_shader_hashes[0xB5D334B0] = AutoTextureFormatUpgradeShaderHash{ std::vector<uint8_t>{ 0 }, std::vector<uint8_t>() }; //aa
+               ResourceUpgradeManager::auto_texture_format_upgrade_shader_hashes[0x9EC6DFC8] = AutoTextureFormatUpgradeShaderHash{ std::vector<uint8_t>{ 0 }, std::vector<uint8_t>() }; //blit
+               ResourceUpgradeManager::auto_texture_format_upgrade_shader_hashes[0xBF5A726E] = AutoTextureFormatUpgradeShaderHash{ std::vector<uint8_t>{ 0 }, std::vector<uint8_t>() }; //after blit downsample blur (concussion)
+               ResourceUpgradeManager::auto_texture_format_upgrade_shader_hashes[0x3D30DAB7] = AutoTextureFormatUpgradeShaderHash{ std::vector<uint8_t>{ 0 }, std::vector<uint8_t>() }; //some generic copy that runs after CopyResource()
                ignore_upgraded_samplers = false;
                break;
             case Halo3:
                // 0x01262530: color diffuse copy (SRV0 is used by regular opaque. RTV0 is used by small and cutout stuff (vegetation))
-               auto_texture_format_upgrade_shader_hashes[0xEEB815BC] = AutoTextureFormatUpgradeShaderHash{ std::vector<uint8_t>{ 0 }, std::vector<uint8_t>() }; //t00 
-               auto_texture_format_upgrade_shader_hashes[0x7D41B2E6] = AutoTextureFormatUpgradeShaderHash{ std::vector<uint8_t>{ 0 }, std::vector<uint8_t>() }; //t01 
-               auto_texture_format_upgrade_shader_hashes[0x9EC6DFC8] = AutoTextureFormatUpgradeShaderHash{ std::vector<uint8_t>{ 0 }, std::vector<uint8_t>() }; //fxaa
+               ResourceUpgradeManager::auto_texture_format_upgrade_shader_hashes[0xEEB815BC] = AutoTextureFormatUpgradeShaderHash{ std::vector<uint8_t>{ 0 }, std::vector<uint8_t>() }; //t00 
+               ResourceUpgradeManager::auto_texture_format_upgrade_shader_hashes[0x7D41B2E6] = AutoTextureFormatUpgradeShaderHash{ std::vector<uint8_t>{ 0 }, std::vector<uint8_t>() }; //t01 
+               ResourceUpgradeManager::auto_texture_format_upgrade_shader_hashes[0x9EC6DFC8] = AutoTextureFormatUpgradeShaderHash{ std::vector<uint8_t>{ 0 }, std::vector<uint8_t>() }; //fxaa
                WarmupDirectAndIndirectHandler::Start();
                break;
             case Halo3ODST:
-               auto_texture_format_upgrade_shader_hashes[0xADADBE3D] = AutoTextureFormatUpgradeShaderHash{ std::vector<uint8_t>{ 0 }, std::vector<uint8_t>() }; //t00
-               auto_texture_format_upgrade_shader_hashes[0x2193CAB5] = AutoTextureFormatUpgradeShaderHash{ std::vector<uint8_t>{ 0 }, std::vector<uint8_t>() }; //t01 
-               auto_texture_format_upgrade_shader_hashes[0x9EC6DFC8] = AutoTextureFormatUpgradeShaderHash{ std::vector<uint8_t>{ 0 }, std::vector<uint8_t>() }; //fxaa
-               auto_texture_format_upgrade_shader_hashes[0x03B68268] = AutoTextureFormatUpgradeShaderHash{ std::vector<uint8_t>{ 0 }, std::vector<uint8_t>() }; //noise overlay
+               ResourceUpgradeManager::auto_texture_format_upgrade_shader_hashes[0xADADBE3D] = AutoTextureFormatUpgradeShaderHash{ std::vector<uint8_t>{ 0 }, std::vector<uint8_t>() }; //t00
+               ResourceUpgradeManager::auto_texture_format_upgrade_shader_hashes[0x2193CAB5] = AutoTextureFormatUpgradeShaderHash{ std::vector<uint8_t>{ 0 }, std::vector<uint8_t>() }; //t01 
+               ResourceUpgradeManager::auto_texture_format_upgrade_shader_hashes[0x9EC6DFC8] = AutoTextureFormatUpgradeShaderHash{ std::vector<uint8_t>{ 0 }, std::vector<uint8_t>() }; //fxaa
+               ResourceUpgradeManager::auto_texture_format_upgrade_shader_hashes[0x03B68268] = AutoTextureFormatUpgradeShaderHash{ std::vector<uint8_t>{ 0 }, std::vector<uint8_t>() }; //noise overlay
                WarmupDirectAndIndirectHandler::Start();
                break;
             case HaloReach:
-               auto_texture_format_upgrade_shader_hashes[0x6A2F1FE6] = AutoTextureFormatUpgradeShaderHash{ std::vector<uint8_t>{ 0 }, std::vector<uint8_t>() }; //downsample
-               auto_texture_format_upgrade_shader_hashes[0xC1FF277A] = AutoTextureFormatUpgradeShaderHash{ std::vector<uint8_t>{ 0 }, std::vector<uint8_t>() }; //t00
-               auto_texture_format_upgrade_shader_hashes[0x363648B2] = AutoTextureFormatUpgradeShaderHash{ std::vector<uint8_t>{ 0 }, std::vector<uint8_t>() }; //t01
-               auto_texture_format_upgrade_shader_hashes[0x924D7B98] = AutoTextureFormatUpgradeShaderHash{ std::vector<uint8_t>{ 0 }, std::vector<uint8_t>() }; //t02
-               auto_texture_format_upgrade_shader_hashes[0x0EFB2B17] = AutoTextureFormatUpgradeShaderHash{ std::vector<uint8_t>{ 0 }, std::vector<uint8_t>() }; //fxaa
-               auto_texture_format_upgrade_shader_hashes[0xBD7AE2AF] = AutoTextureFormatUpgradeShaderHash{ std::vector<uint8_t>{ 0 }, std::vector<uint8_t>() }; //health pickup fx: down
-               auto_texture_format_upgrade_shader_hashes[0x270131A1] = AutoTextureFormatUpgradeShaderHash{ std::vector<uint8_t>{ 0 }, std::vector<uint8_t>() }; //health pickup fx: kernel blur
+               ResourceUpgradeManager::auto_texture_format_upgrade_shader_hashes[0x6A2F1FE6] = AutoTextureFormatUpgradeShaderHash{ std::vector<uint8_t>{ 0 }, std::vector<uint8_t>() }; //downsample
+               ResourceUpgradeManager::auto_texture_format_upgrade_shader_hashes[0xC1FF277A] = AutoTextureFormatUpgradeShaderHash{ std::vector<uint8_t>{ 0 }, std::vector<uint8_t>() }; //t00
+               ResourceUpgradeManager::auto_texture_format_upgrade_shader_hashes[0x363648B2] = AutoTextureFormatUpgradeShaderHash{ std::vector<uint8_t>{ 0 }, std::vector<uint8_t>() }; //t01
+               ResourceUpgradeManager::auto_texture_format_upgrade_shader_hashes[0x924D7B98] = AutoTextureFormatUpgradeShaderHash{ std::vector<uint8_t>{ 0 }, std::vector<uint8_t>() }; //t02
+               ResourceUpgradeManager::auto_texture_format_upgrade_shader_hashes[0x0EFB2B17] = AutoTextureFormatUpgradeShaderHash{ std::vector<uint8_t>{ 0 }, std::vector<uint8_t>() }; //fxaa
+               ResourceUpgradeManager::auto_texture_format_upgrade_shader_hashes[0xBD7AE2AF] = AutoTextureFormatUpgradeShaderHash{ std::vector<uint8_t>{ 0 }, std::vector<uint8_t>() }; //health pickup fx: down
+               ResourceUpgradeManager::auto_texture_format_upgrade_shader_hashes[0x270131A1] = AutoTextureFormatUpgradeShaderHash{ std::vector<uint8_t>{ 0 }, std::vector<uint8_t>() }; //health pickup fx: kernel blur
                break;
             case Halo4:
-               auto_texture_format_upgrade_shader_hashes[0x3A2F6CF7] = AutoTextureFormatUpgradeShaderHash{ std::vector<uint8_t>{ 0 }, std::vector<uint8_t>() }; //t00
-               auto_texture_format_upgrade_shader_hashes[0xB38416A2] = AutoTextureFormatUpgradeShaderHash{ std::vector<uint8_t>{ 0 }, std::vector<uint8_t>() }; //t01
-               auto_texture_format_upgrade_shader_hashes[0xCCC24837] = AutoTextureFormatUpgradeShaderHash{ std::vector<uint8_t>{ 0 }, std::vector<uint8_t>() }; //fxaa
+               ResourceUpgradeManager::auto_texture_format_upgrade_shader_hashes[0x3A2F6CF7] = AutoTextureFormatUpgradeShaderHash{ std::vector<uint8_t>{ 0 }, std::vector<uint8_t>() }; //t00
+               ResourceUpgradeManager::auto_texture_format_upgrade_shader_hashes[0xB38416A2] = AutoTextureFormatUpgradeShaderHash{ std::vector<uint8_t>{ 0 }, std::vector<uint8_t>() }; //t01
+               ResourceUpgradeManager::auto_texture_format_upgrade_shader_hashes[0xCCC24837] = AutoTextureFormatUpgradeShaderHash{ std::vector<uint8_t>{ 0 }, std::vector<uint8_t>() }; //fxaa
                break;
             default: ;
          }
+
+         // log amount in ResourceUpgradeManager::auto_texture_format_upgrade_shader_hashes
+         message(reshade::log::level::info, std::format("SubGameHandler: {} has {} hashes for indirect upgrades.", SubGameToString(curr), ResourceUpgradeManager::auto_texture_format_upgrade_shader_hashes.size()).c_str());
       }
       
       // Safe way to switch in OnDrawOrDispatch()
@@ -1044,16 +997,16 @@ namespace
       // Dequeued on OnPresent()
       void Deque(DeviceData& device_data)
       {
-         SetSubGame(queued);
+         SetSubGame(queued, device_data);
          queued = Unknown;
       }
 
       // full reset!
-      void Reinit()
+      void Reinit(DeviceData& device_data)
       {
          queued = Unknown;
          over = Unknown;
-         SetSubGame(Unknown);
+         SetSubGame(Unknown, device_data);
       }
    };
    
@@ -1127,15 +1080,12 @@ public:
       // XeGTAOHandler & BloomHandler
       XeGTAOHandler::OnInit();
       BloomHandler::OnInit();
-
-      // OnReShadePresent
-      reshade::register_event<reshade::addon_event::reshade_present>(ClearIndirectUpgradesHandler::OnReShadePresent);
    }
 
    void OnInitSwapchain(reshade::api::swapchain* swapchain) override
    {
       // SubGame reset
-      SubGameHandler::Reinit();
+      // SubGameHandler::Reinit(); //TODO: needs device_data. safe without call?
 
       // XeGTAOHandler
       XeGTAOHandler::H2A::Reset();
@@ -1152,7 +1102,7 @@ public:
       // DEVELOPMENT mod active
       if (!custom_shaders_enabled && ignore_indirect_upgraded_textures)
       {
-         SubGameHandler::SetSubGame(SubGame::Unknown);
+         SubGameHandler::SetSubGame(SubGame::Unknown, device_data);
          return DrawOrDispatchOverrideType::None;
       }
       
@@ -1406,8 +1356,8 @@ public:
       // GameDeviceDataHaloTMCC* game_device_data = static_cast<GameDeviceDataHaloTMCC*>(device_data.game);
 
       // SWAPCHAIN_TEST_PEAK
-      ShaderDefines::UIToggleCheckmark(ShaderDefines::SWAPCHAIN_TEST_PEAK, std::format("Display Test Peak (+{:.2f} HDR Stops)", std::log2f(cb_luma_global_settings.ScenePeakWhite / cb_luma_global_settings.ScenePaperWhite)).c_str(),
-         "3 rectangles within a bigger one.\n- Left: Invisible (2x Peak)\n- Middle: Barely Visible (1x Peak)\n- Right: Easily Visible (0.5x Peak).\nSo whatever you do, don't let Middle disappear/clip!");
+      ShaderDefines::UIToggleCheckmark(ShaderDefines::SWAPCHAIN_TEST_PEAK, std::format("Test Display Peak (+{:.2f} HDR Stops)", std::log2f(cb_luma_global_settings.ScenePeakWhite / cb_luma_global_settings.ScenePaperWhite)).c_str(),
+         "3 rectangles within a bigger one.\n\nTo calibrate to display's maximum:\n- Left: Invisible (2x Peak)\n- Middle: Barely Visible (1x Peak)\n- Right: Easily Visible (0.5x Peak).\n\nWhatever you do, don't let Middle disappear/clip!");
 
       ImGui::Separator();
 
@@ -1651,17 +1601,9 @@ public:
          if (ImGui::Combo("Override Sub Game", &subgame_index, subgame_items.data(), static_cast<int>(subgame_items.size())))
          {
             SubGameHandler::over = static_cast<SubGame>(subgame_index);
-            SubGameHandler::SetSubGame(static_cast<SubGame>(subgame_index));
+            SubGameHandler::SetSubGame(static_cast<SubGame>(subgame_index), device_data);
          }
-
-         // best_resource_unorm_disallow
-         if (DEVELOPMENT)
-         {
-            ImGui::Checkbox("(DEVELOPMENT) best_resource_unorm_disallow", &SubGameHandler::best_resource_unorm_disallow);
-            if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
-               ImGui::SetTooltip("Disable GetBestResourceUpgradeFormat() UNORM for all Sub Games.");
-         }
-
+         
          ImGui::NewLine();
          
          // SubGameUserSettingsHandler
@@ -1672,7 +1614,7 @@ public:
       ImGui::Separator();
 
       // Reset button
-      if (ImGui::Button("Panic Reset")) SubGameHandler::Reinit();
+      if (ImGui::Button("Panic Reset")) SubGameHandler::Reinit(device_data);
       if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
          ImGui::SetTooltip("If anything is wonky (black screen, AO not same res, SDR clamping) click this!\n(Full reset Sub Game detection, clearing all HDR upgraded resources.)");
 
@@ -1708,7 +1650,7 @@ BOOL APIENTRY DllMain(HMODULE hModule, DWORD ul_reason_for_call, LPVOID lpReserv
          force_borderless = false;
 
          // resources
-         texture_format_upgrades_type = TextureFormatUpgradesType::AllowedEnabled; //see SubGameHandler::SetSubGame()
+         ResourceUpgradeManager::texture_format_upgrades_type = TextureFormatUpgradesType::AllowedEnabled; //see SubGameHandler::SetSubGame()
 
 #if HALO_UPGRADE_SAMPLERS
          // samplers
