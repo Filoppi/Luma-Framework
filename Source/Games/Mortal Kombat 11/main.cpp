@@ -71,7 +71,7 @@ struct alignas(16) ViewConstants
 
 namespace
 {
-    const ShaderHashesList shader_hashes_TAA = { .compute_shaders = { 0xF529F5BE }};
+    const ShaderHashesList shader_hashes_TAA = { .compute_shaders = { 0xF529F5BE, 0xA5BFCBC9 }};
     const ShaderHashesList shader_hashes_PostTAASharpen = { .compute_shaders = { 0xABAF5929 }};
 
     float g_jitter_x;
@@ -191,8 +191,8 @@ public:
                 // We need to scale jitters to pixel offsets for DLSS.
                 // This should be correct. It's hard to tell cause all jitter offset configurations look ok.
                 // TODO: The game uses only 4 jitters, upgrade to Halton?
-                draw_data.jitter_x = g_jitter_x * device_data.render_resolution.x * -1.0;
-                draw_data.jitter_y = g_jitter_y * device_data.render_resolution.y * 1.0;
+                draw_data.jitter_x = g_jitter_x * device_data.render_resolution.x * -0.5;
+                draw_data.jitter_y = g_jitter_y * device_data.render_resolution.y * 0.5;
 
                 draw_data.render_width = device_data.render_resolution.x;
                 draw_data.render_height = device_data.render_resolution.y;
@@ -289,6 +289,7 @@ BOOL APIENTRY DllMain(HMODULE hModule, DWORD ul_reason_for_call, LPVOID lpReserv
         Globals::DEVELOPMENT_STATE = Globals::ModDevelopmentState::WorkInProgress;
 
         #if DEVELOPMENT
+        forced_shader_names.emplace(0xA5BFCBC9, "TAA");
         forced_shader_names.emplace(0xF529F5BE, "TAA");
         forced_shader_names.emplace(0xABAF5929, "PostTAASharpen");
         #endif
