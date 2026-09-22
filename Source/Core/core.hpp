@@ -577,6 +577,7 @@ namespace
       bool enable_samplers_upgrade = false; // Can't be changed after boot
       bool ignore_upgraded_samplers = false; // Global live toggle. Can be enabled in certain parts of the rendering (for games that aren't multi threaded)
       int samplers_upgrade_mode = 4;
+      bool upgrade_comparison_samplers = true; // Disable when automatic mip bias should affect material textures but not shadow/depth comparison sampling.
       bool force_upgrade_linear_samplers = false; // Best avoided given that it might break things that weren't meant to have AF, unless you selectively turn "ignore_upgraded_samplers" on and off // TODO: delete? dev only?
 #if DEVELOPMENT
       int samplers_upgrade_mode_2 = 0;
@@ -7962,7 +7963,7 @@ namespace
    {
       D3D11_SAMPLER_DESC desc = original_desc;
 #if !DEVELOPMENT
-      if (desc.Filter == D3D11_FILTER_ANISOTROPIC || desc.Filter == D3D11_FILTER_COMPARISON_ANISOTROPIC || (force_upgrade_linear_samplers && desc.Filter == D3D11_FILTER_MIN_MAG_MIP_LINEAR))
+      if (desc.Filter == D3D11_FILTER_ANISOTROPIC || (upgrade_comparison_samplers && desc.Filter == D3D11_FILTER_COMPARISON_ANISOTROPIC) || (force_upgrade_linear_samplers && desc.Filter == D3D11_FILTER_MIN_MAG_MIP_LINEAR))
       {
          if (desc.Filter == D3D11_FILTER_MIN_MAG_MIP_LINEAR)
          {
@@ -8009,7 +8010,7 @@ namespace
       // Note that this might not fix all cases because there's still "ID3D11DeviceContext::SetResourceMinLOD()" and textures that are blurry for other reasons
       // because they use other types of samplers (unfortunately it seems like some decals use "D3D11_FILTER_MIN_MAG_MIP_LINEAR").
       // Note that the AF on different textures in the game seems is possibly linked with other graphics settings than just AF (maybe textures or objects quality).
-      if (desc.Filter == D3D11_FILTER_ANISOTROPIC || desc.Filter == D3D11_FILTER_COMPARISON_ANISOTROPIC || (force_upgrade_linear_samplers && desc.Filter == D3D11_FILTER_MIN_MAG_MIP_LINEAR))
+      if (desc.Filter == D3D11_FILTER_ANISOTROPIC || (upgrade_comparison_samplers && desc.Filter == D3D11_FILTER_COMPARISON_ANISOTROPIC) || (force_upgrade_linear_samplers && desc.Filter == D3D11_FILTER_MIN_MAG_MIP_LINEAR))
       {
          if (desc.Filter == D3D11_FILTER_MIN_MAG_MIP_LINEAR)
          {
