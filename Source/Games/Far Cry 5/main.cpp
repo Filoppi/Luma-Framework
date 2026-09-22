@@ -16,10 +16,13 @@
 namespace FC5
 {
    inline bool configured_enable = true, configured_upscale = true;
+   inline bool configured_auto_mip_bias = true;
+   inline float configured_rcas_sharpness = 0.5f;
    inline bool gpu_timing = false;
    inline bool configured_suspend_reporter = false;
    constexpr uint32_t ShaderTAA = 0x902DA714, ShaderTAAScope = 0x76DF16DF;
    constexpr uint32_t ShaderSharpen = 0xF73CAD14, ShaderMotionVectorCS = 0x47C5C6CD;
+   enum class OutputEncoding { SDR, ScRGB, PQ };
    inline bool IsTemporalResolve(const ShaderHashesList<OneShaderPerPipeline>& hashes)
    {
       // ADS with some weapon sights uses a TAA permutation with the same
@@ -44,9 +47,10 @@ namespace FC5
       bool scaling_frame = false;
       com_ptr<ID3D11Resource> depth, encoded_motion;
       com_ptr<ID3D11Buffer> staging_cb;
-      com_ptr<ID3D11Texture2D> motion, resolve, input_color, input_depth, composite;
-      com_ptr<ID3D11UnorderedAccessView> motion_uav, composite_uav, input_color_uav;
+      com_ptr<ID3D11Texture2D> motion, resolve, input_color, input_depth;
+      com_ptr<ID3D11UnorderedAccessView> motion_uav, input_color_uav;
       com_ptr<ID3D11ShaderResourceView> resolve_srv;
+      com_ptr<ID3D11Buffer> resolve_cb;
       DXGI_FORMAT depth_view_format = DXGI_FORMAT_UNKNOWN;
       uint2 size = { 0, 0 };
       uint2 output_size = { 0, 0 };
@@ -54,6 +58,7 @@ namespace FC5
       com_ptr<ID3D11Resource> pending_taa_target;
       uint64_t routed = 0;
       DXGI_FORMAT format = DXGI_FORMAT_UNKNOWN;
+      OutputEncoding output_encoding = OutputEncoding::SDR;
       float4 jitter_raw = {};
       float2 jitter_scale = { 1.f, 1.f }, mv_scale = { 1.f, 1.f };
       // Explicit opt-in until jitter, color encoding and rendering are verified.
@@ -92,6 +97,26 @@ namespace FC5
       if (!resource || FAILED(resource->QueryInterface(&texture))) return false;
       texture->GetDesc(&desc);
       return true;
+   }
+   bool IsFC5TemporalColorView(DXGI_FORMAT resource, DXGI_FORMAT view, OutputEncoding encoding)
+   {
+      if (encoding != OutputEncoding::PQ)
+         return IsTemporalColorView(resource, view, encoding == OutputEncoding::ScRGB);
+      return view == DXGI_FORMAT_R10G10B10A2_UNORM &&
+         (resource == view || resource == DXGI_FORMAT_R10G10B10A2_TYPELESS);
+   }
+   bool CanRouteFC5Upscale(const D3D11_TEXTURE2D_DESC& source,
+      const D3D11_TEXTURE2D_DESC& target, DXGI_FORMAT source_view, DXGI_FORMAT target_view,
+      UINT iw, UINT ih, UINT ow, UINT oh, bool same_resource, OutputEncoding encoding)
+   {
+      if (encoding != OutputEncoding::PQ)
+         return CanRouteUpscale(source, target, source_view, target_view, iw, ih, ow, oh,
+            same_resource, encoding == OutputEncoding::ScRGB);
+      return same_resource && IsUpscaleSize(iw, ih, ow, oh) &&
+         IsSingleSurface(source) && IsSingleSurface(target) &&
+         source.Width == iw && source.Height == ih && target.Width == ow && target.Height == oh &&
+         source_view == target_view && IsFC5TemporalColorView(source.Format, source_view, encoding) &&
+         IsFC5TemporalColorView(target.Format, target_view, encoding);
    }
    void LogTexture(const char* name, ID3D11Resource* resource, uint64_t frame)
    {
@@ -192,13 +217,14 @@ namespace FC5
          reshade::log::message(reshade::log::level::info,line);
       }
    }
-   bool Allocate(ID3D11Device* device, Device& fc, const D3D11_TEXTURE2D_DESC& color, UINT ow, UINT oh)
+   bool Allocate(ID3D11Device* device, Device& fc, const D3D11_TEXTURE2D_DESC& color,
+      DXGI_FORMAT working_format, UINT ow, UINT oh)
    {
       if (fc.motion && fc.motion_uav && fc.resolve && fc.size.x == color.Width &&
-         fc.size.y == color.Height && fc.format == color.Format && fc.output_size.x == ow && fc.output_size.y == oh) return true;
+         fc.size.y == color.Height && fc.format == working_format && fc.output_size.x == ow && fc.output_size.y == oh) return true;
       // Transactional allocation: never treat partial creation as a valid cache.
-      com_ptr<ID3D11Texture2D> motion, resolve, input_color, input_depth, composite;
-      com_ptr<ID3D11UnorderedAccessView> motion_uav, composite_uav, input_color_uav;
+      com_ptr<ID3D11Texture2D> motion, resolve, input_color, input_depth;
+      com_ptr<ID3D11UnorderedAccessView> motion_uav, input_color_uav;
       com_ptr<ID3D11ShaderResourceView> resolve_srv;
       D3D11_TEXTURE2D_DESC desc{};
       desc.Width = color.Width; desc.Height = color.Height;
@@ -207,28 +233,52 @@ namespace FC5
       desc.BindFlags = D3D11_BIND_SHADER_RESOURCE | D3D11_BIND_UNORDERED_ACCESS;
       if (FAILED(device->CreateTexture2D(&desc, nullptr, &motion)) ||
          FAILED(device->CreateUnorderedAccessView(motion.get(), nullptr, &motion_uav))) return false;
-      desc.Format = color.Format;
+      desc.Format = working_format;
       desc.Width = ow; desc.Height = oh;
       if (FAILED(device->CreateTexture2D(&desc, nullptr, &resolve)) ||
-         FAILED(device->CreateShaderResourceView(resolve.get(), nullptr, &resolve_srv)) ||
-         FAILED(device->CreateTexture2D(&desc, nullptr, &composite)) ||
-         FAILED(device->CreateUnorderedAccessView(composite.get(), nullptr, &composite_uav))) return false;
+         FAILED(device->CreateShaderResourceView(resolve.get(), nullptr, &resolve_srv))) return false;
       desc.BindFlags = D3D11_BIND_SHADER_RESOURCE;
-      if (color.Format == DXGI_FORMAT_R16G16B16A16_FLOAT) desc.BindFlags |= D3D11_BIND_UNORDERED_ACCESS;
+      if (working_format == DXGI_FORMAT_R16G16B16A16_FLOAT) desc.BindFlags |= D3D11_BIND_UNORDERED_ACCESS;
       desc.Width = color.Width; desc.Height = color.Height;
       if (FAILED(device->CreateTexture2D(&desc, nullptr, &input_color))) return false;
-      if (color.Format == DXGI_FORMAT_R16G16B16A16_FLOAT &&
+      if (working_format == DXGI_FORMAT_R16G16B16A16_FLOAT &&
          FAILED(device->CreateUnorderedAccessView(input_color.get(), nullptr, &input_color_uav))) return false;
       desc.BindFlags = D3D11_BIND_SHADER_RESOURCE;
       desc.Format = DXGI_FORMAT_R32_FLOAT;
       if (FAILED(device->CreateTexture2D(&desc, nullptr, &input_depth))) return false;
       fc.motion = std::move(motion); fc.motion_uav = std::move(motion_uav);
-      fc.resolve = std::move(resolve); fc.size = { desc.Width, desc.Height }; fc.format = color.Format;
+      fc.resolve = std::move(resolve); fc.size = { desc.Width, desc.Height }; fc.format = working_format;
       fc.input_color = std::move(input_color); fc.input_depth = std::move(input_depth);
       fc.input_color_uav = std::move(input_color_uav);
-      fc.composite = std::move(composite); fc.composite_uav = std::move(composite_uav);
       fc.resolve_srv = std::move(resolve_srv);
       fc.output_size = { ow, oh };
+      return true;
+   }
+
+   bool DrawResolvedOutput(ID3D11Device* device, ID3D11DeviceContext* ctx, DeviceData& data,
+      Device& fc, ID3D11RenderTargetView* target, UINT width, UINT height)
+   {
+      const uint32_t shader = fc.output_encoding == OutputEncoding::PQ ? CompileTimeStringHash("Resolve PQ PS") :
+         fc.output_encoding == OutputEncoding::ScRGB ? CompileTimeStringHash("Resolve scRGB PS") :
+         CompileTimeStringHash("Resolve SDR PS");
+      auto vs = data.native_vertex_shaders.find(CompileTimeStringHash("Copy VS"));
+      auto ps = data.native_pixel_shaders.find(shader);
+      if (!target || vs == data.native_vertex_shaders.end() || !vs->second ||
+         ps == data.native_pixel_shaders.end() || !ps->second) return false;
+      if (!fc.resolve_cb)
+      {
+         D3D11_BUFFER_DESC desc{};
+         desc.ByteWidth = sizeof(float4); desc.Usage = D3D11_USAGE_DEFAULT;
+         desc.BindFlags = D3D11_BIND_CONSTANT_BUFFER;
+         if (FAILED(device->CreateBuffer(&desc, nullptr, &fc.resolve_cb))) return false;
+      }
+      const float4 constants = { float(width), float(height),
+         std::clamp(configured_rcas_sharpness, 0.f, 1.f), 1.f };
+      ctx->UpdateSubresource(fc.resolve_cb.get(), 0, nullptr, &constants, 0, 0);
+      ID3D11Buffer* cb = fc.resolve_cb.get();
+      ctx->PSSetConstantBuffers(0, 1, &cb);
+      DrawCustomPixelShader(ctx, data.default_depth_stencil_state.get(), data.default_blend_state.get(), nullptr,
+         vs->second.get(), ps->second.get(), fc.resolve_srv.get(), target, width, height, false);
       return true;
    }
 }
@@ -241,6 +291,9 @@ public:
    {
       reshade::get_config_value(nullptr, NAME, "FC5EnableDLSS", FC5::configured_enable);
       reshade::get_config_value(nullptr, NAME, "FC5MatchDisplay", FC5::configured_upscale);
+      reshade::get_config_value(nullptr, NAME, "FC5RCASSharpness", FC5::configured_rcas_sharpness);
+      reshade::get_config_value(nullptr, NAME, "FC5AutoMipBias", FC5::configured_auto_mip_bias);
+      FC5::configured_rcas_sharpness = std::clamp(FC5::configured_rcas_sharpness, 0.f, 1.f);
       reshade::get_config_value(nullptr, NAME, "FC5SuspendReporter", FC5::configured_suspend_reporter);
       FC5::BorderlessHDR::LoadConfiguration();
       wchar_t timing[8]{};
@@ -250,12 +303,16 @@ public:
    {
       native_shaders_definitions.emplace(CompileTimeStringHash("Prepare Inputs"),
          ShaderDefinition{ "Luma_PrepareInputs", reshade::api::pipeline_subobject_type::compute_shader });
-      native_shaders_definitions.emplace(CompileTimeStringHash("Resolve DLAA"),
-         ShaderDefinition{ "Luma_ResolveDLAA", reshade::api::pipeline_subobject_type::compute_shader });
       native_shaders_definitions.emplace(CompileTimeStringHash("Prepare HDR Color"),
          ShaderDefinition{ "Luma_PrepareHDRColor", reshade::api::pipeline_subobject_type::compute_shader });
-      native_shaders_definitions.emplace(CompileTimeStringHash("Resolve HDR"),
-         ShaderDefinition{ "Luma_ResolveHDR", reshade::api::pipeline_subobject_type::compute_shader });
+      native_shaders_definitions.emplace(CompileTimeStringHash("Prepare PQ Color"),
+         ShaderDefinition{ "Luma_PreparePQColor", reshade::api::pipeline_subobject_type::compute_shader });
+      native_shaders_definitions.emplace(CompileTimeStringHash("Resolve SDR PS"),
+         ShaderDefinition{ "Luma_ResolveOutput", reshade::api::pipeline_subobject_type::pixel_shader, nullptr, "resolve_sdr_ps" });
+      native_shaders_definitions.emplace(CompileTimeStringHash("Resolve scRGB PS"),
+         ShaderDefinition{ "Luma_ResolveOutput", reshade::api::pipeline_subobject_type::pixel_shader, nullptr, "resolve_scrgb_ps" });
+      native_shaders_definitions.emplace(CompileTimeStringHash("Resolve PQ PS"),
+         ShaderDefinition{ "Luma_ResolveOutput", reshade::api::pipeline_subobject_type::pixel_shader, nullptr, "resolve_pq_ps" });
       luma_settings_cbuffer_index = luma_data_cbuffer_index = luma_ui_cbuffer_index = -1;
    }
    void OnCreateDevice(ID3D11Device* device, DeviceData& data) override
@@ -337,17 +394,22 @@ public:
          for (UINT i = 1; i < 8; ++i) if (rtvs[i]) single = false;
          D3D11_VIEWPORT viewport{}; UINT count = 1; ctx->RSGetViewports(&count, &viewport);
          if (single && FC5::Describe(source.get(), s) && FC5::Describe(target.get(), t) &&
-            FC5::CanRouteUpscale(s, t, sv.Format, tv.Format, fc.size.x, fc.size.y,
+            FC5::CanRouteFC5Upscale(s, t, sv.Format, tv.Format, fc.size.x, fc.size.y,
                fc.output_size.x, fc.output_size.y, source.get() == fc.pending_taa_target.get(),
-               FC5::BorderlessHDR::Enabled() && fc.native_output_format == DXGI_FORMAT_R16G16B16A16_FLOAT) &&
+               fc.output_encoding) &&
             sv.ViewDimension == D3D11_SRV_DIMENSION_TEXTURE2D && !sv.Texture2D.MostDetailedMip &&
             tv.ViewDimension == D3D11_RTV_DIMENSION_TEXTURE2D && !tv.Texture2D.MipSlice &&
             count == 1 && FC5::IsFullViewport(viewport, t) && target.get() != source.get())
          {
             FC5::PerfScope handoff_timer(fc.handoff_cpu);
             FC5::ScopedState state(ctx, data.uav_max_count);
-            ctx->OMSetRenderTargets(0, nullptr, nullptr);
-            ctx->CopyResource(target.get(), fc.composite.get());
+            if (!FC5::DrawResolvedOutput(device, ctx, data, fc, rtvs[0].get(), t.Width, t.Height))
+            {
+               fc.pending_taa_target.reset();
+               fc.status = "DLSS final resolve unavailable; native upscaling retained";
+               data.force_reset_sr = true;
+               return DrawOrDispatchOverrideType::None;
+            }
             if (fc.capture_image)
             {
                if (fc.image_wait) --fc.image_wait;
@@ -468,14 +530,14 @@ public:
          srvs[0]->GetDesc(&mv_view); srvs[2]->GetDesc(&color_view);
          D3D11_RENDER_TARGET_VIEW_DESC target_view{};
          rtvs[0]->GetDesc(&target_view);
-         // FC5 native scRGB tonemappers (also RenoDX) output linear BT709 nits/80.
-         // This is a game-specific path, not an inference that all FLOAT is linear.
-         // Native HDR10 is PQ before TAA and is not supported by this integration.
-         if (fc.native_output_format == DXGI_FORMAT_R10G10B10A2_UNORM)
-            return fallback("HDR10 temporal encoding unsupported; use native scRGB HDR");
-         const bool hdr_input = FC5::BorderlessHDR::Enabled() &&
-            fc.native_output_format == DXGI_FORMAT_R16G16B16A16_FLOAT &&
+         // Native scRGB (including RenoDX) is linear BT.709 in nits/80. Native
+         // HDR10 is BT.2020 PQ at this pass and must be decoded before NGX.
+         const bool hdr_input = fc.native_output_format == DXGI_FORMAT_R16G16B16A16_FLOAT &&
             color_view.Format == DXGI_FORMAT_R16G16B16A16_FLOAT;
+         const bool pq_input = fc.native_output_format == DXGI_FORMAT_R10G10B10A2_UNORM &&
+            color_view.Format == DXGI_FORMAT_R10G10B10A2_UNORM;
+         fc.output_encoding = pq_input ? FC5::OutputEncoding::PQ :
+            hdr_input ? FC5::OutputEncoding::ScRGB : FC5::OutputEncoding::SDR;
          if (fc.probe_frame || fc.attempts == 0)
          {
             char line[180];
@@ -488,8 +550,8 @@ public:
             target_view.ViewDimension != D3D11_RTV_DIMENSION_TEXTURE2D ||
             mv_view.Texture2D.MostDetailedMip || color_view.Texture2D.MostDetailedMip ||
             target_view.Texture2D.MipSlice || color_view.Format != target_view.Format ||
-            !FC5::IsTemporalColorView(c.Format, color_view.Format, hdr_input) ||
-            !FC5::IsTemporalColorView(t.Format, target_view.Format, hdr_input) || mv_view.Format != DXGI_FORMAT_R8G8_UNORM ||
+            !FC5::IsFC5TemporalColorView(c.Format, color_view.Format, fc.output_encoding) ||
+            !FC5::IsFC5TemporalColorView(t.Format, target_view.Format, fc.output_encoding) || mv_view.Format != DXGI_FORMAT_R8G8_UNORM ||
             fc.depth_view_format != DXGI_FORMAT_R32_FLOAT ||
             (d.Format != DXGI_FORMAT_R32_TYPELESS && d.Format != DXGI_FORMAT_R32_FLOAT))
             return fallback("Unsupported typed view or subresource");
@@ -507,16 +569,18 @@ public:
          ctx->RSGetViewports(&viewport_count, &viewport);
          if (viewport_count != 1 || !FC5::IsFullViewport(viewport, t)) return fallback("Partial viewport unsupported");
          auto prep = data.native_compute_shaders.find(CompileTimeStringHash("Prepare Inputs"));
-         auto finish = data.native_compute_shaders.find(hdr_input ? CompileTimeStringHash("Resolve HDR") : CompileTimeStringHash("Resolve DLAA"));
          auto hdr_prepare = data.native_compute_shaders.find(CompileTimeStringHash("Prepare HDR Color"));
+         auto pq_prepare = data.native_compute_shaders.find(CompileTimeStringHash("Prepare PQ Color"));
          if (prep == data.native_compute_shaders.end() || !prep->second) return fallback("Motion preparation shader unavailable");
-         if (finish == data.native_compute_shaders.end() || !finish->second) return fallback("DLAA composite shader unavailable");
          if (hdr_input && (hdr_prepare == data.native_compute_shaders.end() || !hdr_prepare->second))
             return fallback("HDR working-color shader unavailable");
-         auto typed = c; typed.Format = color_view.Format;
-         const bool resized = fc.size.x != c.Width || fc.size.y != c.Height || fc.format != typed.Format ||
+         if (pq_input && (pq_prepare == data.native_compute_shaders.end() || !pq_prepare->second))
+            return fallback("PQ working-color shader unavailable");
+         const DXGI_FORMAT working_format = (hdr_input || pq_input) ?
+            DXGI_FORMAT_R16G16B16A16_FLOAT : color_view.Format;
+         const bool resized = fc.size.x != c.Width || fc.size.y != c.Height || fc.format != working_format ||
             fc.output_size.x != ow || fc.output_size.y != oh;
-         if (!FC5::Allocate(device, fc, typed, ow, oh)) return fallback("DLSS/DLAA texture allocation failed");
+         if (!FC5::Allocate(device, fc, c, working_format, ow, oh)) return fallback("DLSS/DLAA texture allocation failed");
          if (resized) data.force_reset_sr = true;
          const float jx = fc.jitter_raw.x * fc.jitter_scale.x, jy = fc.jitter_raw.y * fc.jitter_scale.y;
          if (!std::isfinite(jx) || !std::isfinite(jy) || std::abs(jx) > 1.f || std::abs(jy) > 1.f)
@@ -525,11 +589,11 @@ public:
          FC5::GPUProbe::Scope gpu_timer(fc.gpu, device, ctx, FC5::gpu_timing && fc.frame % 16 == 0);
          auto prep_start = FC5::PerfCounter::Clock::now();
          FC5::ScopedState state(ctx, data.uav_max_count);
-         if (hdr_input)
+         if (hdr_input || pq_input)
          {
             ID3D11ShaderResourceView* source = srvs[2].get();
             ID3D11UnorderedAccessView* destination = fc.input_color_uav.get();
-            ctx->CSSetShader(hdr_prepare->second.get(), nullptr, 0);
+            ctx->CSSetShader((pq_input ? pq_prepare : hdr_prepare)->second.get(), nullptr, 0);
             ctx->CSSetShaderResources(0, 1, &source);
             ctx->CSSetUnorderedAccessViews(0, 1, &destination, nullptr);
             ctx->Dispatch((c.Width + 7) / 8, (c.Height + 7) / 8, 1);
@@ -551,7 +615,7 @@ public:
          SR::SettingsData settings{};
          settings.render_width = c.Width; settings.render_height = c.Height;
          settings.output_width = ow; settings.output_height = oh;
-         settings.hdr = hdr_input || fc.linear_hdr_input;
+         settings.hdr = hdr_input || pq_input || fc.linear_hdr_input;
          settings.inverted_depth = fc.inverted_depth; settings.mvs_jittered = fc.mvs_jittered;
          settings.mvs_x_scale = fc.mv_scale.x; settings.mvs_y_scale = fc.mv_scale.y;
          settings.auto_exposure = fc.auto_exposure; settings.render_preset = dlss_render_preset;
@@ -571,13 +635,6 @@ public:
          gpu_timer.Mark(2);
          if (!draw_ok) return fallback("NGX evaluation failed; native TAA retained");
          fc.evaluated_this_frame = true; ++fc.successes;
-         // Use the original target captured and validated BEFORE NGX.
-         ctx->OMSetRenderTargets(0, nullptr, nullptr);
-         inputs[0] = fc.resolve_srv.get(); outputs[0] = fc.composite_uav.get();
-         ctx->CSSetShader(finish->second.get(), nullptr, 0);
-         ctx->CSSetShaderResources(0, 1, inputs); ctx->CSSetUnorderedAccessViews(0, 1, outputs, nullptr);
-         ctx->Dispatch((ow + 7) / 8, (oh + 7) / 8, 1);
-         ctx->CSSetUnorderedAccessViews(0, 1, &null_uav, nullptr); ctx->CSSetShaderResources(0, 1, &null_srv);
          if (route == FC5::TemporalRoute::Upscale)
          {
             fc.pending_taa_target = target;
@@ -585,7 +642,8 @@ public:
             // State is restored before original TAA. Preserve its history and fallback output.
             return DrawOrDispatchOverrideType::None;
          }
-         ctx->CopyResource(target.get(), fc.composite.get());
+         if (!FC5::DrawResolvedOutput(device, ctx, data, fc, rtvs[0].get(), t.Width, t.Height))
+            return fallback("DLAA final resolve unavailable; native TAA retained");
          ++fc.routed;
          if (fc.capture_image)
          {
@@ -593,7 +651,7 @@ public:
             else
             {
                SaveProbe(device, ctx, fc, fc.input_color.get(), "dlaa-input");
-               SaveProbe(device, ctx, fc, fc.composite.get(), "dlaa-output");
+               SaveProbe(device, ctx, fc, target.get(), "dlaa-output");
                fc.capture_image = false;
             }
          }
@@ -608,6 +666,13 @@ public:
    void OnPresent(ID3D11Device* device, DeviceData& data) override
    {
       auto& fc = Data(data);
+      if (enable_samplers_upgrade && !custom_texture_mip_lod_bias_offset)
+      {
+         const float bias = FC5::configured_auto_mip_bias && fc.drawn_this_frame ?
+            SR::GetMipLODBias(fc.size.y, fc.output_size.y) : 0.f;
+         std::unique_lock lock_samplers(s_mutex_samplers);
+         data.texture_mip_lod_bias_offset = bias;
+      }
       if (!fc.drawn_this_frame) data.force_reset_sr = true;
       if (fc.pending_taa_target) fc.status = "DLSS output not handed off; native frame retained";
       if (FC5::gpu_timing)
@@ -625,10 +690,11 @@ public:
       }
       if (fc.frame % 300 == 0)
       {
-         char line[500];
+         char line[600];
          std::snprintf(line, sizeof(line),
-            "[FC5] frame=%llu CS=%llu TAA=%llu NGX=%llu ok=%llu routed=%llu jitter=(%.9g,%.9g,%.9g,%.9g) status=%s",
+            "[FC5] frame=%llu CS=%llu TAA=%llu NGX=%llu ok=%llu routed=%llu encoding=%u RCAS=%.2f mip_bias=%.3f jitter=(%.9g,%.9g,%.9g,%.9g) status=%s",
             fc.frame, fc.cs_count, fc.taa_count, fc.attempts, fc.successes, fc.routed,
+            static_cast<unsigned>(fc.output_encoding), FC5::configured_rcas_sharpness, data.texture_mip_lod_bias_offset,
             fc.jitter_raw.x, fc.jitter_raw.y, fc.jitter_raw.z, fc.jitter_raw.w, fc.status);
          reshade::log::message(reshade::log::level::info, line);
          fc.camera.readback_cpu.Log("camera-copy-map", fc.frame);
@@ -695,12 +761,23 @@ public:
       ImGui::TextWrapped("Keep TAA enabled in the game and select Auto or DLSS above. Resolution scale controls quality: 100% = DLAA, lower values = DLSS upscaling.");
       bool changed = ImGui::Checkbox("Enable DLSS / DLAA", &fc.enable_dlss);
       changed |= ImGui::Checkbox("Match display resolution (DLAA at 100% game scale)", &fc.upscale);
+      if (ImGui::IsItemHovered())
+         ImGui::SetTooltip("Enable at 100% or below so DLSS/DLAA outputs at display resolution. Disable above 100% so DLAA stays at the supersampled render resolution before the game downsamples it.");
       if (changed)
       {
          FC5::configured_enable = fc.enable_dlss; FC5::configured_upscale = fc.upscale;
          reshade::set_config_value(nullptr, NAME, "FC5EnableDLSS", fc.enable_dlss);
          reshade::set_config_value(nullptr, NAME, "FC5MatchDisplay", fc.upscale);
       }
+      if (ImGui::SliderFloat("RCAS sharpness", &FC5::configured_rcas_sharpness, 0.f, 1.f, "%.2f"))
+         reshade::set_config_value(nullptr, NAME, "FC5RCASSharpness", FC5::configured_rcas_sharpness);
+      if (ImGui::IsItemHovered())
+         ImGui::SetTooltip("Contrast-adaptive sharpening after DLSS/DLAA. Default: 0.50. Set 0 to disable. Higher values may create ringing around high-contrast edges.");
+      if (ImGui::Checkbox("Automatic texture mip LOD bias", &FC5::configured_auto_mip_bias))
+         reshade::set_config_value(nullptr, NAME, "FC5AutoMipBias", FC5::configured_auto_mip_bias);
+      if (ImGui::IsItemHovered())
+         ImGui::SetTooltip("Applies the upscaler-recommended bias to anisotropic texture samplers while DLSS/DLAA is active.");
+      ImGui::Text("Active mip bias: %.3f", data.texture_mip_lod_bias_offset);
       ImGui::SeparatorText("Borderless HDR / RenoDX");
       if (ImGui::Checkbox("Enable borderless HDR (restart required)", &FC5::BorderlessHDR::configured))
          reshade::set_config_value(nullptr, NAME, "FC5BorderlessHDR", FC5::BorderlessHDR::configured);
@@ -711,23 +788,23 @@ public:
          ImGui::TextUnformatted("Test launch flag overrides this option for this session.");
       ImGui::Text("Startup option: %s | Native output: %s", FC5::BorderlessHDR::Enabled() ? "Enabled" : "Disabled",
          fc.native_output_format == DXGI_FORMAT_R16G16B16A16_FLOAT ? "FP16 / scRGB candidate" :
-         fc.native_output_format == DXGI_FORMAT_R10G10B10A2_UNORM ? "HDR10/PQ (DLSS unsupported)" : "SDR / other");
-      ImGui::SeparatorText("Optional FC5 reporting thread");
-      if (ImGui::Checkbox("Suspend FC5 reporting thread (remember choice)", &FC5::configured_suspend_reporter))
+         fc.native_output_format == DXGI_FORMAT_R10G10B10A2_UNORM ? "HDR10 / PQ" : "SDR / other");
+      ImGui::SeparatorText("Optional RemoteDataProvider worker");
+      if (ImGui::Checkbox("Suspend RemoteDataProvider worker (remember choice)", &FC5::configured_suspend_reporter))
       {
          reshade::set_config_value(nullptr, NAME, "FC5SuspendReporter", FC5::configured_suspend_reporter);
          fc.reporter_startup_attempted = true;
          if (FC5::configured_suspend_reporter) fc.reporter.Pause(); else fc.reporter.Resume();
          reshade::log::message(reshade::log::level::info, fc.reporter.Status());
       }
-      if (fc.reporter.Suspended() && ImGui::Button("Resume reporting worker now"))
+      if (fc.reporter.Suspended() && ImGui::Button("Resume RemoteDataProvider worker now"))
       {
          FC5::configured_suspend_reporter = false;
          reshade::set_config_value(nullptr, NAME, "FC5SuspendReporter", false);
          fc.reporter_startup_attempted = true;
          fc.reporter.Resume();
       }
-      ImGui::TextWrapped("Stops a verified Far Cry 5 gameplay-reporting worker until unchecked or the game exits. This may interfere with reporting or hang the game. The choice is saved; startup verifies the code and live thread again before suspending it. If identification fails, toggle off and on to retry.");
+      ImGui::TextWrapped("RemoteDataProvider is a Far Cry 5 gameplay-analytics worker. Suspending its verified polling thread may save some background CPU time and stops that worker from processing or sending data while suspended. It does not block every Ubisoft service, and no FPS gain is guaranteed. The saved choice is revalidated every launch. This may interfere with reporting or hang unsupported game builds; uncheck it to resume.");
       ImGui::Text("Actual worker state: %s", fc.reporter.Suspended() ? "Suspended by Luma" : "Not suspended by Luma");
       ImGui::TextWrapped("%s", fc.reporter.Status());
 #if DEVELOPMENT
@@ -783,7 +860,9 @@ BOOL APIENTRY DllMain(HMODULE module, DWORD reason, LPVOID reserved)
       texture_format_upgrades_type = TextureFormatUpgradesType::None;
       force_disable_display_composition = true;
       prevent_fullscreen_state = false; force_borderless = false;
-      enable_samplers_upgrade = false;
+      enable_samplers_upgrade = true;
+      samplers_upgrade_mode = 4;
+      upgrade_comparison_samplers = false;
 #if DEVELOPMENT
       forced_shader_names.emplace(FC5::ShaderTAA, "FC5 Temporal Resolve");
       forced_shader_names.emplace(FC5::ShaderTAAScope, "FC5 Temporal Resolve (ADS)");
