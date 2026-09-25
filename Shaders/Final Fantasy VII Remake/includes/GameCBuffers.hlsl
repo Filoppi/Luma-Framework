@@ -29,14 +29,7 @@ namespace CB
         float highlight_saturation;
         float hue_correction_strength;
         float hue_correction_type; // 0 = input, 1 = output
-        float blowout;		
-    };
-
-    struct GTAOData
-    {
-        float Near;
-        float Far;
-        float FOV;
+        float blowout;
     };
 
     struct LumaGameData
@@ -46,7 +39,6 @@ namespace CB
 		uint4 ViewportRect;
 		float2 ResolutionScale; //Scale, InvScale
 		uint DrewUpscaling;
-		GTAOData GTAO;
 	};
 }
 

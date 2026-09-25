@@ -1097,7 +1097,7 @@ namespace
       // Project-level entries are gated by their feature prop (e.g. UseLumaFastNoise ->
       // ENABLE_FAST_NOISE_TEXTURES) so builds that don't need them skip them.
       const std::filesystem::path textures_root = GetTexturesRootPath();
-      if (!device_data.managed_resources.LoadTexture2DArray(native_device, textures_root / "Global" / "Textures" / "FAST", "vector2_uniform_gauss1_0_Gauss10_separate05", "FAST Noise"_h))
+      if (!device_data.managed_resources.LoadTexture2DArray(native_device, textures_root / "Global" / "Textures" / "FAST", "vector4_uniform_gauss1_0_Gauss10_separate05", "FAST Noise"_h))
       {
          reshade::log::message(reshade::log::level::error, "Failed to load managed texture 'FAST Noise'");
          ASSERT_ONCE(false);
