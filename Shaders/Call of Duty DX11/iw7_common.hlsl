@@ -17,11 +17,11 @@
 
 struct TMInfo
 {
-  float2 uvRaw;
+  float2 uvRaw; //raw texture coordinates after +v1 & before any modifications
   float3 r0;             // Working color; encoded after TM_Gamma().
   float3 colorHDR;       // Per-channel display rolloff, before grading.
   float3 colorNeutral;   // Matching linear SDR proxy, before grading.
-  float aay;
+  float aay; //anti-aliasing luminance
   bool restoreGrade;
 };
 static TMInfo tmi = { float2(0, 0), float3(0, 0, 0), float3(0, 0, 0), float3(0, 0, 0), 0, false };
