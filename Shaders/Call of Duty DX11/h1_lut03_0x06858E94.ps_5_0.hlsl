@@ -44,7 +44,9 @@ void main(
   // CA composite
   r1.xyz = r1.xyz + -r0.xyz;
   r0.xyz = cb2[0].www * r1.xyz + r0.xyz;
-  r0.xyz = saturate(r0.xyz);
+  // Preserve HDR RGB until LUT_Color_Internal normalizes it using saved luminance.
+  // Clamping to 1 here darkens bright pixels before the SDR grading stage.
+  r0.xyz = max(r0.xyz, 0.0);
 
   LUT_Color_Internal(r0.xyz, r0.w);
 

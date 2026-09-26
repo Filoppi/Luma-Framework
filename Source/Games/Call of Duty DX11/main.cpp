@@ -1,3 +1,5 @@
+#include <mutex>
+#include <atomic>
 #define GAME_CODDX11 1
 
 // SR
@@ -2760,9 +2762,13 @@ namespace CODs // partial
             // Unexpected
             if (ps != hash_t2x && ps != hash_t2xf && ps != hash_blit0 && ps != hash_blit_blur)
             {
-               auto s = std::format("Unexpected shader hash when handling RTVState transition: {:#x}", ps);
-               message(reshade::log::level::error, s.c_str());
-               ASSERT_ONCE_MSG(false, s + "\nPlease report bug!");
+               // Unknown variants use the existing continuation path; do not enter a debugger.
+               static std::atomic_flag reported_unknown_transition = ATOMIC_FLAG_INIT;
+               if (!reported_unknown_transition.test_and_set(std::memory_order_relaxed))
+               {
+                  auto s = std::format("Unexpected shader hash when handling RTVState transition: {:#x}", ps);
+                  message(reshade::log::level::warning, s.c_str());
+               }
             }
 
             break;
@@ -3719,6 +3725,87 @@ namespace CB
 
 ////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
 
+
+// AW can resize its back buffer to native resolution while leaving its startup
+// HWND at 1280x720. Correct only that mismatch, outside swapchain resize callbacks.
+namespace AWBorderlessWindow
+{
+   struct State
+   {
+      HWND window = nullptr;
+      UINT width = 0, height = 0;
+      ULONGLONG due = 0;
+      unsigned attempts = 0;
+   };
+   static State state;
+   static std::mutex state_mutex;
+
+   void Observe(reshade::api::swapchain* swapchain)
+   {
+      if (GameIdentity::game != GameIdentity::S1) return;
+      DXGI_SWAP_CHAIN_DESC desc = {};
+      auto* native = reinterpret_cast<IDXGISwapChain*>(swapchain->get_native());
+      if (FAILED(native->GetDesc(&desc))) return;
+      std::scoped_lock lock(state_mutex);
+      state = { desc.Windowed ? desc.OutputWindow : nullptr,
+         desc.BufferDesc.Width, desc.BufferDesc.Height, GetTickCount64() + 2000, 0 };
+   }
+
+   void Update()
+   {
+      State current;
+      {
+         std::scoped_lock lock(state_mutex);
+         current = state;
+      }
+      if (!current.window || current.attempts >= 3 || GetTickCount64() < current.due) return;
+      if (!IsWindow(current.window) || !IsWindowVisible(current.window) || IsIconic(current.window)) return;
+      if (GetForegroundWindow() != current.window) return;
+      DWORD process = 0;
+      GetWindowThreadProcessId(current.window, &process);
+      if (process != GetCurrentProcessId()) return;
+      wchar_t name[32] = {};
+      if (!GetClassNameW(current.window, name, 32) || wcscmp(name, L"S1") != 0) return;
+      const LONG_PTR style = GetWindowLongPtrW(current.window, GWL_STYLE);
+      if (!(style & WS_POPUP) || (style & (WS_CAPTION | WS_THICKFRAME))) return;
+
+      // Read and apply physical monitor pixels without changing process DPI policy.
+      using SetThreadDpi = HANDLE(WINAPI*)(HANDLE);
+      static const auto set_dpi = reinterpret_cast<SetThreadDpi>(
+         GetProcAddress(GetModuleHandleW(L"user32.dll"), "SetThreadDpiAwarenessContext"));
+      if (!set_dpi) return;
+      const HANDLE previous_dpi = set_dpi(reinterpret_cast<HANDLE>(static_cast<INT_PTR>(-4)));
+      if (!previous_dpi) return;
+      struct RestoreDpi
+      {
+         SetThreadDpi function;
+         HANDLE previous;
+         ~RestoreDpi() { function(previous); }
+      } restore_dpi{set_dpi, previous_dpi};
+
+      MONITORINFO monitor = {};
+      monitor.cbSize = sizeof(monitor);
+      RECT window = {};
+      if (!GetMonitorInfoW(MonitorFromWindow(current.window, MONITOR_DEFAULTTONEAREST), &monitor) ||
+          !GetWindowRect(current.window, &window)) return;
+      const int width = monitor.rcMonitor.right - monitor.rcMonitor.left;
+      const int height = monitor.rcMonitor.bottom - monitor.rcMonitor.top;
+      // Do not force native rendering or stretch an intentionally smaller window.
+      if (width <= 0 || height <= 0 || current.width != static_cast<UINT>(width) || current.height != static_cast<UINT>(height)) return;
+      if (EqualRect(&window, &monitor.rcMonitor)) return;
+      {
+         std::scoped_lock lock(state_mutex);
+         if (state.window != current.window || state.due != current.due) return;
+         ++state.attempts;
+         state.due = GetTickCount64() + 2000;
+      }
+      // Queue on the HWND's owner thread; do not resize DXGI buffers or hold a lock.
+      if (SetWindowPos(current.window, nullptr, monitor.rcMonitor.left, monitor.rcMonitor.top,
+          width, height, SWP_NOZORDER | SWP_NOACTIVATE | SWP_ASYNCWINDOWPOS))
+         reshade::log::message(reshade::log::level::info, "[AW window] Requested native-size borderless window bounds.");
+   }
+}
+
 class CallOfDutyDX11 final : public Game
 {
 public:
@@ -3749,6 +3836,7 @@ public:
    void OnInitSwapchain(reshade::api::swapchain* swapchain) override
    {
       message(reshade::log::level::info, "OnInitSwapchain()");
+      AWBorderlessWindow::Observe(swapchain);
       auto& device_data = *swapchain->get_device()->get_private_data<DeviceData>();
    }
 
@@ -3764,6 +3852,7 @@ public:
       SR::OnPreset(native_device, device_data);
       SR::Jitter::OnPresent(native_device, device_data);
       CODs::cod->OnPresent(native_device, nullptr, device_data);
+      AWBorderlessWindow::Update();
    }
 
    void CleanExtraSRResources(DeviceData& device_data) override
@@ -3839,8 +3928,9 @@ BOOL APIENTRY DllMain(HMODULE hModule, DWORD ul_reason_for_call, LPVOID lpReserv
       swapchain_upgrade_type = SwapchainUpgradeType::scRGB;
 
       enable_samplers_upgrade = true;                                                   // SR
-      prevent_fullscreen_state = !std::filesystem::exists("Luma_AllowFullscreenState"); // flag file
-      force_borderless = false;                                                         // safety/compatibilitys
+      prevent_fullscreen_state = false; // flag file
+      force_borderless = false;
+      force_ignore_dpi         = true;                                                         // safety/compatibilitys
 
       GameIdentity::OnDllMain();
       CODs::OnDllMainAfterGameIdentity(GameIdentity::game);

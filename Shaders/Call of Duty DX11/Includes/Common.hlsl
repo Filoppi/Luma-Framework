@@ -95,6 +95,13 @@ namespace HermiteSpline {
 ///////////////////////////////////////////////////////////////////////////////////////////////////
 
 float3 TonemapHDRLuminance(float3 x) {
+#ifdef IW7
+  // IW7 already rolls off to the display peak before applying its SDR LUT.
+  // Keep the late pass for exposure/output scaling, not a second tone curve.
+  if (!(HDR_ENABLED)) return x;
+  x = max(x * GS.ExposurePost, 0);
+  return x * min(1.f, safeDivision(max(HDR_PEAK, 1.f), max3(x), 1.f));
+#else
   float p = HDR_PEAK;
   float em = GS.ExpectedMax;
   em *= 100;
@@ -109,6 +116,7 @@ float3 TonemapHDRLuminance(float3 x) {
   x *= safeDivision(y1, y, 1); //apply
   x = clamp(x, 0, p); //clean
   return x;
+#endif
 }
 
 float GammaCorrectionPeak(float x) {
