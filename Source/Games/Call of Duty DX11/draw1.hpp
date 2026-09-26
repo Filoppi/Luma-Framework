@@ -1,5 +1,4 @@
 #pragma once
-// TODO: THIS IS KINDA UGLY! For some reason, CoDIW needs this (don't Restore() SRVs) to not crash.
 
 namespace DrawDav
 {

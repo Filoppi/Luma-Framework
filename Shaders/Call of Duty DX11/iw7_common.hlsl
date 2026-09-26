@@ -1,180 +1,134 @@
+// IW7 owns b13 in its tonemap shaders. Use IW7's actual Luma slots even
+// when the shared shader folder is compiled from another Call of Duty title.
+#ifdef LUMA_SETTINGS_CB_INDEX
+#undef LUMA_SETTINGS_CB_INDEX
+#endif
+#define LUMA_SETTINGS_CB_INDEX b10
+#ifdef LUMA_DATA_CB_INDEX
+#undef LUMA_DATA_CB_INDEX
+#endif
+#define LUMA_DATA_CB_INDEX b9
+
 #define LUT_SIZE 32u
 #define LUT_3D 1
 
 #include "common.hlsl"
-// #include "../Includes/ColorGradingLUT.hlsl"
+#include "../Includes/ColorGradingLUT.hlsl"
 
-///////////////////////////////////////////////////////////////////////////////////////////////////
-// #ifdef COMMON_LUT
 struct TMInfo
 {
-  float2 uvRaw; //raw texture coordinates after +v1 & before any modifications
-  float3 r0; //main color
-  float3 r0SDR; //main color from SDR rolloff
-  float r0y; //main color luminance from HDR rolloff
-  float colorNy; //neutral color, input into SDR colorgrade
-  float aay; //anti-aliasing luminance
-  float ldrPeak; //temporary tonemap peak for SDR rolloff
+  float2 uvRaw;
+  float3 r0;             // Working color; encoded after TM_Gamma().
+  float3 colorHDR;       // Per-channel display rolloff, before grading.
+  float3 colorNeutral;   // Matching linear SDR proxy, before grading.
+  float aay;
+  bool restoreGrade;
 };
-static TMInfo tmi = { float2(0,0), float3(0,0,0), float3(0,0,0), 0, 0, 0, 0 };
+static TMInfo tmi = { float2(0, 0), float3(0, 0, 0), float3(0, 0, 0), float3(0, 0, 0), 0, false };
 
 void TM_UV(float2 uv) {
   tmi.uvRaw = uv;
 }
 
 void TM_Color(float3 col) {
-  col = max(0, col);
-  tmi.r0 = col;
-  tmi.ldrPeak = 0.845;
+  tmi.r0 = max(0, col);
+  tmi.restoreGrade = false;
 }
 
 #ifndef COMMON_NOCB13
 void TM_Rolloff() {
-  // colorU / Rolloff
-  RolloffResult r = Rolloff_Complete(tmi.r0, cb13[0].x, cb13[1], cb13[2]);
-  tmi.r0 = r.color;
-  tmi.r0y = r.y;
-  tmi.r0SDR = r.colorSDR;
+  float3 scene = tmi.r0 * GS.ExposurePre;
+  float3 vanilla = saturate(scene < cb13[0].x
+      ? MobiusRolloff(scene, cb13[2])
+      : MobiusRolloff(scene, cb13[1]));
 
-  // colorN
-  float y0 = tmi.r0y;
-  float y1 = y0;
-  y1 = HermiteSpline::HermiteSplineLuminanceRolloff(y1, tmi.ldrPeak, 100 * 10 * GS.ExpectedMax);
-  // y1 = Neutwo(y1, tmi.ldrPeak);
-  tmi.colorNy = y1;
-  tmi.r0 *= safeDivision(y1, y0, 1);
-  tmi.r0 = saturate(tmi.r0);
+  // SDR uses the actual game curve and per-channel clipping.
+  if (!(HDR_ENABLED) || HDR_PEAK <= 1.f) {
+    tmi.r0 = vanilla;
+    return;
+  }
+
+  // Extend the game's lower segment with its tangent at the shoulder.
+  float4 coefficients = cb13[0].x > 0 ? cb13[2] : cb13[1];
+  float shoulder = MobiusRolloff(cb13[0].x, coefficients);
+  float slope = MobiusRolloffDerivative(cb13[0].x, coefficients);
+  float3 extended = max(0, scene < cb13[0].x
+      ? vanilla : slope * (scene - cb13[0].x) + shoulder);
+  float peak = max(HDR_PEAK, 1.f);
+  float shoulderSafe = clamp(shoulder, 0.0001f, peak * 0.99f);
+
+  // Keep the rolled-off RGB, not the pre-rolloff luminance. The old
+  // luminance restoration undid this peak limit and needed another tonemap.
+#if PCC_TONEMAP == 1
+  tmi.colorHDR = ExponentialRollOff(extended, shoulderSafe, peak);
+#else
+  tmi.colorHDR = Reinhard::ReinhardPiecewise(extended, peak, shoulderSafe);
+#endif
+  tmi.colorHDR = clamp(tmi.colorHDR, 0, peak);
+
+  // Exact white clip is the HDR peak, not an unrelated scene maximum.
+  // Preserve identity below midgray and map neutral HDR white to SDR 1.
+  float y = GetLuminance(tmi.colorHDR, CS_BT709);
+  float proxyY = peak > 1.f
+      ? Reinhard::ReinhardPiecewiseExtended(y, peak, 1.f, 0.18f) : y;
+  tmi.colorNeutral = ClampByMaxChannel(tmi.colorHDR * safeDivision(proxyY, y, 0), 1.f);
+  tmi.r0 = tmi.colorNeutral;
+
+  {
+    // Correct only hue shift introduced by the per-channel shoulder.
+    // Keep its highlight desaturation. Apply the same hue correction to
+    // both bridge references so it does not contaminate the vanilla grade.
+    float3 hueReference = extended * safeDivision(
+        GetLuminance(tmi.colorNeutral, CS_BT709), GetLuminance(extended, CS_BT709), 0);
+    tmi.r0 = RestoreHueAndChrominance(tmi.r0, hueReference, 1.f, 0.f, 0.f, FLT_MAX, 0.f, CS_BT709);
+    tmi.r0 = ClampByMaxChannel(SimpleGamutClip(tmi.r0, false), 1.f);
+    tmi.colorNeutral = tmi.r0;
+    tmi.colorHDR = tmi.colorNeutral * safeDivision(
+        y, GetLuminance(tmi.colorNeutral, CS_BT709), 0);
+    tmi.colorHDR = ClampByMaxChannel(tmi.colorHDR, peak);
+  }
+  // Grade this exact SDR proxy. RestorePostProcess must compare the graded
+  // result against the same pre-matrix, pre-LUT input to isolate the grade's
+  // luminance and chrominance changes from the SDR compression itself.
+  tmi.r0 = tmi.colorNeutral;
+  tmi.restoreGrade = true;
 }
 #endif
 
-// When tonemap doesnt have rolloff, we need a temporary one to compress in color for SDR color grading
 void TM_Rolloff_Insert() {
-  // colorU / Rolloff
-  tmi.r0y = GetLuminance(tmi.r0, CS_BT709);
-
-  // colorN
-  float y0 = tmi.r0y;
-  float y1 = y0;
-  y1 = HermiteSpline::HermiteSplineLuminanceRolloff(y1, tmi.ldrPeak, 100 * GS.ExpectedMax);
-  tmi.colorNy = y1;
-  tmi.r0 *= safeDivision(y1, y0, 1);
-  tmi.r0 = saturate(tmi.r0);
+  // Overlay-only reads an already graded, encoded scene. Do not expand or
+  // tonemap its existing overlay operations a second time.
+  tmi.restoreGrade = false;
 }
 
 void TM_LumaThingy(int cbStart) {
   if (!GS.AllowVanillaColorGrade) return;
-
-  float3 r1;
-  r1.x = /* saturate */(dot(tmi.r0, cb2[cbStart + 0].xyz));
-  r1.y = /* saturate */(dot(tmi.r0, cb2[cbStart + 1].xyz));
-  r1.z = /* saturate */(dot(tmi.r0, cb2[cbStart + 2].xyz));
-  r1 = ClampByMaxChannel(r1, 1);
-  // r1 = max(r1, 0); //clean
-  tmi.r0 = r1;
-
-  // midgray change
-  {
-    float mg_in = 0.18;
-    float3 r2;
-    r2.x = dot(mg_in, cb2[cbStart + 0].xyz);
-    r2.y = dot(mg_in, cb2[cbStart + 1].xyz);
-    r2.z = dot(mg_in, cb2[cbStart + 2].xyz);
-    r2 = max(r2, 0); //clean
-    float mg_out = GetLuminance(r2, CS_BT709);
-    float ratio = safeDivision(mg_out, mg_in, 1);
-    tmi.r0y *= ratio;
-  }
+  // Preserve the vanilla matrix and clipping, including in the SDR branch.
+  tmi.r0 = saturate(float3(
+      dot(tmi.r0, cb2[cbStart + 0].xyz),
+      dot(tmi.r0, cb2[cbStart + 1].xyz),
+      dot(tmi.r0, cb2[cbStart + 2].xyz)));
 }
 
 void TM_Gamma() {
-  // tmi.r0 = max(0, tmi.r0);
-  // tmi.r0 = linear_to_sRGB_gamma(tmi.r0, GCT_NONE);
-
-  tmi.r0 = pow(tmi.r0, 0.416666657);
-  tmi.r0 = tmi.r0 * 1.05499995 + -0.0549999997;
-  tmi.r0 = max(0, tmi.r0);
-
-  tmi.r0SDR = pow(tmi.r0SDR, 0.416666657);
-  tmi.r0SDR = tmi.r0SDR * 1.05499995 + -0.0549999997;
-  tmi.r0SDR = max(0, tmi.r0SDR);
+  // IW7's original shaper deliberately has no piecewise sRGB linear toe.
+  tmi.r0 = max(0, pow(max(tmi.r0, 0), 0.416666657f) * 1.05499995f - 0.0549999997f);
 }
 
 void TM_LUT(Texture3D<float4> tLUT, SamplerState sLUT) {
   if (!GS.AllowVanillaColorGrade) return;
-
-  // midgray change
-  {
-    const float mg_in_linear = 105/200.f;
-    const float mg_in = linear_to_sRGB_gamma1(mg_in_linear, GCT_NONE);
-    float3 l = tLUT.SampleLevel(sLUT, mg_in, 0).xyz;
-    l = gamma_sRGB_to_linear(l, GCT_NONE);
-    float mg_out = GetLuminance(l, CS_BT709);
-    float ratio = safeDivision(mg_out, mg_in_linear, 1);
-    tmi.r0y *= ratio;
-  }
-
-  float3 r0Before = tmi.r0;
-
-  tmi.r0 = mad(tmi.r0, 0.96875, 0.015625);
-  tmi.r0 = tLUT.SampleLevel(sLUT, tmi.r0, 0).xyz; //half half
-
-  //AHHHHHHHHHHHH
-  // r0Before = gamma_sRGB_to_linear(r0Before, GCT_NONE); //neutral
-  // r0Before = UCS_ToUCS(r0Before);
-
-  tmi.r0SDR = mad(tmi.r0SDR, 0.96875, 0.015625); //exact SDR
-  tmi.r0SDR = tLUT.SampleLevel(sLUT, tmi.r0SDR, 0).xyz;
-  tmi.r0SDR = gamma_sRGB_to_linear(tmi.r0SDR, GCT_NONE);
-  tmi.r0SDR = UCS_ToUCS(tmi.r0SDR);
-
-  tmi.r0 = gamma_sRGB_to_linear(tmi.r0, GCT_NONE);
-  tmi.r0 = UCS_ToUCS(tmi.r0);
-  // float s = tmi.r0y;
-  // s *= 0.4915;
-  // s = saturate(s);
-  // s *= /* 0.97125 */ /* 0.825 */ DVS5;
-  tmi.r0 = RestoreHueAndChrominanceUcs(tmi.r0, tmi.r0SDR, /* s * */ DVS1, /* s *  */DVS2, 0);
-  tmi.r0.x = lerp(tmi.r0.x, tmi.r0SDR.x, 0.176); //take minor contrast adjust
-  // tmi.r0 = RestoreHueAndChrominanceUcs(tmi.r0, r0Before, s * DVS3, s * DVS4, 1);
-  tmi.r0 = UCS_FromUCS(tmi.r0);
-  tmi.r0 = max(0, tmi.r0); //clean
-  tmi.r0 = linear_to_sRGB_gamma(tmi.r0, GCT_NONE);
-
-//     LUTExtrapolationData ld;
-//     ld.inputColor = tmi.r0;
-//     ld.inputColor = gamma_sRGB_to_linear(ld.inputColor, GCT_NONE);
-//     ld.inputColor *= safeDivision(tmi.r0y, GetLuminance(ld.inputColor, CS_BT709), 1);
-//     ld.inputColor = linear_to_sRGB_gamma(ld.inputColor, GCT_NONE);
-//     ld.vanillaInputColor = tmi.r0;
-// 
-//     LUTExtrapolationSettings ls;
-//     ls.lutSize = LUT_SIZE;
-//     ls.inputLinear = false;
-//     ls.lutInputLinear = false;
-//     ls.lutOutputLinear = false;
-//     ls.outputLinear = false;
-//     ls.transferFunctionIn = LUT_EXTRAPOLATION_TRANSFER_FUNCTION_SRGB;
-//     ls.transferFunctionOut = LUT_EXTRAPOLATION_TRANSFER_FUNCTION_SRGB;
-//     ls.samplingQuality = 1;
-//     ls.neutralLUTRestorationAmount = DVS6;
-//     ls.vanillaLUTRestorationAmount = DVS7;
-//     ls.vanillaLUTRestorationType = 0;
-//     ls.enableExtrapolation = true;
-//     ls.extrapolationQuality = 2;
-//     ls.backwardsAmount = 0.5;
-//     ls.clipExtrapolationToWhite = false;
-//     ls.whiteLevelNits = Rec709_WhiteLevelNits;
-//     ls.inputTonemapToPeakWhiteNits = 0;
-//     ls.clampedLUTRestorationAmount = 1;
-//     ls.fixExtrapolationInvalidColors = true;
-// 
-//     tmi.r0 = SampleLUTWithExtrapolation(tLUT, sLUT, ld, ls);
+  // Original 0xA6AFB6CC: 32^3 UNORM LUT, mip 0, RGB axes unchanged.
+  // Map [0,1] to texel centers [0.5/32,31.5/32], using the game sampler.
+  // HDR grades the matching SDR proxy; no midgray or second LUT probe.
+  tmi.r0 = tLUT.SampleLevel(sLUT, mad(tmi.r0, 0.96875f, 0.015625f), 0).xyz;
 }
 
 float TM_LumaForAA_Internal(float x) {
   return Neutwo(x);
 }
 float TM_LumaForAA(float3 x, bool decodeGamma, bool encodeGamma) {
+  if ((!(HDR_ENABLED) || HDR_PEAK <= 1.f) && decodeGamma && encodeGamma)
+    return GetLuminance(x, CS_BT709);
   if (decodeGamma) x = gamma_sRGB_to_linear(x, GCT_NONE);
   float y = TM_LumaForAA_Internal(GetLuminance(x, CS_BT709));
   if (encodeGamma) y = linear_to_sRGB_gamma1(y, GCT_NONE);
@@ -188,29 +142,20 @@ float TM_LumaForAA(float x, bool decodeGamma, bool encodeGamma) {
 }
 
 void TM_Upgrade() {
-  tmi.r0 = gamma_sRGB_to_linear(tmi.r0, GCT_NONE); //linear
-
-  // Upgrade()
-  float ratio = 1.f;
-  float y_untonemapped = tmi.r0y;
-  float y_tonemapped = /* tmi.colorNy */ HermiteSpline::HermiteSplineLuminanceRolloff(tmi.r0y, 1/* tmi.ldrPeak */, 100 * 10 * GS.ExpectedMax);
-  // float y_tonemapped = Neutwo(tmi.r0y, tmi.ldrPeak);
-  float y_tonemapped_graded = GetLuminance(tmi.r0, CS_BT709);
-  if (y_untonemapped < y_tonemapped) {
-    ratio = y_untonemapped / y_tonemapped;
-  } else {
-    float y_delta = y_untonemapped - y_tonemapped;
-    y_delta = max(0, y_delta);
-    const float y_new = y_tonemapped_graded + y_delta;
-    const bool y_valid = (y_tonemapped_graded > 0);
-    ratio = y_valid ? (y_new / y_tonemapped_graded) : 0;
+  if (!(HDR_ENABLED) || !tmi.restoreGrade) {
+    // Preserve encoded SDR/overlay output without a lossy round trip.
+    tmi.aay = dot(tmi.r0, float3(0.212599993f, 0.715200007f, 0.0722000003f));
+    return;
   }
-  float y = y_tonemapped_graded;
-  float y1 = y;
-  y1 *= ratio;
-  tmi.aay = TM_LumaForAA(y1, false, true);
-  tmi.r0 *= safeDivision(y1, y, 1);
 
-  tmi.r0 = max(tmi.r0, 0); //clean
-  tmi.r0 = linear_to_sRGB_gamma(tmi.r0, GCT_NONE); //gamma
+  float3 color = tmi.colorHDR;
+  if (GS.AllowVanillaColorGrade) {
+    color = RestorePostProcess(tmi.colorHDR, tmi.colorNeutral,
+        gamma_sRGB_to_linear(tmi.r0, GCT_NONE), 0.f, true);
+  }
+  // Grading can lift the peak again. Bound it with uniform RGB scaling;
+  // another per-channel clip would change the final hue.
+  color = ClampByMaxChannel(SimpleGamutClip(color, false), max(HDR_PEAK, 1.f));
+  tmi.aay = TM_LumaForAA(color, false, true);
+  tmi.r0 = linear_to_sRGB_gamma(color, GCT_NONE);
 }

@@ -253,8 +253,8 @@ float NeutwoI(float x, float peak, float clip, float gray) {
     float L1 = m + (1.0f - m) / a;            \
                                               \
     T S0 = m + l0;                            \
-    T S1 = m + a * l0;                        \
-    T C2 = (a * P) / (P - S1);                \
+    T shoulderStartOutput = m + a * l0;                        \
+    T C2 = (a * P) / (P - shoulderStartOutput);                \
     T CP = -C2 / P;                           \
                                               \
     T w0 = 1.0f - smoothstep(0.0f, m, x);     \
@@ -262,7 +262,7 @@ float NeutwoI(float x, float peak, float clip, float gray) {
     T w1 = 1.0f - w0 - w2;                    \
                                               \
     T T_ = m * pow(x / m, c) + b;             \
-    T S_ = P - (P - S1) * exp(CP * (x - S0)); \
+    T S_ = P - (P - shoulderStartOutput) * exp(CP * (x - S0)); \
     T L_ = m + a * (x - m);                   \
                                               \
     return T_ * w0 + L_ * w1 + S_ * w2;       \
