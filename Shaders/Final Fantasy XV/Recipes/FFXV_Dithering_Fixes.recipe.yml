@@ -2,7 +2,7 @@ version: 1
 env:
   # Cbuffer element offset for frame_constants (cb13[2].y = frame counter)
   # Change this value to access a different element in the cbuffer.
-  frame_index_offset: 2
+  frame_index_offset: 3
 steps:
   # Probe: detect the original 16-phase procedural bayer usage without
   # mutating. The mul/round_ne/ftou/ult window is the bayer quantization used
