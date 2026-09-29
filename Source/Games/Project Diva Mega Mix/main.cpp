@@ -1933,6 +1933,8 @@ namespace SSS
    // return only Skip or None (continues normal exec)
    DrawOrDispatchOverrideType OnDrawOrDispatchOverride(ID3D11Device* native_device, ID3D11DeviceContext* native_device_context, CommandListData& cmd_list_data, DeviceData& device_data, uint32_t ps)
    {
+      if (DEVELOPMENT && !IsModEnabled()) return DrawOrDispatchOverrideType::None;
+      
       /*
          PBR
          0x93881580: geo setup
