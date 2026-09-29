@@ -21,10 +21,7 @@ void main(uint3 dtid : SV_DispatchThreadID) {
   */
   float backUpY = r1.x;
   r1.x = lutIn.SampleLevel(smp, float2(r1.x, 0), 0).y;
-  
-  // "headroom"
-  float satBeforeHeadroom = r1.x;
-  r1.x *= 0.996f;
+  float satBeforeBias = r1.x;
 
   // // early out: upward slope (aka looking back would be a loss)
   // float satOneTexelEarlier = lutIn.SampleLevel(smp, float2(r1.x - (1.0f / 512.f), 0), 0).y;
@@ -71,14 +68,9 @@ void main(uint3 dtid : SV_DispatchThreadID) {
       hp *= 8;
       hp = pow(hp, 2.5f);
       hp = saturate(hp);
-      r1.x = lerp(satBeforeHeadroom, newSat, hp);
+      r1.x = lerp(satBeforeBias, newSat, hp);
     }
   }
-
-  // // headroom
-  // #if CUSTOM_SDR_1 == 0 && CUSTOM_SDR_1 == 0 // TODO: this is what it was intended for, but it looks worse than above.
-  //   r1.y *= 0.995f;
-  // #endif
 
   // x: biased saturation, y: unaltered rolled off luminance
   lutOut[dtid.xy] = r1.x;

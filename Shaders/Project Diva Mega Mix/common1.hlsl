@@ -564,7 +564,7 @@ float3 Tonemap_Complex(float3 colorT, float4 v3, bool isLookBack = true, bool is
     if (lutInput > 1.0f) return float3(5, 0, 0);
 #endif
   }
-#else // calculate per pixel
+#else // calculate per pixel (TODO: del)
   /*
     Maybe Neutral LUT https://www.desmos.com/calculator/u3bhz0bn62
     r1.x = Saturation (Rolls off to 0 way before 1)
@@ -618,9 +618,6 @@ float3 Tonemap_Complex(float3 colorT, float4 v3, bool isLookBack = true, bool is
       r1.x = lerp(r1.x, newSat, hp);
     }
   }
-
-  // // headroom // TODO: this is what it was intended for, but it looks worse than above.
-  // if (isLookBack) r1.y *= 0.995f;
 #endif
 
   r0.y = v3.x * r1.x; // per-shot PV defined saturation, usually 1
