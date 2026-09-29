@@ -821,18 +821,20 @@ float3 Tonemap_Do(in float3 colorU, in float3 colorT, in float2 uv, in Texture2D
 
         float sourceChrominance = GetChrominance(color_scaled);
 
-        float maxBrightness = max3(color_scaled);
-        float midBrightness = GetMidValue(color_scaled);
-        float minBrightness = min3(color_scaled);
-        float brightnessRatio = saturate(maxBrightness / peakBrightness);
-        brightnessRatio = lerp(brightnessRatio, sqrt(brightnessRatio), sqrt(saturate(InverseLerp(minBrightness, maxBrightness, midBrightness)))); // TODO: saturate() is not present in global code, which causes NaNs/black for whites?
+        if (color_scaled_y < 100000.000 && sourceChrominance > 0.000001) { // TODO: SetChrominance() is weak, and needs safety from high values
+          float maxBrightness = max3(color_scaled);
+          float midBrightness = GetMidValue(color_scaled); 
+          float minBrightness = min3(color_scaled);
+          float brightnessRatio = saturate(maxBrightness / peakBrightness);
+          brightnessRatio = lerp(brightnessRatio, sqrt(brightnessRatio), sqrt(saturate(InverseLerp(minBrightness, maxBrightness, midBrightness)))); // TODO: saturate() is not present in global code, which causes errors for white and near black
 
-        float chrominancePow = lerp(1.0, 1.0 / invSat, brightnessRatio);
-        float targetChrominance = sourceChrominance > 1.0 ? pow(sourceChrominance, chrominancePow) : (1.0 - pow(1.0 - sourceChrominance, chrominancePow));
-        float chrominanceRatio = safeDivision(targetChrominance, sourceChrominance, 1);
-        color_scaled = RestoreLuminance(SetChrominance(color_scaled, chrominanceRatio), color_scaled, true, CS_BT709);
+          float chrominancePow = lerp(1.0, 1 / invSat, brightnessRatio);
+          float targetChrominance = sourceChrominance > 1.0 ? pow(sourceChrominance, chrominancePow) : (1.0 - pow(1.0 - sourceChrominance, chrominancePow));
+          float chrominanceRatio = safeDivision(targetChrominance, sourceChrominance, 1);
+
+          color_scaled = RestoreLuminance(SetChrominance(color_scaled, chrominanceRatio), color_scaled, true, CS_BT709);
+        }
       }
-      color_scaled = max(0, color_scaled);
 
       //debug
       #if CUSTOM_UPGRADE_DEBUG == 0
