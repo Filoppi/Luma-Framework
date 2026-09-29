@@ -4289,9 +4289,7 @@ public:
          ImGui::Separator(); ////////////////////////////////////////////////////////////////////////////////////
 
          auto p = GetPulseMultiplier(0.05);
-         ImGui::PushFont(ImGui::GetIO().Fonts->Fonts[1]);
          ImGui::TextColored(ImVec4(1.f * p, 0.5f * p, 0.9f * p, 1.f), "[Thanks for downloading the mod!]");
-         ImGui::PopFont();
          
          ImGui::NewLine();
          
@@ -5338,6 +5336,7 @@ public:
       ImGui::BulletText("Bug Hunter, Benchmarker, and Tester: Pikota");
       ImGui::BulletText("Bug Hunter: Pino");
       ImGui::BulletText("Testing & Suggestions: neocodex");
+      ImGui::BulletText("Bug Hunter: Jorge");
 
       ImGui::Separator(); ////////////////////////////////////////////////////////////////////////////////////
       
