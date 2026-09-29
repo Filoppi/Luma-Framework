@@ -126,7 +126,7 @@ namespace OutputHandling
          swapchain_format_upgrade_type  = TextureFormatUpgradesType::None;
       }
       // HDR10 rgb10a2
-      else if (std::filesystem::exists("Luma_Output10"))
+      else if (std::filesystem::exists("Luma_Output10") || !DEVELOPMENT)
       {
          swapchain_upgrade_type         = SwapchainUpgradeType::HDR10;
          swapchain_format_upgrade_type  = TextureFormatUpgradesType::AllowedEnabled;
