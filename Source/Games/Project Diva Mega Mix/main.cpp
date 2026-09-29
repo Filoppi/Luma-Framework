@@ -294,7 +294,7 @@ namespace ShaderDefineInfo
    constexpr uint32_t CUSTOM_TONEMAP_IDENTIFY           = char_ptr_crc32("CUSTOM_TONEMAP_IDENTIFY");
    constexpr uint32_t CUSTOM_SDR_1                      = char_ptr_crc32("CUSTOM_SDR_1");
    constexpr uint32_t CUSTOM_PERCHANNELLUMAEMULATE      = char_ptr_crc32("CUSTOM_PERCHANNELLUMAEMULATE");
-   constexpr uint32_t CUSTOM_BLOOM_THRESHOLD            = char_ptr_crc32("CUSTOM_BLOOM_THRESHOLD");
+   constexpr uint32_t CUSTOM_BLOOM_THRESHOLD_1            = char_ptr_crc32("CUSTOM_BLOOM_THRESHOLD_1");
    constexpr uint32_t XEGTAO_SLICECOUNT                 = char_ptr_crc32("XEGTAO_SLICECOUNT");
    constexpr uint32_t XEGTAO_STEPSPERSLICE              = char_ptr_crc32("XEGTAO_STEPSPERSLICE");
    constexpr uint32_t XEGTAO_HALFRES                    = char_ptr_crc32("XEGTAO_HALFRES");
@@ -308,7 +308,7 @@ namespace ShaderDefineInfo
    constexpr uint32_t XEGTAO_THREADS_AO                 = char_ptr_crc32("XEGTAO_THREADS_AO");
    constexpr uint32_t XEGTAO_THREADS_DENOISE            = char_ptr_crc32("XEGTAO_THREADS_DENOISE");
    constexpr uint32_t CUSTOM_PS4BLUR_1                  = char_ptr_crc32("CUSTOM_PS4BLUR_1");
-   constexpr uint32_t CUSTOM_HDRTONEMAPSDR              = char_ptr_crc32("CUSTOM_HDRTONEMAPSDR");
+   constexpr uint32_t CUSTOM_HDRTONEMAPONSDR            = char_ptr_crc32("CUSTOM_HDRTONEMAPONSDR");
 
    void OnInit()
    {
@@ -335,8 +335,8 @@ namespace ShaderDefineInfo
          {"CUSTOM_GAMMACORRECT22", '1', true, false, "Enable Gamma Correction 2.2 for OS and displays missing it.", 1},
          {"CUSTOM_PROGRESSBAR", '0', true, false, "Play head progress bar.", 2},
          {"CUSTOM_PS4BLUR_1", '0', true, false, "PS4 frame blur / ghosting.", 2},
-         {"CUSTOM_BLOOM_THRESHOLD", '0', true, false, "Bloom threshold mode.", 2},
-         {"CUSTOM_HDRTONEMAPSDR", '0', true, false, "Use new HDR tonemapping in SDR path.", 1},
+         {"CUSTOM_BLOOM_THRESHOLD_1", '0', true, false, "Bloom threshold mode.", 4},
+         {"CUSTOM_HDRTONEMAPONSDR", '0', true, false, "Use new HDR tonemapping in SDR path.", 1},
          {"CUSTOM_PERCHANNELLUMAEMULATE", '1', true, false, "Emulate luminance loss from LDR per-channel tonemapping on single channel bright colors.", 1},
          {"XEGTAO_SLICECOUNT", '1', true, false, "XeGTAO samples.", 6},
          {"XEGTAO_STEPSPERSLICE", '0', true, false, "XeGTAO samples.", 2},
@@ -3578,7 +3578,7 @@ namespace LUTBiasCached
    void OnTonemapDraw(ID3D11Device* native_device, ID3D11DeviceContext* native_device_context, CommandListData& cmd_list_data, DeviceData& device_data)
    {
       // gatekeep
-      if (cb_luma_global_settings.DisplayMode != DisplayModeType::HDR) return;
+      if (cb_luma_global_settings.DisplayMode != DisplayModeType::HDR && !ShaderDefineInfo::GetB(ShaderDefineInfo::CUSTOM_HDRTONEMAPONSDR)) return;
       if (!ShaderDefineInfo::GetB(ShaderDefineInfo::CUSTOM_LUT_BLOWOUT_GAUSSIAN)) return;
       if (DEVELOPMENT && !IsModEnabled()) return;
 
@@ -4488,6 +4488,15 @@ public:
       {
          IndividualPVTuning::OnUI(runtime);
       }
+      
+      // ImGui::Separator(); ////////////////////////////////////////////////////////////////////////////////////
+
+      if (is_sdr && DrawCollapsingHeaderEnabledColored("HDR Tonemap in SDR", ShaderDefineInfo::GetB(ShaderDefineInfo::CUSTOM_HDRTONEMAPONSDR)))
+      {
+         DrawColoredSubHeader("Use the new HDR tonemap even in SDR.");
+
+         ShaderDefineInfo::UIToggleCheckmark(ShaderDefineInfo::CUSTOM_HDRTONEMAPONSDR, "HDR Tonemap In SDR", "Use the new HDR Tonemap with it's HQ Bezold-Brucke shift in SDR.\nWithout higher HDR Stops headroom, this may look meh.");
+      }
 
       ImGui::Separator(); ////////////////////////////////////////////////////////////////////////////////////
 
@@ -4653,11 +4662,11 @@ public:
       // ImGui::Separator(); ////////////////////////////////////////////////////////////////////////////////////
 
       ImGui::PushID("###Bloom");
-      if (DrawCollapsingHeaderEnabledColored("Bloom", Bloom::enabled || ShaderDefineInfo::GetB(ShaderDefineInfo::CUSTOM_BLOOM_THRESHOLD)))
+      if (DrawCollapsingHeaderEnabledColored("Bloom", Bloom::enabled || ShaderDefineInfo::GetB(ShaderDefineInfo::CUSTOM_BLOOM_THRESHOLD_1)))
       {
          ImGui::PushID("###BloomThreshold");
          DrawColoredSubHeader("Threshold");
-         ShaderDefineInfo::UIDropDown(ShaderDefineInfo::CUSTOM_BLOOM_THRESHOLD, "Mode",
+         ShaderDefineInfo::UIDropDown(ShaderDefineInfo::CUSTOM_BLOOM_THRESHOLD_1, "Mode",
             { "Vanilla (Crude)", "Slightly Neutral (Recommended)", "More Neutral (Alternative Style)" },
             "The high pass filter for bloom. How should it operate?"
             "\n"
@@ -4820,13 +4829,13 @@ public:
       // ImGui::Separator(); ////////////////////////////////////////////////////////////////////////////////////
 
       ImGui::PushID("###SpotLightShadows");
-      if (DrawCollapsingHeaderEnabledColored("Spotlight Shadows", SpotLightShadows::enabled))
+      if (DrawCollapsingHeaderEnabledColored("Spotlight Lighting Pass", SpotLightShadows::enabled))
       {
-         DrawColoredSubHeader("Full Resolution Spotlight Pass Resolve");
+         DrawColoredSubHeader("Full Resolution Resolve");
 
          if (ImGui::Checkbox("Enable", &SpotLightShadows::enabled))
             reshade::set_config_value(runtime, NAME, SpotLightShadows::reshadesave_enabled, SpotLightShadows::enabled);
-         if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled)) ImGui::SetTooltip("Make the separated spotlight shadows pass resolve to a full resolution color buffer.\nProbably has some performance cost.");
+         if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled)) ImGui::SetTooltip("Make the separated spotlights lighting pass resolve to a full resolution color buffer.\nProbably has some performance cost.");
 
          ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.5f, 0.5f, 0.5f, 1.f));
          ImGui::Bullet(); ImGui::SameLine(); ImGui::TextWrapped("This FX is rather rare. 2 PVs using this are Meiteki Cybernetics & Gaikotsu Gakudan to Riria.");
@@ -5289,31 +5298,7 @@ public:
       
       if (ImGui::Checkbox("Hide README", &GlobalsMegaMix::UIIsReadmeDone))
          reshade::set_config_value(runtime, NAME, "UIIsReadmeDone", GlobalsMegaMix::UIIsReadmeDone);
-      
-      static double exit_armed_time = 0.0;
-      if (exit_armed_time == -10000.f)
-      {
-         ImGui::Button("Exiting...");
-      }
-      else if (exit_armed_time <= 0)
-      {
-         if (ImGui::Button("\"exit(0)\"")) exit_armed_time = static_cast<double>(GetTickCount64());
-      }
-      else
-      {
-         double exit_armed_time_left = 3000.0 - (static_cast<double>(GetTickCount64()) - exit_armed_time);
-         if (exit_armed_time_left > 0)
-         {
-            if (ImGui::Button(std::format("Confirm Exit {:.1f}s", exit_armed_time_left / 1000.0).c_str()))
-            {
-               exit(0);
-               exit_armed_time = -10000.f;
-            }
-         }
-         else exit_armed_time = 0.0;
-      }
-      if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled)) ImGui::SetTooltip("Exit the game via Windows process termination, avoiding the flash bang screen when exiting normally.");
-      
+
 #if DEVELOPMENT
       ImGui::Separator();
 #endif

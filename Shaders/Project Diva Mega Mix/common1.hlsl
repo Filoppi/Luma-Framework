@@ -11,6 +11,22 @@
 #define cmp -
 #endif
 
+// CUSTOM_HDRTONEMAPONSDR
+#ifdef TONEMAP_COMPLEX // applicable only for FutureTone
+  #if CUSTOM_SDR_1 == 0 // force CUSTOM_HDRTONEMAPONSDR off if HDR
+    #ifdef CUSTOM_HDRTONEMAPONSDR
+      #undef CUSTOM_HDRTONEMAPONSDR
+      #define CUSTOM_HDRTONEMAPONSDR 0
+    #endif
+  #endif
+  #if CUSTOM_HDRTONEMAPONSDR // override CUSTOM_SDR_1
+    #ifdef CUSTOM_SDR_1
+      #undef CUSTOM_SDR_1
+      #define CUSTOM_SDR_1 0
+    #endif
+  #endif
+#endif
+
 ////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
 bool CheckCustom(float x, float target, float leniency) {
   if (leniency == 0.f) return all(x == target);
@@ -420,13 +436,13 @@ float3 BloomThreshold(float3 x, float3 threshold) {
   csum = max(0, csum);
 
   // correct
-#if CUSTOM_BLOOM_THRESHOLD > 0
+#if CUSTOM_BLOOM_THRESHOLD_1 > 0
   float csumY = GetLuminance(csum);
 
-  #if CUSTOM_BLOOM_THRESHOLD == 1
+  #if CUSTOM_BLOOM_THRESHOLD_1 == 1
     csumBack -= 0.955; // good fudge TODO: if g_color.xyz != 1.1, make dynamic
     csumBack = max(0, SetChrominance(csumBack, 1.088)); // makeup
-  #elif CUSTOM_BLOOM_THRESHOLD == 2
+  #elif CUSTOM_BLOOM_THRESHOLD_1 == 2
     // dumb curve
     // float anchor = 0.18;
     // csumBack *= anchor;
@@ -803,7 +819,7 @@ float3 Tonemap_Do(in float3 colorU, in float3 colorT, in float2 uv, in Texture2D
       }
 
       // PerChannelTonemapLuminanceReductionEmulation
-      #if CUSTOM_PERCHANNELLUMAEMULATE > 0
+      #if CUSTOM_PERCHANNELLUMAEMULATE > 0 && CUSTOM_HDRTONEMAPONSDR == 0
         color_scaled = PerChannelTonemapLuminanceReductionEmulation(
           color_scaled, color_scaled_bak, 
           1, 
@@ -884,6 +900,11 @@ float3 Tonemap_Do(in float3 colorU, in float3 colorT, in float2 uv, in Texture2D
   // HDR tonemap
   float p = GS.TonemapperPeakCached;
   float m = GS.TonemapperMaxExpectedCached;
+
+  #if CUSTOM_HDRTONEMAPONSDR == 1 // force SDR
+    p = 1;
+    m = 36;
+  #endif
 
   #if CUSTOM_TONEMAP_SCALING == 0
     float l = GetLuminance(colorT, CS_BT709); //luma
