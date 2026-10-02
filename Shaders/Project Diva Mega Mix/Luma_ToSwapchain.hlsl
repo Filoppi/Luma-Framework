@@ -75,16 +75,8 @@ float3 ToSwapchain(float3 x, float2 v1)
 
 	// Rec709 correction
 	#if CUSTOM_HDTVREC709_1 == 1
-    // x = EncodeSrgb(x); // gamma correct down
-    // x = pow(x, 2.2); // gamma correct down
-
-    // x = pow(x, 1 / 2.2); // gamma correct up
-    // x = DecodeSrgb(x); // gamma correct up
-
     x = EncodeRec709(x); // linear to Rec709
-
-    x = DecodeSrgb(x); // Rec709 to linear
-    // x = pow(x, 2.2); // Rec709 to linear
+    x = DecodeSrgb(x); // sRGB to linear
 	#endif
 
 	// ColorGrade
