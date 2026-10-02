@@ -2453,7 +2453,7 @@ public:
 
       //GameSettings default
       default_luma_global_game_settings.TonemapperRolloffStart = cb_luma_global_settings.GameSettings.TonemapperRolloffStart = 36.f;
-      default_luma_global_game_settings.TonemapperMaxExpected = cb_luma_global_settings.GameSettings.TonemapperMaxExpected = 50000.f;
+      default_luma_global_game_settings.TonemapperMaxExpected = cb_luma_global_settings.GameSettings.TonemapperMaxExpected = 40000.f;
       default_luma_global_game_settings.AmbientOcclusion = cb_luma_global_settings.GameSettings.AmbientOcclusion = 1.f;
       default_luma_global_game_settings.Bloom = cb_luma_global_settings.GameSettings.Bloom = 1.f;
       default_luma_global_game_settings.LensFlare = cb_luma_global_settings.GameSettings.LensFlare = 1.f;
