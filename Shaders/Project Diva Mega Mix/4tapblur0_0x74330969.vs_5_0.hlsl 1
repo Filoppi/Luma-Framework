@@ -1,0 +1,63 @@
+// ---- Created with 3Dmigoto v1.3.16 on Tue Sep 02 15:46:08 2025
+
+cbuffer Scene : register(b0)
+{
+  float4 g_transform : packoffset(c0);
+  float4 g_texcoord : packoffset(c1);
+}
+
+
+
+// 3Dmigoto declarations
+#define cmp -
+#include "./Includes/Common.hlsl"
+
+void main(
+  float2 v0 : POSITION0,
+  float4 v1 : TEXCOORD0,
+  float4 v2 : TEXCOORD1,
+  float4 v3 : TEXCOORD2,
+  float2 v4 : TEXCOORD3,
+
+  out float4 o0 : SV_POSITION0,
+  out float4 o1 : TEXCOORD0,
+  out float4 o2 : TEXCOORD1,
+  out float4 o3 : TEXCOORD2, // new
+  out float4 o4 : TEXCOORD3  // new
+)
+{
+  float4 r0;
+  uint4 bitmask, uiDest;
+  float4 fDest;
+
+  o0.xy = v0.xy * float2(2,-2) + float2(-1,1);
+  o0.zw = float2(0,1);
+
+  // 4
+  r0.xy = v1.xy * g_transform.xy + v0.xy;
+  o1.xy = g_texcoord.xx * r0.xy;
+
+  r0.xy = v2.xy * g_transform.xy + v0.xy;
+  o1.zw = g_texcoord.xx * r0.xy;
+
+  r0.xy = v3.xy * g_transform.xy + v0.xy;
+  o2.xy = g_texcoord.xx * r0.xy;
+  
+  r0.xy = v4.xy * g_transform.xy + v0.xy;
+  o2.zw = g_texcoord.xx * r0.xy;
+
+  // 8
+  r0.xy = v1.xy * -1 * g_transform.xy + v0.xy;
+  o3.xy = g_texcoord.xx * r0.xy;
+
+  r0.xy = v2.xy * -1 * g_transform.xy + v0.xy;
+  o3.zw = g_texcoord.xx * r0.xy;
+
+  r0.xy = v3.xy * -1 * g_transform.xy + v0.xy;
+  o4.xy = g_texcoord.xx * r0.xy;
+
+  r0.xy = v4.xy * -1 * g_transform.xy + v0.xy;
+  o4.zw = g_texcoord.xx * r0.xy;
+  
+  return;
+}

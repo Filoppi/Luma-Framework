@@ -120,8 +120,7 @@ void main(
   r0.xyz = r1.www ? r1.xyz : r0.xyz;
 
   colorUntonemapped = r0.xyz;
-  //colorUntonemapped = gamma_to_linear(colorUntonemapped, GCT_POSITIVE, 2.2);
-  colorUntonemapped = gamma_sRGB_to_linear(colorUntonemapped, GCT_POSITIVE);
+  colorUntonemapped = DecodeIntermediate(max(0, colorUntonemapped));
   
   //tonemap
   // r1.xyz = min(float3(0.959999979,0.959999979,0.959999979), r1.xyz); //if this is here, r1.xyz is still HDR before
@@ -152,6 +151,5 @@ void main(
   o0.xyz = r1.xxx ? r1.yzw : r0.xyz;
   o0.w = r0.w;
 
-  Tonemap_Out(o0);
   return;
 }

@@ -63,8 +63,7 @@ void main(
   r0.xyz = r0.www ? r0.xyz : r1.xyz;
 
   colorUntonemapped = r0.xyz;
-  //colorUntonemapped = gamma_to_linear(colorUntonemapped, GCT_POSITIVE, 2.2);
-  colorUntonemapped = gamma_sRGB_to_linear(colorUntonemapped, GCT_POSITIVE);
+  colorUntonemapped = DecodeIntermediate(max(0, colorUntonemapped));
 
   //tonemapper (simple)
   r0.xyz = /* saturate */(r0.xyz * g_tone_scale.xyz + g_tone_offset.xyz); //clamp with color grade
@@ -84,6 +83,5 @@ void main(
     o0.xyz = r0.www ? r1.xyz : r0.xyz; //out xyz
   }
 
-  Tonemap_Out(o0);
   return;
 }

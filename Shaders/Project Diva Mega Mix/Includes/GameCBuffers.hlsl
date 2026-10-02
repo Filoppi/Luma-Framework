@@ -46,66 +46,52 @@ namespace CB
 {
    struct LumaGameSettings
    {
-      int TonemapInfo;
-      
+      float4 BloomStrengths;
+
+      float BloomStrength;
+      int   TonemapInfo;
       float TonemapperPeakCached;
       float TonemapperMaxExpectedCached;
-      float TonemapHDRStops;
-      float AAMultiplier;
+      
+      float IntermediateScalingCached;
       float PerChannelLuminanceReductionEmulateStrength;
-
       float GammaCorrection22PaperWhite;
       float GammaPerceptualChrominanceCorrect;
-
-      // float UITransparency;
-
-      // float SDRTonemapToeStrength;
-      // float SDRTonemapToeLowPass;
-
-      float4 BloomStrengths;
-      float BloomStrength;
-
-      float LUTScalingAndMakeUp;
+      
       float LUTGaussianBlurStep;
       float LUTGaussianBlurBias;
-      
-      // float PCBlowoutLumaEnd;
-      // float PCBlowoutPerChannelClip;
-      // float PCBlowoutPerChannelEnd;
-      // float PCBlowoutPerChannel2ndStartRatio;
-      // float PCBlowoutPerChannel2ndEnd;
-      
-      // float FakeBT2020Gamma;
       float FakeBT2020Chroma;
       float FakeBT2020Luma;
-      
-      float UpscaleMovPumboPow; 
-      float UpscaleBGSpritesMax; 
-      float UpscaleBGSpritesExp;
-      float UpscaleToonMax; 
-      float UpscaleToonExp;
 
-      float HUDBrightnessHealthBar; 
-      float HUDBrightnessHealthBarDelta; 
-      float HUDBrightnessProgressBar; 
-      float HUDBrightnessCommonIcons; 
+      float FrameBlendRatio;
+      float UpscaleMovPumboPow;
+      float UpscaleBGSpritesMax;
+      float UpscaleBGSpritesExp;
+
+      float UpscaleToonMax;
+      float UpscaleToonExp;
+      float HUDBrightnessHealthBar;
+      float HUDBrightnessHealthBarDelta;
+
+      float HUDBrightnessProgressBar;
+      float HUDBrightnessCommonIcons;
       float HUDBrightnessNoteResponse;
-      float HUDBrightnessHoldComboBg; 
-      float HUDBrightnessPJDLogo; 
-      
+      float HUDBrightnessHoldComboBg;
+
+      float HUDBrightnessPJDLogo;
       float CGContrast;
       float CGContrastMidGray;
       float CGSaturation;
+
       float CGHighlightsStrength;
       float CGHighlightsMidGray;
       float CGShadowsStrength;
       float CGShadowsMidGray;
 
-      float ProgressBarRatio;
-
       float XeGTAOFinalPower;
-
       float SSSRadius;
+      float ProgressBarRatio;
+      int   ProgressBarColorPacked; 
    };
    
    struct LumaGameData
@@ -113,7 +99,5 @@ namespace CB
       float Dummy;
    };
 }
-
-
 
 #endif // LUMA_GAME_CB_STRUCTS

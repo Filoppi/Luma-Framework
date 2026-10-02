@@ -22,15 +22,15 @@ void main(
 
   //1st
   r0.xyz = g_texture.Sample(g_sampler_s, w1.xy).xyz;
-  #if CUSTOM_SDR == 0
+  // #if CUSTOM_SDR_1 == 0
     r0.xyz *= GS.AAMultiplier;
-  #endif
+  // #endif
 
   //2nd
   r1.xyz = g_texture.Sample(g_sampler_s, v1.xy).xyz;
-  #if CUSTOM_SDR == 0
+  // #if CUSTOM_SDR_1 == 0
     r1.xyz *= GS.AAMultiplier;
-  #endif
+  // #endif
   
   //edge detect
   r0.xyz = -r1.xyz + r0.xyz;
@@ -41,9 +41,9 @@ void main(
 
   //3rd
   r0.xyz = g_texture.Sample(g_sampler_s, v2.xy).xyz;
-  #if CUSTOM_SDR == 0
+  // #if CUSTOM_SDR_1 == 0
     r0.xyz *= GS.AAMultiplier;
-  #endif
+  // #endif
 
   //edge detect
   r0.xyz = r0.xyz + -r1.xyz;
