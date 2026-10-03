@@ -725,6 +725,52 @@ public:
             native_device_context->CSGetShaderResources(0, ARRAYSIZE(shader_resources), &shader_resources[0]);
          else
             native_device_context->PSGetShaderResources(0, ARRAYSIZE(shader_resources), &shader_resources[0]);
+
+         // Size the TAA input/output textures are expected to be. They match the pass' own
+         // render target, which UE4 allocates at the *internal* render resolution, so anything
+         // smaller belongs to a different pass.
+         //
+         // "device_data.render_resolution" would be the natural reference for that, but it is
+         // only refreshed once the per-view global cbuffer has been located. When that lookup
+         // never succeeds for a game it keeps holding the *swapchain* size, and since UE4 renders
+         // smaller than the swapchain whenever "r.ScreenPercentage < 100", this gate then rejects
+         // every single TAA texture: TAA could only ever be confirmed while the game happened to
+         // render at 100%. DLSS therefore stayed off until the player opened the resolution
+         // settings (the display mode change passes through 100% for one frame) and was off again
+         // after a restart. Take the size from the pass itself instead.
+         uint32_t taa_pass_width = (uint32_t)device_data.render_resolution.x;
+         uint32_t taa_pass_height = (uint32_t)device_data.render_resolution.y;
+         {
+            com_ptr<ID3D11Resource> taa_pass_resource;
+            if (is_compute_shader)
+            {
+               com_ptr<ID3D11UnorderedAccessView> taa_pass_uav;
+               native_device_context->CSGetUnorderedAccessViews(0, 1, &taa_pass_uav);
+               if (taa_pass_uav != nullptr)
+                  taa_pass_uav->GetResource(&taa_pass_resource);
+            }
+            else
+            {
+               com_ptr<ID3D11RenderTargetView> taa_pass_rtv;
+               native_device_context->OMGetRenderTargets(1, &taa_pass_rtv, nullptr);
+               if (taa_pass_rtv != nullptr)
+                  taa_pass_rtv->GetResource(&taa_pass_resource);
+            }
+            if (taa_pass_resource != nullptr)
+            {
+               com_ptr<ID3D11Texture2D> taa_pass_texture;
+               if (SUCCEEDED(taa_pass_resource->QueryInterface(&taa_pass_texture)))
+               {
+                  D3D11_TEXTURE2D_DESC taa_pass_desc;
+                  taa_pass_texture->GetDesc(&taa_pass_desc);
+                  if (taa_pass_desc.Width > 0 && taa_pass_desc.Height > 0)
+                  {
+                     taa_pass_width = taa_pass_desc.Width;
+                     taa_pass_height = taa_pass_desc.Height;
+                  }
+               }
+            }
+         }
          size_t color_texture_count = 0;
          size_t depth_texture_count = 0;
          size_t velocity_texture_count = 0;
@@ -749,7 +795,7 @@ public:
 
             if (std::fabs(output_aspect_ratio - swapchain_aspect_ratio) > FLT_EPSILON)
                continue;
-            if (desc.Width < device_data.render_resolution.x || desc.Height < device_data.render_resolution.y)
+            if (desc.Width < taa_pass_width || desc.Height < taa_pass_height)
                continue;
 
             switch (desc.Format)
@@ -910,16 +956,29 @@ public:
             SR::SettingsData settings_data;
             settings_data.output_width = taa_output_texture_desc.Width;
             settings_data.output_height = taa_output_texture_desc.Height;
-            settings_data.render_width = game_device_data.render_resolution.x;
-            settings_data.render_height = game_device_data.render_resolution.y;
+            // The declared render size must be the real DLSS input texture size
+            // (the game's TAA source colour), not game_device_data.render_resolution:
+            // that field is only refreshed once the per-view global cbuffer has been
+            // located, so when the lookup never succeeds it keeps holding the *swapchain*
+            // size, which is larger than the TAA resolution whenever
+            // "r.ScreenPercentage < 100". NGX uses the declared size as
+            // InRenderSubrectDimensions, and declaring more than the input texture
+            // makes it return FAIL_InvalidParameter (0xBAD00005).
+            settings_data.render_width = taa_output_texture_desc.Width;
+            settings_data.render_height = taa_output_texture_desc.Height;
             settings_data.dynamic_resolution = true;
             settings_data.hdr = true; // Unreal Engine does DLSS before tonemapping, in HDR linear space
             settings_data.inverted_depth = true;
             settings_data.mvs_jittered = false;
             settings_data.auto_exposure = sr_auto_exposure; // Unreal Engine does TAA before tonemapping
             settings_data.render_preset = dlss_render_preset;
-            settings_data.mvs_x_scale = 1.0f;
-            settings_data.mvs_y_scale = 1.0f;
+            // Motion vectors are generated at the TAA resolution and expressed in
+            // pixels of that resolution, while DLSS expects input-resolution pixels.
+            // The two are identical for this slot (it is replaced 1:1, i.e. DLAA),
+            // but derive the ratio instead of hardcoding 1.0 so that it stays correct
+            // if the sizes ever diverge.
+            settings_data.mvs_x_scale = (float)settings_data.render_width / (float)taa_output_texture_desc.Width;
+            settings_data.mvs_y_scale = (float)settings_data.render_height / (float)taa_output_texture_desc.Height;
             sr_implementations[device_data.sr_type]->UpdateSettings(sr_instance_data, native_device_context, settings_data);
 
             constexpr bool dlss_use_native_uav = true;
@@ -1059,11 +1118,15 @@ public:
                draw_data.motion_vectors = game_device_data.sr_motion_vectors.get();
                draw_data.depth_buffer = game_device_data.depth_buffer.get();
                draw_data.pre_exposure = 0.0f; // automatic exposure
-               draw_data.jitter_x = game_device_data.jitter.x * game_device_data.render_resolution.x * 0.5f;
-               draw_data.jitter_y = game_device_data.jitter.y * game_device_data.render_resolution.y * -0.5f;
+               // Jitter is expressed in DLSS input pixels, so it has to use the
+               // same size the input texture was declared with.
+               draw_data.jitter_x = game_device_data.jitter.x * settings_data.render_width * 0.5f;
+               draw_data.jitter_y = game_device_data.jitter.y * settings_data.render_height * -0.5f;
                draw_data.reset = reset_sr;
-               draw_data.render_width = game_device_data.render_resolution.x;
-               draw_data.render_height = game_device_data.render_resolution.y;
+               // Must match the declared render size above and the actual input
+               // texture, or NGX rejects the frame with InvalidParameter.
+               draw_data.render_width = settings_data.render_width;
+               draw_data.render_height = settings_data.render_height;
                draw_data.near_plane = game_device_data.near_plane / 100.0f;
                draw_data.far_plane = FLT_MAX; // TODO: made up values
                draw_data.vert_fov = game_device_data.fov_y;

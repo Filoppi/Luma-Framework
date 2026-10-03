@@ -117,7 +117,21 @@ static uint32_t* FindLargestCBufferDeclaration(const uint32_t* code_u32, const s
             break; // we scanned all cbuffer declarations
       }
       instruction_count++;
-      offset += len;
+      // "dcl_immediateConstantBuffer" is opcode 53, which the WDK header this project
+      // ships (Source/External/WDK/includes/d3d11TokenizedProgramFormat.hpp) spells
+      // D3D10_SB_OPCODE_CUSTOMDATA -- there is no
+      // D3D10_SB_OPCODE_DCL_IMMEDIATE_CONSTANT_BUFFER in it. The ICB form is
+      // custom-data class 3. Since opcode token bits [31:11] carry the class, the
+      // usual instruction length field ([30:24]) decodes to 0 for an ICB token
+      // (0x00001835 = 53 | (3 << 11)), and "len == 0 ? 1 : len" would step 1 DWORD
+      // into the ICB payload. The declaration's real size in DWORDs -- opcode token
+      // included -- is the DWORD right after it, so it can be used as a plain stride.
+      if (opcode == D3D10_SB_OPCODE_CUSTOMDATA &&
+          DECODE_D3D10_SB_CUSTOMDATA_CLASS(token) == D3D10_SB_CUSTOMDATA_DCL_IMMEDIATE_CONSTANT_BUFFER &&
+          offset + 1 < size_u32)
+         offset += code_u32[offset + 1];
+      else
+         offset += len;
    }
    return max_cbuffer_declaration;
 }
@@ -393,6 +407,20 @@ static bool IsUE4TAACandidate(const std::byte* code, size_t size, uint64_t shade
       {
          offset += len;
       }
+      else if (opcode == D3D10_SB_OPCODE_CUSTOMDATA &&
+               DECODE_D3D10_SB_CUSTOMDATA_CLASS(token) == D3D10_SB_CUSTOMDATA_DCL_IMMEDIATE_CONSTANT_BUFFER &&
+               offset + 1 < size_u32)
+      {
+         // opcode 53 is NOT inside the 88..111 declaration range, so without this
+         // branch the scan stops at the ICB before a single texture is counted
+         // (detected_2d_texture_float_count stays 0 and the shader is rejected).
+         // Note the name: opcode 53 is D3D10_SB_OPCODE_CUSTOMDATA in the WDK header
+         // this project ships, and the ICB declaration is custom-data class 3.
+         // Bits [31:11] of the opcode token hold the class, so the ordinary length
+         // field ([30:24]) reads as 0 (0x00001835 = 53 | (3 << 11)). The real size,
+         // opcode token included, follows it -- use that as the stride.
+         offset += code_u32[offset + 1];
+      }
       else
       {
          found_non_texture_declaration = true;
@@ -476,12 +504,13 @@ static bool IsUE4TAACandidate(const std::byte* code, size_t size, uint64_t shade
       std::byte{endloop_opcode.b[3]},
    };
    std::vector<std::byte*> endloop_hits = System::ScanMemoryForPattern(code, size, endloop_pattern);
-   if (!loop_hits.empty() || !endloop_hits.empty())
+   // A UE4 TAA pixel shader can legitimately contain a loop: the 9-tap neighborhood
+   // gather emitted by UE 4.26 (it walks the ICB offset table to accumulate the
+   // YCoCg-clamped history neighbourhood) compiles down to a real loop/endloop pair.
+   // Only an unbalanced pair indicates the bytecode scan itself went off the rails.
+   if (loop_hits.size() != endloop_hits.size())
    {
-      if (loop_hits.size() == endloop_hits.size())
-      {
-         return false;
-      }
+      return false;
    }
 
    float confidence = GetTAAShaderConfidence(code, size);
@@ -554,7 +583,9 @@ static bool FindShaderInfo(const std::byte* code, size_t size, TAAShaderInfo& ta
 
    if (cbuffer_operand_hits.size() < 4) // try xxyw instead of xywx
    {
-      cbuffer_operand_hits.clear();
+      // NOTE: do NOT clear() here. Some UE4 titles mix swizzles across the four rows
+      // of the PrevClipToClip matrix (e.g. one row emited as .xywx, three as .xxyw),
+      // so the xywx and xxyw hits must be pooled to reach the four consecutive indices.
       uint32_t swizzle_xxyw = ENCODE_D3D10_SB_OPERAND_4_COMPONENT_SWIZZLE(0, 0, 1, 3);
 
       hits = scan_pattern(swizzle_xxyw, D3D10_SB_OPERAND_INDEX_IMMEDIATE32);
