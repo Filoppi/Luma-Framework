@@ -691,7 +691,7 @@ namespace OutputHandler // partial //TODO: this is mega goofy. Luma needs a Reno
          constexpr ID3D11ShaderResourceView* srv0 = nullptr;
          native_device_context->PSSetShaderResources(0, 1, &srv0);
 
-         // set our RTV
+         // set our 16f backbuffer as SRV
          native_device_context->PSSetShaderResources(10, 1, &Resources::backbuffer_srv); // DisplayComposition uses up to 8
       }
    }
