@@ -2,7 +2,10 @@
 
 #if CUSTOM_FAST == 0
    #define ENABLE_NGX 1
-   // #define ENABLE_FIDELITY_SK 1 //TODO: still dont know why FSR complete ruin main color Resource on draw...
+   #ifdef ENABLE_FIDELITY_SK
+      #undef ENABLE_FIDELITY_SK
+   #endif
+   #define ENABLE_FIDELITY_SK 0 //TODO: still dont know why FSR complete ruin main color Resource on draw...
 #endif
 
 #define DISABLE_AUTO_DEBUGGER  1
