@@ -2,7 +2,10 @@
 
 #if CUSTOM_FAST == 0
    #define ENABLE_NGX 1
-   // #define ENABLE_FIDELITY_SK 1 //TODO: still dont know why FSR complete ruin main color Resource on draw...
+   #ifdef ENABLE_FIDELITY_SK
+      #undef ENABLE_FIDELITY_SK
+   #endif
+   #define ENABLE_FIDELITY_SK 0 //TODO: still dont know why FSR complete ruin main color Resource on draw...
 #endif
 
 #define DISABLE_AUTO_DEBUGGER  1
@@ -14,7 +17,6 @@
 
 namespace Globals
 {
-   static auto SDR8Bit = false;
    static bool UIIsAdvanced = false;
 #if ENABLE_SR == 1
    static bool IsUi = true;
@@ -42,50 +44,62 @@ namespace Globals
       if (a == b) return 0.f;
       return (v - a) / (b - a);
    }
-
 }
 
-// void ShaderHashesLists_Setup() //TODO: del
-// {
-//    ShaderHashesLists::ProbeCulling.compute_shaders.emplace(std::stoul("0x6759EF9E", nullptr, 16)); //Light
-//    ShaderHashesLists::ProbeCulling.compute_shaders.emplace(std::stoul("0xDA63105C", nullptr, 16)); //Reflection
-//    
-//    ShaderHashesLists::MotionVectors.pixel_shaders.emplace(std::stoul("0xB8A51615", nullptr, 16));
-//    
-//    ShaderHashesLists::GTAOUltra0.pixel_shaders.emplace(std::stoul("0x8FC85155", nullptr, 16));
-//    
-//    ShaderHashesLists::LensFlare.pixel_shaders.emplace(std::stoul("0x7740A983", nullptr, 16));
-//    
-//    ShaderHashesLists::Tonemap.pixel_shaders.emplace(std::stoul("0x59F328E3", nullptr, 16)); //game
-//    ShaderHashesLists::Tonemap.pixel_shaders.emplace(std::stoul("0x1744B1D4", nullptr, 16)); //menu (CA)
-//    
-//    ShaderHashesLists::SMAAT2X.pixel_shaders.emplace(std::stoul("0xD9288CF8", nullptr, 16)); //final SMAA T2X (NOT FILMIC) resolve
-//    //ShaderHashesLists::SMAAT2X.pixel_shaders.emplace(std::stoul("0x15FF4E6D", nullptr, 16)); // T2XF
-//
-//    // ShaderHashesLists::AAStart.compute_shaders.emplace(std::stoul("0x6312E037", nullptr, 16)); // FXAA Edge
-//    // ShaderHashesLists::AAStart.compute_shaders.emplace(std::stoul("0x6240554C", nullptr, 16)); // SMAA Edge
-//
-//    ShaderHashesLists::SMAAT2XPrep.compute_shaders.emplace(std::stoul("0x6240554C", nullptr, 16)); // SMAA Edge
-//    ShaderHashesLists::SMAAT2XPrep.compute_shaders.emplace(std::stoul("0xB037D915", nullptr, 16)); // SMAA Prep Idk
-//    ShaderHashesLists::SMAAT2XPrep.compute_shaders.emplace(std::stoul("0x3B3C41EF", nullptr, 16)); // SMAA Resolve V
-//    ShaderHashesLists::SMAAT2XPrep.compute_shaders.emplace(std::stoul("0xCDEFC09A", nullptr, 16)); // SMAA Resolve H
-//    
-//    ShaderHashesLists::SMAAResolveH.compute_shaders.emplace(std::stoul("0xCDEFC09A", nullptr, 16)); // SMAA Resolve H
-//    
-//    ShaderHashesLists::Final.pixel_shaders.emplace(std::stoul("0x3D461B1A", nullptr, 16)); //game
-//    ShaderHashesLists::Final.pixel_shaders.emplace(std::stoul("0x224A8BF5", nullptr, 16)); //menu (noise, dither)
-//    
-//    ShaderHashesLists::FullscreenBlurLast.pixel_shaders.emplace(std::stoul("0xDA908072", nullptr, 16)); //last fullscreen blur that upsamples from lower res
-//    
-//    ShaderHashesLists::Rec709.pixel_shaders.emplace(std::stoul("0x8324B585", nullptr, 16)); //right-before-swapchain trash rec709, where rtv is 8bit texture
-//
-//    ShaderHashesLists::Exposure.compute_shaders.emplace(std::stoul("0x14F64B50", nullptr, 16)); //(exposure tex 9x1 UAV 1)
-//
-//    ShaderHashesLists::VolumetricFogDraw.pixel_shaders.emplace(std::stoul("0x48AE98F9", nullptr, 16)); //opposed to composite (OIT SRV 5)
-//    ShaderHashesLists::VolumetricFogDraw.pixel_shaders.emplace(std::stoul("0xDFC82E40", nullptr, 16));
-//    
-//    ShaderHashesLists::Sprites.compute_shaders.emplace(std::stoul("0xCAF61E7A", nullptr, 16)); //flame, smoke, etc. particles (OIT UAV 4)
-// }
+namespace OutputHandler // partial
+{
+   enum State : uint8_t
+   {
+      scRGB,
+      HDR10,
+      sRGB
+   };
+   static State state = scRGB;
+   static const char* GetStateName()
+   {
+      switch (state)
+      {
+         case scRGB: return "16-bit scRGB";
+         case HDR10: return "10-bit HDR10";
+         case sRGB: return "8-bit sRGB";
+         default: return "Unknown";
+      }
+   }
+   
+   static PUBLISHING_CONSTEXPR bool force_hdr10_false = false;
+   static bool IsHDR10() { return state == HDR10 && !force_hdr10_false; }
+
+   static bool is_use16f = false;
+   static const char* GetResourceQualityName()
+   {
+      if (is_use16f) return "rgba16f";
+      else return "r11g11b10f";
+   }
+
+   static bool is_displaycomp_custom = false;
+   void SetDisplayComposition(bool is_custom) // state should be parsed before calling this function
+   {
+      if (is_displaycomp_custom == is_custom) return;
+      is_displaycomp_custom = is_custom;
+
+      native_shaders_definitions.erase(CompileTimeStringHash("Display Composition"));
+      if (is_displaycomp_custom)
+      {
+         auto mode = state == scRGB ? "0" : (state == HDR10 ? "1" : "2");
+         native_shaders_definitions.emplace(CompileTimeStringHash("Display Composition"), ShaderDefinition{"Luma_CoDBO3_DisplayComposition", reshade::api::pipeline_subobject_type::pixel_shader, nullptr, "main", {{"OUTPUT_MODE", mode}}});
+      }
+      else
+      {
+         native_shaders_definitions.emplace(CompileTimeStringHash("Display Composition"), ShaderDefinition{"Luma_DisplayComposition", reshade::api::pipeline_subobject_type::pixel_shader});
+      }
+   }
+   void UIDrawDisplayCompositionToggle()
+   {
+      if (IsHDR10()) return; // only works for scRGB (& prob sRGB)
+      bool is_custom = is_displaycomp_custom;
+      if (ImGui::Checkbox("(DEVELOPMENT) Custom Display Composition", &is_custom)) SetDisplayComposition(is_custom);
+   }
+}
 
 namespace ShaderDefineInfo
 {
@@ -394,7 +408,7 @@ struct CallOfDutyBlackOps3GameDeviceData final : public GameDeviceData
       desc.ArraySize = 1;
       desc.BindFlags = D3D11_BIND_SHADER_RESOURCE | D3D11_BIND_RENDER_TARGET | D3D11_BIND_UNORDERED_ACCESS;
       desc.Usage = D3D11_USAGE_DEFAULT;
-      desc.Format = DXGI_FORMAT_R16G16B16A16_FLOAT;
+      desc.Format = OutputHandler::is_use16f ? DXGI_FORMAT_R16G16B16A16_FLOAT : DXGI_FORMAT_R11G11B10_FLOAT;
       desc.SampleDesc = {1, 0};
       desc.CPUAccessFlags = 0;
       desc.MiscFlags = 0;
@@ -456,6 +470,7 @@ struct CallOfDutyBlackOps3GameDeviceData final : public GameDeviceData
    bool drawn_smaat2x = false; //not filmic
    bool drawn_smaat2x_prev = false; //prev frame
    bool drawn_final = false;
+   bool drawn_final_prev = false; //prev frame
    bool drawn_hdtv = false;
    bool drawn_hdtv_prev = false; //prev frame
 
@@ -468,7 +483,7 @@ struct CallOfDutyBlackOps3GameDeviceData final : public GameDeviceData
              resources_smaa_color_input.desc.Height == resources_sr_output.desc.Height;
    }
    
-   void Reset(bool isSRReset)
+   void OnPresent(bool isSRReset)
    {
       drawn_probecull = false;
       drawn_motionvectors = false;
@@ -483,6 +498,7 @@ struct CallOfDutyBlackOps3GameDeviceData final : public GameDeviceData
       drawn_smaat2xprep = false;
       drawn_smaat2x_prev = drawn_smaat2x;
       drawn_smaat2x = false;
+      drawn_final_prev = drawn_final;
       drawn_final = false;
       drawn_hdtv_prev = drawn_hdtv;
       drawn_hdtv = false;
@@ -517,6 +533,180 @@ struct CallOfDutyBlackOps3GameDeviceData final : public GameDeviceData
    }
 #endif
 };
+
+namespace OutputHandler // partial //TODO: this is mega goofy. Luma needs a RenoDX-like auto swap back buffer to rgba16f but DisplayComposition to rgb10a2.
+{
+   constexpr const char* const Flag_SDR = "Luma_8bitSDR";
+   constexpr const char* const Flag_scRGB = "Luma_scRGB";
+   constexpr const char* const Flag_16fResources = "Luma_16fResources";
+   
+   namespace Resources
+   {
+      static ComPtr<ID3D11ShaderResourceView> backbuffer_srv;
+      static ComPtr<ID3D11RenderTargetView> backbuffer_rtv;
+      static float2 size = {0, 0};
+
+      static bool IsReady(DeviceData& device_data)
+      {
+         return size.x == device_data.display_resolution.x && size.y == device_data.display_resolution.y;
+      }
+
+      static void Create(ID3D11Device* device, DeviceData& device_data)
+      {
+         ASSERT(device_data.display_resolution.x > 0 && device_data.display_resolution.y > 0);
+
+         size = {device_data.display_resolution.x, device_data.display_resolution.y};
+      
+         D3D11_TEXTURE2D_DESC desc{};
+         desc.Width = device_data.display_resolution.x;
+         desc.Height = device_data.display_resolution.y;
+         desc.MipLevels = 1;
+         desc.ArraySize = 1;
+         desc.Format = OutputHandler::is_use16f ? DXGI_FORMAT_R16G16B16A16_FLOAT : DXGI_FORMAT_R11G11B10_FLOAT;
+         desc.SampleDesc.Count = 1;
+         desc.Usage = D3D11_USAGE_DEFAULT;
+         desc.BindFlags = D3D11_BIND_RENDER_TARGET | D3D11_BIND_SHADER_RESOURCE;
+      
+         ComPtr<ID3D11Texture2D> tex;
+         HRESULT hr0 = device->CreateTexture2D(&desc, nullptr, tex.put());
+         ASSERT_MSG(SUCCEEDED(hr0), "OutputHandler::Resources::Create(): hr0");
+
+         HRESULT hr1 = device->CreateShaderResourceView(tex.get(), nullptr, backbuffer_srv.put());
+         ASSERT_MSG(SUCCEEDED(hr1), "OutputHandler::Resources::Create(): hr1");
+
+         HRESULT hr2 = device->CreateRenderTargetView(tex.get(), nullptr, backbuffer_rtv.put());
+         ASSERT_MSG(SUCCEEDED(hr2), "OutputHandler::Resources::Create(): hr2");
+      }
+
+      static void Reset()
+      {
+         backbuffer_srv.reset();
+         backbuffer_rtv.reset();
+         size = {0, 0};
+      }
+   }
+
+   static void OnDll()
+   {
+      // state flag files
+      if (std::filesystem::exists(Flag_SDR)) state = sRGB;
+      else if (std::filesystem::exists(Flag_scRGB)) state = scRGB;
+      else state = HDR10;
+
+      // swapchain upgrades
+      swapchain_format_upgrade_type = state == sRGB ? TextureFormatUpgradesType::None : TextureFormatUpgradesType::AllowedEnabled;
+      swapchain_upgrade_type = state == sRGB ? SwapchainUpgradeType::None : (state == scRGB ? SwapchainUpgradeType::scRGB : SwapchainUpgradeType::HDR10);
+
+      // is_use16f flag file
+      is_use16f = std::filesystem::exists(Flag_16fResources);
+
+      // texture upgrades
+      if (is_use16f)
+      {
+         texture_format_upgrades_type = TextureFormatUpgradesType::AllowedEnabled;
+         texture_upgrade_formats = {
+            reshade::api::format::r11g11b10_float, //color (not super necessary, but its nice)
+         };
+         texture_format_upgrades_2d_size_filters = (uint32_t)TextureFormatUpgrades2DSizeFilters::SwapchainAspectRatio;
+      }
+      else
+      {
+         texture_format_upgrades_type = TextureFormatUpgradesType::None;
+      }
+   }
+
+   static void OnInit()
+   {
+      message(reshade::log::level::info, std::format("OutputHandler::OnInit(): {} mode enabled.", GetStateName()).c_str());
+      SetDisplayComposition(true);
+   }
+
+   static void OnDrawOrDispatchOverrideBegin(ID3D11Device* native_device, ID3D11DeviceContext* native_device_context, CommandListData& cmd_list_data, DeviceData& device_data, CallOfDutyBlackOps3GameDeviceData& game_device_data, uint32_t ps)
+   {
+      if (!IsHDR10()) return;
+
+      // create resources
+      [[unlikely]] if (!Resources::IsReady(device_data)) Resources::Create(native_device, device_data);
+   }
+
+
+   static void OnDrawFinal(ID3D11Device* native_device, ID3D11DeviceContext* native_device_context, CommandListData& cmd_list_data, DeviceData& device_data, CallOfDutyBlackOps3GameDeviceData& game_device_data, uint32_t ps)
+   {
+      if (IsHDR10())
+      {
+         // set our RTV
+         ComPtr<ID3D11RenderTargetView> rtv0;
+         ComPtr<ID3D11DepthStencilView> dsv;
+         native_device_context->OMGetRenderTargets(1, rtv0.put(), dsv.put());
+         native_device_context->OMSetRenderTargets(1, &Resources::backbuffer_rtv, dsv.get());
+      }
+   }
+
+   static void OnDrawOrDispatchOverride(ID3D11Device* native_device, ID3D11DeviceContext* native_device_context, CommandListData& cmd_list_data, DeviceData& device_data, CallOfDutyBlackOps3GameDeviceData& game_device_data, uint32_t ps)
+   {
+      if (IsHDR10())
+      {
+         /*
+            After final, the game will PS some sprites to a resource (caching, so that later PS can sample with chromatic aberration).
+            Then, backbuffer is bound to RTV0, once at start of all UI.
+            There are some shaders at the end (FPS stats text, Rec709) that will rebind backbuffer to RTV0, so we must continually check to replace.
+         */
+         
+         if (game_device_data.drawn_final_prev && !game_device_data.drawn_final)
+            return; // one frame delay, but avoids OMGetRenderTargets() spam when normal 3D rendering
+
+         // get RTV0, Res, Handle
+         ComPtr<ID3D11RenderTargetView> rtv0;
+         ComPtr<ID3D11DepthStencilView> dsv; // TODO: required? it's bound but it's not used?
+         native_device_context->OMGetRenderTargets(1, rtv0.put(), dsv.put());
+         [[unlikely]] if (!rtv0.get()) return;
+
+         ComPtr<ID3D11Resource> res;
+         rtv0->GetResource(res.put());
+
+         uint64_t handle = reinterpret_cast<uint64_t>(res.get());
+
+         // replace with our RTV?
+         if (device_data.back_buffers.contains(handle))
+            native_device_context->OMSetRenderTargets(1, &Resources::backbuffer_rtv, dsv.get());
+      }
+   }
+
+   static DrawOrDispatchOverrideType OnDrawRec709(ID3D11Device* native_device, ID3D11DeviceContext* native_device_context, CommandListData& cmd_list_data, DeviceData& device_data, CallOfDutyBlackOps3GameDeviceData& game_device_data, uint32_t ps)
+   {
+      // if (state == sRGB) return DrawOrDispatchOverrideType::None;
+      return DrawOrDispatchOverrideType::Skip; // does CopyResource(), backbuffer to new 8bit... gg
+   }
+
+   // TODO: please Pumbo, i need this. my custom swapchain proxy shader is kinda homeless.
+   static void OnBeforeDisplayComposition(ID3D11Device* native_device, ID3D11DeviceContext* native_device_context, DeviceData& device_data, CallOfDutyBlackOps3GameDeviceData& game_device_data)
+   {
+      if (IsHDR10())
+      {
+         // clear RTV0 (avoid bind conflicts)
+         constexpr ID3D11RenderTargetView* rtv0 = nullptr;
+         native_device_context->OMSetRenderTargets(1, &rtv0, nullptr);
+
+         // clear SRV0 (avoid bind conflicts)
+         constexpr ID3D11ShaderResourceView* srv0 = nullptr;
+         native_device_context->PSSetShaderResources(0, 1, &srv0);
+
+         // set our 16f backbuffer as SRV
+         native_device_context->PSSetShaderResources(10, 1, &Resources::backbuffer_srv); // DisplayComposition uses up to 8
+      }
+   }
+
+   // this is after Display Composition
+   static void OnPresent(ID3D11Device* native_device, DeviceData& device_data, CallOfDutyBlackOps3GameDeviceData& game_device_data)
+   {
+      
+   }
+
+   static void HardReset()
+   {
+      Resources::Reset();
+   }
+}
 
 namespace BlackFloorSDRTonemap
 {
@@ -1211,7 +1401,7 @@ namespace SectionedImGui
       static void DrawCompletelyUselessButton(const char* text = nullptr)
       {
          ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.75f, 0.75f, 0.75f, 1.f));
-         ImGui::TextWrapped(!text ? "This section is useless." : text);
+         ImGui::TextWrapped(!text ? "This section is useless for SDR." : text);
          ImGui::PopStyleColor();
       }
       
@@ -1229,11 +1419,23 @@ namespace SectionedImGui
          ImGui::Bullet(); ImGui::SameLine(); ImGui::TextWrapped("This acts as a wizard to fully configure.");
          ImGui::Bullet(); ImGui::SameLine(); ImGui::TextWrapped("Ordered by importance, please at least view all non-Advanced sections!");
          ImGui::Bullet(); ImGui::SameLine(); ImGui::TextWrapped("For those new to ImGUI, you can CTRL click a slider for keyboard input.");
-#if ENABLE_SR == 1
-         ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.5f, 0.5f, 0.5f, 1.f));
-         ImGui::Bullet(); ImGui::SameLine(); ImGui::TextWrapped(std::format("Detected Executable: {}", GetExeTypeName(MemoryHack::exe_type)).c_str());
+
+         ImGui::Separator(); ////////////////////
+
+         ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.75f, 1.f, 1.f, 1.f));
+         ImGui::TextWrapped("[Startup Settings]");
          ImGui::PopStyleColor();
+         ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.5f, 0.5f, 0.5f, 1.f));
+#if ENABLE_SR == 1
+         ImGui::Bullet(); ImGui::SameLine(); ImGui::TextWrapped(std::format("Detected Executable: {}", GetExeTypeName(MemoryHack::exe_type)).c_str());
 #endif
+         ImGui::Bullet(); ImGui::SameLine(); ImGui::TextWrapped(std::format("Output Mode: {}", OutputHandler::GetStateName()).c_str());
+         ImGui::Bullet(); ImGui::SameLine(); ImGui::TextWrapped(std::format("Color Buffer Quality: {}", OutputHandler::GetResourceQualityName()).c_str());
+         ImGui::Bullet(); ImGui::SameLine(); ImGui::TextWrapped(std::format("HDR Supported Display: {}", hdr_supported_display).c_str());
+         ImGui::Bullet(); ImGui::SameLine(); ImGui::TextWrapped(std::format("HDR Enabled Display: {}", hdr_enabled_display).c_str());
+         
+         ImGui::PopStyleColor();
+         
          
          if (Globals::UIIsAdvanced)
          {
@@ -1249,99 +1451,99 @@ namespace SectionedImGui
       
       static void GammaCorrection(DeviceData& device_data, reshade::api::effect_runtime* runtime)
       {
-         if (IsSDRMode())
+         if (cb_luma_global_settings.DisplayMode == DisplayModeType::HDR)
          {
-            DrawCompletelyUselessButton();
-            return;
+            ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.75f, 1.f, 1.f, 1.f));
+            ImGui::TextWrapped("[Reintroduce SDR's gamma mismatch to lower shadows.]");
+            ImGui::PopStyleColor();
+
+            //save prev
+            float gamma_prev = custom_sdr_gamma;
+
+            // Dropdown for custom_sdr_gamma
+            const char* const items[] = { "Off (sRGB)", "Match SDR (2.2)", "Stronger (2.4)" };
+            int custom_sdr_gamma_index = 0;
+            if (custom_sdr_gamma > 0) { //detect
+               if (abs(custom_sdr_gamma - 2.2f) < 0.001f) custom_sdr_gamma_index = 1;
+               else if (custom_sdr_gamma == 2.4f) custom_sdr_gamma_index = 2;
+            }
+            ImGui::PushID("GammaCorrection custom_sdr_gamma");
+            if (ImGui::Combo("Correction", &custom_sdr_gamma_index, items, IM_ARRAYSIZE(items))) //user set & save
+            {
+               switch (custom_sdr_gamma_index)
+               {
+               default: custom_sdr_gamma = 0.f; break;
+               case 1: custom_sdr_gamma = 2.2f; break;
+               case 2: custom_sdr_gamma = 2.4f; break;
+               }
+               ShaderDefineInfo::Set(GAMMA_CORRECTION_TYPE_HASH, custom_sdr_gamma > 0);
+               defines_need_recompilation = true;
+               reshade::set_config_value(runtime, NAME, "custom_sdr_gamma", custom_sdr_gamma);
+            }
+            ImGui::PopID();
+
+            //link
+            if (ImGui::Button("More Info & Test (Google Slides)"))
+               Website::OpenWebsite("https://docs.google.com/presentation/d/e/2PACX-1vSXeLHlbm6repcS7fels1-SXYGRmzziRrnuJ8nDO8J5rsWV3dT1-nVyCKp0Tj_stwx-9qlCI-N6rYIT/pub?start=false&loop=false&slide=id.g3e007eafba8_0_0");
+
+            //force define because its trolling sometimes
+            if (bool is_define_on = ShaderDefineInfo::Get(GAMMA_CORRECTION_TYPE_HASH) == 1; is_define_on != (custom_sdr_gamma > 0.f))
+               ShaderDefineInfo::Set(GAMMA_CORRECTION_TYPE_HASH, is_define_on ? '0' : '1');
          }
          
-         ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.75f, 1.f, 1.f, 1.f));
-         ImGui::TextWrapped("[Reintroduce SDR's gamma mismatch to lower shadows.]");
-         ImGui::PopStyleColor();
-
-         //save prev
-         float gamma_prev = custom_sdr_gamma;
-
-         // Dropdown for custom_sdr_gamma
-         const char* const items[] = { "Off (sRGB)", "Match SDR (2.2)", "Stronger (2.4)" };
-         int custom_sdr_gamma_index = 0;
-         if (custom_sdr_gamma > 0) { //detect
-            if (abs(custom_sdr_gamma - 2.2f) < 0.001f) custom_sdr_gamma_index = 1;
-            else if (custom_sdr_gamma == 2.4f) custom_sdr_gamma_index = 2;
-         }
-         ImGui::PushID("GammaCorrection custom_sdr_gamma");
-         if (ImGui::Combo("Correction", &custom_sdr_gamma_index, items, IM_ARRAYSIZE(items))) //user set & save
+         if (cb_luma_global_settings.DisplayMode == DisplayModeType::HDR)
          {
-            switch (custom_sdr_gamma_index)
-            {
-            default: custom_sdr_gamma = 0.f; break;
-            case 1: custom_sdr_gamma = 2.2f; break;
-            case 2: custom_sdr_gamma = 2.4f; break;
-            }
-            ShaderDefineInfo::Set(GAMMA_CORRECTION_TYPE_HASH, custom_sdr_gamma > 0);
-            defines_need_recompilation = true;
-            reshade::set_config_value(runtime, NAME, "custom_sdr_gamma", custom_sdr_gamma);
-         }
-         ImGui::PopID();
-
-         //link
-         if (ImGui::Button("More Info & Test (Google Slides)"))
-            Website::OpenWebsite("https://docs.google.com/presentation/d/e/2PACX-1vSXeLHlbm6repcS7fels1-SXYGRmzziRrnuJ8nDO8J5rsWV3dT1-nVyCKp0Tj_stwx-9qlCI-N6rYIT/pub?start=false&loop=false&slide=id.g3e007eafba8_0_0");
-
-         //force define because its trolling sometimes
-         if (bool is_define_on = ShaderDefineInfo::Get(GAMMA_CORRECTION_TYPE_HASH) == 1; is_define_on != (custom_sdr_gamma > 0.f))
-            ShaderDefineInfo::Set(GAMMA_CORRECTION_TYPE_HASH, is_define_on ? '0' : '1');
-
-         is_disabled = custom_sdr_gamma == 0.f;
-         if (is_disabled) ImGui::BeginDisabled();
-         {            
-            ImGui::Separator(); ////////////////////
-            
-            ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.75f, 1.f, 1.f, 1.f));
-            ImGui::TextWrapped("[\"Brightness\" slider replacement, due to the algorithm's SDR limitations.]");
-            ImGui::PopStyleColor();
-            
-            //Gamma Influence
-            if (ImGui::SliderFloat("Gamma Brightness", &cb_luma_global_settings.GameSettings.GammaInfluence, 0.f, 2.f))
-               reshade::set_config_value(runtime, NAME, "GammaInfluence", cb_luma_global_settings.GameSettings.GammaInfluence);
-            if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled)) ImGui::SetTooltip("Lower to let the gamma correction influence more of the image, and decreasing overall brightness.");
-            DrawResetButton(cb_luma_global_settings.GameSettings.GammaInfluence, default_luma_global_game_settings.GammaInfluence, "GammaInfluence", runtime);
-            
-            if (Globals::UIIsAdvanced)
-            {
+            is_disabled = custom_sdr_gamma == 0.f;
+            if (is_disabled) ImGui::BeginDisabled();
+            {            
                ImGui::Separator(); ////////////////////
             
                ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.75f, 1.f, 1.f, 1.f));
-               ImGui::TextWrapped("[Correction may become artificial without limits.]");
+               ImGui::TextWrapped("[\"Brightness\" slider replacement, due to the algorithm's SDR limitations.]");
                ImGui::PopStyleColor();
-
-               //CUSTOM_GAMMA_CORRECTION_MODE dropdown
-               bool is_disabled_mode = ShaderDefineInfo::Get(ShaderDefineInfo::CUSTOM_LUTBUILDER_COLORSPACE) == 0;
-               if (is_disabled_mode) ImGui::BeginDisabled();
+            
+               //Gamma Influence
+               if (ImGui::SliderFloat("Gamma Brightness", &cb_luma_global_settings.GameSettings.GammaInfluence, 0.f, 2.f))
+                  reshade::set_config_value(runtime, NAME, "GammaInfluence", cb_luma_global_settings.GameSettings.GammaInfluence);
+               if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled)) ImGui::SetTooltip("Lower to let the gamma correction influence more of the image, and decreasing overall brightness.");
+               DrawResetButton(cb_luma_global_settings.GameSettings.GammaInfluence, default_luma_global_game_settings.GammaInfluence, "GammaInfluence", runtime);
+            
+               if (Globals::UIIsAdvanced)
                {
-                  auto a = "Per-Channel (Hue Shifts / Vanilla)";
-                  auto b = "Perceptual (Hue Corrected)";
-                  ShaderDefineInfo::UIDropDown(ShaderDefineInfo::CUSTOM_GAMMA_CORRECTION_MODE, "Gamma Correction Mode",
-                     {a, is_disabled_mode ? a : b},
-                     "(Only available when LUT Builder is upgraded to output wider in BT.2020!)\nHow should the gamma correction operate?\n\nPer-Channel is Vanilla Brightness Slider-like, with hue shifting shadows.\nPerceptual retains the hues of the original sRGB gamma output, only darkening luminance.");
-               }
-               if (is_disabled_mode) ImGui::EndDisabled();
+                  ImGui::Separator(); ////////////////////
+            
+                  ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.75f, 1.f, 1.f, 1.f));
+                  ImGui::TextWrapped("[Correction may become artificial without limits.]");
+                  ImGui::PopStyleColor();
 
-               //GammaPerceptualChrominanceCorrect
-               bool is_disabled_perceptual = ShaderDefineInfo::Get(ShaderDefineInfo::CUSTOM_GAMMA_CORRECTION_MODE) != 1 || ShaderDefineInfo::Get(ShaderDefineInfo::CUSTOM_LUTBUILDER_COLORSPACE) == 0;
-               if (is_disabled_perceptual) ImGui::BeginDisabled();
-               {
-                  if (ImGui::SliderFloat("Perceptual Chrominance Gain Reduction", &cb_luma_global_settings.GameSettings.GammaPerceptualChrominanceCorrect, 0.f, 1.f, "%.4f"))
-                     reshade::set_config_value(runtime, NAME, "GammaPerceptualChrominanceCorrect", cb_luma_global_settings.GameSettings.GammaPerceptualChrominanceCorrect);
-                  if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled)) ImGui::SetTooltip("Reduce chrominance/saturation increase from Gamma Correction in the Perceptual mode, preventing it from becoming too artificial.");
-                  DrawResetButton(cb_luma_global_settings.GameSettings.GammaPerceptualChrominanceCorrect, default_luma_global_game_settings.GammaPerceptualChrominanceCorrect, "GammaPerceptualChrominanceCorrect", runtime);
+                  //CUSTOM_GAMMA_CORRECTION_MODE dropdown
+                  bool is_disabled_mode = ShaderDefineInfo::Get(ShaderDefineInfo::CUSTOM_LUTBUILDER_COLORSPACE) == 0;
+                  if (is_disabled_mode) ImGui::BeginDisabled();
+                  {
+                     auto a = "Per-Channel (Hue Shifts / Vanilla)";
+                     auto b = "Perceptual (Hue Corrected)";
+                     ShaderDefineInfo::UIDropDown(ShaderDefineInfo::CUSTOM_GAMMA_CORRECTION_MODE, "Gamma Correction Mode",
+                        {a, is_disabled_mode ? a : b},
+                        "(Only available when LUT Builder is upgraded to output wider in BT.2020!)\nHow should the gamma correction operate?\n\nPer-Channel is Vanilla Brightness Slider-like, with hue shifting shadows.\nPerceptual retains the hues of the original sRGB gamma output, only darkening luminance.");
+                  }
+                  if (is_disabled_mode) ImGui::EndDisabled();
+
+                  //GammaPerceptualChrominanceCorrect
+                  bool is_disabled_perceptual = ShaderDefineInfo::Get(ShaderDefineInfo::CUSTOM_GAMMA_CORRECTION_MODE) != 1 || ShaderDefineInfo::Get(ShaderDefineInfo::CUSTOM_LUTBUILDER_COLORSPACE) == 0;
+                  if (is_disabled_perceptual) ImGui::BeginDisabled();
+                  {
+                     if (ImGui::SliderFloat("Perceptual Chrominance Gain Reduction", &cb_luma_global_settings.GameSettings.GammaPerceptualChrominanceCorrect, 0.f, 1.f, "%.4f"))
+                        reshade::set_config_value(runtime, NAME, "GammaPerceptualChrominanceCorrect", cb_luma_global_settings.GameSettings.GammaPerceptualChrominanceCorrect);
+                     if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled)) ImGui::SetTooltip("Reduce chrominance/saturation increase from Gamma Correction in the Perceptual mode, preventing it from becoming too artificial.");
+                     DrawResetButton(cb_luma_global_settings.GameSettings.GammaPerceptualChrominanceCorrect, default_luma_global_game_settings.GammaPerceptualChrominanceCorrect, "GammaPerceptualChrominanceCorrect", runtime);
+                  }
+                  if (is_disabled_perceptual) ImGui::EndDisabled();
                }
-               if (is_disabled_perceptual) ImGui::EndDisabled();
             }
-         }
-         if (is_disabled) ImGui::EndDisabled();
+            if (is_disabled) ImGui::EndDisabled();
          
-         ImGui::Separator(); ////////////////////
+            ImGui::Separator(); ////////////////////
+         }
 
          //CUSTOM_HDTVREC709
          ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.75f, 1.f, 1.f, 1.f));
@@ -1694,58 +1896,61 @@ namespace SectionedImGui
          }
          
          bool is_clicked;
-         
-         //CUSTOM_LUTBUILDER_COLORSPACE
-         ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.75f, 1.f, 1.f, 1.f));
-         ImGui::TextWrapped("[Fake Wide Color Gamut]");
-         ImGui::PopStyleColor();
-         ImGui::Bullet(); ImGui::SameLine(); ImGui::TextWrapped("Helps perceptually bring back mid-high orange, but may make everything too \"10000%% Digital Vibrance\" looking.");
-         ImGui::Bullet(); ImGui::SameLine(); ImGui::TextWrapped("(This is purely tomfoolery, as the original is non-wide BT.709 primaries. For real WCG, you need deep changes and regrading, e.g. Black Ops 4.)");
-         
-         ImGui::PushID("Preset BT2020 Off");
-         is_clicked = ImGui::Button("Off");
-         ImGui::PopID();
-         if (is_clicked)
-         {
-            ShaderDefineInfo::Set(ShaderDefineInfo::CUSTOM_LUTBUILDER_COLORSPACE, 0);
-         }
-         
-         ImGui::SameLine();
-         ImGui::PushID("Preset BT2020 On 0");
-         is_clicked = ImGui::Button("Low");
-         ImGui::PopID();
-         if (is_clicked)
-         {
-            ShaderDefineInfo::Set(ShaderDefineInfo::CUSTOM_LUTBUILDER_COLORSPACE, 1);
-            ShaderDefineInfo::Set(ShaderDefineInfo::CUSTOM_LUTBUILDER_SATBOOST, 1);
-            cb_luma_global_settings.GameSettings.LUTBuilderExpansionChrominance = default_luma_global_game_settings.LUTBuilderExpansionChrominance;
-            cb_luma_global_settings.GameSettings.LUTBuilderExpansionLuminance = default_luma_global_game_settings.LUTBuilderExpansionLuminance;
-            cb_luma_global_settings.GameSettings.LUTBuilderHighlightSat = default_luma_global_game_settings.LUTBuilderHighlightSat;
-            cb_luma_global_settings.GameSettings.LUTBuilderHighlightSatHighlightsOnly = default_luma_global_game_settings.LUTBuilderHighlightSatHighlightsOnly;
-            reshade::set_config_value(runtime, NAME, "LUTBuilderExpansionChrominance", cb_luma_global_settings.GameSettings.LUTBuilderExpansionChrominance);
-            reshade::set_config_value(runtime, NAME, "LUTBuilderExpansionLuminance", cb_luma_global_settings.GameSettings.LUTBuilderExpansionLuminance);
-            reshade::set_config_value(runtime, NAME, "LUTBuilderHighlightSat", cb_luma_global_settings.GameSettings.LUTBuilderHighlightSat);
-            reshade::set_config_value(runtime, NAME, "LUTBuilderHighlightSatHighlightsOnly", cb_luma_global_settings.GameSettings.LUTBuilderHighlightSatHighlightsOnly);
-         }
-         
-         ImGui::SameLine();
-         ImGui::PushID("Preset BT2020 On 1");
-         is_clicked = ImGui::Button("High");
-         ImGui::PopID();
-         if (is_clicked)
-         {
-            ShaderDefineInfo::Set(ShaderDefineInfo::CUSTOM_LUTBUILDER_COLORSPACE, 1);
-            ShaderDefineInfo::Set(ShaderDefineInfo::CUSTOM_LUTBUILDER_SATBOOST, 1);
-            cb_luma_global_settings.GameSettings.LUTBuilderExpansionChrominance = 0.85f;
-            cb_luma_global_settings.GameSettings.LUTBuilderExpansionLuminance = 0.25f;
-            cb_luma_global_settings.GameSettings.LUTBuilderHighlightSat = 0.2f;
-            cb_luma_global_settings.GameSettings.LUTBuilderHighlightSatHighlightsOnly = default_luma_global_game_settings.LUTBuilderHighlightSatHighlightsOnly;
-            reshade::set_config_value(runtime, NAME, "LUTBuilderExpansionChrominance", cb_luma_global_settings.GameSettings.LUTBuilderExpansionChrominance);
-            reshade::set_config_value(runtime, NAME, "LUTBuilderExpansionLuminance", cb_luma_global_settings.GameSettings.LUTBuilderExpansionLuminance);
-            reshade::set_config_value(runtime, NAME, "LUTBuilderHighlightSat", cb_luma_global_settings.GameSettings.LUTBuilderHighlightSat);
-            reshade::set_config_value(runtime, NAME, "LUTBuilderHighlightSatHighlightsOnly", cb_luma_global_settings.GameSettings.LUTBuilderHighlightSatHighlightsOnly);
-         }
 
+         if (OutputHandler::is_use16f)
+         {
+            // CUSTOM_LUTBUILDER_COLORSPACE
+            ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.75f, 1.f, 1.f, 1.f));
+            ImGui::TextWrapped("[Fake Wide Color Gamut]");
+            ImGui::PopStyleColor();
+            ImGui::Bullet(); ImGui::SameLine(); ImGui::TextWrapped("Helps perceptually bring back mid-high orange, but may make everything too \"10000%% Digital Vibrance\" looking.");
+            ImGui::Bullet(); ImGui::SameLine(); ImGui::TextWrapped("(This is purely tomfoolery, as the original is non-wide BT.709 primaries. For real WCG, you need deep changes and regrading, e.g. Black Ops 4.)");
+            
+            ImGui::PushID("Preset BT2020 Off");
+            is_clicked = ImGui::Button("Off");
+            ImGui::PopID();
+            if (is_clicked)
+            {
+               ShaderDefineInfo::Set(ShaderDefineInfo::CUSTOM_LUTBUILDER_COLORSPACE, 0);
+            }
+            
+            ImGui::SameLine();
+            ImGui::PushID("Preset BT2020 On 0");
+            is_clicked = ImGui::Button("Low");
+            ImGui::PopID();
+            if (is_clicked)
+            {
+               ShaderDefineInfo::Set(ShaderDefineInfo::CUSTOM_LUTBUILDER_COLORSPACE, 1);
+               ShaderDefineInfo::Set(ShaderDefineInfo::CUSTOM_LUTBUILDER_SATBOOST, 1);
+               cb_luma_global_settings.GameSettings.LUTBuilderExpansionChrominance = default_luma_global_game_settings.LUTBuilderExpansionChrominance;
+               cb_luma_global_settings.GameSettings.LUTBuilderExpansionLuminance = default_luma_global_game_settings.LUTBuilderExpansionLuminance;
+               cb_luma_global_settings.GameSettings.LUTBuilderHighlightSat = default_luma_global_game_settings.LUTBuilderHighlightSat;
+               cb_luma_global_settings.GameSettings.LUTBuilderHighlightSatHighlightsOnly = default_luma_global_game_settings.LUTBuilderHighlightSatHighlightsOnly;
+               reshade::set_config_value(runtime, NAME, "LUTBuilderExpansionChrominance", cb_luma_global_settings.GameSettings.LUTBuilderExpansionChrominance);
+               reshade::set_config_value(runtime, NAME, "LUTBuilderExpansionLuminance", cb_luma_global_settings.GameSettings.LUTBuilderExpansionLuminance);
+               reshade::set_config_value(runtime, NAME, "LUTBuilderHighlightSat", cb_luma_global_settings.GameSettings.LUTBuilderHighlightSat);
+               reshade::set_config_value(runtime, NAME, "LUTBuilderHighlightSatHighlightsOnly", cb_luma_global_settings.GameSettings.LUTBuilderHighlightSatHighlightsOnly);
+            }
+            
+            ImGui::SameLine();
+            ImGui::PushID("Preset BT2020 On 1");
+            is_clicked = ImGui::Button("High");
+            ImGui::PopID();
+            if (is_clicked)
+            {
+               ShaderDefineInfo::Set(ShaderDefineInfo::CUSTOM_LUTBUILDER_COLORSPACE, 1);
+               ShaderDefineInfo::Set(ShaderDefineInfo::CUSTOM_LUTBUILDER_SATBOOST, 1);
+               cb_luma_global_settings.GameSettings.LUTBuilderExpansionChrominance = 0.85f;
+               cb_luma_global_settings.GameSettings.LUTBuilderExpansionLuminance = 0.25f;
+               cb_luma_global_settings.GameSettings.LUTBuilderHighlightSat = 0.2f;
+               cb_luma_global_settings.GameSettings.LUTBuilderHighlightSatHighlightsOnly = default_luma_global_game_settings.LUTBuilderHighlightSatHighlightsOnly;
+               reshade::set_config_value(runtime, NAME, "LUTBuilderExpansionChrominance", cb_luma_global_settings.GameSettings.LUTBuilderExpansionChrominance);
+               reshade::set_config_value(runtime, NAME, "LUTBuilderExpansionLuminance", cb_luma_global_settings.GameSettings.LUTBuilderExpansionLuminance);
+               reshade::set_config_value(runtime, NAME, "LUTBuilderHighlightSat", cb_luma_global_settings.GameSettings.LUTBuilderHighlightSat);
+               reshade::set_config_value(runtime, NAME, "LUTBuilderHighlightSatHighlightsOnly", cb_luma_global_settings.GameSettings.LUTBuilderHighlightSatHighlightsOnly);
+            }
+         }
+         
          ImGui::Separator();
 
          //CUSTOM_LUTBUILDER_NEUTRAL
@@ -1859,7 +2064,7 @@ namespace SectionedImGui
          
          //Selection
          int tonemap_def = ShaderDefineInfo::UIDropDown(ShaderDefineInfo::CUSTOM_TONEMAP, "HDR Tonemapper Type",
-            {"Off", "Reinhard Piecewise (Gradual)", "Hermite Spline (Scalable)"},
+            {"Off (For Testing)", "Reinhard Piecewise (Gradual) (DEPRECATED)", "Hermite Spline (Scalable)"},
             "Select HDR tonemapping to preference.\nEach has a different curve and feel.");
          
          //Shoulder Start
@@ -1881,9 +2086,9 @@ namespace SectionedImGui
          is_disabled = !(tonemap_def > 0);
          if (!is_disabled)
          {
-            if (ImGui::SliderFloat("HDR Tonemapper Expected Max", &cb_luma_global_settings.GameSettings.TonemapperMaxExpected, 20000, tonemap_def == 1 ? 100000.f : 200000.f, "%.0f"))
+            if (ImGui::SliderFloat("HDR Tonemapper Expected Max", &cb_luma_global_settings.GameSettings.TonemapperMaxExpected, 10000, tonemap_def == 1 ? 100000.f : 200000.f, "%.0f"))
                reshade::set_config_value(runtime, NAME, "TonemapperMaxExpected", cb_luma_global_settings.GameSettings.TonemapperMaxExpected);
-            if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled)) ImGui::SetTooltip("HDR tonemapper's expected max nits. Reduce to cause clipping.");
+            if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled)) ImGui::SetTooltip("HDR tonemapper's expected max nits.\nReduce to cause clipping.");
             if (!is_disabled && cb_luma_global_settings.GameSettings.TonemapperMaxExpected < cb_luma_global_settings.ScenePeakWhite)
             {
                ImGui::SameLine();
@@ -2094,6 +2299,13 @@ namespace SectionedImGui
 
       static void FakeWCG(DeviceData& device_data, reshade::api::effect_runtime* runtime)
       {
+         if (!OutputHandler::is_use16f)
+         {
+            ImGui::Bullet(); ImGui::SameLine(); ImGui::TextWrapped("Fake WCG is disabled because the color buffers format is not high quality 16-bit float.");
+            ImGui::Bullet(); ImGui::SameLine(); ImGui::TextWrapped("Create a flag file next to the executable named \"%s\" and restart.", OutputHandler::Flag_16fResources);
+            return;
+         }
+         
          if (IsSDRMode())
          {
             DrawCompletelyUselessButton();
@@ -2286,6 +2498,9 @@ namespace SectionedImGui
             }
          }
 
+         // CUSTOM_LUTBUILDER_COLORSPACE
+         if (!OutputHandler::is_use16f) ShaderDefineInfo::Set(ShaderDefineInfo::CUSTOM_LUTBUILDER_COLORSPACE, 0);
+
          //force no gamma correct in SDR
          if (cb_luma_global_settings.DisplayMode == DisplayModeType::SDR && ShaderDefineInfo::Get(GAMMA_CORRECTION_TYPE_HASH) == 1)
          {
@@ -2372,6 +2587,10 @@ namespace SectionedImGui
       // Advanced Settings Toggle
       if (ImGui::Checkbox("Advanced Settings", &Globals::UIIsAdvanced))
          reshade::set_config_value(runtime, NAME, "UIIsAdvanced", Globals::UIIsAdvanced);
+
+#if DEVELOPMENT
+      OutputHandler::UIDrawDisplayCompositionToggle();
+#endif
    }
 }
 
@@ -2441,10 +2660,6 @@ public:
       native_shaders_definitions.emplace(CompileTimeStringHash("CoDBO3 PreSR"), ShaderDefinition{"Luma_CoDBO3_PreSR", reshade::api::pipeline_subobject_type::pixel_shader});
       native_shaders_definitions.emplace(CompileTimeStringHash("CoDBO3 LinearizeVelocity"), ShaderDefinition{"Luma_CoDBO3_LinearizeVelocity", reshade::api::pipeline_subobject_type::pixel_shader});
 #endif
-
-      // Native Shaders: Display Composition replacement
-      native_shaders_definitions.erase(CompileTimeStringHash("Display Composition"));
-      native_shaders_definitions.emplace(CompileTimeStringHash("Display Composition"), ShaderDefinition{"Luma_CoDBO3_DisplayComposition", reshade::api::pipeline_subobject_type::pixel_shader});
       
       //cb
       luma_settings_cbuffer_index = 13;
@@ -2453,7 +2668,7 @@ public:
 
       //GameSettings default
       default_luma_global_game_settings.TonemapperRolloffStart = cb_luma_global_settings.GameSettings.TonemapperRolloffStart = 36.f;
-      default_luma_global_game_settings.TonemapperMaxExpected = cb_luma_global_settings.GameSettings.TonemapperMaxExpected = 50000.f;
+      default_luma_global_game_settings.TonemapperMaxExpected = cb_luma_global_settings.GameSettings.TonemapperMaxExpected = 40000.f;
       default_luma_global_game_settings.AmbientOcclusion = cb_luma_global_settings.GameSettings.AmbientOcclusion = 1.f;
       default_luma_global_game_settings.Bloom = cb_luma_global_settings.GameSettings.Bloom = 1.f;
       default_luma_global_game_settings.LensFlare = cb_luma_global_settings.GameSettings.LensFlare = 1.f;
@@ -2508,10 +2723,7 @@ public:
          std::filesystem::remove("blackops3.start", ec);
       }
 
-      //log Globals::SDR8Bit
-      if (Globals::SDR8Bit) message(reshade::log::level::info, "OnInit(): SDR8Bit is enabled.");
-
-      // Alerts: users on Steam vanilla of crash if not t7patch
+      // Alerts: users on Steam vanilla will crash if not t7patch
       constexpr const char* NAME_ALERTS = "Alerts";
       if (MemoryHack::exe_type == MemoryHack::Steam_Sep2026_24784313)
       {
@@ -2534,27 +2746,8 @@ public:
          }
       }
 
-      // Alerts: smooth motion crash
-      if (swapchain_format_upgrade_type != TextureFormatUpgradesType::None)
-      {
-         constexpr const char* ENTRY = "HasShownSmoothMotionAlert";
-         
-         bool has_shown = false;
-         reshade::get_config_value(nullptr, NAME_ALERTS, ENTRY, has_shown);
-
-         if (!has_shown)
-         {
-            MessageBoxA(
-               nullptr,
-               "(Final alert, never shown again!)\n\nNVIDIA Smooth Motion is incompatible with scRGB 16bit, causing crash!",
-               "NVIDIA Smooth Motion",
-               MB_ICONINFORMATION | MB_OK
-            );
-            
-            has_shown = true;
-            reshade::set_config_value(nullptr, NAME_ALERTS, ENTRY, has_shown);
-         }
-      }
+      // HDR10
+      OutputHandler::OnInit();
    }
 
    // void OnLoad(std::filesystem::path& file_path, bool failed) override
@@ -2594,6 +2787,8 @@ public:
       device_data.force_reset_sr = true;
       game_device_data.HardResetSR();
 #endif
+
+      OutputHandler::HardReset();
       
       // device_data.cb_luma_global_settings_dirty = true;
       // defines_need_recompilation = true;
@@ -2657,6 +2852,11 @@ public:
       
       //game_device_data
       auto& game_device_data = CallOfDutyBlackOps3GameDeviceData::GetGameDeviceData(device_data);
+
+      ////////////////////////////////////////////////////////////////////////////////////////////////////////////
+
+      // HDR10
+      OutputHandler::OnDrawOrDispatchOverrideBegin(native_device, native_device_context, cmd_list_data, device_data, game_device_data, ps);
       
       ////////////////////////////////////////////////////////////////////////////////////////////////////////////
 
@@ -3060,6 +3260,9 @@ public:
          game_device_data.drawn_final = true;
          device_data.has_drawn_main_post_processing = true;
 
+         // HDR10
+         OutputHandler::OnDrawFinal(native_device, native_device_context, cmd_list_data, device_data, game_device_data, ps);
+
          //disabled: no SR
          if (device_data.sr_type == SR::Type::None || device_data.sr_suppressed) return DrawOrDispatchOverrideType::None;
          
@@ -3161,20 +3364,27 @@ public:
 #endif
 
       //case: HDTV rec.709 decode
-      if (game_device_data.drawn_final && ps == 0x8324B585)
+      if (/*game_device_data.drawn_final &&*/ ps == 0x8324B585)
       {
-         //progress
-         game_device_data.drawn_hdtv = true;
-         
-         return DrawOrDispatchOverrideType::Skip; //Skip this trash! It creates another 8bit tex to decode srgb and encode rec709.
+         game_device_data.drawn_hdtv = true; //progress
+         return OutputHandler::OnDrawRec709(native_device, native_device_context, cmd_list_data, device_data, game_device_data, ps);
       }
 
       //case: No UI after Final
       if (!Globals::IsUi && game_device_data.drawn_final) 
          return DrawOrDispatchOverrideType::Skip;
 
+      // HDR10
+      OutputHandler::OnDrawOrDispatchOverride(native_device, native_device_context, cmd_list_data, device_data, game_device_data, ps);
+
       //case: normal
       return DrawOrDispatchOverrideType::None;
+   }
+
+   void OnBeforeDisplayComposition(ID3D11Device* native_device, ID3D11DeviceContext* native_device_context, DeviceData& device_data) override
+   {
+      auto& game_device_data = CallOfDutyBlackOps3GameDeviceData::GetGameDeviceData(device_data);
+      OutputHandler::OnBeforeDisplayComposition(native_device, native_device_context, device_data, game_device_data);
    }
 
    void OnPresent(ID3D11Device* native_device, DeviceData& device_data) override
@@ -3212,8 +3422,11 @@ public:
       //ForcedLODBias
       ForcedLODBias::OnPresent();
 
+      // HDR10
+      OutputHandler::OnPresent(native_device, device_data, game_device_data);
+
       //reset
-      game_device_data.Reset(device_data.force_reset_sr);
+      game_device_data.OnPresent(device_data.force_reset_sr);
    }
 
    void CleanExtraSRResources(DeviceData& device_data) override
@@ -3323,13 +3536,6 @@ public:
       
       //////////////////////////////////////////////////////////////////////////////////////////////////////
       
-      //Globals::SDR8Bit
-      if (Globals::SDR8Bit)
-      {
-         ImGui::Bullet(); ImGui::SameLine();
-         ImGui::TextWrapped("Forcing 8bit gamma SDR output.");
-      }
-      
       //SR on but not SMAA T2X
 #if ENABLE_SR == 1
       if (device_data.sr_type != SR::Type::None && game_device_data.drawn_tonemap_prev && !game_device_data.drawn_smaat2x_prev)
@@ -3423,6 +3629,8 @@ public:
          if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
             ImGui::SetTooltip("Skip the custom linearize pass at final when DLSS.");
 
+         ImGui::Checkbox("Force HDR10 False", &OutputHandler::force_hdr10_false);
+         
          ImGui::Checkbox("TiledDeferredCSTracking", &TiledDeferredCSTracking::enabled);
          ImGui::Checkbox("FSFXTracking", &FSFXTracking::enabled);
       }
@@ -3456,6 +3664,7 @@ public:
       ImGui::BulletText("Bug Hunter: RooniVarooni");
       ImGui::BulletText("Bug Hunter: soulshot96");
       ImGui::BulletText("Bug Hunter: KING");
+      ImGui::BulletText("Bug Hunter: bisquickpancakes");
 
       ImGui::NewLine();
       ImGui::Text("Third Party:");
@@ -3469,6 +3678,7 @@ public:
       ImGui::BulletText("NVIDIA");
       ImGui::BulletText("AMD");
       ImGui::BulletText("DICE");
+      ImGui::BulletText("RenderDoc");
       ImGui::BulletText("KsDumper");
       ImGui::BulletText("Ghidra");
    }
@@ -3481,22 +3691,10 @@ BOOL APIENTRY DllMain(HMODULE hModule, DWORD ul_reason_for_call, LPVOID lpReserv
       Globals::SetGlobals(PROJECT_NAME, "Call of Duty: Black Ops III - Luma");
       Globals::VERSION = 1;
       
-      //swapchain upgrade
-      Globals::SDR8Bit = std::filesystem::exists("Luma_8bitSDR");
-      swapchain_format_upgrade_type  = !Globals::SDR8Bit ? TextureFormatUpgradesType::AllowedEnabled : TextureFormatUpgradesType::None;
-      swapchain_upgrade_type         = SwapchainUpgradeType::scRGB;
-      force_disable_display_composition = Globals::SDR8Bit;
+      // swapchain & texture upgrade
+      OutputHandler::OnDll();
 
-      //texture upgrade
-      texture_format_upgrades_type   = TextureFormatUpgradesType::AllowedEnabled;
-      texture_upgrade_formats = {
-         #if ENABLE_SR == 1
-            reshade::api::format::r16g16_snorm, //motion vectors
-         #endif
-         reshade::api::format::r11g11b10_float, //color (not super necessary, but its nice)
-      };
-      texture_format_upgrades_2d_size_filters = (uint32_t)TextureFormatUpgrades2DSizeFilters::SwapchainAspectRatio;
-
+      
 // #if ENABLE_SR == 1
 //       //sampler upgrade
 //       enable_samplers_upgrade = true; //TODO: this has no effect... use other modes?

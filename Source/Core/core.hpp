@@ -3258,6 +3258,14 @@ namespace
          const std::unique_lock lock_reshade(s_mutex_reshade);
          Display::GetHDRMaxLuminance(native_swapchain3, device_data.default_user_peak_white, srgb_white_level); // TODO: detect when the display changes and update peak brightness calibration, and set HDR10+ on the new display too etc
          Display::IsHDRSupportedAndEnabled(swapchain_desc.OutputWindow, hdr_supported_display, hdr_enabled_display, native_swapchain3);
+
+         // Luma_ForcedHDR flag file
+         if (std::filesystem::exists("Luma_ForcedHDR"))
+         {
+            hdr_enabled_display = true;
+            hdr_supported_display = true;
+         }
+         
 #if ENABLE_NVAPI
          if (hdr_enabled_display)
          {
@@ -6054,8 +6062,9 @@ namespace
                ID3D11SamplerState* const sampler_state_linear = device_data.sampler_state_linear.get();
                native_device_context->PSSetSamplers(0, 1, &sampler_state_linear);
             }
-
+                        
             // Note: we don't really need to re-apply our custom cbuffers in most games (e.g. Prey), they are on indexes that are never used by the game's code
+            game->OnBeforeDisplayComposition(native_device, native_device_context, device_data);
             DrawCustomPixelShader(native_device_context, device_data.default_depth_stencil_state.get(), device_data.default_blend_state.get(), nullptr, device_data.native_vertex_shaders[CompileTimeStringHash("Copy VS")].get(), device_data.native_pixel_shaders[CompileTimeStringHash("Display Composition")].get(), device_data.display_composition_srv.get(), target_resource_texture_view.get(), target_desc.Width, target_desc.Height, false);
 
 #if DEVELOPMENT
