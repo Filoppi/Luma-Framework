@@ -286,6 +286,25 @@ float3 ComposeUI(float3 pos, float3 linearSceneColor, float gamePaperWhite, floa
 #endif
 }
 
+// What the SDR display composition does with the game's final SDR image ("SDR_OUTPUT_TRANSFORM").
+//
+// 0 (legacy): decode sRGB to linear. Only correct when the container encodes on write, i.e. "_SRGB"
+//    views and scRGB, which is what Luma's own scRGB swapchain upgrade relies on. On a plain UNORM
+//    container the OS applies the sRGB transfer function itself, so stopping at linear displays the
+//    picture one decode too dark: over contrasted, over saturated, "richer" than vanilla.
+// 1: pass the value through untouched. Correct for any plain UNORM container (the game wrote sRGB
+//    encoded values, so identity), and equally for an "_SRGB" container (the game wrote linear values,
+//    the view encodes on write, so identity again). In other words this is the safe mode whenever the
+//    game was not forced through a swapchain format upgrade.
+float3 SDRGameOutputToContainer(float3 srgbEncodedColor)
+{
+#if SDR_OUTPUT_TRANSFORM == 1
+	return srgbEncodedColor;
+#else
+	return gamma_sRGB_to_linear(srgbEncodedColor, GCT_NONE);
+#endif
+}
+
 // Custom Luma shader to apply the display (or output) transfer function from a linear input (or apply custom gamma correction)
 float4 main(float4 pos : SV_Position) : SV_Target0
 {
@@ -389,7 +408,7 @@ float4 main(float4 pos : SV_Position) : SV_Target0
 			if (LumaSettings.DisplayMode <= 0)
 			{
 				// The SDR display will (usually) linearize with gamma 2.2, hence applying the usual gamma mismatch, so we don't correct gamma here
-				color.rgb = gamma_sRGB_to_linear(color.rgb, GCT_NONE);
+				color.rgb = SDRGameOutputToContainer(color.rgb);
 			}
 			// HDR (we assume this is the default case for Luma users/devs, this isn't an officially supported case anyway) (we ignore "GAMMA_CORRECTION_RANGE_TYPE" and "VANILLA_ENCODING_TYPE" here, it doesn't matter)
 			else
@@ -489,7 +508,8 @@ float4 main(float4 pos : SV_Position) : SV_Target0
 		// we linearize with sRGB because scRGB HDR buffers (Luma) in SDR are re-encoded with sRGB and then (likely) linearized by the display with 2.2, which would then apply the gamma correction.
 		// For any user that wanted to play in sRGB, they'd need to have an sRGB monitor.
 		// We could theoretically add a mode that fakes sRGB output on scRGB->2.2 but it wouldn't really be useful as the game was likely designed for 2.2 displays (unconsciously).
-		color.rgb = ColorGradingLUTTransferFunctionOut(color.rgb, LUT_EXTRAPOLATION_TRANSFER_FUNCTION_SRGB, false);
+		// Note: "SDRGameOutputToContainer" leaves the value alone when the swapchain is a plain UNORM buffer (see "SDR_OUTPUT_TRANSFORM").
+		color.rgb = SDRGameOutputToContainer(color.rgb);
 #endif // POST_PROCESS_SPACE_TYPE == 1
 
 #if 0 // For linux support (somehow scRGB is not interpreted as linear when in SDR) //TODOFT4: expose?
