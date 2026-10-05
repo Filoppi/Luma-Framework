@@ -51,6 +51,8 @@ Project("{8BC9CEB8-8B4A-11D0-8D11-00A0C91BC942}") = "Heavy Rain", "Source\Games\
 EndProject
 Project("{8BC9CEB8-8B4A-11D0-8D11-00A0C91BC942}") = "Mafia II Definitive Edition", "Source\Games\Mafia II Definitive Edition\Mafia II Definitive Edition.vcxproj", "{5605BCCC-4F89-4AF3-984F-991105C32602}"
 EndProject
+Project("{8BC9CEB8-8B4A-11D0-8D11-00A0C91BC942}") = "Mafia Definitive Edition", "Source\Games\Mafia Definitive Edition\Mafia Definitive Edition.vcxproj", "{D414969A-65FC-484F-84B9-FC73CC74876B}"
+EndProject
 Project("{8BC9CEB8-8B4A-11D0-8D11-00A0C91BC942}") = "INSIDE", "Source\Games\INSIDE\INSIDE.vcxproj", "{12A5D475-264C-35B7-7C7F-EA9C310C41BB}"
 EndProject
 Project("{8BC9CEB8-8B4A-11D0-8D11-00A0C91BC942}") = "Dying Light 2", "Source\Games\Dying Light 2\Dying Light 2.vcxproj", "{F4605338-43D9-473F-AD3E-A95380C8AD56}"
@@ -271,6 +273,18 @@ Global
 		{890ED9C4-668B-65B3-D953-37D85DF155AC}.Test-Release|Win32.ActiveCfg = Test-Release|x64
 		{890ED9C4-668B-65B3-D953-37D85DF155AC}.Test-Release|x64.ActiveCfg = Test-Release|x64
 		{890ED9C4-668B-65B3-D953-37D85DF155AC}.Test-Release|x64.Build.0 = Test-Release|x64
+		{D414969A-65FC-484F-84B9-FC73CC74876B}.Development-Debug|Win32.ActiveCfg = Development-Debug|x64
+		{D414969A-65FC-484F-84B9-FC73CC74876B}.Development-Debug|x64.ActiveCfg = Development-Debug|x64
+		{D414969A-65FC-484F-84B9-FC73CC74876B}.Development-Debug|x64.Build.0 = Development-Debug|x64
+		{D414969A-65FC-484F-84B9-FC73CC74876B}.Development-Release|Win32.ActiveCfg = Development-Release|x64
+		{D414969A-65FC-484F-84B9-FC73CC74876B}.Development-Release|x64.ActiveCfg = Development-Release|x64
+		{D414969A-65FC-484F-84B9-FC73CC74876B}.Development-Release|x64.Build.0 = Development-Release|x64
+		{D414969A-65FC-484F-84B9-FC73CC74876B}.Publishing-Release|Win32.ActiveCfg = Publishing-Release|x64
+		{D414969A-65FC-484F-84B9-FC73CC74876B}.Publishing-Release|x64.ActiveCfg = Publishing-Release|x64
+		{D414969A-65FC-484F-84B9-FC73CC74876B}.Publishing-Release|x64.Build.0 = Publishing-Release|x64
+		{D414969A-65FC-484F-84B9-FC73CC74876B}.Test-Release|Win32.ActiveCfg = Test-Release|x64
+		{D414969A-65FC-484F-84B9-FC73CC74876B}.Test-Release|x64.ActiveCfg = Test-Release|x64
+		{D414969A-65FC-484F-84B9-FC73CC74876B}.Test-Release|x64.Build.0 = Test-Release|x64
 		{163BA26C-1EA0-EB05-F492-C8AF046A1F46}.Development-Debug|Win32.ActiveCfg = Development-Debug|x64
 		{163BA26C-1EA0-EB05-F492-C8AF046A1F46}.Development-Debug|x64.ActiveCfg = Development-Debug|x64
 		{163BA26C-1EA0-EB05-F492-C8AF046A1F46}.Development-Debug|x64.Build.0 = Development-Debug|x64
@@ -1002,6 +1016,7 @@ Global
 		{8EF11F8D-FD8B-45E1-888E-CEEA5FFB316E} = {02EA681E-C7D8-13C7-8484-4AC65E1B71E8}
 		{D58EB0ED-8EFA-4DB0-B2AD-B2D2A098873E} = {02EA681E-C7D8-13C7-8484-4AC65E1B71E8}
 		{5605BCCC-4F89-4AF3-984F-991105C32602} = {02EA681E-C7D8-13C7-8484-4AC65E1B71E8}
+		{D414969A-65FC-484F-84B9-FC73CC74876B} = {02EA681E-C7D8-13C7-8484-4AC65E1B71E8}
 		{12A5D475-264C-35B7-7C7F-EA9C310C41BB} = {02EA681E-C7D8-13C7-8484-4AC65E1B71E8}
 		{F4605338-43D9-473F-AD3E-A95380C8AD56} = {02EA681E-C7D8-13C7-8484-4AC65E1B71E8}
 		{9DD802E8-588E-4955-9FF8-21A0F5B06F48} = {02EA681E-C7D8-13C7-8484-4AC65E1B71E8}
