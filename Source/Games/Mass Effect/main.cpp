@@ -599,7 +599,7 @@ public:
          ShaderDefinition("Luma_ME1_DepthExtract", reshade::api::pipeline_subobject_type::compute_shader));
       // RCAS PS, drawn via core "Copy VS" + DrawCustomPixelShader.
       native_shaders_definitions.emplace(CompileTimeStringHash("ME1 Sharpen PS"),
-         ShaderDefinition{"Luma_ME1_Sharpen", reshade::api::pipeline_subobject_type::pixel_shader, nullptr, "sharpen_ps"});
+         ShaderDefinition{"Luma_RCAS_PS", reshade::api::pipeline_subobject_type::pixel_shader, nullptr, "sharpen_ps"});
 #endif
 
       // Address-space ceiling, PROBED: no LARGE_ADDRESS_AWARE (0x0102 measured) = 2 GB, Luma's 4K scratch ~365 MB.

@@ -466,7 +466,7 @@ public:
          ShaderDefinition("Luma_MOHA_DepthExtract", reshade::api::pipeline_subobject_type::compute_shader));
       // RCAS sharpen PS, drawn via core "Copy VS" + DrawCustomPixelShader after SMAA.
       native_shaders_definitions.emplace(CompileTimeStringHash("MOHA Sharpen PS"),
-         ShaderDefinition{"Luma_MOHA_Sharpen", reshade::api::pipeline_subobject_type::pixel_shader, nullptr, "sharpen_ps"});
+         ShaderDefinition{"Luma_RCAS_PS", reshade::api::pipeline_subobject_type::pixel_shader, nullptr, "sharpen_ps"});
 #endif
 
       // Buffers stay in GAMMA space: the gamma-SDR HUD blends onto this canvas and a linear buffer washes it out.

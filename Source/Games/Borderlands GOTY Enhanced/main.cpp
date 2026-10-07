@@ -537,7 +537,7 @@ public:
          ShaderDefinition("Luma_BL_DepthExtract", reshade::api::pipeline_subobject_type::compute_shader));
       // RCAS sharpen PS (drawn via core "Copy VS" + DrawCustomPixelShader after SMAA).
       native_shaders_definitions.emplace(CompileTimeStringHash("BL Sharpen PS"),
-         ShaderDefinition{"Luma_BL_Sharpen", reshade::api::pipeline_subobject_type::pixel_shader, nullptr, "sharpen_ps"});
+         ShaderDefinition{"Luma_RCAS_PS", reshade::api::pipeline_subobject_type::pixel_shader, nullptr, "sharpen_ps"});
 
       // XeGTAO (replaces the game's native HBAO+; see the AO hash block above). 4 compute passes out of one
       // file; the two denoise variants differ only by XE_GTAO_FINAL_APPLY (the final one writes the game's

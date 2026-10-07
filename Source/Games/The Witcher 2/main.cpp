@@ -981,7 +981,7 @@ public:
          ShaderDefinition("Luma_TW2_SMAALinearize", reshade::api::pipeline_subobject_type::compute_shader));
       // RCAS sharpen PS (drawn via core "Copy VS" + DrawCustomPixelShader after SMAA).
       native_shaders_definitions.emplace(CompileTimeStringHash("TW2 Sharpen PS"),
-         ShaderDefinition{"Luma_TW2_Sharpen", reshade::api::pipeline_subobject_type::pixel_shader, nullptr, "sharpen_ps"});
+         ShaderDefinition{"Luma_RCAS_PS", reshade::api::pipeline_subobject_type::pixel_shader, nullptr, "sharpen_ps"});
       // Depth-extract CS for SMAA predication: game r32f LINEAR view-space depth -> R16F edge-ness in [0,1].
       native_shaders_definitions.emplace(CompileTimeStringHash("TW2 Depth Extract CS"),
          ShaderDefinition("Luma_TW2_DepthExtract", reshade::api::pipeline_subobject_type::compute_shader));
