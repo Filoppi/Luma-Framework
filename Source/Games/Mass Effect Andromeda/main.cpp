@@ -12,6 +12,7 @@
 // FSR 3 Native AA as a vendor-neutral alternative to DLAA (selectable in core's "Super Resolution" combo)
 #define GEOMETRY_SHADER_SUPPORT 0
 #define ENABLE_SMAA 1 // replaces the game's FXAA pass (FXAA AA mode) with SMAA
+#define ENABLE_RCAS 1 // optional sharpening of the SMAA output
 // The dialogue/cutscene DOF-variant resolve is run-native-then-override via original_draw_dispatch_func,
 // which the core only populates with this enabled — otherwise it is null outside DEVELOPMENT builds and
 // every DOF resolve silently bails to native TAA in Test/Publishing.
@@ -214,14 +215,7 @@ struct MassEffectAndromedaGameDeviceData final : public GameDeviceData
    ComPtr<ID3D11Texture2D> tex_smaa_out;
    ComPtr<ID3D11RenderTargetView> tex_smaa_out_rtv;
    ComPtr<ID3D11ShaderResourceView> tex_smaa_out_srv;
-   ComPtr<ID3D11Buffer> cb_sharpen;
    uint32_t smaa_out_w = 0, smaa_out_h = 0;
-   uint32_t sharpen_w = 0, sharpen_h = 0; // cache key for cb_sharpen
-   float sharpen_amount = -1.f;           // cache key for cb_sharpen
-   // Size the core-managed DrawSMAA intermediates (smaa_dsv / edge / blend RTs) were last built at. Core sizes them
-   // from the FIRST RTV and only rebuilds on swapchain re-init — not on MEA's in-game Resolution Scale change — so we
-   // drop them ourselves on a size change (see the SMAA branch). 0 = not built yet.
-   uint32_t smaa_core_w = 0, smaa_core_h = 0;
 #endif
 };
 
@@ -263,7 +257,7 @@ class MassEffectAndromeda final : public Game
    }
 
    // Create an IMMUTABLE constant buffer holding `size` bytes from `data`. Resets `out` first; returns true on
-   // success (out null on failure). Shared by the SMAA RT_METRICS CB and the RCAS sharpen CB.
+   // success (out null on failure). Used for the SMAA RT_METRICS CB.
    static bool CreateImmutableCB(ID3D11Device* device, const void* data, UINT size, ComPtr<ID3D11Buffer>& out)
    {
       out.reset();
@@ -454,11 +448,6 @@ public: // OnMapBufferRegion is referenced from DllMain (DLL_PROCESS_DETACH unre
       luma_settings_cbuffer_index = -1;
       luma_data_cbuffer_index = -1;
       luma_ui_cbuffer_index = -1;
-#if ENABLE_SMAA
-      // RCAS sharpening PS for the SMAA output (reuses core's "Copy VS" fullscreen vertex shader).
-      native_shaders_definitions.emplace(CompileTimeStringHash("MEA Sharpen PS"),
-         ShaderDefinition{"Luma_RCAS_PS", reshade::api::pipeline_subobject_type::pixel_shader, nullptr, "sharpen_ps"});
-#endif
 #if ENABLE_SR
       // Format-converting SR output hand-off: the game's "Buffer Format" setting can switch the TAA resolve
       // target (u2/u3) to r11g11b10_float, where CopySubresourceRegion from our rgba16f output silently
@@ -497,7 +486,6 @@ public: // OnMapBufferRegion is referenced from DllMain (DLL_PROCESS_DETACH unre
          gd.tex_smaa_out.reset();
          gd.tex_smaa_out_rtv.reset();
          gd.tex_smaa_out_srv.reset();
-         gd.cb_sharpen.reset();
 #endif
       }
       delete device_data.game;
@@ -546,7 +534,7 @@ public: // OnMapBufferRegion is referenced from DllMain (DLL_PROCESS_DETACH unre
 
          if (srv_color && rtv)
          {
-            // Use the real RTV size (not swapchain) so SMAA RT_METRICS / sharpen CB / viewport all match the target
+            // Use the real RTV size (not swapchain) so SMAA RT_METRICS and the viewport match the target
             // under in-game Resolution Scale. Falls back to swapchain size if the desc can't be read.
             uint32_t w = (uint32_t)device_data.output_resolution.x;
             uint32_t h = (uint32_t)device_data.output_resolution.y;
@@ -554,27 +542,6 @@ public: // OnMapBufferRegion is referenced from DllMain (DLL_PROCESS_DETACH unre
                ComPtr<ID3D11Resource> rtv_res;
                rtv->GetResource(rtv_res.put());
                TryGetTex2DSize(rtv_res.get(), w, h);
-            }
-
-            // DrawSMAA sizes its edge/blend/DSV intermediates from the FIRST RTV and rebuilds them only
-            // on swapchain re-init — not on a Resolution-Scale change. On a size change, drop the 3 core-managed views
-            // so DrawSMAA recreates them at the new size.
-            if (gd.smaa_core_w != w || gd.smaa_core_h != h)
-            {
-               auto& mr = device_data.managed_resources;
-               mr.depth_stencil_views[CompileTimeStringHash("smaa_dsv")].reset();
-               mr.render_target_views[CompileTimeStringHash("smaa_edge_detection")].reset();
-               mr.render_target_views[CompileTimeStringHash("smaa_blending_weight_calculation")].reset();
-#if DEVELOPMENT || TEST
-               if (gd.smaa_core_w || gd.smaa_core_h) // skip the first-build transition (0 -> size); only log real resizes
-               {
-                  char b[160];
-                  snprintf(b, sizeof(b), "MEA SMAA: resized core intermediates %ux%u -> %ux%u (Resolution-Scale change).", gd.smaa_core_w, gd.smaa_core_h, w, h);
-                  reshade::log::message(reshade::log::level::info, b);
-               }
-#endif
-               gd.smaa_core_w = w;
-               gd.smaa_core_h = h;
             }
 
             // (Re)create the SMAA metrics CB on resolution change.
@@ -602,23 +569,11 @@ public: // OnMapBufferRegion is referenced from DllMain (DLL_PROCESS_DETACH unre
 
             if (gd.cb_smaa_metrics && smaa_shaders_ready)
             {
-               // Bind the metrics CB at VS+PS b1 (DrawSMAA restores VS/PS/SRVs/RTs but NOT cbuffer slots).
-               ComPtr<ID3D11Buffer> vs_cb1_orig, ps_cb1_orig;
-               native_device_context->VSGetConstantBuffers(1, 1, vs_cb1_orig.put());
-               native_device_context->PSGetConstantBuffers(1, 1, ps_cb1_orig.put());
-               ID3D11Buffer* mcb = gd.cb_smaa_metrics.get();
-               native_device_context->VSSetConstantBuffers(1, 1, &mcb);
-               native_device_context->PSSetConstantBuffers(1, 1, &mcb);
-
                // MEA's FXAA input is already display-encoded → use it as both color and gamma; no predication.
                // With sharpening on, SMAA renders into a temp texture and an RCAS pass writes the final RTV.
-               ID3D11RenderTargetView* smaa_target = rtv.get();
                // Only route SMAA through the temp texture if sharpening is on AND the RCAS shaders are
                // actually compiled — otherwise SMAA must write straight to the final RTV, or the image is lost.
-               const bool sharpen_shaders_ready =
-                  device_data.native_vertex_shaders[CompileTimeStringHash("Copy VS")].get() != nullptr &&
-                  device_data.native_pixel_shaders[CompileTimeStringHash("MEA Sharpen PS")].get() != nullptr;
-               bool do_sharpen = g_smaa_sharpness > 0.f && sharpen_shaders_ready;
+               bool do_sharpen = g_smaa_sharpness > 0.f && PrepareRCAS(native_device, device_data);
                if (do_sharpen)
                {
                   if (!gd.tex_smaa_out || gd.smaa_out_w != w || gd.smaa_out_h != h)
@@ -633,55 +588,19 @@ public: // OnMapBufferRegion is referenced from DllMain (DLL_PROCESS_DETACH unre
                         gd.smaa_out_h = h;
                      }
                   }
-                  if (gd.tex_smaa_out_rtv && gd.tex_smaa_out_srv)
+                  if (!gd.tex_smaa_out_rtv || !gd.tex_smaa_out_srv)
                   {
-                     // (Re)create the RCAS CB up-front, BEFORE choosing smaa_target: if it fails we must fall back to
-                     // SMAA-straight-to-RTV, else the final RTV is left unwritten (still Replaced) → stale/black.
-                     if (!gd.cb_sharpen || gd.sharpen_w != w || gd.sharpen_h != h || gd.sharpen_amount != g_smaa_sharpness)
-                     {
-                        const float sp[4] = {(float)w, (float)h, g_smaa_sharpness, 0.f};
-                        if (CreateImmutableCB(native_device, sp, sizeof(sp), gd.cb_sharpen))
-                        {
-                           gd.sharpen_w = w;
-                           gd.sharpen_h = h;
-                           gd.sharpen_amount = g_smaa_sharpness;
-                        }
-                     }
-                     if (gd.cb_sharpen)
-                        smaa_target = gd.tex_smaa_out_rtv.get();
-                     else
-                        do_sharpen = false;
-                  }
-                  else
                      do_sharpen = false;
+                  }
                }
 
                DrawSMAA(native_device, native_device_context, device_data,
-                  smaa_target, srv_color.get(), srv_color.get(), nullptr);
+                  do_sharpen ? gd.tex_smaa_out_rtv.get() : rtv.get(), srv_color.get(), srv_color.get(), nullptr, gd.cb_smaa_metrics.get());
 
                if (do_sharpen)
                {
-                  // cb_sharpen + both RCAS shaders are guaranteed non-null here: the do_sharpen gate above is set
-                  // false if any is missing (SMAA then renders straight to the final RTV), so no re-guard.
-                  auto* sharpen_vs = device_data.native_vertex_shaders[CompileTimeStringHash("Copy VS")].get();
-                  auto* sharpen_ps = device_data.native_pixel_shaders[CompileTimeStringHash("MEA Sharpen PS")].get();
-                  // DrawCustomPixelShader does NOT restore state → wrap in core's DrawStateStack<FullGraphics>
-                  // (caches/restores all PS SRV/CB/sampler slots, IA, RS, scissors, viewport, blend, DS).
-                  DrawStateStack<DrawStateStackType::FullGraphics> sharpen_state;
-                  sharpen_state.Cache(native_device_context, device_data.uav_max_count);
-
-                  ID3D11Buffer* scb = gd.cb_sharpen.get();
-                  native_device_context->PSSetConstantBuffers(0, 1, &scb);
-                  DrawCustomPixelShader(native_device_context, device_data.default_depth_stencil_state.get(), device_data.default_blend_state.get(), nullptr,
-                     sharpen_vs, sharpen_ps, gd.tex_smaa_out_srv.get(), rtv.get(), w, h, false);
-
-                  sharpen_state.Restore(native_device_context);
+                  DrawRCAS(native_device_context, device_data, gd.tex_smaa_out_srv.get(), rtv.get(), g_smaa_sharpness);
                }
-
-               ID3D11Buffer* vcb = vs_cb1_orig.get();
-               ID3D11Buffer* pcb = ps_cb1_orig.get();
-               native_device_context->VSSetConstantBuffers(1, 1, &vcb);
-               native_device_context->PSSetConstantBuffers(1, 1, &pcb);
 
                device_data.has_drawn_main_post_processing = true;
                return DrawOrDispatchOverrideType::Replaced; // cancel native FXAA

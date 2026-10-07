@@ -11,6 +11,7 @@
 #define GEOMETRY_SHADER_SUPPORT 0
 // The game ships no AA at all (no option, no post AA pass, sampleCount 1), so SMAA adds rather than replaces.
 #define ENABLE_SMAA 1
+#define ENABLE_RCAS 1
 // Replaces the game's quarter-res bright-pass glow, which the replaced gather then stops writing.
 #define ENABLE_BLOOM 1
 // Outside DEVELOPMENT only this define makes original_draw_dispatch_func non-null; without it the callback never fires.
@@ -130,8 +131,8 @@ struct MassEffectGameDeviceData final : public GameDeviceData
 #if ENABLE_SMAA
    // ---- SMAA (TW2/BL2 shape, see RunPostFinalGradeSMAA) ----
    // Metrics CB (b1) = (1/w, 1/h, w, h) + (predication scale, 0, 0, 0).
-   // Canvas size every resource below (and core's DrawSMAA intermediates) was created for. A change releases them all
-   // at once; each is then recreated on first use, so no resource tracks a size of its own.
+   // Canvas size every resource below was created for. A change releases them all at once; each is then recreated on
+   // first use, so no resource tracks a size of its own.
    uint32_t smaa_w = 0, smaa_h = 0;
    ComPtr<ID3D11Buffer> cb_smaa_metrics;
    float smaa_metrics_pred_scale = -1.f;
@@ -158,8 +159,6 @@ struct MassEffectGameDeviceData final : public GameDeviceData
    }
 
    // RCAS. The intermediate exists ONLY while sharpening is on: at 0 the last SMAA pass writes the canvas directly.
-   ComPtr<ID3D11Buffer> cb_sharpen;
-   float sharpen_amount = -1.f;
    ComPtr<ID3D11Texture2D> tex_smaa_out;
    ComPtr<ID3D11RenderTargetView> tex_smaa_out_rtv;
    ComPtr<ID3D11ShaderResourceView> tex_smaa_out_srv;
@@ -597,9 +596,6 @@ public:
          ShaderDefinition("Luma_ME1_SMAALinearize", reshade::api::pipeline_subobject_type::compute_shader));
       native_shaders_definitions.emplace(CompileTimeStringHash("ME1 Depth Extract CS"),
          ShaderDefinition("Luma_ME1_DepthExtract", reshade::api::pipeline_subobject_type::compute_shader));
-      // RCAS PS, drawn via core "Copy VS" + DrawCustomPixelShader.
-      native_shaders_definitions.emplace(CompileTimeStringHash("ME1 Sharpen PS"),
-         ShaderDefinition{"Luma_RCAS_PS", reshade::api::pipeline_subobject_type::pixel_shader, nullptr, "sharpen_ps"});
 #endif
 
       // Address-space ceiling, PROBED: no LARGE_ADDRESS_AWARE (0x0102 measured) = 2 GB, Luma's 4K scratch ~365 MB.
@@ -674,17 +670,6 @@ public:
    }
 
 #if ENABLE_SMAA
-   // Core's DrawSMAA intermediates, ~83 MB at 4K, dropped only on swapchain init. Views hold references: release all.
-   static void ReleaseCoreSMAAIntermediates(DeviceData& device_data)
-   {
-      auto& mr = device_data.managed_resources;
-      mr.depth_stencil_views[CompileTimeStringHash("smaa_dsv")].reset();
-      mr.render_target_views[CompileTimeStringHash("smaa_edge_detection")].reset();
-      mr.render_target_views[CompileTimeStringHash("smaa_blending_weight_calculation")].reset();
-      mr.shader_resource_views[CompileTimeStringHash("smaa_edge_detection")].reset();
-      mr.shader_resource_views[CompileTimeStringHash("smaa_blending_weight_calculation")].reset();
-   }
-
    // SMAA after the grade, before the HUD (TW2/BL2 chain): snapshot -> linear decode -> DrawSMAA -> [RCAS] -> canvas.
    void RunPostFinalGradeSMAA(ID3D11Device* native_device, ID3D11DeviceContext* native_device_context, DeviceData& device_data, MassEffectGameDeviceData& gd, ID3D11Resource* canvas_res, ID3D11RenderTargetView* canvas_rtv)
    {
@@ -702,14 +687,12 @@ public:
       if (!smaa_ready)
          return;
 
-      // Resolution change: drop every size-bound resource, ours and DrawSMAA's core-managed intermediates, so each is
-      // recreated at the new size (below, or by core). The predication CB does not depend on the size and stays.
+      // Resolution change: drop every size-bound resource so each is recreated at the new size below (DrawSMAA follows
+      // the target size itself). The predication CB does not depend on the size and stays.
       if (gd.smaa_w != w || gd.smaa_h != h)
       {
          gd.ReleaseSMAAScratch();
          gd.cb_smaa_metrics.reset();
-         gd.cb_sharpen.reset();
-         ReleaseCoreSMAAIntermediates(device_data);
          gd.smaa_w = w;
          gd.smaa_h = h;
       }
@@ -755,17 +738,9 @@ public:
          return;
 
       // RCAS decides the chain's SHAPE: with sharpening off the last SMAA pass writes the canvas, saving a write-back.
-      auto* copy_vs = FindShader(device_data.native_vertex_shaders, CompileTimeStringHash("Copy VS"));
-      auto* sharpen_ps = FindShader(device_data.native_pixel_shaders, CompileTimeStringHash("ME1 Sharpen PS"));
-      bool do_sharpen = g_rcas_sharpness > 0.f && copy_vs != nullptr && sharpen_ps != nullptr;
+      bool do_sharpen = g_rcas_sharpness > 0.f && PrepareRCAS(native_device, device_data);
       if (do_sharpen)
       {
-         if (!gd.cb_sharpen || gd.sharpen_amount != g_rcas_sharpness)
-         {
-            const float sp[4] = {(float)w, (float)h, g_rcas_sharpness, 0.f};
-            if (CreateImmutableCB(native_device, sp, sizeof(sp), gd.cb_sharpen))
-               gd.sharpen_amount = g_rcas_sharpness;
-         }
          if (!gd.tex_smaa_out_rtv || !gd.tex_smaa_out_srv)
          {
             gd.ReleaseSharpenScratch();
@@ -775,8 +750,10 @@ public:
                native_device->CreateShaderResourceView(gd.tex_smaa_out.get(), nullptr, gd.tex_smaa_out_srv.put());
             }
          }
-         if (!gd.cb_sharpen || !gd.tex_smaa_out_rtv || !gd.tex_smaa_out_srv)
+         if (!gd.tex_smaa_out_rtv || !gd.tex_smaa_out_srv)
+         {
             do_sharpen = false; // allocation failed: fall back to the un-sharpened chain rather than dropping SMAA
+         }
       }
 
       if (!gd.srv_input || !gd.uav_input_linear || !gd.srv_input_linear)
@@ -841,6 +818,7 @@ public:
       }
       if (pred_ok && g_smaa_pred_debug)
       {
+         auto* copy_vs = FindShader(device_data.native_vertex_shaders, CompileTimeStringHash("Copy VS"));
          auto* copy_ps = FindShader(device_data.native_pixel_shaders, CompileTimeStringHash("Copy PS"));
          if (copy_vs != nullptr && copy_ps != nullptr)
          {
@@ -855,34 +833,13 @@ public:
       }
 #endif
 
-      // Metrics CB at VS+PS b1 (DrawSMAA restores VS/PS/SRVs/RTs, but not cbuffers).
-      ComPtr<ID3D11Buffer> vs_cb1_orig, ps_cb1_orig;
-      native_device_context->VSGetConstantBuffers(1, 1, vs_cb1_orig.put());
-      native_device_context->PSGetConstantBuffers(1, 1, ps_cb1_orig.put());
-      ID3D11Buffer* mcb = gd.cb_smaa_metrics.get();
-      native_device_context->VSSetConstantBuffers(1, 1, &mcb);
-      native_device_context->PSSetConstantBuffers(1, 1, &mcb);
-
       // Reading the canvas as the target is safe: the chain samples the snapshot, never the canvas itself.
-      DrawSMAA(native_device, native_device_context, device_data, do_sharpen ? gd.tex_smaa_out_rtv.get() : canvas_rtv, gd.srv_input_linear.get(), gd.srv_input.get(), pred_ok ? gd.srv_pred.get() : nullptr /*predication signal*/);
+      DrawSMAA(native_device, native_device_context, device_data, do_sharpen ? gd.tex_smaa_out_rtv.get() : canvas_rtv, gd.srv_input_linear.get(), gd.srv_input.get(), pred_ok ? gd.srv_pred.get() : nullptr /*predication signal*/, gd.cb_smaa_metrics.get());
 
       if (do_sharpen)
       {
-         DrawStateStack<DrawStateStackType::FullGraphics> sharpen_state;
-         sharpen_state.Cache(native_device_context, device_data.uav_max_count);
-
-         ID3D11Buffer* scb = gd.cb_sharpen.get();
-         native_device_context->PSSetConstantBuffers(0, 1, &scb);
-         DrawCustomPixelShader(native_device_context, device_data.default_depth_stencil_state.get(), device_data.default_blend_state.get(), nullptr,
-            copy_vs, sharpen_ps, gd.tex_smaa_out_srv.get(), canvas_rtv, w, h, false);
-
-         sharpen_state.Restore(native_device_context);
+         DrawRCAS(native_device_context, device_data, gd.tex_smaa_out_srv.get(), canvas_rtv, g_rcas_sharpness);
       }
-
-      ID3D11Buffer* vcb = vs_cb1_orig.get();
-      ID3D11Buffer* pcb = ps_cb1_orig.get();
-      native_device_context->VSSetConstantBuffers(1, 1, &vcb);
-      native_device_context->PSSetConstantBuffers(1, 1, &pcb);
    }
 #endif // ENABLE_SMAA
 
@@ -1102,7 +1059,7 @@ public:
       if (!g_smaa_enable && gd.tex_input)
       {
          gd.ReleaseSMAAScratch();
-         ReleaseCoreSMAAIntermediates(device_data);
+         ReleaseSMAAIntermediates(device_data);
          gd.smaa_w = gd.smaa_h = 0; // core recreates lazily; keep the latch from claiming anything is current
       }
       else

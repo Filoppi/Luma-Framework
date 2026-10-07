@@ -1360,7 +1360,19 @@ void SanitizeNaNs(ID3D11Device* device, ID3D11DeviceContext* device_context, ID3
    }
 }
 
-void DrawSMAA(ID3D11Device* device, ID3D11DeviceContext* device_context, DeviceData& device_data, ID3D11RenderTargetView* rtv, ID3D11ShaderResourceView* srv_color_tex, ID3D11ShaderResourceView* srv_color_tex_gamma, ID3D11ShaderResourceView* srv_predication_tex = nullptr)
+// Drops the target-sized intermediates of "DrawSMAA()" (~83 MB at 4K), e.g. once a game stops drawing SMAA. They are recreated on the next draw.
+void ReleaseSMAAIntermediates(DeviceData& device_data)
+{
+   auto& managed_resources = device_data.managed_resources;
+   managed_resources.depth_stencil_views["smaa_dsv"_h].reset();
+   managed_resources.render_target_views["smaa_edge_detection"_h].reset();
+   managed_resources.shader_resource_views["smaa_edge_detection"_h].reset();
+   managed_resources.render_target_views["smaa_blending_weight_calculation"_h].reset();
+   managed_resources.shader_resource_views["smaa_blending_weight_calculation"_h].reset();
+}
+
+// "cb_smaa_metrics" (optional) is bound to VS and PS b1, the slot the "Luma_SMAA_impl.hlsl" files declare their metrics cbuffer at.
+void DrawSMAA(ID3D11Device* device, ID3D11DeviceContext* device_context, DeviceData& device_data, ID3D11RenderTargetView* rtv, ID3D11ShaderResourceView* srv_color_tex, ID3D11ShaderResourceView* srv_color_tex_gamma, ID3D11ShaderResourceView* srv_predication_tex = nullptr, ID3D11Buffer* cb_smaa_metrics = nullptr)
 {
    auto& managed_resources = device_data.managed_resources;
 
@@ -1379,6 +1391,15 @@ void DrawSMAA(ID3D11Device* device, ID3D11DeviceContext* device_context, DeviceD
    device_context->PSGetSamplers(0, ps_samplers_original.size(), ps_samplers_original.data());
    std::array<ID3D11ShaderResourceView*, 3> ps_srvs_original = {};
    device_context->PSGetShaderResources(0, ps_srvs_original.size(), ps_srvs_original.data());
+
+   // Backup the metrics cbuffer slot.
+   ComPtr<ID3D11Buffer> vs_cb_metrics_original;
+   ComPtr<ID3D11Buffer> ps_cb_metrics_original;
+   if (cb_smaa_metrics)
+   {
+      device_context->VSGetConstantBuffers(1, 1, vs_cb_metrics_original.put());
+      device_context->PSGetConstantBuffers(1, 1, ps_cb_metrics_original.put());
+   }
 
    // Backup Viewports.
    UINT num_viewports;
@@ -1413,6 +1434,31 @@ void DrawSMAA(ID3D11Device* device, ID3D11DeviceContext* device_context, DeviceD
    ensure(resource->QueryInterface(tex.put()), >= 0);
    D3D11_TEXTURE2D_DESC tex_desc;
    tex->GetDesc(&tex_desc);
+   // The intermediates only share the target's size, not its mips, array, MSAA, usage or misc flags.
+   tex_desc.MipLevels = 1;
+   tex_desc.ArraySize = 1;
+   tex_desc.SampleDesc = {1, 0};
+   tex_desc.Usage = D3D11_USAGE_DEFAULT;
+   tex_desc.CPUAccessFlags = 0;
+   tex_desc.MiscFlags = 0;
+
+   // Rebuild the intermediates whenever the target size changes (e.g. a game's resolution scale), not only with the swapchain.
+   if (const auto& edge_detection_rtv = managed_resources.render_target_views["smaa_edge_detection"_h])
+   {
+      uint4 edge_detection_size;
+      DXGI_FORMAT edge_detection_format;
+      GetResourceInfo(edge_detection_rtv.get(), edge_detection_size, edge_detection_format);
+      if (edge_detection_size.x != tex_desc.Width || edge_detection_size.y != tex_desc.Height)
+      {
+         ReleaseSMAAIntermediates(device_data);
+      }
+   }
+
+   if (cb_smaa_metrics)
+   {
+      device_context->VSSetConstantBuffers(1, 1, &cb_smaa_metrics);
+      device_context->PSSetConstantBuffers(1, 1, &cb_smaa_metrics);
+   }
 
    // EdgeDetection pass
    //
@@ -1559,18 +1605,12 @@ void DrawSMAA(ID3D11Device* device, ID3D11DeviceContext* device_context, DeviceD
 
    //
 
-   // Reset resolution dependent resources on init swapchain.
-   // Some are intentionaly left out, we will recreate them here (in the DrawSMAA function).
-   auto on_init_swapchain = [&]()
-   {
-      managed_resources.depth_stencil_views["smaa_dsv"_h].reset();
-      managed_resources.render_target_views["smaa_edge_detection"_h].reset();
-      managed_resources.render_target_views["smaa_blending_weight_calculation"_h].reset();
-   };
-
-   LumaCallbacks::on_init_swapchain.try_emplace("luma_smaa"_h, on_init_swapchain);
-
    // Restore.
+   if (cb_smaa_metrics)
+   {
+      device_context->VSSetConstantBuffers(1, 1, vs_cb_metrics_original.get_addressof());
+      device_context->PSSetConstantBuffers(1, 1, ps_cb_metrics_original.get_addressof());
+   }
    device_context->OMSetBlendState(blend_original.get(), blend_factor_original, sample_mask_original);
    device_context->OMSetDepthStencilState(ds_original.get(), stencil_ref_original);
    device_context->OMSetRenderTargets(rtvs_original.size(), rtvs_original.data(), dsv_original.get());
@@ -1588,6 +1628,53 @@ void DrawSMAA(ID3D11Device* device, ID3D11DeviceContext* device_context, DeviceD
    release_com_array(ps_samplers_original);
    release_com_array(ps_srvs_original);
 }
+
+#if ENABLE_RCAS
+// Whether "DrawRCAS()" can draw: its shaders load asynchronously (and reload in development builds), and its cbuffer is created here.
+// Call it before routing a pass into the RCAS source: once it returns true, "DrawRCAS()" always writes its target.
+bool PrepareRCAS(ID3D11Device* device, DeviceData& device_data)
+{
+   const auto vs = device_data.native_vertex_shaders.find("Copy VS"_h);
+   const auto ps = device_data.native_pixel_shaders.find("RCAS PS"_h);
+   if (vs == device_data.native_vertex_shaders.end() || !vs->second || ps == device_data.native_pixel_shaders.end() || !ps->second)
+      return false;
+
+   auto& cb = device_data.managed_resources.buffers["rcas_params"_h];
+   if (!cb)
+   {
+      CD3D11_BUFFER_DESC cb_desc(sizeof(float) * 4, D3D11_BIND_CONSTANT_BUFFER, D3D11_USAGE_DYNAMIC, D3D11_CPU_ACCESS_WRITE);
+      device->CreateBuffer(&cb_desc, nullptr, cb.put());
+   }
+   return cb.get() != nullptr;
+}
+
+// RCAS sharpening ("Luma_RCAS_PS") of "srv_source" into the whole "rtv", e.g. after SMAA or super resolution.
+// Call "PrepareRCAS()" first. Restores the state it changes.
+void DrawRCAS(ID3D11DeviceContext* device_context, DeviceData& device_data, ID3D11ShaderResourceView* srv_source, ID3D11RenderTargetView* rtv, float sharpness)
+{
+   uint4 size;
+   DXGI_FORMAT format;
+   GetResourceInfo(rtv, size, format);
+
+   // Map only fails with a removed device. We draw anyway, so the target is never left unwritten.
+   const auto& cb = device_data.managed_resources.buffers.at("rcas_params"_h);
+   if (D3D11_MAPPED_SUBRESOURCE mapped_cb; SUCCEEDED(device_context->Map(cb.get(), 0, D3D11_MAP_WRITE_DISCARD, 0, &mapped_cb)))
+   {
+      const float params[4] = {(float)size.x, (float)size.y, sharpness, 0.f};
+      std::memcpy(mapped_cb.pData, params, sizeof(params));
+      device_context->Unmap(cb.get(), 0);
+   }
+
+   DrawStateStack<DrawStateStackType::FullGraphics> draw_state_stack;
+   draw_state_stack.Cache(device_context, device_data.uav_max_count);
+
+   device_context->PSSetConstantBuffers(0, 1, cb.get_addressof());
+   DrawCustomPixelShader(device_context, device_data.default_depth_stencil_state.get(), device_data.default_blend_state.get(), nullptr,
+      device_data.native_vertex_shaders.at("Copy VS"_h).get(), device_data.native_pixel_shaders.at("RCAS PS"_h).get(), srv_source, rtv, size.x, size.y, false);
+
+   draw_state_stack.Restore(device_context);
+}
+#endif // ENABLE_RCAS
 
 void DrawKarisAverage(ID3D11Device* device, ID3D11DeviceContext* device_context, DeviceData& device_data, ID3D11ShaderResourceView* srv_source, ID3D11ShaderResourceView** srv_out)
 {

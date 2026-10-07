@@ -19,6 +19,7 @@
 // No DLSS/DLAA: UE3 has no usable motion vectors, and NGX is x64-only (game is 32-bit)
 #define GEOMETRY_SHADER_SUPPORT 0
 #define ENABLE_SMAA 1  // SMAA ULTRA (+RCAS) injected post-tonemap; core auto-registers the 6 "SMAA ..." passes from Luma_SMAA_impl
+#define ENABLE_RCAS 1  // core registers the "RCAS PS" pass, drawn by DrawRCAS after SMAA
 #define ENABLE_BLOOM 1 // core auto-registers the Bloom VS/Prefilter/Downsample/Upsample passes -> Luma_Bloom_impl
 // SMAA runs POST-tonemap through the post-draw callback (see RunPostTonemapSMAA); needs original_draw_dispatch_func.
 #define ENABLE_POST_DRAW_DISPATCH_CALLBACK 1
@@ -137,8 +138,6 @@ struct Borderlands2GameDeviceData final : public GameDeviceData
    ComPtr<ID3D11Buffer> cb_smaa_metrics;
    uint32_t smaa_metrics_w = 0, smaa_metrics_h = 0;
 
-   uint32_t smaa_core_w = 0, smaa_core_h = 0;
-
    // SMAA scratch, one texture per colour domain DrawSMAA takes. tex_input_encoded = snapshot of the LDR as the
    // tonemap wrote it (gamma 2.2), for edge detection; tex_input_linear = its decode (fp16), for the neighborhood
    // blend, written by the linearize CS.
@@ -155,11 +154,6 @@ struct Borderlands2GameDeviceData final : public GameDeviceData
    ComPtr<ID3D11RenderTargetView> tex_smaa_out_rtv;
    ComPtr<ID3D11ShaderResourceView> tex_smaa_out_srv;
    uint32_t smaa_out_w = 0, smaa_out_h = 0;
-
-   // RCAS sharpen CB (b0) = (w,h,sharpness,0). RCAS writes the LDR RTV, so it needs no output temp.
-   ComPtr<ID3D11Buffer> cb_sharpen;
-   uint32_t sharpen_w = 0, sharpen_h = 0;
-   float sharpen_amount = -1.f;
 
    // Resource the tonemap renders to; on BL2 the HUD draws onto it afterwards. Used by Hide UI and the FXAA override.
    uint64_t ldr_buffer_handle = 0;
@@ -298,17 +292,6 @@ class Borderlands2 final : public Game
          return;
       }
 
-      // Drop DrawSMAA's core-managed intermediates on resolution change so they recreate at the new size.
-      if (gd.smaa_core_w != w || gd.smaa_core_h != h)
-      {
-         auto& mr = device_data.managed_resources;
-         mr.depth_stencil_views[CompileTimeStringHash("smaa_dsv")].reset();
-         mr.render_target_views[CompileTimeStringHash("smaa_edge_detection")].reset();
-         mr.render_target_views[CompileTimeStringHash("smaa_blending_weight_calculation")].reset();
-         gd.smaa_core_w = w;
-         gd.smaa_core_h = h;
-      }
-
       // SMAA depth predication: plane-deviation edge-ness from the captured scene-color SRV (.a). Plain ULTRA fallback when
       // any input is missing (never scale 2.0 with a null texture).
       auto* pred_cs = FindShader(device_data.native_compute_shaders, CompileTimeStringHash("BL2TPS Depth Extract CS"));
@@ -363,21 +346,9 @@ class Borderlands2 final : public Game
 
       // Resolve RCAS before allocating: it decides whether SMAA renders into the LDR RTV directly or into the
       // intermediate RCAS reads.
-      auto* copy_vs = FindShader(device_data.native_vertex_shaders, CompileTimeStringHash("Copy VS"));
-      auto* sharpen_ps = FindShader(device_data.native_pixel_shaders, CompileTimeStringHash("BL2TPS Sharpen PS"));
-      bool do_sharpen = g_rcas_sharpness > 0.f && copy_vs != nullptr && sharpen_ps != nullptr;
+      bool do_sharpen = g_rcas_sharpness > 0.f && PrepareRCAS(native_device, device_data);
       if (do_sharpen)
       {
-         if (!gd.cb_sharpen || gd.sharpen_w != w || gd.sharpen_h != h || gd.sharpen_amount != g_rcas_sharpness)
-         {
-            const float sp[4] = {(float)w, (float)h, g_rcas_sharpness, 0.f};
-            if (CreateImmutableCB(native_device, sp, sizeof(sp), gd.cb_sharpen))
-            {
-               gd.sharpen_w = w;
-               gd.sharpen_h = h;
-               gd.sharpen_amount = g_rcas_sharpness;
-            }
-         }
          // SMAA output temp (LDR format, SRV+RTV): only needed as the RCAS input.
          if (!gd.tex_smaa_out || gd.smaa_out_w != w || gd.smaa_out_h != h)
          {
@@ -392,8 +363,10 @@ class Borderlands2 final : public Game
                gd.smaa_out_h = h;
             }
          }
-         if (!gd.cb_sharpen || !gd.tex_smaa_out_rtv || !gd.tex_smaa_out_srv)
+         if (!gd.tex_smaa_out_rtv || !gd.tex_smaa_out_srv)
+         {
             do_sharpen = false;
+         }
       }
 
       // The two colour inputs: the encoded snapshot (LDR format, so CopyResource matches) and its linear decode.
@@ -461,6 +434,7 @@ class Borderlands2 final : public Game
 
       if (pred_ok && g_smaa_pred_debug)
       {
+         auto* copy_vs = FindShader(device_data.native_vertex_shaders, CompileTimeStringHash("Copy VS"));
          auto* copy_ps = FindShader(device_data.native_pixel_shaders, CompileTimeStringHash("Copy PS"));
          if (copy_vs != nullptr && copy_ps != nullptr)
          {
@@ -477,39 +451,18 @@ class Borderlands2 final : public Game
       }
 #endif
 
-      // SMAA (3 passes). Metrics CB at VS+PS b1 (DrawSMAA restores VS/PS/SRVs/RTs, not cbuffers).
-      ComPtr<ID3D11Buffer> vs_cb1_orig, ps_cb1_orig;
-      native_device_context->VSGetConstantBuffers(1, 1, vs_cb1_orig.put());
-      native_device_context->PSGetConstantBuffers(1, 1, ps_cb1_orig.put());
-      ID3D11Buffer* mcb = gd.cb_smaa_metrics.get();
-      native_device_context->VSSetConstantBuffers(1, 1, &mcb);
-      native_device_context->PSSetConstantBuffers(1, 1, &mcb);
-
       // The last pass of the chain renders straight into the LDR RTV, which is safe because SMAA and RCAS sample
       // the snapshot copies, never the LDR itself.
       DrawSMAA(native_device, native_device_context, device_data,
          do_sharpen ? gd.tex_smaa_out_rtv.get() : ldr_rtv,
          gd.srv_input_linear.get() /*neighborhood blend (linear light)*/,
          gd.srv_input_encoded.get() /*edge detection (gamma 2.2)*/,
-         pred_ok ? gd.srv_pred.get() : nullptr /*predication signal*/);
+         pred_ok ? gd.srv_pred.get() : nullptr /*predication signal*/, gd.cb_smaa_metrics.get());
 
       if (do_sharpen)
       {
-         DrawStateStack<DrawStateStackType::FullGraphics> sharpen_state;
-         sharpen_state.Cache(native_device_context, device_data.uav_max_count);
-
-         ID3D11Buffer* scb = gd.cb_sharpen.get();
-         native_device_context->PSSetConstantBuffers(0, 1, &scb);
-         DrawCustomPixelShader(native_device_context, device_data.default_depth_stencil_state.get(), device_data.default_blend_state.get(), nullptr,
-            copy_vs, sharpen_ps, gd.tex_smaa_out_srv.get(), ldr_rtv, w, h, false);
-
-         sharpen_state.Restore(native_device_context);
+         DrawRCAS(native_device_context, device_data, gd.tex_smaa_out_srv.get(), ldr_rtv, g_rcas_sharpness);
       }
-
-      ID3D11Buffer* vcb = vs_cb1_orig.get();
-      ID3D11Buffer* pcb = ps_cb1_orig.get();
-      native_device_context->VSSetConstantBuffers(1, 1, &vcb);
-      native_device_context->PSSetConstantBuffers(1, 1, &pcb);
    }
 #endif // ENABLE_SMAA
 
@@ -536,10 +489,7 @@ public:
       // "UI Paper White" slider on UI_DRAW_TYPE >= 1 && !use_os_reference_white_level. UI default 203 nits (BT.2408).
       use_os_reference_white_level = false;
 
-      // Core auto-registers the 6 SMAA passes; these three are this game's own. RCAS sharpen PS (drawn via core
-      // "Copy VS" + DrawCustomPixelShader after SMAA).
-      native_shaders_definitions.emplace(CompileTimeStringHash("BL2TPS Sharpen PS"),
-         ShaderDefinition{"Luma_RCAS_PS", reshade::api::pipeline_subobject_type::pixel_shader, nullptr, "sharpen_ps"});
+      // Core auto-registers the 6 SMAA passes and the RCAS sharpen PS; these two are this game's own.
       // Depth-extract CS for SMAA predication: scene-color .a (linear view Z) -> R16F plane-deviation edge-ness.
       native_shaders_definitions.emplace(CompileTimeStringHash("BL2TPS Depth Extract CS"),
          ShaderDefinition("Luma_BL2TPS_DepthExtract", reshade::api::pipeline_subobject_type::compute_shader));

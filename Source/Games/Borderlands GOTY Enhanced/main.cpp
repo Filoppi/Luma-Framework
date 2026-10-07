@@ -17,6 +17,7 @@
 
 #define GEOMETRY_SHADER_SUPPORT 0
 #define ENABLE_SMAA 1
+#define ENABLE_RCAS 1
 
 #include "..\..\Core\core.hpp"
 #include <shellapi.h> // ShellExecuteA for About links (system() hangs the render thread in exclusive fullscreen)
@@ -289,9 +290,6 @@ struct BorderlandsGotyGameDeviceData final : public GameDeviceData
    uint32_t smaa_metrics_w = 0, smaa_metrics_h = 0;
    float smaa_metrics_pred_scale = -1.f; // 2.0 = valid depth (predication active), 1.0 = no/mismatched depth (plain ULTRA threshold)
 
-   // Tracks the size DrawSMAA built its core-managed intermediates at (to rebuild on resolution change).
-   uint32_t smaa_core_w = 0, smaa_core_h = 0;
-
    // SMAA inputs (fp16), recreated on resolution change: scene-color snapshot (CopyResource'd each frame, edge
    // detection) and its linear-light decode (neighborhood blend).
    ComPtr<ID3D11Texture2D> tex_input;
@@ -307,10 +305,6 @@ struct BorderlandsGotyGameDeviceData final : public GameDeviceData
    ComPtr<ID3D11ShaderResourceView> tex_smaa_out_srv;
    uint32_t smaa_out_w = 0, smaa_out_h = 0;
 
-   // RCAS sharpen CB (b0) = (w, h, sharpness, 0), recreated on resolution/sharpness change.
-   ComPtr<ID3D11Buffer> cb_sharpen;
-   uint32_t sharpen_w = 0, sharpen_h = 0;
-   float sharpen_amount = -1.f;
    // RCAS output temp (fp16, RTV). RCAS reads tex_smaa_out_srv -> writes here -> copied into the swapchain target.
    ComPtr<ID3D11Texture2D> tex_rcas_out;
    ComPtr<ID3D11RenderTargetView> tex_rcas_out_rtv;
@@ -535,9 +529,6 @@ public:
       // Depth-extract CS for SMAA predication: hardware d24 -> R16F plane-deviation edge-ness.
       native_shaders_definitions.emplace(CompileTimeStringHash("BL Depth Extract CS"),
          ShaderDefinition("Luma_BL_DepthExtract", reshade::api::pipeline_subobject_type::compute_shader));
-      // RCAS sharpen PS (drawn via core "Copy VS" + DrawCustomPixelShader after SMAA).
-      native_shaders_definitions.emplace(CompileTimeStringHash("BL Sharpen PS"),
-         ShaderDefinition{"Luma_RCAS_PS", reshade::api::pipeline_subobject_type::pixel_shader, nullptr, "sharpen_ps"});
 
       // XeGTAO (replaces the game's native HBAO+; see the AO hash block above). 4 compute passes out of one
       // file; the two denoise variants differ only by XE_GTAO_FINAL_APPLY (the final one writes the game's
@@ -914,18 +905,6 @@ public:
              !AllShadersReady(device_data.native_vertex_shaders, {CompileTimeStringHash("SMAA Edge Detection VS"), CompileTimeStringHash("SMAA Blending Weight Calculation VS"), CompileTimeStringHash("SMAA Neighborhood Blending VS")}))
             return DrawOrDispatchOverrideType::None;
 
-         // DrawSMAA sizes its edge/blend/DSV intermediates from the first RTV and rebuilds only on swapchain re-init.
-         // On a resolution change (in-game Resolution Scale) drop the 3 core-managed views so they recreate at the new size.
-         if (gd.smaa_core_w != w || gd.smaa_core_h != h)
-         {
-            auto& mr = device_data.managed_resources;
-            mr.depth_stencil_views[CompileTimeStringHash("smaa_dsv")].reset();
-            mr.render_target_views[CompileTimeStringHash("smaa_edge_detection")].reset();
-            mr.render_target_views[CompileTimeStringHash("smaa_blending_weight_calculation")].reset();
-            gd.smaa_core_w = w;
-            gd.smaa_core_h = h;
-         }
-
          // (Re)create the SMAA metrics CB on resolution change OR when the predication state flips (depth
          // present/absent). pred_scale only toggles 1.0<->2.0 on menu/transition boundaries, so recreation is rare.
          if (!gd.cb_smaa_metrics || gd.smaa_metrics_w != w || gd.smaa_metrics_h != h || gd.smaa_metrics_pred_scale != pred_scale)
@@ -1040,39 +1019,18 @@ public:
 #endif
 
          // --- SMAA (3 passes) into the temp RTV, then copy into the swapchain target. ---
-         // Bind metrics at VS+PS b1 (DrawSMAA restores VS/PS/SRVs/RTs but NOT cbuffer slots).
-         ComPtr<ID3D11Buffer> vs_cb1_orig, ps_cb1_orig;
-         native_device_context->VSGetConstantBuffers(1, 1, vs_cb1_orig.put());
-         native_device_context->PSGetConstantBuffers(1, 1, ps_cb1_orig.put());
-         ID3D11Buffer* mcb = gd.cb_smaa_metrics.get();
-         native_device_context->VSSetConstantBuffers(1, 1, &mcb);
-         native_device_context->PSSetConstantBuffers(1, 1, &mcb);
-
          // Pass depth for predication only when valid (same-size, captured this frame); otherwise null + the
          // pred_scale=1.0 baked into the metrics CB make SMAA run as plain ULTRA instead of degraded predication.
          DrawSMAA(native_device, native_device_context, device_data,
             gd.tex_smaa_out_rtv.get(), gd.srv_input_linear.get(), gd.srv_input.get(),
-            pred_ok ? gd.srv_pred.get() : nullptr /*predication (plane-deviation edge-ness)*/);
+            pred_ok ? gd.srv_pred.get() : nullptr /*predication (plane-deviation edge-ness)*/, gd.cb_smaa_metrics.get());
 
          // --- Optional RCAS sharpen on the SMAA output, then copy into the swapchain target. ---
          // SMAA output -> RCAS -> tex_rcas_out -> color_res. If sharpening is off or anything isn't ready, copy the
          // SMAA output straight through (never leave the swapchain unwritten on a Replaced dispatch).
-         auto* sharpen_vs = FindShader(device_data.native_vertex_shaders, CompileTimeStringHash("Copy VS"));
-         auto* sharpen_ps = FindShader(device_data.native_pixel_shaders, CompileTimeStringHash("BL Sharpen PS"));
-         bool do_sharpen = g_rcas_sharpness > 0.f && sharpen_vs != nullptr && sharpen_ps != nullptr;
+         bool do_sharpen = g_rcas_sharpness > 0.f && PrepareRCAS(native_device, device_data);
          if (do_sharpen)
          {
-            // (Re)create the RCAS CB on resolution/sharpness change.
-            if (!gd.cb_sharpen || gd.sharpen_w != w || gd.sharpen_h != h || gd.sharpen_amount != g_rcas_sharpness)
-            {
-               const float sp[4] = {(float)w, (float)h, g_rcas_sharpness, 0.f};
-               if (CreateImmutableCB(native_device, sp, sizeof(sp), gd.cb_sharpen))
-               {
-                  gd.sharpen_w = w;
-                  gd.sharpen_h = h;
-                  gd.sharpen_amount = g_rcas_sharpness;
-               }
-            }
             // (Re)create the RCAS output temp (fp16, RTV+SRV-capable) on resolution change.
             if (!gd.tex_rcas_out || gd.rcas_out_w != w || gd.rcas_out_h != h)
             {
@@ -1085,34 +1043,21 @@ public:
                   gd.rcas_out_h = h;
                }
             }
-            if (!gd.cb_sharpen || !gd.tex_rcas_out_rtv)
+            if (!gd.tex_rcas_out_rtv)
+            {
                do_sharpen = false;
+            }
          }
 
          if (do_sharpen)
          {
-            // DrawCustomPixelShader does NOT restore state -> wrap in core's DrawStateStack<FullGraphics>.
-            DrawStateStack<DrawStateStackType::FullGraphics> sharpen_state;
-            sharpen_state.Cache(native_device_context, device_data.uav_max_count);
-
-            ID3D11Buffer* scb = gd.cb_sharpen.get();
-            native_device_context->PSSetConstantBuffers(0, 1, &scb);
-            DrawCustomPixelShader(native_device_context, device_data.default_depth_stencil_state.get(), device_data.default_blend_state.get(), nullptr,
-               sharpen_vs, sharpen_ps, gd.tex_smaa_out_srv.get(), gd.tex_rcas_out_rtv.get(), w, h, false);
-
-            sharpen_state.Restore(native_device_context);
-
+            DrawRCAS(native_device_context, device_data, gd.tex_smaa_out_srv.get(), gd.tex_rcas_out_rtv.get(), g_rcas_sharpness);
             native_device_context->CopyResource(color_res.get(), gd.tex_rcas_out.get());
          }
          else
          {
             native_device_context->CopyResource(color_res.get(), gd.tex_smaa_out.get());
          }
-
-         ID3D11Buffer* vcb = vs_cb1_orig.get();
-         ID3D11Buffer* pcb = ps_cb1_orig.get();
-         native_device_context->VSSetConstantBuffers(1, 1, &vcb);
-         native_device_context->PSSetConstantBuffers(1, 1, &pcb);
 
          return DrawOrDispatchOverrideType::Replaced; // cancel the FXAA resolve dispatch
       }

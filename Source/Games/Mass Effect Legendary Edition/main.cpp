@@ -16,6 +16,7 @@
 #define DISABLE_AUTO_DEBUGGER 1 // The DEVELOPMENT attach prompt is hidden by fullscreen and blocks the loader.
 
 #define ENABLE_SMAA 1  // replaces the game's compute FXAA
+#define ENABLE_RCAS 1  // optional sharpening of the SMAA output
 #define ENABLE_BLOOM 1 // fp16 pyramidal bloom replaces the game's clamped bloom
 
 #include "..\..\Core\core.hpp"
@@ -193,9 +194,6 @@ struct MassEffectGameDeviceData final : public GameDeviceData
    uint32_t smaa_metrics_w = 0, smaa_metrics_h = 0;
    bool smaa_metrics_predicated = false; // Whether the cached metrics carry the depth-edge term or plain ULTRA.
 
-   // Size DrawSMAA built its core-managed intermediates at (rebuild on resolution change).
-   uint32_t smaa_core_w = 0, smaa_core_h = 0;
-
    // SRV-readable snapshot of the in-place gamma post buffer.
    RGBA16FTarget smaa_input;
    // Its linear-light decode, for the neighborhood blend.
@@ -204,10 +202,7 @@ struct MassEffectGameDeviceData final : public GameDeviceData
    // fp16 SMAA output, copied back directly or through RCAS.
    RGBA16FTarget smaa_out;
 
-   // RCAS b0 = (width, height, sharpness, 0).
-   ComPtr<ID3D11Buffer> cb_sharpen;
-   uint32_t sharpen_w = 0, sharpen_h = 0;
-   float sharpen_amount = -1.f;
+   // RCAS output, copied back.
    RGBA16FTarget rcas_out;
 
    // XeGTAO inputs at half-res AO size: R24 depth from deinterleave t0, packed R8G8 view normals from horizon t0.
@@ -270,8 +265,6 @@ class MassEffectLE final : public Game
    static constexpr uint32_t kNameSMAAWeightPS = CompileTimeStringHash("SMAA Blending Weight Calculation PS");
    static constexpr uint32_t kNameSMAABlendVS = CompileTimeStringHash("SMAA Neighborhood Blending VS");
    static constexpr uint32_t kNameSMAABlendPS = CompileTimeStringHash("SMAA Neighborhood Blending PS");
-   static constexpr uint32_t kNameCopyVS = CompileTimeStringHash("Copy VS");
-   static constexpr uint32_t kNameSharpenPS = CompileTimeStringHash("MELE Sharpen PS");
    static constexpr uint32_t kNameSMAALinearizeCS = CompileTimeStringHash("MELE SMAA Linearize CS");
 
    // operator[] default-inserts on a miss, which would mutate a map the render thread otherwise only reads.
@@ -387,11 +380,9 @@ public:
       luma_data_cbuffer_index = 12;
 
       // Core registers SMAA through ENABLE_SMAA; its neighborhood blend reads a linear decode of the gamma post buffer.
-      // RCAS runs afterwards through Copy VS and DrawCustomPixelShader.
+      // Core registers RCAS through ENABLE_RCAS, and DrawRCAS draws it afterwards.
       native_shaders_definitions.emplace(kNameSMAALinearizeCS,
          ShaderDefinition("Luma_MELE_SMAALinearize", reshade::api::pipeline_subobject_type::compute_shader));
-      native_shaders_definitions.emplace(kNameSharpenPS,
-         ShaderDefinition{"Luma_RCAS_PS", reshade::api::pipeline_subobject_type::pixel_shader, nullptr, "sharpen_ps"});
 
       // Four XeGTAO compute entries share one source; XE_GTAO_FINAL_APPLY selects the game's R8_UNORM target.
       native_shaders_definitions.emplace(kNameGTAOPrefilterCS,
@@ -846,17 +837,6 @@ public:
          if (!smaa_ready)
             return DrawOrDispatchOverrideType::None;
 
-         // DrawSMAA rebuilds managed views only on swapchain init; drop them explicitly on resolution changes.
-         if (gd.smaa_core_w != w || gd.smaa_core_h != h)
-         {
-            auto& mr = device_data.managed_resources;
-            mr.depth_stencil_views[CompileTimeStringHash("smaa_dsv")].reset();
-            mr.render_target_views[CompileTimeStringHash("smaa_edge_detection")].reset();
-            mr.render_target_views[CompileTimeStringHash("smaa_blending_weight_calculation")].reset();
-            gd.smaa_core_w = w;
-            gd.smaa_core_h = h;
-         }
-
          if (!gd.cb_smaa_metrics || gd.smaa_metrics_w != w || gd.smaa_metrics_h != h || gd.smaa_metrics_predicated != depth_ok)
          {
             const float metrics[8] = {1.f / (float)w, 1.f / (float)h, (float)w, (float)h, pred_scale, kPredThreshold, kPredStrength, 0.f};
@@ -892,69 +872,27 @@ public:
             linearize_state.Restore(native_device_context);
          }
 
-         // DrawSMAA restores shaders, resources, and targets, but not cbuffer slots; save VS/PS b1 explicitly.
-         ComPtr<ID3D11Buffer> vs_cb1_orig, ps_cb1_orig;
-         native_device_context->VSGetConstantBuffers(1, 1, vs_cb1_orig.put());
-         native_device_context->PSGetConstantBuffers(1, 1, ps_cb1_orig.put());
-         ID3D11Buffer* mcb = gd.cb_smaa_metrics.get();
-         native_device_context->VSSetConstantBuffers(1, 1, &mcb);
-         native_device_context->PSSetConstantBuffers(1, 1, &mcb);
-
          DrawSMAA(native_device, native_device_context, device_data,
             gd.smaa_out.rtv.get(), gd.smaa_input_linear.srv.get() /*blend color (linear)*/, gd.smaa_input.srv.get() /*edge color (gamma)*/,
-            depth_ok ? gd.srv_depth.get() : nullptr /*predication*/);
+            depth_ok ? gd.srv_depth.get() : nullptr /*predication*/, gd.cb_smaa_metrics.get());
 
          // Apply optional RCAS, otherwise copy SMAA directly so the cancelled resolve always produces output.
-         const bool sharpen_shaders_ready =
-            AllShadersReady(device_data.native_vertex_shaders, {kNameCopyVS}) &&
-            AllShadersReady(device_data.native_pixel_shaders, {kNameSharpenPS});
-         bool do_sharpen = g_rcas_sharpness > 0.f && sharpen_shaders_ready;
-         if (do_sharpen)
+         bool do_sharpen = g_rcas_sharpness > 0.f && PrepareRCAS(native_device, device_data);
+         // Written by the sharpen pass and then copied out, so it needs no SRV.
+         if (do_sharpen && !EnsureRGBA16FTarget(native_device, w, h, D3D11_BIND_RENDER_TARGET, &gd.rcas_out))
          {
-            if (!gd.cb_sharpen || gd.sharpen_w != w || gd.sharpen_h != h || gd.sharpen_amount != g_rcas_sharpness)
-            {
-               const float sp[4] = {(float)w, (float)h, g_rcas_sharpness, 0.f};
-               if (CreateImmutableCB(native_device, sp, sizeof(sp), gd.cb_sharpen))
-               {
-                  gd.sharpen_w = w;
-                  gd.sharpen_h = h;
-                  gd.sharpen_amount = g_rcas_sharpness;
-               }
-            }
-            // Written by the sharpen pass and then copied out, so it needs no SRV.
-            const bool rcas_target_ready =
-               EnsureRGBA16FTarget(native_device, w, h, D3D11_BIND_RENDER_TARGET, &gd.rcas_out);
-            if (!gd.cb_sharpen || !rcas_target_ready)
-               do_sharpen = false;
+            do_sharpen = false;
          }
 
          if (do_sharpen)
          {
-            auto* sharpen_vs = FindShader(device_data.native_vertex_shaders, kNameCopyVS);
-            auto* sharpen_ps = FindShader(device_data.native_pixel_shaders, kNameSharpenPS);
-            // DrawCustomPixelShader does not restore state; FullGraphics also prevents RCAS b0 leaking into HUD draws.
-            DrawStateStack<DrawStateStackType::FullGraphics> sharpen_state;
-            sharpen_state.Cache(native_device_context, device_data.uav_max_count);
-
-            ID3D11Buffer* scb = gd.cb_sharpen.get();
-            native_device_context->PSSetConstantBuffers(0, 1, &scb);
-            DrawCustomPixelShader(native_device_context, device_data.default_depth_stencil_state.get(), device_data.default_blend_state.get(), nullptr,
-               sharpen_vs, sharpen_ps, gd.smaa_out.srv.get(), gd.rcas_out.rtv.get(), w, h, false);
-
-            sharpen_state.Restore(native_device_context);
-
+            DrawRCAS(native_device_context, device_data, gd.smaa_out.srv.get(), gd.rcas_out.rtv.get(), g_rcas_sharpness);
             native_device_context->CopyResource(color_res.get(), gd.rcas_out.tex.get());
          }
          else
          {
             native_device_context->CopyResource(color_res.get(), gd.smaa_out.tex.get());
          }
-
-         // Restore native VS/PS b1; the linearize dispatch already restored its compute state.
-         ID3D11Buffer* vcb = vs_cb1_orig.get();
-         ID3D11Buffer* pcb = ps_cb1_orig.get();
-         native_device_context->VSSetConstantBuffers(1, 1, &vcb);
-         native_device_context->PSSetConstantBuffers(1, 1, &pcb);
 
          gd.smaa_applied_handles.insert(color_handle);
          device_data.has_drawn_main_post_processing = true;
