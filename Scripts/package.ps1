@@ -159,7 +159,10 @@ try {
     $OutDir = $OutDir.TrimEnd('\')
     New-Item -ItemType Directory -Path $OutDir -Force | Out-Null
     $zipPath = Join-Path $OutDir $zipName
-    Compress-Archive -Path "$tempDir\*" -DestinationPath $zipPath -Force
+    # Same archive as "Compress-Archive", just faster
+    Add-Type -AssemblyName System.IO.Compression.FileSystem
+    if (Test-Path $zipPath) { Remove-Item $zipPath -Force }
+    [IO.Compression.ZipFile]::CreateFromDirectory($tempDir, $zipPath)
     Write-Host "Packaged: $zipPath"
 } finally {
     # Only remove the unique staging directory created by this invocation.

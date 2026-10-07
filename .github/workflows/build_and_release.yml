@@ -6,21 +6,44 @@ on:
   pull_request:
     branches: [ main ]
 
+# A new push to a pull request cancels its previous run. Each push to main gets its own group, so main runs never wait for or cancel each other.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event_name == 'pull_request' && github.ref || github.run_id }}
+  cancel-in-progress: true
+
 jobs:
+  # Lists the projects each build cell compiles. Pull requests only build the games they touch,
+  # and the x64 cells are split over a few runners (see ".github/scripts/plan-build.ps1").
+  plan:
+    runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.plan.outputs.matrix }}
+      count: ${{ steps.plan.outputs.count }}
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+      with:
+        fetch-depth: 2 # on pull requests, HEAD is GitHub's merge commit and HEAD^1 the base branch
+
+    - name: Plan the build cells
+      id: plan
+      shell: pwsh
+      run: ./.github/scripts/plan-build.ps1
+
   build:
+    needs: plan
+    if: needs.plan.outputs.count != '0'
+    name: build (${{ matrix.config }}, ${{ matrix.platform }}, ${{ matrix.shard }})
     # runs-on: windows-2022
     runs-on: windows-2025-vs2026
     strategy:
-      matrix:
-        config: [Development-Debug, Development-Release, Test-Release, Publishing-Release]
-        platform: [x64, Win32]
+      matrix: ${{ fromJSON(needs.plan.outputs.matrix) }}
     steps:
     - name: Checkout code
       uses: actions/checkout@v4
       with:
         submodules: recursive
-        fetch-depth: 0
-        
+
     - name: Setup MSBuild
       uses: microsoft/setup-msbuild@v1.1.2
 
@@ -28,17 +51,38 @@ jobs:
       shell: pwsh
       run: '& "$env:VCPKG_INSTALLATION_ROOT\vcpkg.exe" integrate install'
 
-    # This requires the git directory to be added to the PATH Windows environment variables, to properly set up versioning information
-    - name: Build ReShade.sln Release
-      run: |
-        msbuild "Source\External\reshade\ReShade.sln" /p:Configuration="Release" /p:Platform="64-bit" /p:PlatformToolset=v145
-        msbuild "Source\External\reshade\ReShade.sln" /p:Configuration="Release" /p:Platform="32-bit" /p:PlatformToolset=v145
-      continue-on-error: true
-      
-    - name: Build Luma.sln ${{ matrix.config }}-${{ matrix.platform }}
+    # Only packaging needs ReShade, and only for this cell's platform
+    - name: ReShade submodule SHA
+      id: reshade_sha
+      if: matrix.config != 'Development-Debug'
       shell: pwsh
+      run: '"sha=$(git rev-parse HEAD:Source/External/reshade)" >> $env:GITHUB_OUTPUT'
+
+    - name: Cache ReShade
+      id: reshade_cache
+      if: matrix.config != 'Development-Debug'
+      uses: actions/cache@v6
+      with:
+        path: Source/External/reshade/bin/${{ matrix.platform }}/Release/ReShade*.dll
+        key: reshade-v145-${{ matrix.platform }}-${{ steps.reshade_sha.outputs.sha }}
+
+    # This requires the git directory to be added to the PATH Windows environment variables, to properly set up versioning information
+    # ReShade takes its version from "git describe --tags", so its shallow submodule needs the full history and tags first
+    - name: Build ReShade.sln Release
+      if: matrix.config != 'Development-Debug' && steps.reshade_cache.outputs.cache-hit != 'true'
       run: |
-        msbuild Luma.sln /p:Configuration=${{ matrix.config }} /p:Platform=${{ matrix.platform }} /p:DefineConstants="REMOTE_BUILD=1"
+        git -C Source/External/reshade fetch --unshallow --tags --no-recurse-submodules
+        msbuild "Source\External\reshade\ReShade.sln" /m /p:Configuration="Release" /p:Platform="${{ matrix.platform == 'x64' && '64-bit' || '32-bit' }}" /p:PlatformToolset=v145
+      continue-on-error: true
+
+    - name: Build Luma.sln ${{ matrix.config }}-${{ matrix.platform }} (${{ matrix.shard }})
+      shell: pwsh
+      env:
+        PATHS: ${{ matrix.paths }}
+      run: |
+        # A solution filter keeps the solution's configurations and project names. It's called "Luma.slnf" so "$(SolutionName)" stays "Luma".
+        ConvertTo-Json -Depth 3 @{ solution = @{ path = "Luma.sln"; projects = @($env:PATHS -split ';') } } | Set-Content Luma.slnf
+        msbuild Luma.slnf /m /p:Configuration=${{ matrix.config }} /p:Platform=${{ matrix.platform }} /p:DefineConstants="REMOTE_BUILD=1"
         if ($LASTEXITCODE -ne 0) {
           Write-Host "::warning::MSBuild reported errors for ${{ matrix.config }}-${{ matrix.platform }} - the projects that failed to compile will be excluded from packaging/release (see the 'Create ZIP' step for the exact list)."
         }
@@ -49,6 +93,9 @@ jobs:
       shell: pwsh
       # We only build publishing and test for now, development builds can be built locally by devs (with the exclusion of the Generic and Graphics Analyzer mod, which can also be used to quickly download a dev/debug environment)
       if: matrix.config == 'Publishing-Release' || matrix.config == 'Test-Release' || matrix.config == 'Development-Release'
+      env:
+        PROJECTS: ${{ matrix.projects }}
+        PATHS: ${{ matrix.paths }}
       run: |
         # Scan vcxproj files to find projects that use NGX (DLSS)
         $ngxProjects = @()
@@ -75,32 +122,19 @@ jobs:
         Write-Host "Core FAST texture projects: $($coreFastNoiseProjects -join ', ')"
         Write-Host "DXP projects: $($dxpProjects -join ', ')"
 
-        # Expected addons for this cell (from Luma.sln) - missing ones failed to build
-        $solCfg = "${{ matrix.config }}|${{ matrix.platform }}"
-        $slnProjects = @{}
-        $projectLinePattern = '^Project\("\{[^"]+\}"\) = "([^"]+)", "([^"]+\.vcxproj)", "\{([^"]+)\}"'
-        foreach ($line in (Get-Content "Luma.sln")) {
-          if ($line -match $projectLinePattern) {
-            $slnProjects[$Matches[3]] = @{ Name = $Matches[1]; Vcxproj = $Matches[2] }
-          }
-        }
-        $buildLinePattern = '^\s*\{([^}]+)\}\.' + [regex]::Escape($solCfg) + '\.Build\.0\s*=\s*(.+)$'
+        # Expected addons for this cell (the projects it built, listed by the plan job) - missing ones failed to build
+        $cellProjects = $env:PROJECTS -split ';'
+        $cellPaths = $env:PATHS -split ';'
         $expectedAddons = @()
-        foreach ($line in (Get-Content "Luma.sln")) {
-          if ($line -match $buildLinePattern) {
-            $guid = $Matches[1]
-            $mappedCfg = $Matches[2].Trim()
-            if ($mappedCfg -ne $solCfg -or -not $slnProjects.ContainsKey($guid)) { continue }
-            $proj = $slnProjects[$guid]
-            $vcxPath = Join-Path (Get-Location) $proj.Vcxproj
-            if (-not (Test-Path $vcxPath)) { continue }
-            $vcxContent = Get-Content $vcxPath -Raw
-            if ($vcxContent -match '<ConfigurationType>StaticLibrary</ConfigurationType>') { continue }
-            $projName = $proj.Name
-            if ($vcxContent -match '<ProjectName>([^<]+)</ProjectName>') { $projName = $Matches[1] }
-            $projName = $projName -replace '&amp;', '&' -replace '&lt;', '<' -replace '&gt;', '>' -replace '&quot;', '"'
-            $expectedAddons += "Luma-$projName.addon"
-          }
+        for ($i = 0; $i -lt $cellPaths.Count; $i++) {
+          $vcxPath = Join-Path (Get-Location) $cellPaths[$i]
+          if (-not (Test-Path $vcxPath)) { continue }
+          $vcxContent = Get-Content $vcxPath -Raw
+          if ($vcxContent -match '<ConfigurationType>StaticLibrary</ConfigurationType>') { continue }
+          $projName = $cellProjects[$i]
+          if ($vcxContent -match '<ProjectName>([^<]+)</ProjectName>') { $projName = $Matches[1] }
+          $projName = $projName -replace '&amp;', '&' -replace '&lt;', '<' -replace '&gt;', '>' -replace '&quot;', '"'
+          $expectedAddons += "Luma-$projName.addon"
         }
         Write-Host "Projects expected for this configuration: $($expectedAddons.Count)"
         
@@ -205,10 +239,11 @@ jobs:
       if: (matrix.config == 'Publishing-Release' || matrix.config == 'Test-Release' || matrix.config == 'Development-Release') && steps.create_zip.outputs.skip_upload != 'true'
       uses: actions/upload-artifact@v4
       with:
-        name: Package-${{ matrix.config }}-${{ matrix.platform }}
+        name: Package-${{ matrix.config }}-${{ matrix.platform }}-${{ matrix.shard }}
         #path: ${{ steps.create_zip.outputs.zipfile }}
         path: |
           Luma-*.zip
+        compression-level: 0 # the zips are already compressed
 
   release:
     if: github.event_name == 'push' && github.ref == 'refs/heads/main' # Don't run this on PRs but only on push, otherwise it will fail to upload release files
