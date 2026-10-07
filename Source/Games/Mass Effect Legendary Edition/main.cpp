@@ -391,7 +391,7 @@ public:
       native_shaders_definitions.emplace(kNameSMAALinearizeCS,
          ShaderDefinition("Luma_MELE_SMAALinearize", reshade::api::pipeline_subobject_type::compute_shader));
       native_shaders_definitions.emplace(kNameSharpenPS,
-         ShaderDefinition{"Luma_MELE_Sharpen", reshade::api::pipeline_subobject_type::pixel_shader, nullptr, "sharpen_ps"});
+         ShaderDefinition{"Luma_RCAS_PS", reshade::api::pipeline_subobject_type::pixel_shader, nullptr, "sharpen_ps"});
 
       // Four XeGTAO compute entries share one source; XE_GTAO_FINAL_APPLY selects the game's R8_UNORM target.
       native_shaders_definitions.emplace(kNameGTAOPrefilterCS,

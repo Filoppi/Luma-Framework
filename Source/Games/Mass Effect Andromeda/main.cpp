@@ -457,7 +457,7 @@ public: // OnMapBufferRegion is referenced from DllMain (DLL_PROCESS_DETACH unre
 #if ENABLE_SMAA
       // RCAS sharpening PS for the SMAA output (reuses core's "Copy VS" fullscreen vertex shader).
       native_shaders_definitions.emplace(CompileTimeStringHash("MEA Sharpen PS"),
-         ShaderDefinition{"Luma_MEA_Sharpen", reshade::api::pipeline_subobject_type::pixel_shader, nullptr, "sharpen_ps"});
+         ShaderDefinition{"Luma_RCAS_PS", reshade::api::pipeline_subobject_type::pixel_shader, nullptr, "sharpen_ps"});
 #endif
 #if ENABLE_SR
       // Format-converting SR output hand-off: the game's "Buffer Format" setting can switch the TAA resolve
