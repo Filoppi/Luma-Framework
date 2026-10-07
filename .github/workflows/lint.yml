@@ -22,6 +22,7 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
           style: file
+          tidy-checks: '-*' # clang-tidy has no compile database here, so it only reports noise
           files-changed-only: true # should be set to true initially, but false for testing
           thread-comments: false
           ignore: 'Source/External/** | **/safetyhook* | **/Zydis*'
