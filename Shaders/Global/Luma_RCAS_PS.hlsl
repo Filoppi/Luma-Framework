@@ -1,5 +1,5 @@
-// RCAS sharpening for the SMAA output, run after the neighborhood blend. paperWhite = 1.0, the sharpness slider is
-// the knob, and RCAS_LIMIT bounds the lobe so bright pixels don't over-sharpen.
+// RCAS sharpening pass drawn by Core's "DrawRCAS()" (e.g. on the SMAA output). paperWhite = 1.0, the sharpness slider
+// is the knob, and RCAS_LIMIT bounds the lobe so bright pixels don't over-sharpen.
 
 #include "../Includes/RCAS.hlsl"
 
