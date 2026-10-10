@@ -112,6 +112,19 @@ static float2 XeGTAO_SourcePixelSize; // 1 / tex0's size, set first by each entr
 #define XE_GTAO_DENOISE_OUTPUT_TYPE unorm float2
 #endif
 
+// Define "XE_GTAO_NO_DENOISE" if the game filters the AO itself and doesn't dispatch "denoise_pass_cs".
+// With "XE_GTAO_FINAL_APPLY", the main pass then writes the final value. Debug view 3 only exists in the denoise pass.
+#if XE_GTAO_NO_DENOISE && XE_GTAO_FINAL_APPLY
+#define XE_GTAO_MAIN_PASS_OUTPUT_TYPE    XE_GTAO_FINAL_OUTPUT_TYPE
+#define XE_GTAO_MAIN_PASS_DEBUG_VALUE(v) XE_GTAO_ENCODE_FINAL(v)
+// The same value "XeGTAO_Denoise()" writes, without the blur. "saturate(saturate(v / scale) * scale)" is just "saturate(v)".
+#define XE_GTAO_MAIN_PASS_VALUE(visibility, edges) XE_GTAO_ENCODE_FINAL(XE_GTAO_FINAL_VALUE(saturate(visibility)))
+#else
+#define XE_GTAO_MAIN_PASS_OUTPUT_TYPE              unorm float2
+#define XE_GTAO_MAIN_PASS_DEBUG_VALUE(v)           float2(v, 1.0)
+#define XE_GTAO_MAIN_PASS_VALUE(visibility, edges) float2(saturate((visibility) / XE_GTAO_OCCLUSION_TERM_SCALE), edges)
+#endif
+
 // This is also a good place to do non-linear depth conversion for cases where one wants the 'radius' (effectively the threshold between near-field and far-field GI),
 // is required to be non-linear (i.e. very large outdoors environments).
 float XeGTAO_ClampDepth(float depth)
@@ -246,6 +259,9 @@ float XeGTAO_PackEdges(float4 edgesLRTB)
    return dot(edgesLRTB, float4(64.0 / 255.0, 16.0 / 255.0, 4.0 / 255.0, 1.0 / 255.0));
 }
 
+// Define "XE_GTAO_CUSTOM_VIEWSPACE_POSITION" to replace this with the game's own reconstruction, with the same signature.
+// "NDC_TO_VIEW_MUL" is still needed for the screen space radius.
+#if !XE_GTAO_CUSTOM_VIEWSPACE_POSITION
 // Inputs are screen XY and viewspace depth, output is viewspace position
 float3 XeGTAO_ComputeViewspacePosition(float2 screenPos, float viewspaceDepth)
 {
@@ -254,6 +270,7 @@ float3 XeGTAO_ComputeViewspacePosition(float2 screenPos, float viewspaceDepth)
    ret.z = viewspaceDepth;
    return ret;
 }
+#endif
 
 #if XE_GTAO_GENERATE_NORMALS
 // Depth-derived view-space normal (from the Intel reference; same convention as ComputeViewspacePosition,
@@ -287,7 +304,7 @@ float XeGTAO_FastACos(float inX)
    return inX >= 0 ? res : 3.141593 - res;
 }
 
-void XeGTAO_MainPass(uint2 pixCoord, float2 localNoise, float3 viewspaceNormal, Texture2D sourceViewspaceDepth, SamplerState depthSampler, RWTexture2D<unorm float2> outWorkingAOTermAndEdges)
+void XeGTAO_MainPass(uint2 pixCoord, float2 localNoise, float3 viewspaceNormal, Texture2D sourceViewspaceDepth, SamplerState depthSampler, RWTexture2D<XE_GTAO_MAIN_PASS_OUTPUT_TYPE> outWorkingAOTermAndEdges)
 {
    float2 normalizedScreenPos = (pixCoord + 0.5) * VIEWPORT_PIXEL_SIZE;
 
@@ -313,12 +330,12 @@ void XeGTAO_MainPass(uint2 pixCoord, float2 localNoise, float3 viewspaceNormal, 
    // values through when DebugViewRT > 0).
    if (DebugViewRT > 0.5 && DebugViewRT < 1.5) // 1 = depth gradient (proves live depth + linearization/scale)
    {
-      outWorkingAOTermAndEdges[pixCoord] = float2(saturate(frac(log2(max(viewspaceZ, 1e-6)))), 1.0);
+      outWorkingAOTermAndEdges[pixCoord] = XE_GTAO_MAIN_PASS_DEBUG_VALUE(saturate(frac(log2(max(viewspaceZ, 1e-6)))));
       return;
    }
    if (DebugViewRT >= 3.5 && DebugViewRT < 4.5) // 4 = edges
    {
-      outWorkingAOTermAndEdges[pixCoord] = float2(dot(edgesLRTB, 0.25), 1.0);
+      outWorkingAOTermAndEdges[pixCoord] = XE_GTAO_MAIN_PASS_DEBUG_VALUE(dot(edgesLRTB, 0.25));
       return;
    }
 #endif
@@ -347,7 +364,7 @@ void XeGTAO_MainPass(uint2 pixCoord, float2 localNoise, float3 viewspaceNormal, 
 #if DEVELOPMENT
    if (DebugViewRT >= 1.5 && DebugViewRT < 2.5) // 2 = normals view-facing term (smooth per-surface shading = correct decode)
    {
-      outWorkingAOTermAndEdges[pixCoord] = float2(saturate(abs(dot(viewspaceNormal, viewVec))), 1.0);
+      outWorkingAOTermAndEdges[pixCoord] = XE_GTAO_MAIN_PASS_DEBUG_VALUE(saturate(abs(dot(viewspaceNormal, viewVec))));
       return;
    }
 #endif
@@ -509,8 +526,7 @@ void XeGTAO_MainPass(uint2 pixCoord, float2 localNoise, float3 viewspaceNormal, 
       XE_GTAO_ADJUST_VISIBILITY(visibility, viewspaceZ)
    }
 
-   visibility = saturate(visibility / XE_GTAO_OCCLUSION_TERM_SCALE);
-   outWorkingAOTermAndEdges[pixCoord] = float2(visibility, edges);
+   outWorkingAOTermAndEdges[pixCoord] = XE_GTAO_MAIN_PASS_VALUE(visibility, edges);
 }
 
 void XeGTAO_DecodeGatherPartial(float4 packedValue, out float outDecoded[4])
@@ -667,7 +683,7 @@ RWTexture2D<float> out_working_depth_mip1 : register(u1);
 RWTexture2D<float> out_working_depth_mip2 : register(u2);
 RWTexture2D<float> out_working_depth_mip3 : register(u3);
 RWTexture2D<float> out_working_depth_mip4 : register(u4);
-RWTexture2D<unorm float2> ao_term_and_edges : register(u0);
+RWTexture2D<XE_GTAO_MAIN_PASS_OUTPUT_TYPE> ao_term_and_edges : register(u0);
 
 RWTexture2D<XE_GTAO_DENOISE_OUTPUT_TYPE> final_output : register(u0);
 
