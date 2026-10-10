@@ -748,6 +748,7 @@ namespace
        // Sadly most games encoded with sRGB (or used linear sRGB buffers, similar thing), so that's the default here
        {"VANILLA_ENCODING_TYPE", '0', true, DEVELOPMENT ? false : true, "0 - sRGB\n1 - Gamma 2.2"},
        {"GAMMA_CORRECTION_TYPE", '1', true, false, "(HDR only) Emulates a specific SDR transfer function\nThis is best left to \"1\" (Gamma 2.2) unless you have crushed blacks or overly saturated colors\n0 - sRGB\n1 - Gamma 2.2\n2 - sRGB (color hues) with gamma 2.2 luminance (corrected by channel)\n3 - sRGB (color hues) with gamma 2.2 luminance (corrected by luminance)\n4 - Gamma 2.2 (corrected by luminance) with per channel correction chrominance"},
+      {"SDR_OUTPUT_TRANSFORM", '0', true, false, "What the SDR display composition does with the game's final SDR image.\nHistorically it always decoded sRGB to linear, which is only correct when the swapchain container encodes on write (\"_SRGB\" views, scRGB) - for a plain UNORM container (R8G8B8A8_UNORM, R10G10B10A2_UNORM, ...) the OS applies the sRGB transfer function itself, so the image arrives one decode too dark (over contrasted, over saturated).\n0 - Decode sRGB to linear (legacy, correct for scRGB and for SDR-in-HDR on a scRGB container)\n1 - Pass through untouched (correct for any plain UNORM container, and for \"_SRGB\" containers whose values are already linear)\nOnly affects SDR output (Display Mode 0).", 1},
        {"GAMUT_MAPPING_TYPE", '0', true, DEVELOPMENT ? false : true, "The type of gamut mapping that is needed by the game.\nIf rendering and post processing don't generate any colors beyond the target gamut, there's no need to do gamut mapping.\n0 - None\n1 - Auto (SDR/HDR)\n2 - SDR (BT.709)\n3 - HDR (BT.2020)"},
        {"UI_DRAW_TYPE", '0', true, DEVELOPMENT ? false : true, "Describes how the UI draws in\n0 - Raw (original linear to linear or gamma to gamma draws) (no custom UI paper white control)\n1 - Direct Custom (gamma to linear adapted blends)\n2 - Direct (inverse scene brightness draws)\n3 - Separate (renders the UI on a separate texture, allows tonemapping of UI background)", 3},
 #if DEVELOPMENT
@@ -764,6 +765,7 @@ namespace
    constexpr uint32_t EARLY_DISPLAY_ENCODING_HASH = char_ptr_crc32("EARLY_DISPLAY_ENCODING");
    constexpr uint32_t VANILLA_ENCODING_TYPE_HASH = char_ptr_crc32("VANILLA_ENCODING_TYPE");
    constexpr uint32_t GAMMA_CORRECTION_TYPE_HASH = char_ptr_crc32("GAMMA_CORRECTION_TYPE");
+   constexpr uint32_t SDR_OUTPUT_TRANSFORM_HASH = char_ptr_crc32("SDR_OUTPUT_TRANSFORM");
    constexpr uint32_t GAMUT_MAPPING_TYPE_HASH = char_ptr_crc32("GAMUT_MAPPING_TYPE");
    constexpr uint32_t UI_DRAW_TYPE_HASH = char_ptr_crc32("UI_DRAW_TYPE");
    constexpr uint32_t TEST_SDR_HDR_SPLIT_VIEW_MODE_NATIVE_IMPL_HASH = char_ptr_crc32("TEST_SDR_HDR_SPLIT_VIEW_MODE_NATIVE_IMPL");
