@@ -43,9 +43,21 @@ previous-frame or merely last-observed inputs; debug snapshots are display-only.
 
 Preserve native double-to-float conversion before jitter scaling: UV jitter is
 `float(projection[8]) * 0.5f`, `float(projection[9]) * -0.5f`.
-SR pixel jitter is `uv_x * render_width`, `-uv_y * render_height`.
+This is already top-left texture-space displacement. SR pixel jitter is
+`uv_x * render_width`, `uv_y * render_height`; do not flip Y a second time.
 Near/FOV decoding preserves the renderer's float operation order and rejects invalid matrices.
-The game's four-phase jitter is unchanged; no Halton override is implemented.
+
+Halton(2,3) is enabled automatically while SR is requested. Development/Test retain a nonpersisted
+**Jitter Pattern** comparison slider, defaulting to Halton; Publishing has no jitter setting.
+Halton replaces the per-call XY translation in the native jittered-view builder, before the
+renderer derives projections, inverses, providers, and history, using clip translation
+`(2 * jitter_x / width, -2 * jitter_y / height)`. The global four-entry table and
+native phase indices are untouched. SR still consumes captured applied jitter, not generated values.
+The period is `ceil(8 * max(output_height / render_height, 1)^2)`, limited to 8–128 samples.
+Phase advances with the native render-frame counter; repeated calls in one frame reuse the phase.
+Toggle/configuration changes, native camera-history invalidation, and scene gaps restart it and
+request an SR reset. Unsupported hooks or a detected applied-projection mismatch retain native
+jitter. The applied-projection guard remains active in all builds; SR consumes only live captures.
 
 Backend settings: linear HDR, pre-exposure 1, auto exposure off, normal depth, non-jittered MVs,
 MV scales equal render width/height, dynamic resolution off, far plane 1000, FSR sharpness 0.
@@ -84,4 +96,6 @@ Install hooks outside `DllMain`, pin modules before activation, and retain tramp
 detach only invalidates capture. Do not weaken these lifetimes or draw/state restoration ordering.
 
 Development/Test expose bounded `QB native inputs:` logs and display-only snapshots.
+Halton logs hook installation, debug pattern changes, and faults; temporary phase/history
+telemetry is not retained. No diagnostics read GPU buffers.
 Changes to renderer ABI, transitions, or shader reloads require in-game validation.

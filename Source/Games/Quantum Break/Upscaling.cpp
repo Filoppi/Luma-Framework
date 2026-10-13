@@ -241,6 +241,16 @@ namespace QuantumBreakUpscaling
 #if ENABLE_SR
       ImGui::NewLine();
       ImGui::Text("Super Resolution");
+      int jitter_pattern = NativeHooks::IsHaltonEnabled() ? 1 : 0;
+      if (ImGui::SliderInt("Jitter Pattern", &jitter_pattern, 0, 1, jitter_pattern == 0 ? "Native" : "Halton"))
+      {
+         NativeHooks::SetHaltonEnabled(jitter_pattern != 0);
+         device_data.force_reset_sr = true;
+      }
+      if (ImGui::IsItemHovered())
+      {
+         ImGui::SetTooltip("Halton is enabled by default for upscaling. Native is available for debug comparisons.\nSwitching patterns resets SR history.");
+      }
       if (ImGui::Button("Reset SR History"))
       {
          device_data.force_reset_sr = true;
@@ -516,6 +526,8 @@ namespace QuantumBreakUpscaling
                {motion_vectors_desc.Width, motion_vectors_desc.Height}, cached_size, temporal_size);
             if (depth_source != SRDepthSource::Unavailable && output_desc.Width != 0u && output_desc.Height != 0u)
             {
+               const float ratio = (std::max)(static_cast<float>(output_desc.Height) / static_cast<float>(source_desc.Height), 1.f);
+               NativeHooks::SetHaltonPhases(static_cast<uint32_t>(std::clamp(std::ceil(8.f * ratio * ratio), 8.f, 128.f)));
                const bool use_cached_depth = depth_source == SRDepthSource::Cached;
                sr_depth_resource = use_cached_depth ? data.sr_clip_depth : temporal_resolve_depth_resource;
                depth_desc = use_cached_depth ? data.sr_clip_depth_desc : temporal_resolve_depth_desc;
@@ -553,6 +565,7 @@ namespace QuantumBreakUpscaling
          result.stop_processing = action == TemporalInputAction::Skip;
          return result;
       }
+      if (NativeHooks::ConsumeHaltonReset()) device_data.force_reset_sr = true;
       if (device_data.sr_type == SR::Type::DLSS && data.dlss_scene_warmup_remaining > 0u)
       {
          // Count valid resolves, not seconds. Keep game TAA and an empty DLSS history during warmup.
@@ -571,9 +584,9 @@ namespace QuantumBreakUpscaling
       const uint32_t render_height = source_desc.Height;
       const uint32_t output_width = output_desc.Width;
       const uint32_t output_height = output_desc.Height;
-      // Current native jitter is UV-space; convert to SR render pixels and flip Y.
+      // DecodeNativeJitter already converts clip-space Y to top-left UV; only scale to pixels.
       const float pixel_jitter_x = native_x * static_cast<float>(render_width);
-      const float pixel_jitter_y = -native_y * static_cast<float>(render_height);
+      const float pixel_jitter_y = native_y * static_cast<float>(render_height);
 #if DEVELOPMENT || TEST
       data.debug_inputs.pixel_jitter_x = pixel_jitter_x;
       data.debug_inputs.pixel_jitter_y = pixel_jitter_y;

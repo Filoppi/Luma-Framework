@@ -27,13 +27,32 @@ namespace QuantumBreakUpscaling::NativeHooks
       using ResolveFunction = void(__fastcall*)(void*, const void*, void*, void*, void*);
       using SceneFunction = void(__fastcall*)(void*, const void*, void*, void*);
       using ViewUseFunction = void(__fastcall*)(const void*);
+      using JitterViewFunction = void(__fastcall*)(void*, const void*, const double*);
       ResolveFunction original_resolves[2] = {};
       SceneFunction original_scene = nullptr;
       ViewUseFunction original_view_use = nullptr;
+      JitterViewFunction original_jitter_view = nullptr;
       std::atomic<Status> temporal_status = Status::NotInstalled;
       std::atomic<Status> scene_status = Status::NotInstalled;
+      std::atomic<Status> halton_status = Status::NotInstalled;
       NativeJitterState capture_state;
       uintptr_t renderer_base = 0u;
+      // Bit 0 enables Halton; bits 1..8 hold its period. Upper bits invalidate sequences.
+      constexpr uint64_t halton_enabled_bit = 1u;
+      constexpr uint64_t halton_phases_mask = 0x1feu;
+      constexpr uint64_t halton_config_mask = halton_enabled_bit | halton_phases_mask;
+      constexpr uint64_t halton_generation_step = 0x200u;
+      std::atomic<uint64_t> halton_config = halton_enabled_bit | (8u << 1u);
+      std::atomic<bool> halton_reset_pending = false;
+      std::atomic<bool> halton_faulted = false;
+      thread_local HaltonPhaseState halton_phase;
+
+      struct HaltonSample
+      {
+         uintptr_t view = 0u;
+         float x = 0.f;
+         float y = 0.f;
+      };
 
       struct TemporalScope
       {
@@ -46,13 +65,26 @@ namespace QuantumBreakUpscaling::NativeHooks
          NativeSceneAssociation association;
          NativeSceneCamera camera;
          uintptr_t renderer = 0u;
+         uintptr_t source_view = 0u;
          uintptr_t active_view = 0u;
          uintptr_t depth_resource = 0u;
          uint64_t depth_area = 0u;
          uintptr_t motion_resource = 0u;
+         HaltonSample halton;
       };
       thread_local TemporalScope current_temporal;
       thread_local SceneScope current_scene;
+
+      void ChangeHaltonConfig(uint64_t mask, uint64_t value, bool invalidate = false) noexcept
+      {
+         uint64_t previous = halton_config.load(std::memory_order_acquire);
+         while (invalidate || (previous & mask) != value)
+         {
+            const uint64_t next = ((previous & halton_config_mask) & ~mask) | value |
+                                  ((previous & ~halton_config_mask) + halton_generation_step);
+            if (halton_config.compare_exchange_weak(previous, next, std::memory_order_acq_rel, std::memory_order_acquire)) return;
+         }
+      }
 
       bool CopyViewMatrices(const void* view, double* projection, double* inverse) noexcept
       {
@@ -85,6 +117,123 @@ namespace QuantumBreakUpscaling::NativeHooks
          }
       }
 
+      bool CopyJitterTransform(const double* input, const void* source, double* transform,
+         uint32_t& frame, uint32_t& width, uint32_t& height, bool& history_valid) noexcept
+      {
+         if (input == nullptr) return false;
+         __try
+         {
+            const auto* base = reinterpret_cast<const uint8_t*>(renderer_base);
+            if (base[0x4748a1u] == 0u) return false; // No jittered scene view when native SSAA is off.
+            const auto* size = reinterpret_cast<const int32_t*>(base + 0x49ae38u);
+            if (size[0] <= 0 || size[1] <= 0) return false;
+            frame = *reinterpret_cast<const uint32_t*>(base + 0x49adf4u);
+            width = static_cast<uint32_t>(size[0]);
+            height = static_cast<uint32_t>(size[1]);
+            history_valid = *(static_cast<const uint8_t*>(source) + 0x4b0u) != 0u;
+            std::memcpy(transform, input, sizeof(double) * 16u);
+            return true;
+         }
+         __except (EXCEPTION_EXECUTE_HANDLER)
+         {
+            return false;
+         }
+      }
+
+      void __fastcall CaptureJitterView(void* output, const void* source, const double* native_transform)
+      {
+         const uintptr_t caller = reinterpret_cast<uintptr_t>(_ReturnAddress());
+         auto& scene = current_scene;
+         const uint64_t token = capture_state.Token();
+         const uint64_t config = halton_config.load(std::memory_order_acquire);
+         const bool enabled = (config & halton_enabled_bit) != 0u && NativeJitterState::IsActive(token) &&
+                              NativeJitterState::IsPreferred(token) && !halton_faulted.load(std::memory_order_acquire);
+         const bool current = caller == renderer_base + 0xffd70u && scene.association.live &&
+                              scene.association.thread == GetCurrentThreadId() && scene.association.token == token &&
+                              !scene.association.renderer_rejected && source != nullptr && output != nullptr &&
+                              scene.source_view == reinterpret_cast<uintptr_t>(source);
+         const auto use_native = [&]()
+         {
+            if (current)
+            {
+               scene.halton = {};
+               if (halton_phase.initialized)
+               {
+                  halton_phase.initialized = false;
+                  halton_reset_pending.store(true, std::memory_order_release);
+               }
+            }
+            original_jitter_view(output, source, native_transform);
+         };
+         if (!enabled || !current || halton_status.load(std::memory_order_acquire) != Status::Installed)
+         {
+            use_native();
+            return;
+         }
+
+         alignas(16) std::array<double, 16> transform;
+         std::array<double, 16> projection;
+         std::array<double, 16> inverse;
+         HaltonSample sample;
+         uint32_t frame = 0u;
+         uint32_t width = 0u;
+         uint32_t height = 0u;
+         bool history_valid = false;
+         if (!(CopyJitterTransform(native_transform, source, transform.data(), frame, width, height, history_valid) &&
+                CopyViewMatrices(static_cast<const uint8_t*>(source) + 0x10u, projection.data(), inverse.data())))
+         {
+            use_native();
+            return;
+         }
+         // This call accepts identity + XY translation, not an arbitrary camera transformation.
+         for (size_t i = 0u; i < transform.size(); ++i)
+         {
+            if (!std::isfinite(transform[i]) || (i != 12u && i != 13u && transform[i] != (i % 5u == 0u ? 1.0 : 0.0)))
+            {
+               use_native();
+               return;
+            }
+         }
+         NativeSceneCamera camera;
+         if (!DecodeNativeSceneCamera(projection, inverse, camera))
+         {
+            use_native();
+            return;
+         }
+         const uint32_t phases = static_cast<uint32_t>((config & halton_phases_mask) >> 1u);
+         if (halton_phase.Update(scene.renderer, config, frame, width, height, phases, history_valid))
+         {
+            halton_reset_pending.store(true, std::memory_order_release);
+         }
+         const uint32_t index = halton_phase.index;
+         // Top-left pixel jitter becomes clip translation with the opposite Y sign.
+         transform[12] = static_cast<double>((2.f * NativeHaltonSequence(index, 2u)) / static_cast<float>(width));
+         transform[13] = static_cast<double>(-(2.f * NativeHaltonSequence(index, 3u)) / static_cast<float>(height));
+         DecodeNativeJitter(projection[8] + projection[11] * transform[12],
+            projection[9] + projection[11] * transform[13], sample.x, sample.y);
+         sample.view = reinterpret_cast<uintptr_t>(output) + 0x10u;
+         scene.halton = sample;
+         // Let the renderer derive projection/inverse/providers and history from this local value.
+         original_jitter_view(output, source, transform.data());
+      }
+
+      void VerifyAppliedHalton(NativeJitterSample& jitter)
+      {
+         const auto& expected = current_scene.halton;
+         if (expected.view == 0u || expected.view != current_temporal.view || !jitter.valid) return;
+         const bool matches = NativeCameraValueMatches(jitter.x, expected.x, 1e-9f) &&
+                              NativeCameraValueMatches(jitter.y, expected.y, 1e-9f);
+         if (!matches)
+         {
+            // Do not keep altering projections if the supported call stopped producing our input.
+            jitter.valid = false;
+            if (!halton_faulted.exchange(true, std::memory_order_acq_rel))
+            {
+               reshade::log::message(reshade::log::level::warning, "QB Halton: applied projection mismatch; further overrides disabled, native jitter retained next scene.");
+            }
+         }
+      }
+
       template <size_t Path>
       void __fastcall CaptureResolve(void* self, const void* view, void* output, void* color, void* depth)
       {
@@ -106,6 +255,7 @@ namespace QuantumBreakUpscaling::NativeHooks
             {
                sample.valid = DecodeNativeJitter(projection[8], projection[9], sample.x, sample.y);
                DecodeNativeSceneCamera(projection, inverse, current_temporal.camera);
+               VerifyAppliedHalton(sample);
             }
          }
          // Path 1 hides its enclosing sample; nested path 0 restores it only until caller return.
@@ -122,6 +272,7 @@ namespace QuantumBreakUpscaling::NativeHooks
             a.token = capture_state.Token();
             a.thread = GetCurrentThreadId();
             current_scene.renderer = reinterpret_cast<uintptr_t>(self);
+            current_scene.source_view = reinterpret_cast<uintptr_t>(view);
             bool rejected = true;
             a.renderer_rejected = !CopyRendererReject(self, rejected) || rejected;
          }
@@ -333,6 +484,51 @@ namespace QuantumBreakUpscaling::NativeHooks
          reshade::log::message(reshade::log::level::info, "QB native inputs: scene hooks installed; camera/jitter primary without CB0/CB1 byte capture on verified live scenes.");
       }
 
+      void InstallHalton(HMODULE module)
+      {
+         Status expected = Status::NotInstalled;
+         if (!halton_status.compare_exchange_strong(expected, Status::Installing, std::memory_order_acq_rel)) return;
+         const auto* image = reinterpret_cast<const uint8_t*>(module);
+         constexpr uint8_t build_view[] = {0x48, 0x89, 0x5c, 0x24, 0x08, 0x48, 0x89, 0x6c, 0x24, 0x10, 0x48, 0x89, 0x74, 0x24, 0x18, 0x57};
+         constexpr uint8_t build_call[] = {0x4c, 0x8d, 0x44, 0x24, 0x50, 0x48, 0x8b, 0xd6, 0x48, 0x8d, 0x4d, 0xe0, 0xe8, 0x90, 0x27, 0x05, 0x00};
+         constexpr uint8_t frame_increment[] = {0xff, 0x05, 0xbc, 0x2e, 0x3a, 0x00};
+         constexpr uint8_t history_copy[] = {0x48, 0x8b, 0x42, 0x10, 0x48, 0x89, 0x41, 0x10, 0x48, 0x8b, 0x42, 0x18, 0x48, 0x89, 0x41, 0x18};
+         const bool matches = std::memcmp(image + 0x152500u, build_view, sizeof(build_view)) == 0 &&
+                              std::memcmp(image + 0xffd5fu, build_call, sizeof(build_call)) == 0 &&
+                              std::memcmp(image + 0xf7f32u, frame_increment, sizeof(frame_increment)) == 0 &&
+                              std::memcmp(image + 0x10b3e0u, history_copy, sizeof(history_copy)) == 0;
+         if (!matches)
+         {
+            halton_status.store(Status::UnsupportedRenderer, std::memory_order_release);
+            reshade::log::message(reshade::log::level::warning, "QB Halton: producer layout unsupported; native jitter retained.");
+            return;
+         }
+         void* target = reinterpret_cast<void*>(renderer_base + 0x152500u);
+         void* original = nullptr;
+         if (MH_CreateHook(target, reinterpret_cast<void*>(&CaptureJitterView), &original) != MH_OK)
+         {
+            halton_status.store(Status::HookFailed, std::memory_order_release);
+            reshade::log::message(reshade::log::level::warning, "QB Halton: producer hook creation failed; native jitter retained.");
+            return;
+         }
+         original_jitter_view = reinterpret_cast<JitterViewFunction>(original);
+         // Scene prerequisites already pinned both modules. Publish the trampoline before activation.
+         if (MH_QueueEnableHook(target) != MH_OK)
+         {
+            MH_RemoveHook(target);
+            halton_status.store(Status::HookFailed, std::memory_order_release);
+            return;
+         }
+         if (MH_ApplyQueued() != MH_OK)
+         {
+            halton_status.store(Status::HookFailed, std::memory_order_release);
+            reshade::log::message(reshade::log::level::warning, "QB Halton: activation failed; pass-through trampoline retained until exit.");
+            return;
+         }
+         halton_status.store(Status::Installed, std::memory_order_release);
+         reshade::log::message(reshade::log::level::info, "QB Halton: producer hook installed; enabled for upscaling; native table and phase indices untouched.");
+      }
+
       bool IsCurrentScene() noexcept
       {
          const auto& a = current_scene.association;
@@ -344,13 +540,12 @@ namespace QuantumBreakUpscaling::NativeHooks
 
    void TryInstall()
    {
-      if (temporal_status.load(std::memory_order_acquire) != Status::NotInstalled &&
-          (temporal_status.load(std::memory_order_acquire) != Status::Installed ||
-             scene_status.load(std::memory_order_acquire) != Status::NotInstalled))
-      {
-         // Both installation attempts are process-lifetime decisions.
-         return;
-      }
+      const auto temporal = temporal_status.load(std::memory_order_acquire);
+      const auto scene = scene_status.load(std::memory_order_acquire);
+      const bool pending = temporal == Status::NotInstalled ||
+                           (temporal == Status::Installed && scene == Status::NotInstalled) ||
+                           (scene == Status::Installed && halton_status.load(std::memory_order_acquire) == Status::NotInstalled);
+      if (!pending) return; // Installation attempts are process-lifetime decisions.
       const auto module = GetModuleHandleW(L"renderer_x64_f.dll");
       if (module == nullptr) return;
       if (temporal_status.load(std::memory_order_acquire) == Status::NotInstalled)
@@ -362,6 +557,10 @@ namespace QuantumBreakUpscaling::NativeHooks
       {
          InstallScene(module);
       }
+      if (scene_status.load(std::memory_order_acquire) == Status::Installed)
+      {
+         InstallHalton(module);
+      }
    }
 
    void SetActive(bool active) noexcept
@@ -371,6 +570,17 @@ namespace QuantumBreakUpscaling::NativeHooks
    void Reset() noexcept
    {
       capture_state.Reset();
+      ChangeHaltonConfig(0u, 0u, true);
+   }
+
+   void SetHaltonPhases(uint32_t phases) noexcept
+   {
+      ChangeHaltonConfig(halton_phases_mask, static_cast<uint64_t>(std::clamp(phases, 8u, 128u)) << 1u);
+   }
+
+   bool ConsumeHaltonReset() noexcept
+   {
+      return halton_reset_pending.exchange(false, std::memory_order_acq_rel);
    }
 
    void RecordDepth(uintptr_t resource, uint32_t width, uint32_t height) noexcept
@@ -413,6 +623,18 @@ namespace QuantumBreakUpscaling::NativeHooks
    }
 
 #if DEVELOPMENT || TEST
+   bool IsHaltonEnabled() noexcept
+   {
+      return (halton_config.load(std::memory_order_acquire) & halton_enabled_bit) != 0u;
+   }
+
+   void SetHaltonEnabled(bool enabled) noexcept
+   {
+      ChangeHaltonConfig(halton_enabled_bit, enabled ? halton_enabled_bit : 0u);
+      if (enabled) halton_faulted.store(false, std::memory_order_release);
+      reshade::log::message(reshade::log::level::info, enabled ? "QB Halton: MODE requested=Halton." : "QB Halton: MODE requested=Native (debug comparison).");
+   }
+
    const char* StatusText() noexcept
    {
       switch (temporal_status.load(std::memory_order_acquire))

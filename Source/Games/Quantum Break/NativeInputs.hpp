@@ -96,6 +96,55 @@ namespace QuantumBreakUpscaling
       return std::isfinite(x) && std::isfinite(y);
    }
 
+   constexpr float NativeHaltonSequence(uint32_t index, uint32_t base) noexcept
+   {
+      ++index; // Skip the biased all-zero radical inverse, matching Core's SR::HaltonSequence.
+      float result = 0.f;
+      const float inverse_base = 1.f / static_cast<float>(base);
+      float fraction = inverse_base;
+      while (index != 0u)
+      {
+         result += static_cast<float>(index % base) * fraction;
+         index /= base;
+         fraction *= inverse_base;
+      }
+      return result - 0.5f;
+   }
+
+   struct HaltonPhaseState
+   {
+      uintptr_t renderer = 0u;
+      uint64_t config = 0u;
+      uint32_t frame = 0u;
+      uint32_t width = 0u;
+      uint32_t height = 0u;
+      uint32_t index = 0u;
+      bool initialized = false;
+
+      bool Update(uintptr_t current_renderer, uint64_t current_config, uint32_t current_frame,
+         uint32_t current_width, uint32_t current_height, uint32_t phases, bool history_valid = true) noexcept
+      {
+         const uint32_t elapsed = current_frame - frame;
+         const bool reset = !initialized || renderer != current_renderer || config != current_config ||
+                            width != current_width || height != current_height || elapsed > 1u || !history_valid;
+         if (reset)
+         {
+            index = 0u;
+         }
+         else if (elapsed == 1u)
+         {
+            index = (index + 1u) % phases;
+         }
+         renderer = current_renderer;
+         config = current_config;
+         frame = current_frame;
+         width = current_width;
+         height = current_height;
+         initialized = true;
+         return reset;
+      }
+   };
+
    inline bool NativeCameraValueMatches(float native_value, float reference_value, float absolute_tolerance) noexcept
    {
       if (!std::isfinite(native_value) || !std::isfinite(reference_value)) return false;
