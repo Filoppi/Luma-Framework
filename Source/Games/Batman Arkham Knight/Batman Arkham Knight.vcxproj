@@ -63,6 +63,7 @@
   </ItemGroup>
   <PropertyGroup>
     <UseLumaNGX>true</UseLumaNGX>
+    <UseLumaFSR>true</UseLumaFSR>
     <LumaPackage>false</LumaPackage>
   </PropertyGroup>
   <ImportGroup Label="ExtensionSettings">
