@@ -1,10 +1,7 @@
 
 #define GAME_BATMAN_ARKHAM_KNIGHT 1
 
-// TODO: Do this dynamically.
-// Offsets for patching "BuildProjectionMatrix" function are different.
-#define GAME_VERSION 1 // 1 - Steam, 2 - GOG
-
+#include "../../../Shaders/Batman Arkham Knight/Includes/GameCBuffers.hlsl"
 #include "..\..\Core\core.hpp"
 
 // TODO: Fix this globaly? Define NOMINMAX before including windows.h.
@@ -16,85 +13,332 @@ namespace
     const ShaderHashesList shader_hashes_SMAAEdgeDetection = { .pixel_shaders = { 0x067FF80F } };
     const ShaderHashesList shader_hashes_SMAABlendingWeightCalculation = { .pixel_shaders = { 0x2F55F98E } };
     const ShaderHashesList shader_hashes_SMAANeighborhoodBlending = { .compute_shaders = { 0x42C0137E } };
+    // Writes camera motion for every pixel of the velocity buffer, before the base pass draws object motion on top.
+    // Replaced by "CameraVelocity_0x47811EB4.cs_5_0.hlsl", which reprojects with the matrix we provide.
+    const ShaderHashesList shader_hashes_CameraVelocity = { .compute_shaders = { 0x47811EB4 } };
 
-    float2 g_jitters;
+    // FViewInfo layout (Steam build, verified in the view copy constructor, the view init function and against the view cbuffer).
+    constexpr size_t view_size_x_offset = 0x6C; // float
+    constexpr size_t view_size_y_offset = 0x70; // float
+    constexpr size_t view_projection_offset = 0x110; // FMatrix, row vectors (clip = pos * M)
+    constexpr size_t view_secondary_projection_offset = 0x150; // FMatrix, second perspective projection built together with the main one
+    constexpr size_t view_translated_view_projection_offset = 0x380; // FMatrix, translated world to clip (the view cbuffer one)
+    constexpr size_t view_pre_view_translation_offset = 0x440; // float3, translated world = world + this (minus the view origin)
+    constexpr size_t view_jitter_offset = 0x520; // float2, NDC offset ("UnicornJitter"), copied along with the view to the render thread
 
-    void PatchBuildProjectionMatrixFunc()
+    // Written on the render thread, read on the game thread
+    std::atomic<bool> g_jitter_enabled = false;
+    std::atomic<uint32_t> g_render_width = 0;
+    std::atomic<uint32_t> g_render_height = 0;
+    // Game thread only
+    uint32_t g_jitter_index = 0;
+    // Render thread only
+    uint32_t g_frame_index = 0;
+    float2 g_frame_jitter_pixels = {};
+    bool g_camera_velocity_rendered = false;
+    bool g_camera_velocity_has_history = false;
+    float4 g_reprojection_matrix[4] = {}; // Current jittered NDC + device depth to previous jittered clip space, for the camera velocity pass
+    double g_last_translated_view_projection[4][4] = {};
+    double g_last_pre_view_translation[3] = {};
+    uint32_t g_last_camera_velocity_frame_index = 0;
+    bool g_has_last_camera_velocity = false;
+
+    using ViewJitterFunc = void(__fastcall*)(uint8_t* view);
+    using CameraVelocityFunc = void(__fastcall*)(void* renderer, uint8_t* view);
+    ViewJitterFunc g_original_view_jitter_func = nullptr;
+    CameraVelocityFunc g_original_camera_velocity_func = nullptr;
+
+    bool IsRenderResolutionView(const uint8_t* view)
     {
-        const size_t stolen_len = 12;
-        HMODULE engine_module = nullptr;
-        while (!engine_module)
-        {
-            engine_module = GetModuleHandleA("BatmanAK.exe");
-            Sleep(100);
-        }
-        auto base_addr = (uintptr_t)engine_module;
+        const float size_x = *reinterpret_cast<const float*>(view + view_size_x_offset);
+        const float size_y = *reinterpret_cast<const float*>(view + view_size_y_offset);
+        return std::abs(size_x - float(g_render_width.load(std::memory_order_relaxed))) <= 0.5f && std::abs(size_y - float(g_render_height.load(std::memory_order_relaxed))) <= 0.5f;
+    }
 
-        #if GAME_VERSION == 1 // Steam
-        uintptr_t patch_addr = base_addr + 0x104FF;
-        #else // GAME_VERSION == 2 (GOG)
-        uintptr_t patch_addr = base_addr + 0x104BF;
-        #endif
-        
-        uintptr_t ret_addr = patch_addr + stolen_len;
-        uintptr_t mem = (uintptr_t)VirtualAlloc(NULL, 128, MEM_COMMIT | MEM_RESERVE, PAGE_EXECUTE_READWRITE);
-        if (!mem)
+    // Row vectors: out = a * b
+    void Multiply(const double a[4][4], const double b[4][4], double out[4][4])
+    {
+        for (int r = 0; r < 4; r++)
+        {
+            for (int c = 0; c < 4; c++)
+            {
+                out[r][c] = a[r][0] * b[0][c] + a[r][1] * b[1][c] + a[r][2] * b[2][c] + a[r][3] * b[3][c];
+            }
+        }
+    }
+
+    // Gauss-Jordan elimination with partial pivoting
+    bool Invert(const double in[4][4], double out[4][4])
+    {
+        double m[4][8];
+        for (int r = 0; r < 4; r++)
+        {
+            for (int c = 0; c < 4; c++)
+            {
+                m[r][c] = in[r][c];
+                m[r][c + 4] = r == c ? 1.0 : 0.0;
+            }
+        }
+        for (int c = 0; c < 4; c++)
+        {
+            int pivot = c;
+            for (int r = c + 1; r < 4; r++)
+            {
+                if (std::abs(m[r][c]) > std::abs(m[pivot][c]))
+                {
+                    pivot = r;
+                }
+            }
+            if (m[pivot][c] == 0.0)
+            {
+                return false;
+            }
+            if (pivot != c)
+            {
+                for (int k = 0; k < 8; k++)
+                {
+                    std::swap(m[c][k], m[pivot][k]);
+                }
+            }
+            const double inv_pivot = 1.0 / m[c][c];
+            for (int k = 0; k < 8; k++)
+            {
+                m[c][k] *= inv_pivot;
+            }
+            for (int r = 0; r < 4; r++)
+            {
+                if (r != c && m[r][c] != 0.0)
+                {
+                    const double factor = m[r][c];
+                    for (int k = 0; k < 8; k++)
+                    {
+                        m[r][k] -= factor * m[c][k];
+                    }
+                }
+            }
+        }
+        for (int r = 0; r < 4; r++)
+        {
+            for (int c = 0; c < 4; c++)
+            {
+                out[r][c] = m[r][c + 4];
+            }
+        }
+        return true;
+    }
+
+    std::vector<System::BytePattern> ParsePattern(std::string_view text)
+    {
+        std::vector<System::BytePattern> pattern;
+        for (size_t i = 0; i < text.size(); i += 3)
+        {
+            pattern.push_back(text[i] == '?' ? System::ANY : System::BytePattern(unsigned(std::stoul(std::string(text.substr(i, 2)), nullptr, 16))));
+        }
+        return pattern;
+    }
+
+    // Returns the start of the only match of the pattern in the executable, or null if there are none or several
+    std::byte* FindUniquePattern(const char* name, std::string_view pattern)
+    {
+        const std::vector<std::byte*> matches = System::ScanModuleForPattern(ParsePattern(pattern));
+        if (matches.size() != 1)
+        {
+            reshade::log::message(reshade::log::level::warning, (std::string("Batman Arkham Knight Luma: pattern \"") + name + "\" matched " + std::to_string(matches.size()) + " times, patch skipped").c_str());
+            return nullptr;
+        }
+        return matches[0];
+    }
+
+    void NopBytes(std::byte* address, size_t size)
+    {
+        const std::vector<uint8_t> nops(size, 0x90);
+        System::PatchMemory(address, nops.data(), size);
+    }
+
+    // Redirects the "call rel32" at "call_site" to "target" through an absolute jump stub allocated within reach,
+    // returning the original callee (or null on failure, in which case nothing was changed).
+    void* RedirectCall(std::byte* call_site, void* target)
+    {
+        if (call_site[0] != std::byte{ 0xE8 })
+        {
+            return nullptr;
+        }
+        int32_t original_rel;
+        std::memcpy(&original_rel, call_site + 1, sizeof(original_rel));
+        void* original_callee = call_site + 5 + original_rel;
+
+        uint8_t* stub = static_cast<uint8_t*>(System::VirtualAllocNear(call_site, 14));
+        if (!stub)
+        {
+            return nullptr;
+        }
+        const int64_t stub_rel = reinterpret_cast<int64_t>(stub) - reinterpret_cast<int64_t>(call_site + 5);
+        if (stub_rel < INT32_MIN || stub_rel > INT32_MAX)
+        {
+            VirtualFree(stub, 0, MEM_RELEASE);
+            return nullptr;
+        }
+        // jmp qword ptr [rip+0] followed by the absolute target
+        const uint8_t jmp_abs[6] = { 0xFF, 0x25, 0x00, 0x00, 0x00, 0x00 };
+        std::memcpy(stub, jmp_abs, sizeof(jmp_abs));
+        std::memcpy(stub + sizeof(jmp_abs), &target, sizeof(target));
+        FlushInstructionCache(GetCurrentProcess(), stub, 14);
+
+        const int32_t new_rel = static_cast<int32_t>(stub_rel);
+        System::PatchMemory(call_site + 1, &new_rel, sizeof(new_rel));
+        return original_callee;
+    }
+
+    // Game thread: the engine resets the view jitter (it's only used by its disabled checkerboard upscaler) right before
+    // deriving all the view matrices from the projection, so we offset the projection here (only for perspective views that render at our resolution, so not shadows or scene captures).
+    // The NDC offset is also stored in the view's own jitter field, which is copied along with the view to the render thread.
+    // This runs twice per frame for the main view: once for the game thread view, and once for the render thread view constructed from it (with the already jittered projection).
+    void __fastcall HookedViewJitter(uint8_t* view)
+    {
+        g_original_view_jitter_func(view);
+
+        if (!g_jitter_enabled.load(std::memory_order_relaxed) || !IsRenderResolutionView(view))
         {
             return;
         }
-        uint8_t stolen_bytes[stolen_len];
-        memcpy(&stolen_bytes[0], (void*)patch_addr, stolen_len);
+        // M[2][3] is 1 for perspective projections (w = view z), so M[2][0..1] offsets x/y by a constant amount after the perspective divide
+        float* projection = reinterpret_cast<float*>(view + view_projection_offset);
+        if (projection[11] != 1.0f)
+        {
+            return;
+        }
 
-        // jmp to shellcode / jmp back
-        uint8_t jmp[12] = {
-            0x48, 0xB8, // mov rax, imm64 
-            0, 0, 0, 0, 0, 0, 0, 0, // 8-byte address
-            0xFF, 0xE0 // jmp rax
-        };
+        float* view_jitter = reinterpret_cast<float*>(view + view_jitter_offset);
+        // The game's perspective projections have exactly 0 there, and Halton never gives 0 on both axes, so a non zero offset is our own jitter (from the view this one was constructed from)
+        if (projection[8] != 0.0f || projection[9] != 0.0f)
+        {
+            view_jitter[0] = projection[8];
+            view_jitter[1] = projection[9];
+            return;
+        }
 
-        memcpy(&jmp[2], &ret_addr, sizeof(uintptr_t));
-        const size_t actual_size = stolen_len + 13 + sizeof(jmp);
+        const float size_x = *reinterpret_cast<const float*>(view + view_size_x_offset);
+        const float size_y = *reinterpret_cast<const float*>(view + view_size_y_offset);
+        const unsigned int index = g_jitter_index++ % SR::GetDefaultJitterPhases();
+        const float jitter_ndc_x = SR::HaltonSequence(index, 2) * 2.0f / size_x;
+        const float jitter_ndc_y = -SR::HaltonSequence(index, 3) * 2.0f / size_y;
 
-        uint8_t shellcode[13] = {
-            0x48, 0xB8, // mov rax, imm64 
-            0, 0, 0, 0, 0, 0, 0, 0, // 8-byte address
-            0x48, 0x8B, 0x00 //mov rax, [rax]
-        };
-
-        uintptr_t data_addr1 = reinterpret_cast<uintptr_t>(&g_jitters);
-        memcpy(&shellcode[2], &data_addr1, sizeof(data_addr1));
-        size_t offset = 0;
-        uint8_t actual_shell[actual_size];
-        memcpy(&actual_shell[offset], &shellcode, sizeof(shellcode)); offset += sizeof(shellcode);
-        memcpy(&actual_shell[offset], &stolen_bytes, sizeof(stolen_bytes)); offset += sizeof(stolen_bytes);
-        memcpy(&actual_shell[offset], &jmp, sizeof(jmp)); offset += sizeof(jmp);
-        memcpy((void*)mem, &actual_shell, sizeof(actual_shell));
-
-        // PATCH
-        DWORD old_protect;
-        VirtualProtect((void*)patch_addr, stolen_len, PAGE_EXECUTE_READWRITE, &old_protect);
-
-        memcpy(&jmp[2], &mem, sizeof(uintptr_t));
-        memset((void*)patch_addr, 0x90, stolen_len); // NOP original bytes
-        memcpy((void*)patch_addr, jmp, sizeof(jmp)); // Write the jump
-
-        VirtualProtect((void*)patch_addr, stolen_len, old_protect, &old_protect);
-
-        FlushInstructionCache(GetCurrentProcess(), (void*)patch_addr, stolen_len);
+        projection[8] = jitter_ndc_x;
+        projection[9] = jitter_ndc_y;
+        float* secondary_projection = reinterpret_cast<float*>(view + view_secondary_projection_offset);
+        if (secondary_projection[11] == 1.0f)
+        {
+            secondary_projection[8] += jitter_ndc_x;
+            secondary_projection[9] += jitter_ndc_y;
+        }
+        view_jitter[0] = jitter_ndc_x;
+        view_jitter[1] = jitter_ndc_y;
     }
 
-    void JitterUpdate(bool enabled, float renderer_resolution_x, float renderer_resolution_y)
+    // Render thread, main view: builds the camera velocity reprojection matrix (current jittered NDC + depth -> previous jittered clip space).
+    // The engine's previous view projection is exactly last frame's translated view projection, relative to last frame's view origin,
+    // so this moves current translated world positions by how much the origin moved since. Built in double precision, as positions are relative to the camera.
+    void UpdateReprojectionMatrix(const uint8_t* view)
     {
-        if (enabled)
+        const float* translated_view_projection_f = reinterpret_cast<const float*>(view + view_translated_view_projection_offset);
+        const float* pre_view_translation_f = reinterpret_cast<const float*>(view + view_pre_view_translation_offset);
+        double translated_view_projection[4][4];
+        for (int i = 0; i < 16; i++)
         {
-            auto index = cb_luma_global_settings.FrameIndex % 8;
-            g_jitters.x = SR::HaltonSequence(index, 2) * 2.0f / renderer_resolution_x;
-            g_jitters.y = -SR::HaltonSequence(index, 3) * 2.0f / renderer_resolution_y;
+            translated_view_projection[i / 4][i % 4] = translated_view_projection_f[i];
+        }
+        const double pre_view_translation[3] = { pre_view_translation_f[0], pre_view_translation_f[1], pre_view_translation_f[2] };
+
+        double inverse_translated_view_projection[4][4];
+        g_camera_velocity_has_history = g_has_last_camera_velocity && g_last_camera_velocity_frame_index + 1 == g_frame_index && Invert(translated_view_projection, inverse_translated_view_projection);
+        if (g_camera_velocity_has_history)
+        {
+            double translation[4][4] = { { 1.0, 0.0, 0.0, 0.0 }, { 0.0, 1.0, 0.0, 0.0 }, { 0.0, 0.0, 1.0, 0.0 }, { 0.0, 0.0, 0.0, 1.0 } };
+            for (int i = 0; i < 3; i++)
+            {
+                translation[3][i] = g_last_pre_view_translation[i] - pre_view_translation[i];
+            }
+            double to_previous_translated_world[4][4];
+            double reprojection[4][4];
+            Multiply(inverse_translated_view_projection, translation, to_previous_translated_world);
+            Multiply(to_previous_translated_world, g_last_translated_view_projection, reprojection);
+            for (int r = 0; r < 4; r++)
+            {
+                g_reprojection_matrix[r] = float4{ float(reprojection[r][0]), float(reprojection[r][1]), float(reprojection[r][2]), float(reprojection[r][3]) };
+            }
         }
         else
         {
-            g_jitters.x = 0.0f;
-            g_jitters.y = 0.0f;
+            // No motion (DLSS history is reset this frame)
+            g_reprojection_matrix[0] = float4{ 1.0f, 0.0f, 0.0f, 0.0f };
+            g_reprojection_matrix[1] = float4{ 0.0f, 1.0f, 0.0f, 0.0f };
+            g_reprojection_matrix[2] = float4{ 0.0f, 0.0f, 1.0f, 0.0f };
+            g_reprojection_matrix[3] = float4{ 0.0f, 0.0f, 0.0f, 1.0f };
+        }
+
+        std::memcpy(g_last_translated_view_projection, translated_view_projection, sizeof(g_last_translated_view_projection));
+        std::memcpy(g_last_pre_view_translation, pre_view_translation, sizeof(g_last_pre_view_translation));
+        g_last_camera_velocity_frame_index = g_frame_index;
+        g_has_last_camera_velocity = true;
+    }
+
+    // Render thread: runs once per frame for the main view (we force it), before the base pass and SMAA.
+    // The matrix needs to be ready before the pass (our replaced shader reads it from the Luma instance data).
+    void __fastcall HookedCameraVelocity(void* renderer, uint8_t* view)
+    {
+        const bool is_main_view = IsRenderResolutionView(view);
+        if (is_main_view)
+        {
+            UpdateReprojectionMatrix(view);
+        }
+
+        g_original_camera_velocity_func(renderer, view);
+
+        if (is_main_view)
+        {
+            const float size_x = *reinterpret_cast<const float*>(view + view_size_x_offset);
+            const float size_y = *reinterpret_cast<const float*>(view + view_size_y_offset);
+            const float* view_jitter = reinterpret_cast<const float*>(view + view_jitter_offset);
+            g_frame_jitter_pixels.x = view_jitter[0] * size_x * 0.5f;
+            g_frame_jitter_pixels.y = view_jitter[1] * size_y * -0.5f;
+            g_camera_velocity_rendered = true;
+        }
+    }
+
+    // The engine only computes velocities (camera and objects) when motion blur is enabled, and skips the camera velocity pass when the camera barely moved.
+    // These patches make it always compute them, while the motion blur effect itself still follows the user setting.
+    void PatchVelocityAndJitter()
+    {
+        // Motion blur post process proxy creation: don't require the motion blur setting for "requires velocities" (je -> nop)
+        if (std::byte* match = FindUniquePattern("MotionBlurRequiresVelocities", "39 3D ?? ?? ?? ?? 74 1E 39 3D ?? ?? ?? ?? 75 16 39 3D ?? ?? ?? ?? 75 0E B8 01 00 00 00"))
+        {
+            NopBytes(match + 6, 2);
+        }
+        // Velocity stage (camera velocity pass) motion blur setting check (je rel32 -> nop)
+        if (std::byte* match = FindUniquePattern("VelocityStageGate", "83 3D ?? ?? ?? ?? 00 49 8B D9 48 8B F2 0F 84 ?? ?? ?? ?? F7 41 28 00 04 00 00"))
+        {
+            NopBytes(match + 13, 6);
+        }
+        // Velocity stage end motion blur setting check (je -> nop)
+        if (std::byte* match = FindUniquePattern("VelocityStageEndGate", "83 3D ?? ?? ?? ?? 00 49 8B F1 48 8B EA 48 8B F9 74 ?? F7 41 28 00 04 00 00"))
+        {
+            NopBytes(match + 16, 2);
+        }
+        // Base pass object velocity motion blur setting check (je -> nop)
+        if (std::byte* match = FindUniquePattern("ObjectVelocityGate", "83 3D ?? ?? ?? ?? 00 74 ?? F7 43 28 00 04 00 00"))
+        {
+            NopBytes(match + 7, 2);
+        }
+        // Camera velocity pass: skip the "camera didn't move enough" early out (jne -> nop) and hook the pass itself
+        if (std::byte* match = FindUniquePattern("CameraVelocityPass", "E8 ?? ?? ?? ?? 85 C0 75 ?? 48 8B D3 48 8B CE E8 ?? ?? ?? ?? E9"))
+        {
+            NopBytes(match + 7, 2);
+            g_original_camera_velocity_func = reinterpret_cast<CameraVelocityFunc>(RedirectCall(match + 15, reinterpret_cast<void*>(&HookedCameraVelocity)));
+        }
+        // View init: hook the view jitter setup, to jitter the projection before all the other view matrices are derived from it
+        if (std::byte* match = FindUniquePattern("ViewJitter", "E8 ?? ?? ?? ?? 8B 05 ?? ?? ?? ?? 45 33 E4 89 87 38 05 00 00"))
+        {
+            g_original_view_jitter_func = reinterpret_cast<ViewJitterFunc>(RedirectCall(match, reinterpret_cast<void*>(&HookedViewJitter)));
         }
     }
 }
@@ -124,7 +368,7 @@ public:
 
     void OnInit(bool async) override
     {
-        PatchBuildProjectionMatrixFunc();
+        PatchVelocityAndJitter();
 
         std::vector<ShaderDefineData> game_shader_defines_data = {
             { "DISABLE_LENS_FLARE_AND_LENS_DIRT", '0', true, false, "Disables lens flare and lens dirt effects.", 1 }
@@ -172,6 +416,19 @@ public:
     DrawOrDispatchOverrideType OnDrawOrDispatch(ID3D11Device* native_device, ID3D11DeviceContext* native_device_context, CommandListData& cmd_list_data, DeviceData& device_data, reshade::api::shader_stage stages, const ShaderHashesList<OneShaderPerPipeline>& original_shader_hashes, bool is_custom_pass, bool& updated_cbuffers, std::function<void()>* original_draw_dispatch_func) override
     {
         auto& game_device_data = GetGameDeviceData(device_data);
+
+        if (original_shader_hashes.Contains(shader_hashes_CameraVelocity))
+        {
+            // UAV0 is the velocity buffer (the base pass then draws moving objects on top of it).
+            // It's not necessarily cleared anymore when this pass runs, so grab it here too.
+            ComPtr<ID3D11UnorderedAccessView> uav_mvs;
+            native_device_context->CSGetUnorderedAccessViews(0, 1, uav_mvs.put());
+            if (uav_mvs.get())
+            {
+                uav_mvs->GetResource(game_device_data.resource_mvs.put());
+            }
+            return DrawOrDispatchOverrideType::None;
+        }
 
         if (original_shader_hashes.Contains(shader_hashes_SMAAEdgeDetection))
         {
@@ -230,9 +487,9 @@ public:
                 settings_data.hdr = true;
                 settings_data.mvs_jittered = true;
 
-                // MVs are in [-1,1] range so we need to scale them to screen space for DLSS.
-                settings_data.mvs_x_scale = device_data.render_resolution.x * 0.5;
-                settings_data.mvs_y_scale = device_data.render_resolution.y * 0.5;
+                // MVs are "previous UV - current UV" (camera velocity matches thanks to the replaced shader), DLSS wants pixels.
+                settings_data.mvs_x_scale = device_data.render_resolution.x;
+                settings_data.mvs_y_scale = device_data.render_resolution.y;
                 
                 settings_data.render_preset = dlss_render_preset;
                 settings_data.auto_exposure = true;
@@ -245,9 +502,11 @@ public:
                 draw_data.motion_vectors = game_device_data.resource_mvs.get();
                 draw_data.depth_buffer = game_device_data.resource_depth.get();
 
-                // Jitters are in NDC offsets so we need to scale them to pixel offsets for DLSS.
-                draw_data.jitter_x = g_jitters.x * device_data.render_resolution.x * 0.5f;
-                draw_data.jitter_y = g_jitters.y * device_data.render_resolution.y * -0.5f;
+                // Jitter the frame was rendered with (pixels), read back from its view on the render thread.
+                draw_data.jitter_x = g_frame_jitter_pixels.x;
+                draw_data.jitter_y = g_frame_jitter_pixels.y;
+                // The camera velocity pass is skipped by the engine on camera cuts and similar, and the velocities need last frame's camera to be valid.
+                draw_data.reset = !g_camera_velocity_rendered || !g_camera_velocity_has_history;
 
                 draw_data.render_width = device_data.render_resolution.x;
                 draw_data.render_height = device_data.render_resolution.y;
@@ -265,9 +524,11 @@ public:
 
     void OnPresent(ID3D11Device* native_device, DeviceData& device_data) override
     {
-        auto& game_device_data = GetGameDeviceData(device_data);
-
-        JitterUpdate(device_data.sr_type != SR::Type::None, device_data.render_resolution.x, device_data.render_resolution.y);
+        g_jitter_enabled.store(device_data.sr_type != SR::Type::None && !device_data.sr_suppressed, std::memory_order_relaxed);
+        g_render_width.store(device_data.render_resolution.x, std::memory_order_relaxed);
+        g_render_height.store(device_data.render_resolution.y, std::memory_order_relaxed);
+        g_camera_velocity_rendered = false;
+        g_frame_index++;
 
         if (!custom_texture_mip_lod_bias_offset)
         {
@@ -281,6 +542,11 @@ public:
                device_data.texture_mip_lod_bias_offset = 0.0f;
             }
         }
+    }
+
+    void UpdateLumaInstanceDataCB(CB::LumaInstanceDataPadded& data, CommandListData& cmd_list_data, DeviceData& device_data) override
+    {
+        std::memcpy(data.GameData.ReprojectionMatrix, g_reprojection_matrix, sizeof(g_reprojection_matrix));
     }
 
     void PrintImGuiAbout() override

@@ -19,7 +19,9 @@ namespace CB
 	// Define the game specific cbuffer (instance/pass) data here
 	struct LumaGameData
 	{
-		float Dummy; // hlsl doesn't support empty structs
+		// Rows (row vector convention) of the matrix taking the current jittered NDC + device depth (camera velocity pass) to the previous frame's jittered clip space.
+		// The previous view projection is relative to the previous view origin, so the camera translation is baked in here.
+		float4 ReprojectionMatrix[4];
 	};
 }
 
