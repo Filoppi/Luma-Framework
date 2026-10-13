@@ -20,26 +20,39 @@ Checks:
   - -readability-uppercase-literal-suffix
   - -readability-identifier-length
 CheckOptions:
-# TODO: make consts/statics/globals/contexprs UPPER_CASE?
+  # Match Pumbo's usual lower_case values; macros use UPPER_CASE.
+  # Deliberate UPPER_CASE metadata globals and constexpr names remain accepted.
   readability-braces-around-statements.ShortStatementLines: 1
   readability-identifier-naming.ClassCase: CamelCase
+  readability-identifier-naming.ClassConstexprCase: lower_case
+  readability-identifier-naming.ClassConstexprIgnoredRegexp: '^[A-Z][A-Z0-9_]*$'
   readability-identifier-naming.ClassConstantCase: lower_case
   readability-identifier-naming.ClassMemberCase: lower_case
-  readability-identifier-naming.ClassMemberSuffix: _
   readability-identifier-naming.ClassMethodCase: CamelCase
   readability-identifier-naming.ConstantCase: lower_case
   readability-identifier-naming.ConstantMemberCase: lower_case
   readability-identifier-naming.ConstantParameterCase: lower_case
+  readability-identifier-naming.ConstexprVariableCase: lower_case
+  readability-identifier-naming.ConstexprVariableIgnoredRegexp: '^[A-Z][A-Z0-9_]*$'
   readability-identifier-naming.EnumCase: CamelCase
+  readability-identifier-naming.EnumConstantCase: CamelCase
   readability-identifier-naming.FunctionCase: CamelCase
+  readability-identifier-naming.GlobalConstantCase: lower_case
+  readability-identifier-naming.GlobalConstantIgnoredRegexp: '^[A-Z][A-Z0-9_]*$'
   readability-identifier-naming.GlobalFunctionCase: CamelCase
+  readability-identifier-naming.GlobalVariableCase: lower_case
+  readability-identifier-naming.GlobalVariableIgnoredRegexp: '^[A-Z][A-Z0-9_]*$'
   readability-identifier-naming.LocalVariableCase: lower_case
   readability-identifier-naming.LocalConstantCase: lower_case
+  readability-identifier-naming.MacroDefinitionCase: UPPER_CASE
   readability-identifier-naming.MethodCase: CamelCase
   readability-identifier-naming.MemberCase: lower_case
   readability-identifier-naming.NamespaceCase: CamelCase
   readability-identifier-naming.ParameterCase: lower_case
+  readability-identifier-naming.PrivateMemberCase: lower_case
+  readability-identifier-naming.PrivateMemberSuffix: _
   readability-identifier-naming.StaticConstantCase: lower_case
+  readability-identifier-naming.StaticVariableCase: lower_case
   readability-identifier-naming.StructCase: CamelCase
   readability-identifier-naming.VariableCase: lower_case
 
