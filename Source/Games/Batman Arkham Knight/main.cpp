@@ -71,6 +71,7 @@ namespace
     bool g_has_last_camera_velocity = false;
     bool g_sr_upscaled_this_frame = false; // Super resolution upscaled the scene this frame, so the post processes need to switch to the output resolution
     float2 g_post_render_scale = { 1.f, 1.f };
+    float4 g_camera_velocity_view_rect = {}; // Size (xy) and origin (zw) of the main view rect, for the camera velocity pass
 
     using ViewJitterFunc = void(__fastcall*)(uint8_t* view);
     using CameraVelocityFunc = void(__fastcall*)(void* renderer, uint8_t* view);
@@ -319,6 +320,8 @@ namespace
         if (is_main_view)
         {
             UpdateReprojectionMatrix(view);
+            g_camera_velocity_view_rect = float4{ *reinterpret_cast<const float*>(view + view_size_x_offset), *reinterpret_cast<const float*>(view + view_size_y_offset),
+                *reinterpret_cast<const float*>(view + view_rect_min_x_offset), *reinterpret_cast<const float*>(view + view_rect_min_y_offset) };
         }
 
         g_original_camera_velocity_func(renderer, view);
@@ -765,6 +768,7 @@ public:
     {
         std::memcpy(data.GameData.ReprojectionMatrix, g_reprojection_matrix, sizeof(g_reprojection_matrix));
         data.GameData.PostRenderScale = float4{ g_post_render_scale.x, g_post_render_scale.y, 0.f, 0.f };
+        data.GameData.CameraVelocityViewRect = g_camera_velocity_view_rect;
     }
 
     void LoadConfigs() override

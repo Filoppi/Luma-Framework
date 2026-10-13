@@ -25,6 +25,9 @@ namespace CB
 		// xy: render resolution / output resolution, for the post processes that run at output resolution after super resolution upscaling,
 		// but still read the render resolution depth and velocity (1 when not upscaling). zw: unused.
 		float4 PostRenderScale;
+		// xy: size, zw: origin of the view rect rendered by the camera velocity pass (render resolution).
+		// Its own constants have the full buffer size instead, which only matches when not upscaling.
+		float4 CameraVelocityViewRect;
 	};
 }
 
