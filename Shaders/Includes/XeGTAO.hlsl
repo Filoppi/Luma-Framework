@@ -389,11 +389,8 @@ void XeGTAO_MainPass(uint2 pixCoord, float2 localNoise, float3 viewspaceNormal, 
 #if !XE_GTAO_CUSTOM_VIEWSPACE_POSITION
       // approx viewspace pixel size at pixCoord; approximation of NDCToViewspace( normalizedScreenPos.xy + consts.ViewportPixelSize.xy, pixCenterPos.z ).xy - pixCenterPos.xy;
       const float2 pixelDirRBViewspaceSizeAtCenterZ = viewspaceZ.xx * NDC_TO_VIEW_MUL_X_PIXEL_SIZE;
-#elif XE_GTAO_GENERATE_NORMALS
-      const float2 pixelDirRBViewspaceSizeAtCenterZ = XeGTAO_ComputeViewspacePosition(normalizedScreenPos + VIEWPORT_PIXEL_SIZE, CENTER.z).xy - CENTER.xy;
 #else
-      float3 CENTER = XeGTAO_ComputeViewspacePosition(normalizedScreenPos, viewspaceZ);
-      const float2 pixelDirRBViewspaceSizeAtCenterZ = XeGTAO_ComputeViewspacePosition(normalizedScreenPos + VIEWPORT_PIXEL_SIZE, CENTER.z).xy - CENTER.xy;
+      const float2 pixelDirRBViewspaceSizeAtCenterZ = XeGTAO_ComputeViewspacePosition(normalizedScreenPos + VIEWPORT_PIXEL_SIZE, pixCenterPos.z).xy - pixCenterPos.xy;
 #endif
 
       float screenspaceRadius = effectRadius * rcp(abs(pixelDirRBViewspaceSizeAtCenterZ.x));
