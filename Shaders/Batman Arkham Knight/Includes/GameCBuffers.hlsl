@@ -22,6 +22,9 @@ namespace CB
 		// Rows (row vector convention) of the matrix taking the current jittered NDC + device depth (camera velocity pass) to the previous frame's jittered clip space.
 		// The previous view projection is relative to the previous view origin, so the camera translation is baked in here.
 		float4 ReprojectionMatrix[4];
+		// xy: render resolution / output resolution, for the post processes that run at output resolution after super resolution upscaling,
+		// but still read the render resolution depth and velocity (1 when not upscaling). zw: unused.
+		float4 PostRenderScale;
 	};
 }
 

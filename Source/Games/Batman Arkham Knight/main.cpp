@@ -16,6 +16,17 @@ namespace
     // Writes camera motion for every pixel of the velocity buffer, before the base pass draws object motion on top.
     // Replaced by "CameraVelocity_0x47811EB4.cs_5_0.hlsl", which reprojects with the matrix we provide.
     const ShaderHashesList shader_hashes_CameraVelocity = { .compute_shaders = { 0x47811EB4 } };
+    // Post processes that read the render resolution depth/velocity after upscaling, replaced by versions that scale their load coordinates:
+    // "Gather_0xB2A276FD.cs_5_0.hlsl" (DOF/bloom downsample, depth) and "RockOnPreamble_0xF98BC308.cs_5_0.hlsl" (motion blur/DOF setup, depth and velocity).
+
+    // Super resolution quality modes (render resolution scale), the engine ScreenPercentage is set from these.
+    // Slightly above the nominal scales, as the engine truncates "float(size) * (percentage * 0.01f)".
+    constexpr const char* sr_quality_names[] = { "Native (DLAA)", "Quality", "Balanced", "Performance", "Ultra Performance" };
+    constexpr float sr_quality_screen_percentages[] = { 100.f, 66.667f, 58.001f, 50.001f, 33.334f };
+    constexpr int sr_quality_count = int(std::size(sr_quality_names));
+    std::atomic<int> g_sr_quality = 0;
+    // Added to the recommended super resolution texture mip bias (log2(render / output) - 1), negative is sharper but shimmers more
+    std::atomic<float> g_mip_bias_offset = 0.f;
 
     // FViewInfo layout (Steam build, verified in the view copy constructor, the view init function and against the view cbuffer).
     constexpr size_t view_size_x_offset = 0x6C; // float
@@ -25,11 +36,27 @@ namespace
     constexpr size_t view_translated_view_projection_offset = 0x380; // FMatrix, translated world to clip (the view cbuffer one)
     constexpr size_t view_pre_view_translation_offset = 0x440; // float3, translated world = world + this (minus the view origin)
     constexpr size_t view_jitter_offset = 0x520; // float2, NDC offset ("UnicornJitter"), copied along with the view to the render thread
+    constexpr size_t view_rect_min_x_offset = 0x5C; // float
+    constexpr size_t view_rect_min_y_offset = 0x60; // float
+
+    // Engine globals and functions found by signature (null if not found, upscaling is then unavailable)
+    // Our ScreenPercentages, read by the engine instead of the game setting (patched): [0] view scaling, [1] unscaling (HUD canvas),
+    // chosen so that unscaling the truncated view size gives back exactly the output size.
+    float* g_screen_percentages = nullptr;
+    const uint32_t* g_smaa_enabled = nullptr; // The game's anti aliasing setting, super resolution replaces SMAA so it needs to be on
+    using InitRenderTargetRectFunc = void(__fastcall*)(uint8_t* view, float min_x, float min_y);
+    InitRenderTargetRectFunc g_init_render_target_rect_func = nullptr;
+    using PostGatherFunc = void(__fastcall*)(void* post_proxy, void* context, uint8_t* view, int levels);
+    PostGatherFunc g_original_post_gather_func = nullptr;
+    bool g_upscaling_supported = false;
 
     // Written on the render thread, read on the game thread
     std::atomic<bool> g_jitter_enabled = false;
     std::atomic<uint32_t> g_render_width = 0;
     std::atomic<uint32_t> g_render_height = 0;
+    std::atomic<uint32_t> g_output_width = 0;
+    std::atomic<uint32_t> g_output_height = 0;
+    std::atomic<uint32_t> g_jitter_phases = SR::GetDefaultJitterPhases();
     // Game thread only
     uint32_t g_jitter_index = 0;
     // Render thread only
@@ -42,6 +69,8 @@ namespace
     double g_last_pre_view_translation[3] = {};
     uint32_t g_last_camera_velocity_frame_index = 0;
     bool g_has_last_camera_velocity = false;
+    bool g_sr_upscaled_this_frame = false; // Super resolution upscaled the scene this frame, so the post processes need to switch to the output resolution
+    float2 g_post_render_scale = { 1.f, 1.f };
 
     using ViewJitterFunc = void(__fastcall*)(uint8_t* view);
     using CameraVelocityFunc = void(__fastcall*)(void* renderer, uint8_t* view);
@@ -219,7 +248,7 @@ namespace
 
         const float size_x = *reinterpret_cast<const float*>(view + view_size_x_offset);
         const float size_y = *reinterpret_cast<const float*>(view + view_size_y_offset);
-        const unsigned int index = g_jitter_index++ % SR::GetDefaultJitterPhases();
+        const unsigned int index = g_jitter_index++ % g_jitter_phases.load(std::memory_order_relaxed);
         const float jitter_ndc_x = SR::HaltonSequence(index, 2) * 2.0f / size_x;
         const float jitter_ndc_y = -SR::HaltonSequence(index, 3) * 2.0f / size_y;
 
@@ -341,6 +370,107 @@ namespace
             g_original_view_jitter_func = reinterpret_cast<ViewJitterFunc>(RedirectCall(match, reinterpret_cast<void*>(&HookedViewJitter)));
         }
     }
+
+    // Render thread: the first post process after the anti aliasing (SMAA or our super resolution), in the Rocksteady post process proxy.
+    // When super resolution upscaled the scene, switch the view to the output resolution rect, so that all the later post processes
+    // (bloom, tonemapping, DOF, motion blur, ...) derive their constants and dispatch sizes from it.
+    // The view is rebuilt from the game thread view every frame, so it doesn't need restoring.
+    void __fastcall HookedPostGather(void* post_proxy, void* context, uint8_t* view, int levels)
+    {
+        if (g_sr_upscaled_this_frame)
+        {
+            g_sr_upscaled_this_frame = false;
+            const float output_width = float(g_output_width.load(std::memory_order_relaxed));
+            const float output_height = float(g_output_height.load(std::memory_order_relaxed));
+            float* view_size = reinterpret_cast<float*>(view + view_size_x_offset);
+            g_post_render_scale = float2{ view_size[0] / output_width, view_size[1] / output_height };
+            *reinterpret_cast<float*>(view + view_rect_min_x_offset) = 0.f;
+            *reinterpret_cast<float*>(view + view_rect_min_y_offset) = 0.f;
+            view_size[0] = output_width;
+            view_size[1] = output_height;
+            // Recomputes the render target rects and screen position scale biases from the view rect
+            g_init_render_target_rect_func(view, 0.f, 0.f);
+        }
+        g_original_post_gather_func(post_proxy, context, view, levels);
+    }
+
+    // The engine ScreenPercentage path (render the scene in a smaller view rect of the full size buffers, then upscale) is broken on PC:
+    // the scaled view rect is centered, but the raster passes draw it at the top left (while compute passes use the centered one),
+    // and the final upscale samples a texture that's still bound as UAV (so it reads black).
+    // These patches keep the scaled view rect at the top left and disable the engine upscale (the post processes run at the output resolution after our super resolution instead).
+    // The view scaling reads our own screen percentage instead of the game setting, so the game never saves it to its config.
+    // Nothing changes at 100%. All the patterns are found first, so either all of them are applied or none.
+    void PatchUpscaling()
+    {
+        std::byte* scale_screen_coords = FindUniquePattern("ScaleScreenCoords", "48 89 5C 24 10 57 F3 0F 10 05 ?? ?? ?? ?? 4D 8B D9 49 8B D8 0F 2E 05 ?? ?? ?? ?? 48 8B FA 0F 84 ?? ?? ?? ?? 83 B9 B8 06 00 00 00");
+        std::byte* scale_screen_coords_center = FindUniquePattern("ScaleScreenCoordsCenter", "41 2B 0B D1 E9 03 CA 89 0F 45 2B 08 41 D1 E9 45 03 CA 44 89 0B");
+        std::byte* unscale_screen_coords = FindUniquePattern("UnScaleScreenCoords", "83 B9 AC 05 00 00 00 0F 84 ?? ?? ?? ?? 83 B9 B8 06 00 00 00 0F 85 ?? ?? ?? ?? F3 0F 10 05 ?? ?? ?? ?? 0F 2F 81 A8 05 00 00 0F 86 ?? ?? ?? ?? F3 0F 10 05 ?? ?? ?? ??");
+        std::byte* unscale_screen_coords_center = FindUniquePattern("UnScaleScreenCoordsCenter", "F3 48 0F 2A C0 F3 0F 5C 44 24 40 F3 0F 59 05 ?? ?? ?? ?? F3 0F 5C C8 0F 57 C0 F3 0F 10 C1 F3 0F 10 4C 24 38 F3 0F 2C C0 66 0F EF C0 89 02 8B 01 F3 48 0F 2A C0 F3 0F 5C 44 24 48 F3 0F 59 05 ?? ?? ?? ?? F3 0F 5C C8");
+        std::byte* needs_upscale = FindUniquePattern("NeedsUpscale", "83 B9 AC 05 00 00 00 74 ?? 83 B9 B8 06 00 00 00 75 ?? F3 0F 10 05 ?? ?? ?? ?? 0F 2F 81 A8 05 00 00 76 ?? B8 01 00 00 00 C3 33 C0 C3");
+        std::byte* smaa_check = FindUniquePattern("PostProxySMAA", "39 15 ?? ?? ?? ?? 44 8D 62 01 74 ?? 4C 8B C3 48 8B D7 48 8B CD E8 ?? ?? ?? ??");
+        std::byte* post_gather_call = FindUniquePattern("PostProxyGather", "41 B9 09 00 00 00 4C 8B C3 48 8B D7 48 8B CD E8 ?? ?? ?? ??");
+        std::byte* init_render_target_rect = FindUniquePattern("InitRenderTargetRect", "48 89 5C 24 08 48 89 6C 24 10 48 89 74 24 18 57 48 83 EC 50 83 3D ?? ?? ?? ?? 00 0F 29 74 24 40 0F 29 7C 24 30 48 8B F9 44 0F 29 4C 24 20 0F 28 FA 0F 28 F1 74 ?? 83 3D ?? ?? ?? ?? 00 74 ?? FF 15 ?? ?? ?? ??");
+        if (!scale_screen_coords || !scale_screen_coords_center || !unscale_screen_coords || !unscale_screen_coords_center || !needs_upscale || !smaa_check || !post_gather_call || !init_render_target_rect)
+        {
+            return;
+        }
+
+        // Our screen percentages, within rip relative reach of the two functions that read them
+        float* screen_percentages = static_cast<float*>(System::VirtualAllocNear(scale_screen_coords, sizeof(float) * 2, PAGE_READWRITE));
+        if (!screen_percentages)
+        {
+            return;
+        }
+        screen_percentages[0] = 100.f;
+        screen_percentages[1] = 100.f;
+        // Returns the rip relative displacement from "next_instruction" to "target", if reachable
+        auto GetDisplacement = [](std::byte* next_instruction, const float* target, int32_t& displacement)
+        {
+            const int64_t offset = reinterpret_cast<int64_t>(target) - reinterpret_cast<int64_t>(next_instruction);
+            displacement = static_cast<int32_t>(offset);
+            return offset >= INT32_MIN && offset <= INT32_MAX;
+        };
+        int32_t scale_displacement, unscale_compare_displacement, unscale_load_displacement;
+        if (!GetDisplacement(scale_screen_coords + 0x0E, &screen_percentages[0], scale_displacement) || !GetDisplacement(unscale_screen_coords + 0x29, &screen_percentages[1], unscale_compare_displacement) || !GetDisplacement(unscale_screen_coords + 0x37, &screen_percentages[1], unscale_load_displacement))
+        {
+            VirtualFree(screen_percentages, 0, MEM_RELEASE);
+            return;
+        }
+
+        g_original_post_gather_func = reinterpret_cast<PostGatherFunc>(RedirectCall(post_gather_call + 0x0F, reinterpret_cast<void*>(&HookedPostGather)));
+        if (!g_original_post_gather_func)
+        {
+            VirtualFree(screen_percentages, 0, MEM_RELEASE);
+            return;
+        }
+        g_screen_percentages = screen_percentages;
+        // "cmp [rip+disp32], edx" at +0x00 (disp32 at +0x02, next instruction at +0x06)
+        int32_t smaa_displacement;
+        std::memcpy(&smaa_displacement, smaa_check + 0x02, sizeof(smaa_displacement));
+        g_smaa_enabled = reinterpret_cast<const uint32_t*>(smaa_check + 0x06 + smaa_displacement);
+        g_init_render_target_rect_func = reinterpret_cast<InitRenderTargetRectFunc>(init_render_target_rect);
+
+        // ScaleScreenCoords (view rect): "movss xmm0, [rip+disp32]" at +0x06 reads our screen percentage
+        System::PatchMemory(scale_screen_coords + 0x0A, &scale_displacement, sizeof(scale_displacement));
+        // ScaleScreenCoords: don't center the scaled view rect ("mov [rdi], ecx" and "mov [rbx], r9d" -> nop)
+        NopBytes(scale_screen_coords_center + 0x07, 2);
+        NopBytes(scale_screen_coords_center + 0x12, 3);
+        // UnScaleScreenCoords (HUD canvas rect): ignore the UpscaleScreenPercentage setting (je -> nop), compare and load our screen percentage
+        // ("comiss xmm0, [rcx+0x5A8]" -> "comiss xmm0, [rip+disp32]", same length, and "movss xmm0, [rip+disp32]" at +0x2F)
+        NopBytes(unscale_screen_coords + 0x07, 6);
+        uint8_t compare_screen_percentage[7] = { 0x0F, 0x2F, 0x05 };
+        std::memcpy(compare_screen_percentage + 3, &unscale_compare_displacement, sizeof(unscale_compare_displacement));
+        System::PatchMemory(unscale_screen_coords + 0x22, compare_screen_percentage, sizeof(compare_screen_percentage));
+        System::PatchMemory(unscale_screen_coords + 0x33, &unscale_load_displacement, sizeof(unscale_load_displacement));
+        // UnScaleScreenCoords: don't un-center it ("subss xmm1, xmm0" -> nop)
+        NopBytes(unscale_screen_coords_center + 0x13, 4);
+        NopBytes(unscale_screen_coords_center + 0x43, 4);
+        // NeedsUpscale (game setting based): always false ("xor eax, eax; ret"), so the post processes write the final image like at 100%
+        const uint8_t return_false[] = { 0x33, 0xC0, 0xC3 };
+        System::PatchMemory(needs_upscale, return_false, sizeof(return_false));
+
+        g_upscaling_supported = true;
+    }
 }
 
 struct GameDeviceDataBatmanArkhamKnight final : GameDeviceData
@@ -369,6 +499,7 @@ public:
     void OnInit(bool async) override
     {
         PatchVelocityAndJitter();
+        PatchUpscaling();
 
         std::vector<ShaderDefineData> game_shader_defines_data = {
             { "DISABLE_LENS_FLARE_AND_LENS_DIRT", '0', true, false, "Disables lens flare and lens dirt effects.", 1 }
@@ -512,6 +643,8 @@ public:
                 draw_data.render_height = device_data.render_resolution.y;
 
                 sr_implementations[device_data.sr_type]->Draw(sr_instance_data, native_device_context, draw_data);
+                // The post processes need to switch to the output resolution (done in the hook of the first one)
+                g_sr_upscaled_this_frame = device_data.render_resolution.x < device_data.output_resolution.x || device_data.render_resolution.y < device_data.output_resolution.y;
 
                 return DrawOrDispatchOverrideType::Replaced;
             }
@@ -522,20 +655,104 @@ public:
         return DrawOrDispatchOverrideType::None;
     }
 
+    // Same math as the engine view scaling (ScaleScreenCoords) and unscaling (UnScaleScreenCoords)
+    static uint32_t ScaleSize(uint32_t size, float screen_percentage)
+    {
+        const float scale = std::clamp(screen_percentage * 0.01f, 0.f, 1.f);
+        return uint32_t(std::max(1, int(float(size) * scale)));
+    }
+    static uint32_t UnscaleSize(uint32_t size, float screen_percentage)
+    {
+        const float scale = std::clamp(screen_percentage * 0.01f, 0.f, 1.f);
+        return uint32_t(int(float(size) * (1.f / scale)));
+    }
+
+    // Finds the view scaling percentage closest above "nominal_screen_percentage", and the matching unscaling percentage (HUD canvas),
+    // so that unscaling the truncated render size gives back exactly the output size on both axes (the engine truncates both ways)
+    static void FindScreenPercentages(uint32_t output_width, uint32_t output_height, float nominal_screen_percentage, float& screen_percentage, float& unscale_screen_percentage)
+    {
+        screen_percentage = nominal_screen_percentage;
+        unscale_screen_percentage = nominal_screen_percentage;
+        if (nominal_screen_percentage >= 100.f)
+        {
+            return;
+        }
+        for (int step = 0; step < 200; step++)
+        {
+            const float candidate = nominal_screen_percentage + float(step) * 0.005f;
+            const uint32_t render_width = ScaleSize(output_width, candidate);
+            const uint32_t render_height = ScaleSize(output_height, candidate);
+            // Valid unscaling scales are in (render / (output + 1), render / output] on each axis
+            const double min_scale = std::max(double(render_width) / double(output_width + 1), double(render_height) / double(output_height + 1));
+            const double max_scale = std::min(double(render_width) / double(output_width), double(render_height) / double(output_height));
+            if (min_scale >= max_scale)
+            {
+                continue;
+            }
+            const float unscale_candidate = float((min_scale + max_scale) * 50.0);
+            if (UnscaleSize(render_width, unscale_candidate) == output_width && UnscaleSize(render_height, unscale_candidate) == output_height)
+            {
+                screen_percentage = candidate;
+                unscale_screen_percentage = unscale_candidate;
+                return;
+            }
+        }
+    }
+
     void OnPresent(ID3D11Device* native_device, DeviceData& device_data) override
     {
-        g_jitter_enabled.store(device_data.sr_type != SR::Type::None && !device_data.sr_suppressed, std::memory_order_relaxed);
-        g_render_width.store(device_data.render_resolution.x, std::memory_order_relaxed);
-        g_render_height.store(device_data.render_resolution.y, std::memory_order_relaxed);
+        const bool sr_active = device_data.sr_type != SR::Type::None && !device_data.sr_suppressed;
+        g_jitter_enabled.store(sr_active, std::memory_order_relaxed);
+
+        const uint32_t output_width = uint32_t(device_data.output_resolution.x + 0.5f);
+        const uint32_t output_height = uint32_t(device_data.output_resolution.y + 0.5f);
+        // Super resolution replaces SMAA, so it only runs (and can upscale) when the game anti aliasing is on
+        float screen_percentage = 100.f;
+        float unscale_screen_percentage = 100.f;
+        if (g_upscaling_supported && sr_active && *g_smaa_enabled != 0)
+        {
+            const int sr_quality = std::clamp(g_sr_quality.load(std::memory_order_relaxed), 0, sr_quality_count - 1);
+            static uint32_t cached_output_width = 0, cached_output_height = 0;
+            static int cached_sr_quality = -1;
+            static float cached_screen_percentage = 100.f, cached_unscale_screen_percentage = 100.f;
+            if (cached_output_width != output_width || cached_output_height != output_height || cached_sr_quality != sr_quality)
+            {
+                FindScreenPercentages(output_width, output_height, sr_quality_screen_percentages[sr_quality], cached_screen_percentage, cached_unscale_screen_percentage);
+                cached_output_width = output_width;
+                cached_output_height = output_height;
+                cached_sr_quality = sr_quality;
+            }
+            screen_percentage = cached_screen_percentage;
+            unscale_screen_percentage = cached_unscale_screen_percentage;
+        }
+        const uint32_t render_width = ScaleSize(output_width, screen_percentage);
+        const uint32_t render_height = ScaleSize(output_height, screen_percentage);
+        if (g_upscaling_supported)
+        {
+            g_screen_percentages[0] = screen_percentage;
+            g_screen_percentages[1] = unscale_screen_percentage;
+        }
+        // The engine applies the new percentage from the next view it builds, so this can be off for a frame or two after a change
+        device_data.render_resolution = float2{ float(render_width), float(render_height) };
+        g_render_width.store(render_width, std::memory_order_relaxed);
+        g_render_height.store(render_height, std::memory_order_relaxed);
+        g_output_width.store(output_width, std::memory_order_relaxed);
+        g_output_height.store(output_height, std::memory_order_relaxed);
+        // More jitter phases the more we upscale, to cover every output pixel (as suggested by DLSS and FSR)
+        const float upscale_ratio = float(output_width) / float(render_width);
+        g_jitter_phases.store(std::max(uint32_t(SR::GetDefaultJitterPhases()), uint32_t(std::ceil(8.f * upscale_ratio * upscale_ratio))), std::memory_order_relaxed);
+
         g_camera_velocity_rendered = false;
+        g_sr_upscaled_this_frame = false;
+        g_post_render_scale = float2{ 1.f, 1.f };
         g_frame_index++;
 
         if (!custom_texture_mip_lod_bias_offset)
         {
             std::shared_lock shared_lock_samplers(s_mutex_samplers);
-            if (device_data.sr_type != SR::Type::None && !device_data.sr_suppressed)
+            if (sr_active)
             {
-               device_data.texture_mip_lod_bias_offset = SR::GetMipLODBias(device_data.render_resolution.y, device_data.output_resolution.y); // This results in -1 at output res
+               device_data.texture_mip_lod_bias_offset = SR::GetMipLODBias(device_data.render_resolution.y, device_data.output_resolution.y) + g_mip_bias_offset.load(std::memory_order_relaxed); // This results in -1 at output res (without the user offset)
             }
             else
             {
@@ -547,6 +764,47 @@ public:
     void UpdateLumaInstanceDataCB(CB::LumaInstanceDataPadded& data, CommandListData& cmd_list_data, DeviceData& device_data) override
     {
         std::memcpy(data.GameData.ReprojectionMatrix, g_reprojection_matrix, sizeof(g_reprojection_matrix));
+        data.GameData.PostRenderScale = float4{ g_post_render_scale.x, g_post_render_scale.y, 0.f, 0.f };
+    }
+
+    void LoadConfigs() override
+    {
+        reshade::api::effect_runtime* runtime = nullptr;
+        int sr_quality = 0;
+        reshade::get_config_value(runtime, NAME, "SRQuality", sr_quality);
+        g_sr_quality.store(std::clamp(sr_quality, 0, sr_quality_count - 1), std::memory_order_relaxed);
+        float mip_bias_offset = 0.f;
+        reshade::get_config_value(runtime, NAME, "MipBiasOffset", mip_bias_offset);
+        g_mip_bias_offset.store(std::clamp(mip_bias_offset, -1.f, 1.f), std::memory_order_relaxed);
+    }
+
+    void DrawImGuiSettings(DeviceData& device_data) override
+    {
+        reshade::api::effect_runtime* runtime = nullptr;
+        ImGui::BeginDisabled(!g_upscaling_supported);
+        int sr_quality = g_sr_quality.load(std::memory_order_relaxed);
+        if (ImGui::Combo("Super Resolution Quality", &sr_quality, sr_quality_names, sr_quality_count))
+        {
+            g_sr_quality.store(sr_quality, std::memory_order_relaxed);
+            reshade::set_config_value(runtime, NAME, "SRQuality", sr_quality);
+        }
+        ImGui::EndDisabled();
+        if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
+        {
+            ImGui::SetTooltip(g_upscaling_supported ? "Render resolution of DLSS/FSR (it replaces the game anti aliasing, so that needs to be on)." : "Not supported by this version of the game.");
+        }
+        float mip_bias_offset = g_mip_bias_offset.load(std::memory_order_relaxed);
+        if (ImGui::SliderFloat("Texture Mip Bias Offset", &mip_bias_offset, -1.f, 1.f, "%.2f"))
+        {
+            // Quantized, as every value creates new samplers
+            mip_bias_offset = std::round(mip_bias_offset * 20.f) / 20.f;
+            g_mip_bias_offset.store(mip_bias_offset, std::memory_order_relaxed);
+            reshade::set_config_value(runtime, NAME, "MipBiasOffset", mip_bias_offset);
+        }
+        if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
+        {
+            ImGui::SetTooltip("Added to the texture mip bias recommended for DLSS/FSR (log2(render / output resolution) - 1).\nHigher reduces texture shimmering in motion, lower is sharper. 0 is the recommended value.");
+        }
     }
 
     void PrintImGuiAbout() override
