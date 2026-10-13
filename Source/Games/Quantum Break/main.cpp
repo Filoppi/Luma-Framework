@@ -1,6 +1,13 @@
 #include "shared.h"
-#include "ConstantBufferCache.hpp"
 #include "Upscaling.hpp"
+#if ENABLE_SR
+#include "NativeHooks.hpp"
+#endif
+
+// Core exposes translation-unit-local state; keep its SR consumer in this same unity TU.
+#include "Upscaling.cpp"
+
+#include <array>
 
 namespace
 {
@@ -23,11 +30,10 @@ namespace
          float max_value = 2.f;
          const char* format = "%.2f";
          const char* tooltip = nullptr;
-         std::vector<std::string> labels = {"Off", "On"};
-         bool (*is_enabled)(const CB::LumaGameSettings&) = nullptr;
+         std::array<const char*, 2> labels = {};
       };
 
-      const Descriptor k_descriptors[] = {
+      constexpr Descriptor k_descriptors[] = {
          {
             .kind = Kind::Float,
             .label = "Highlights",
@@ -96,25 +102,6 @@ namespace
          },
       };
 
-      int IntegerSliderMin(const Descriptor& setting)
-      {
-         return setting.labels.empty()
-                   ? static_cast<int>(setting.min_value)
-                   : 0;
-      }
-
-      int IntegerSliderMax(const Descriptor& setting)
-      {
-         return setting.labels.empty()
-                   ? static_cast<int>(setting.max_value)
-                   : static_cast<int>(setting.labels.size() - 1);
-      }
-
-      void SaveSettingValue(reshade::api::effect_runtime* runtime, const Descriptor& setting, float value)
-      {
-         reshade::set_config_value(runtime, NAME, setting.label, value);
-      }
-
       void Initialize()
       {
          for (const Descriptor& setting : k_descriptors)
@@ -122,8 +109,6 @@ namespace
             default_luma_global_game_settings.*(setting.member) = setting.default_value;
             cb_luma_global_settings.GameSettings.*(setting.member) = setting.default_value;
          }
-
-         QuantumBreakUpscaling::Settings::Initialize();
       }
 
       void Load(reshade::api::effect_runtime* runtime)
@@ -133,56 +118,28 @@ namespace
             float& value = cb_luma_global_settings.GameSettings.*(setting.member);
             reshade::get_config_value(runtime, NAME, setting.label, value);
          }
-
-         QuantumBreakUpscaling::Settings::Load(runtime);
-      }
-
-      void DrawIntegerSetting(const Descriptor& setting, float& value, reshade::api::effect_runtime* runtime)
-      {
-         const int min_value_i = IntegerSliderMin(setting);
-         const int max_value_i = IntegerSliderMax(setting);
-         int slider_value = std::clamp(static_cast<int>(std::lround(value)), min_value_i, max_value_i);
-
-         const char* slider_format = "%d";
-         if (!setting.labels.empty())
-         {
-            slider_format = setting.labels[static_cast<size_t>(slider_value - min_value_i)].c_str();
-         }
-
-         if (ImGui::SliderInt(setting.label, &slider_value, min_value_i, max_value_i, slider_format))
-         {
-            value = static_cast<float>(slider_value);
-            SaveSettingValue(runtime, setting, value);
-         }
-      }
-
-      void DrawFloatSetting(const Descriptor& setting, float& value, reshade::api::effect_runtime* runtime)
-      {
-         if (ImGui::SliderFloat(setting.label, &value, setting.min_value, setting.max_value, setting.format))
-         {
-            SaveSettingValue(runtime, setting, value);
-         }
       }
 
       void DrawOne(const Descriptor& setting, reshade::api::effect_runtime* runtime)
       {
          float& value = cb_luma_global_settings.GameSettings.*(setting.member);
          const float default_value = default_luma_global_game_settings.*(setting.member);
-         const bool is_enabled = setting.is_enabled == nullptr || setting.is_enabled(cb_luma_global_settings.GameSettings);
-
-         if (!is_enabled)
-         {
-            ImGui::BeginDisabled();
-         }
-
+         bool changed = false;
          if (setting.kind == Kind::Integer)
          {
-            DrawIntegerSetting(setting, value, runtime);
+            const bool has_labels = setting.labels[0] != nullptr;
+            const int min_value_i = has_labels ? 0 : static_cast<int>(setting.min_value);
+            const int max_value_i = has_labels ? static_cast<int>(setting.labels.size() - 1) : static_cast<int>(setting.max_value);
+            int slider_value = std::clamp(static_cast<int>(std::lround(value)), min_value_i, max_value_i);
+            const char* slider_format = has_labels ? setting.labels[static_cast<size_t>(slider_value - min_value_i)] : "%d";
+            changed = ImGui::SliderInt(setting.label, &slider_value, min_value_i, max_value_i, slider_format);
+            if (changed) value = static_cast<float>(slider_value);
          }
          else
          {
-            DrawFloatSetting(setting, value, runtime);
+            changed = ImGui::SliderFloat(setting.label, &value, setting.min_value, setting.max_value, setting.format);
          }
+         if (changed) reshade::set_config_value(runtime, NAME, setting.label, value);
 
          if (setting.tooltip != nullptr && ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
          {
@@ -190,11 +147,6 @@ namespace
          }
 
          DrawResetButton(value, default_value, setting.label, runtime);
-
-         if (!is_enabled)
-         {
-            ImGui::EndDisabled();
-         }
       }
 
       void DrawAll(reshade::api::effect_runtime* runtime)
@@ -309,16 +261,16 @@ struct GameDeviceDataQuantumBreak final : public GameDeviceData
    // Frame markers are latched on present so pause/menu frames can be distinguished from scene frames.
    bool had_scene_temporal_resolve_last_frame = false;
    uint32_t ui_only_frame_hold_counter = 0u;
+#if ENABLE_SR && (DEVELOPMENT || TEST)
    bool debug_prev_saw_history_reprojection_pass = false;
    bool debug_prev_saw_temporal_resolve_pass = false;
+#endif
    bool saw_history_reprojection_pass = false;
    bool saw_temporal_resolve_pass = false;
 };
 
 class QuantumBreakGame final : public Game
 {
-   inline static bool cbuffer_events_registered_ = false;
-
    static GameDeviceDataQuantumBreak& GetGameDeviceData(DeviceData& device_data)
    {
       return *static_cast<GameDeviceDataQuantumBreak*>(device_data.game);
@@ -329,169 +281,15 @@ class QuantumBreakGame final : public Game
       return *static_cast<const GameDeviceDataQuantumBreak*>(device_data.game);
    }
 
-   static QuantumBreakUpscaling::ConstantBufferCache* TryGetConstantBufferCache(reshade::api::device* device)
-   {
-      if (device == nullptr)
-      {
-         return nullptr;
-      }
-
-      DeviceData* device_data = device->get_private_data<DeviceData>();
-      if (device_data == nullptr || device_data->game == nullptr)
-      {
-         return nullptr;
-      }
-
-      auto& game_device_data = *static_cast<GameDeviceDataQuantumBreak*>(device_data->game);
-      return &game_device_data.upscaling.constant_buffer_cache;
-   }
-
 public:
-   // These callbacks are emitted for buffers throughout the entire game. Keep cheap checks here,
-   // before looking up per-device state, so unrelated work and shadow-rendering threads return early.
-   static void OnMapBufferRegion(reshade::api::device* device, reshade::api::resource resource, uint64_t offset, uint64_t size, reshade::api::map_access access, void** mapped_data)
-   {
-      (void)offset;
-      (void)size;
-      if (resource.handle == 0u || mapped_data == nullptr || *mapped_data == nullptr || !QuantumBreakUpscaling::ConstantBufferCache::IsWriteAccess(access) || !QuantumBreakUpscaling::ConstantBufferCache::IsCaptureThread())
-      {
-         return;
-      }
-
-      if (auto* cache = TryGetConstantBufferCache(device))
-      {
-         cache->RecordMap(reinterpret_cast<ID3D11Buffer*>(resource.handle), *mapped_data);
-      }
-   }
-
-   // Unmap marks the point where a CPU write is complete and safe to copy into the snapshot.
-   static void OnUnmapBufferRegion(reshade::api::device* device, reshade::api::resource resource)
-   {
-      if (resource.handle == 0u || !QuantumBreakUpscaling::ConstantBufferCache::IsCaptureThread())
-      {
-         return;
-      }
-
-      if (auto* cache = TryGetConstantBufferCache(device))
-      {
-         cache->RecordUnmap(reinterpret_cast<ID3D11Buffer*>(resource.handle));
-      }
-   }
-
-   // Unlike Map, an Update call already supplies the bytes being written.
-   // ReShade expects false when an add-on only observes the update instead of replacing it.
-   static bool OnUpdateBufferRegion(reshade::api::device* device, const void* source_data, reshade::api::resource resource, uint64_t offset, uint64_t size)
-   {
-      if (resource.handle == 0u || source_data == nullptr || !QuantumBreakUpscaling::ConstantBufferCache::IsCaptureThread())
-      {
-         return false;
-      }
-
-      if (auto* cache = TryGetConstantBufferCache(device))
-      {
-         cache->RecordUpdate(
-            reinterpret_cast<ID3D11Buffer*>(resource.handle),
-            source_data,
-            offset,
-            size);
-      }
-      return false;
-   }
-
-   static bool OnCopyResource(reshade::api::command_list* command_list, reshade::api::resource source, reshade::api::resource destination)
-   {
-      (void)source;
-      if (command_list == nullptr || destination.handle == 0u || !QuantumBreakUpscaling::ConstantBufferCache::IsCaptureThread())
-      {
-         return false;
-      }
-
-      if (auto* cache = TryGetConstantBufferCache(command_list->get_device()))
-      {
-         // A GPU copy has no CPU-visible source bytes, so this resource must use safe readback.
-         cache->RequireGpuReadback(reinterpret_cast<ID3D11Buffer*>(destination.handle));
-      }
-      return false;
-   }
-
-   static bool OnCopyBufferRegion(reshade::api::command_list* command_list, reshade::api::resource source, uint64_t source_offset, reshade::api::resource destination, uint64_t destination_offset, uint64_t size)
-   {
-      (void)source;
-      (void)source_offset;
-      (void)destination_offset;
-      (void)size;
-      if (command_list == nullptr || destination.handle == 0u || !QuantumBreakUpscaling::ConstantBufferCache::IsCaptureThread())
-      {
-         return false;
-      }
-
-      if (auto* cache = TryGetConstantBufferCache(command_list->get_device()))
-      {
-         cache->RequireGpuReadback(reinterpret_cast<ID3D11Buffer*>(destination.handle));
-      }
-      return false;
-   }
-
-   static void OnDestroyResource(reshade::api::device* device, reshade::api::resource resource)
-   {
-      if (resource.handle == 0u)
-      {
-         return;
-      }
-
-      if (auto* cache = TryGetConstantBufferCache(device))
-      {
-         cache->Forget(reinterpret_cast<ID3D11Buffer*>(resource.handle));
-      }
-   }
-
-   static void RegisterCBufferEvents()
-   {
-#if ENABLE_SR
-      if (cbuffer_events_registered_)
-      {
-         return;
-      }
-
-      reshade::register_event<reshade::addon_event::map_buffer_region>(OnMapBufferRegion);
-      reshade::register_event<reshade::addon_event::unmap_buffer_region>(OnUnmapBufferRegion);
-      reshade::register_event<reshade::addon_event::update_buffer_region>(OnUpdateBufferRegion);
-      reshade::register_event<reshade::addon_event::copy_resource>(OnCopyResource);
-      reshade::register_event<reshade::addon_event::copy_buffer_region>(OnCopyBufferRegion);
-      reshade::register_event<reshade::addon_event::destroy_resource>(OnDestroyResource);
-      cbuffer_events_registered_ = true;
-#endif
-   }
-
-   static void UnregisterCBufferEvents()
-   {
-#if ENABLE_SR
-      if (!cbuffer_events_registered_)
-      {
-         return;
-      }
-
-      reshade::unregister_event<reshade::addon_event::map_buffer_region>(OnMapBufferRegion);
-      reshade::unregister_event<reshade::addon_event::unmap_buffer_region>(OnUnmapBufferRegion);
-      reshade::unregister_event<reshade::addon_event::update_buffer_region>(OnUpdateBufferRegion);
-      reshade::unregister_event<reshade::addon_event::copy_resource>(OnCopyResource);
-      reshade::unregister_event<reshade::addon_event::copy_buffer_region>(OnCopyBufferRegion);
-      reshade::unregister_event<reshade::addon_event::destroy_resource>(OnDestroyResource);
-      cbuffer_events_registered_ = false;
-#endif
-   }
-
-   void OnLoad(std::filesystem::path& file_path, bool failed) override
-   {
-      (void)file_path;
-      if (!failed)
-      {
-         RegisterCBufferEvents();
-      }
-   }
-
    void OnInit(bool async) override
    {
+#if ENABLE_SR
+      // Only Core's post-DllMain initialization permits hook installation here.
+      if (async) QuantumBreakUpscaling::NativeHooks::TryInstall();
+#else
+      (void)async;
+#endif
       RuntimeConfig::ApplyUltrawidePatches();
 
       // QB custom shaders reserve these slots for Luma settings/data during the temporal resolve replacement.
@@ -515,20 +313,33 @@ public:
       device_data.game = new GameDeviceDataQuantumBreak;
    }
 
+   void OnInitDevice(ID3D11Device* native_device, DeviceData& device_data) override
+   {
+      (void)native_device;
+      QuantumBreakUpscaling::OnInitDevice(device_data);
+   }
+
    void OnDestroyDeviceData(DeviceData& device_data) override
    {
       auto* game_device_data = static_cast<GameDeviceDataQuantumBreak*>(device_data.game);
-      // Resource releases during destruction may re-enter OnDestroyResource.
+      // Clear the game pointer before releases/destruction can re-enter addon callbacks.
       device_data.game = nullptr;
+      QuantumBreakUpscaling::OnDestroyDevice(game_device_data != nullptr ? &game_device_data->upscaling : nullptr);
       delete game_device_data;
-      QuantumBreakUpscaling::ConstantBufferCache::ResetCaptureThread();
    }
 
    DrawOrDispatchOverrideType OnDrawOrDispatch(ID3D11Device* native_device, ID3D11DeviceContext* native_device_context, CommandListData& cmd_list_data, DeviceData& device_data, reshade::api::shader_stage stages, const ShaderHashesList<OneShaderPerPipeline>& original_shader_hashes, bool is_custom_pass, bool& updated_cbuffers, std::function<void()>* original_draw_dispatch_func) override
    {
-      auto& game_device_data = GetGameDeviceData(device_data);
+      const bool depth_pass = QuantumBreakUpscaling::MatchesPass(original_shader_hashes, QuantumBreakUpscaling::depth_linearization_pass);
+      const bool motion_pass = QuantumBreakUpscaling::MatchesPass(original_shader_hashes, QuantumBreakUpscaling::history_reprojection_pass);
+      const bool temporal_pass = QuantumBreakUpscaling::MatchesPass(original_shader_hashes, QuantumBreakUpscaling::temporal_resolve_pass);
+      if (!depth_pass && !motion_pass && !temporal_pass) return DrawOrDispatchOverrideType::None;
 
-      if (QuantumBreakUpscaling::IsDepthLinearizationPass(original_shader_hashes))
+      auto& game_device_data = GetGameDeviceData(device_data);
+      // Lifecycle/UI callbacks activate capture early; only relevant passes need this late-load retry.
+      QuantumBreakUpscaling::PrepareNativeInputs(native_device_context, device_data);
+
+      if (depth_pass)
       {
          if (QuantumBreakUpscaling::IsRequested(device_data))
          {
@@ -538,7 +349,7 @@ public:
          return DrawOrDispatchOverrideType::None;
       }
 
-      if (QuantumBreakUpscaling::IsHistoryReprojectionPass(original_shader_hashes))
+      if (motion_pass)
       {
          game_device_data.saw_history_reprojection_pass = true;
          device_data.taa_detected = true;
@@ -550,16 +361,12 @@ public:
          return DrawOrDispatchOverrideType::None;
       }
 
-      if (!QuantumBreakUpscaling::IsTemporalResolvePass(original_shader_hashes))
-      {
-         return DrawOrDispatchOverrideType::None;
-      }
-
       // Temporal resolve is the SR insertion point: it sees color, depth, post-stack constants, and final output.
       game_device_data.saw_temporal_resolve_pass = true;
       device_data.has_drawn_main_post_processing = true;
 
-      const auto sr_result = QuantumBreakUpscaling::RunTemporalResolve(native_device, native_device_context, device_data, game_device_data.upscaling);
+      const bool temporal_replacement_active = QuantumBreakUpscaling::IsRequested(device_data) && QuantumBreakUpscaling::IsTemporalReplacementActive(native_device_context, cmd_list_data, device_data);
+      const auto sr_result = QuantumBreakUpscaling::RunTemporalResolve(native_device, native_device_context, device_data, game_device_data.upscaling, temporal_replacement_active);
       if (sr_result.stop_processing)
       {
          // Some loading-to-gameplay temporal-resolve variants bind color/depth/MV but not QB's scene
@@ -644,8 +451,10 @@ public:
 
       QuantumBreakUpscaling::OnPresent(device_data, game_device_data.upscaling);
 
+#if ENABLE_SR && (DEVELOPMENT || TEST)
       game_device_data.debug_prev_saw_history_reprojection_pass = game_device_data.saw_history_reprojection_pass;
       game_device_data.debug_prev_saw_temporal_resolve_pass = game_device_data.saw_temporal_resolve_pass;
+#endif // ENABLE_SR && (DEVELOPMENT || TEST)
 
       device_data.taa_detected = game_device_data.saw_history_reprojection_pass;
       device_data.has_drawn_sr = false;
@@ -684,8 +493,9 @@ public:
 
       // Keep user-facing grading/effects controls above the SR tuning/debug block.
       Settings::DrawAll(runtime);
-      QuantumBreakUpscaling::Settings::Draw(device_data, runtime);
+      QuantumBreakUpscaling::DrawSettings(device_data);
 
+#if ENABLE_SR && (DEVELOPMENT || TEST)
       auto& game_device_data = GetGameDeviceData(device_data);
       QuantumBreakUpscaling::DrawDebug(
          game_device_data.upscaling,
@@ -693,6 +503,7 @@ public:
          game_device_data.debug_prev_saw_temporal_resolve_pass,
          game_device_data.had_scene_temporal_resolve_last_frame,
          game_device_data.ui_only_frame_hold_counter);
+#endif // ENABLE_SR && (DEVELOPMENT || TEST)
    }
 
    void PrintImGuiAbout() override
@@ -732,6 +543,9 @@ public:
                   "\n\nThird Party:"
                   "\nReShade"
                   "\nImGui"
+#if ENABLE_SR
+                  "\nMinHook (native camera / jitter) - Copyright (c) 2009-2017 Tsuda Kageyu. Licensed under BSD-2-Clause."
+#endif
                   "\nNeutwo, LUT Scaling, and Film Grain (from RenoDX) - Copyright (c) 2026 Carlos Lopez Jr. Licensed under MIT."
                   "");
       static const std::string neutwo_license_link = std::string("RenoDX MIT License ") + std::string(ICON_FK_SEARCH);
@@ -742,7 +556,7 @@ public:
    }
 };
 
-BOOL APIENTRY DllMain(HMODULE hModule, DWORD ul_reason_for_call, LPVOID lpReserved)
+BOOL APIENTRY DllMain(HMODULE h_module, DWORD ul_reason_for_call, LPVOID lp_reserved)
 {
    if (ul_reason_for_call == DLL_PROCESS_ATTACH)
    {
@@ -758,10 +572,12 @@ BOOL APIENTRY DllMain(HMODULE hModule, DWORD ul_reason_for_call, LPVOID lpReserv
    }
    else if (ul_reason_for_call == DLL_PROCESS_DETACH)
    {
-      QuantumBreakGame::UnregisterCBufferEvents();
+#if ENABLE_SR
+      QuantumBreakUpscaling::NativeHooks::Reset();
+#endif
    }
 
-   CoreMain(hModule, ul_reason_for_call, lpReserved);
+   CoreMain(h_module, ul_reason_for_call, lp_reserved);
 
    return TRUE;
 }
