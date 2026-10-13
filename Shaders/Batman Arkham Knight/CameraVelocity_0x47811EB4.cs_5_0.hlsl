@@ -18,25 +18,23 @@
 
 cbuffer CameraVelocityCB : register(b0)
 {
-    float4 c0[15];
+   float4 c0[15];
 }
 
 Texture2D<float4> SceneDepth : register(t0);
 RWTexture2D<float4> Velocity : register(u0);
 
-[numthreads(16, 16, 1)]
-void main(uint3 id : SV_DispatchThreadID)
-{
-    float device_depth = min(SceneDepth.Load(int3(id.xy, 0)).x, 1.0);
+[numthreads(16, 16, 1)] void main(uint3 id : SV_DispatchThreadID) {
+   float device_depth = min(SceneDepth.Load(int3(id.xy, 0)).x, 1.0);
 
-    // Jittered NDC of the pixel center (the jitter is part of the matrices, like for the objects)
-    float4 view_rect = LumaData.GameData.CameraVelocityViewRect; // Size (xy), origin (zw)
-    float2 ndc = (float2(id.xy) - view_rect.zw + 0.5) * (float2(2.0, -2.0) / view_rect.xy) + float2(-1.0, 1.0);
+   // Jittered NDC of the pixel center (the jitter is part of the matrices, like for the objects)
+   float4 view_rect = LumaData.GameData.CameraVelocityViewRect; // Size (xy), origin (zw)
+   float2 ndc = (float2(id.xy) - view_rect.zw + 0.5) * (float2(2.0, -2.0) / view_rect.xy) + float2(-1.0, 1.0);
 
-    float4x4 reprojection = float4x4(LumaData.GameData.ReprojectionMatrix[0], LumaData.GameData.ReprojectionMatrix[1], LumaData.GameData.ReprojectionMatrix[2], LumaData.GameData.ReprojectionMatrix[3]);
-    float4 prev_clip = mul(float4(ndc, device_depth, 1.0), reprojection);
-    float2 prev_ndc = prev_clip.xy / prev_clip.w;
+   float4x4 reprojection = float4x4(LumaData.GameData.ReprojectionMatrix[0], LumaData.GameData.ReprojectionMatrix[1], LumaData.GameData.ReprojectionMatrix[2], LumaData.GameData.ReprojectionMatrix[3]);
+   float4 prev_clip = mul(float4(ndc, device_depth, 1.0), reprojection);
+   float2 prev_ndc = prev_clip.xy / prev_clip.w;
 
-    float2 velocity = (ndc - prev_ndc) * float2(-0.5, 0.5);
-    Velocity[id.xy] = float4(velocity, velocity.x, velocity.x);
+   float2 velocity = (ndc - prev_ndc) * float2(-0.5, 0.5);
+   Velocity[id.xy] = float4(velocity, velocity.x, velocity.x);
 }

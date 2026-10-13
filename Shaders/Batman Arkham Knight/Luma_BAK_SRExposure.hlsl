@@ -5,8 +5,6 @@
 Texture2D<float> EngineExposure : register(t0);
 RWTexture2D<float> SRExposure : register(u0);
 
-[numthreads(1, 1, 1)]
-void main()
-{
-    SRExposure[uint2(0, 0)] = 1.0 / max(EngineExposure.Load(int3(0, 0, 0)), 0.0001);
+[numthreads(1, 1, 1)] void main() {
+   SRExposure[uint2(0, 0)] = 1.0 / max(EngineExposure.Load(int3(0, 0, 0)), 0.0001);
 }
