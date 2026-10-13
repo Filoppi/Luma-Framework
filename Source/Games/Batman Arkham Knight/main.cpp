@@ -16,6 +16,8 @@ namespace
     // Writes camera motion for every pixel of the velocity buffer, before the base pass draws object motion on top.
     // Replaced by "CameraVelocity_0x47811EB4.cs_5_0.hlsl", which reprojects with the matrix we provide.
     const ShaderHashesList shader_hashes_CameraVelocity = { .compute_shaders = { 0x47811EB4 } };
+    // Eye adaptation, writes the 1x1 exposure divisor (scene / value is the tonemapper input) the tonemapper reads in the same frame
+    const ShaderHashesList shader_hashes_EyeAdaptation = { .compute_shaders = { 0x44283FF8 } };
     // Post processes that read the render resolution depth/velocity after upscaling, replaced by versions that scale their load coordinates:
     // "Gather_0xB2A276FD.cs_5_0.hlsl" (DOF/bloom downsample, depth) and "RockOnPreamble_0xF98BC308.cs_5_0.hlsl" (motion blur/DOF setup, depth and velocity).
 
@@ -38,6 +40,11 @@ namespace
     constexpr size_t view_jitter_offset = 0x520; // float2, NDC offset ("UnicornJitter"), copied along with the view to the render thread
     constexpr size_t view_rect_min_x_offset = 0x5C; // float
     constexpr size_t view_rect_min_y_offset = 0x60; // float
+    // History invalidation flags (render thread view), all copied from the game thread view or set by the scene renderer before rendering
+    constexpr size_t view_flags_offset = 0x800; // uint32 bitfield
+    constexpr uint32_t view_flag_instant_switch = 0x200; // LocalPlayer.bInstantlySwitchPostProcessVolume (teleport, player switch, cutscene camera jump)
+    constexpr size_t view_camera_cut_offset = 0x80C; // uint32, PlayerController.bCameraCut (cutscene camera switch)
+    constexpr size_t view_prev_transforms_reset_offset = 0x3AE4; // uint32, any of the above, first frame, or a large camera movement
 
     // Engine globals and functions found by signature (null if not found, upscaling is then unavailable)
     // Our ScreenPercentages, read by the engine instead of the game setting (patched): [0] view scaling, [1] unscaling (HUD canvas),
@@ -64,6 +71,7 @@ namespace
     float2 g_frame_jitter_pixels = {};
     bool g_camera_velocity_rendered = false;
     bool g_camera_velocity_has_history = false;
+    std::atomic<bool> g_use_engine_exposure = true;
     float4 g_reprojection_matrix[4] = {}; // Current jittered NDC + device depth to previous jittered clip space, for the camera velocity pass
     double g_last_translated_view_projection[4][4] = {};
     double g_last_pre_view_translation[3] = {};
@@ -268,7 +276,7 @@ namespace
     // Render thread, main view: builds the camera velocity reprojection matrix (current jittered NDC + depth -> previous jittered clip space).
     // The engine's previous view projection is exactly last frame's translated view projection, relative to last frame's view origin,
     // so this moves current translated world positions by how much the origin moved since. Built in double precision, as positions are relative to the camera.
-    void UpdateReprojectionMatrix(const uint8_t* view)
+    void UpdateReprojectionMatrix(const uint8_t* view, bool camera_cut)
     {
         const float* translated_view_projection_f = reinterpret_cast<const float*>(view + view_translated_view_projection_offset);
         const float* pre_view_translation_f = reinterpret_cast<const float*>(view + view_pre_view_translation_offset);
@@ -279,8 +287,9 @@ namespace
         }
         const double pre_view_translation[3] = { pre_view_translation_f[0], pre_view_translation_f[1], pre_view_translation_f[2] };
 
+        // On camera cuts there's no previous frame to reproject to, but this frame is still stored as the next frame's previous one
         double inverse_translated_view_projection[4][4];
-        g_camera_velocity_has_history = g_has_last_camera_velocity && g_last_camera_velocity_frame_index + 1 == g_frame_index && Invert(translated_view_projection, inverse_translated_view_projection);
+        g_camera_velocity_has_history = !camera_cut && g_has_last_camera_velocity && g_last_camera_velocity_frame_index + 1 == g_frame_index && Invert(translated_view_projection, inverse_translated_view_projection);
         if (g_camera_velocity_has_history)
         {
             double translation[4][4] = { { 1.0, 0.0, 0.0, 0.0 }, { 0.0, 1.0, 0.0, 0.0 }, { 0.0, 0.0, 1.0, 0.0 }, { 0.0, 0.0, 0.0, 1.0 } };
@@ -319,7 +328,11 @@ namespace
         const bool is_main_view = IsRenderResolutionView(view);
         if (is_main_view)
         {
-            UpdateReprojectionMatrix(view);
+            // The engine resets its own history (previous transforms, eye adaptation, ...) on these
+            const bool camera_cut = *reinterpret_cast<const uint32_t*>(view + view_prev_transforms_reset_offset) != 0
+                || *reinterpret_cast<const uint32_t*>(view + view_camera_cut_offset) != 0
+                || (*reinterpret_cast<const uint32_t*>(view + view_flags_offset) & view_flag_instant_switch) != 0;
+            UpdateReprojectionMatrix(view, camera_cut);
             g_camera_velocity_view_rect = float4{ *reinterpret_cast<const float*>(view + view_size_x_offset), *reinterpret_cast<const float*>(view + view_size_y_offset),
                 *reinterpret_cast<const float*>(view + view_rect_min_x_offset), *reinterpret_cast<const float*>(view + view_rect_min_y_offset) };
         }
@@ -360,6 +373,14 @@ namespace
         if (std::byte* match = FindUniquePattern("ObjectVelocityGate", "83 3D ?? ?? ?? ?? 00 74 ?? F7 43 28 00 04 00 00"))
         {
             NopBytes(match + 7, 2);
+        }
+        // Camera velocity pass: also run it on camera cut frames (where it writes no motion), so the camera of those frames is known by the next one
+        // ("bPrevTransformsReset", "bInstantlySwitchPostProcessVolume" and "bCameraCut" checks, jne -> nop)
+        if (std::byte* match = FindUniquePattern("CameraVelocityCutGates", "83 BB E4 3A 00 00 00 75 59 F7 83 00 08 00 00 00 02 00 00 75 4D 83 BB 0C 08 00 00 00 75 44 85 C0 75 40"))
+        {
+            NopBytes(match + 7, 2);
+            NopBytes(match + 19, 2);
+            NopBytes(match + 28, 2);
         }
         // Camera velocity pass: skip the "camera didn't move enough" early out (jne -> nop) and hook the pass itself
         if (std::byte* match = FindUniquePattern("CameraVelocityPass", "E8 ?? ?? ?? ?? 85 C0 75 ?? 48 8B D3 48 8B CE E8 ?? ?? ?? ?? E9"))
@@ -480,6 +501,12 @@ struct GameDeviceDataBatmanArkhamKnight final : GameDeviceData
 {
    ComPtr<ID3D11Resource> resource_depth;
    ComPtr<ID3D11Resource> resource_mvs;
+   // The engine eye adaptation output (1x1 exposure divisor), and our exposure multiplier for super resolution (1 / divisor)
+   ComPtr<ID3D11Resource> resource_engine_exposure;
+   ID3D11Resource* engine_exposure_srv_resource = nullptr; // The resource "srv_engine_exposure" was created for
+   ComPtr<ID3D11ShaderResourceView> srv_engine_exposure;
+   ComPtr<ID3D11Texture2D> texture_sr_exposure;
+   ComPtr<ID3D11UnorderedAccessView> uav_sr_exposure;
 };
 
 class BatmanArkhamKnight final : public Game
@@ -512,11 +539,19 @@ public:
 
         luma_settings_cbuffer_index = 13;
         luma_data_cbuffer_index = 12;
+
+        native_shaders_definitions.emplace(CompileTimeStringHash("BAK SR Exposure"), ShaderDefinition("Luma_BAK_SRExposure", reshade::api::pipeline_subobject_type::compute_shader));
     }
 
     void OnCreateDevice(ID3D11Device* native_device, DeviceData& device_data) override
     {
         device_data.game = new GameDeviceDataBatmanArkhamKnight;
+    }
+
+    void OnDestroyDeviceData(DeviceData& device_data) override
+    {
+        delete static_cast<GameDeviceDataBatmanArkhamKnight*>(device_data.game);
+        device_data.game = nullptr;
     }
 
     static bool OnClearRenderTargetView(reshade::api::command_list* cmd_list, reshade::api::resource_view rtv, const float color[4], uint32_t rect_count, const reshade::api::rect* rects)
@@ -560,6 +595,19 @@ public:
             if (uav_mvs.get())
             {
                 uav_mvs->GetResource(game_device_data.resource_mvs.put());
+            }
+            return DrawOrDispatchOverrideType::None;
+        }
+
+        if (original_shader_hashes.Contains(shader_hashes_EyeAdaptation))
+        {
+            // UAV0 is the new exposure, the next frame's super resolution uses it (it ping-pongs between two textures)
+            ComPtr<ID3D11UnorderedAccessView> uav_exposure;
+            native_device_context->CSGetUnorderedAccessViews(0, 1, uav_exposure.put());
+            if (uav_exposure.get())
+            {
+                game_device_data.resource_engine_exposure.reset();
+                uav_exposure->GetResource(game_device_data.resource_engine_exposure.put());
             }
             return DrawOrDispatchOverrideType::None;
         }
@@ -626,7 +674,9 @@ public:
                 settings_data.mvs_y_scale = device_data.render_resolution.y;
                 
                 settings_data.render_preset = dlss_render_preset;
-                settings_data.auto_exposure = true;
+                // The engine exposure is honored by DLSS presets J and K (others always auto expose)
+                ID3D11Resource* sr_exposure = g_use_engine_exposure.load(std::memory_order_relaxed) ? UpdateSRExposure(native_device, native_device_context, device_data) : nullptr;
+                settings_data.auto_exposure = sr_exposure == nullptr;
 
                 sr_implementations[device_data.sr_type]->UpdateSettings(sr_instance_data, native_device_context, settings_data);
 
@@ -635,11 +685,13 @@ public:
                 draw_data.output_color = resource_out.get();
                 draw_data.motion_vectors = game_device_data.resource_mvs.get();
                 draw_data.depth_buffer = game_device_data.resource_depth.get();
+                draw_data.exposure = sr_exposure;
 
                 // Jitter the frame was rendered with (pixels), read back from its view on the render thread.
                 draw_data.jitter_x = g_frame_jitter_pixels.x;
                 draw_data.jitter_y = g_frame_jitter_pixels.y;
-                // The camera velocity pass is skipped by the engine on camera cuts and similar, and the velocities need last frame's camera to be valid.
+                // The camera velocity pass hook isn't called when there's no main view this frame (loading, videos),
+                // and the velocities need last frame's camera to be valid (not on camera cuts).
                 draw_data.reset = !g_camera_velocity_rendered || !g_camera_velocity_has_history;
 
                 draw_data.render_width = device_data.render_resolution.x;
@@ -656,6 +708,61 @@ public:
         }
         
         return DrawOrDispatchOverrideType::None;
+    }
+
+    // Writes the super resolution exposure multiplier (1 / the engine exposure divisor) into our 1x1 texture and returns it, or null if unavailable.
+    // At the super resolution point, the latest engine exposure is the one from the previous frame (it adapts slowly, so that's fine).
+    // Before the engine wrote any, ours stays at 1 (what the engine writes on resets too).
+    static ID3D11Resource* UpdateSRExposure(ID3D11Device* native_device, ID3D11DeviceContext* native_device_context, DeviceData& device_data)
+    {
+        auto& game_device_data = GetGameDeviceData(device_data);
+        if (!game_device_data.texture_sr_exposure.get())
+        {
+            D3D11_TEXTURE2D_DESC desc = {};
+            desc.Width = 1;
+            desc.Height = 1;
+            desc.MipLevels = 1;
+            desc.ArraySize = 1;
+            desc.Format = DXGI_FORMAT_R32_FLOAT;
+            desc.SampleDesc.Count = 1;
+            desc.Usage = D3D11_USAGE_DEFAULT;
+            desc.BindFlags = D3D11_BIND_SHADER_RESOURCE | D3D11_BIND_UNORDERED_ACCESS;
+            const float one = 1.f;
+            const D3D11_SUBRESOURCE_DATA initial_data = { &one, sizeof(one), sizeof(one) };
+            if (FAILED(native_device->CreateTexture2D(&desc, &initial_data, game_device_data.texture_sr_exposure.put()))
+                || FAILED(native_device->CreateUnorderedAccessView(game_device_data.texture_sr_exposure.get(), nullptr, game_device_data.uav_sr_exposure.put())))
+            {
+                game_device_data.texture_sr_exposure.reset();
+                game_device_data.uav_sr_exposure.reset();
+                return nullptr;
+            }
+        }
+
+        ID3D11Resource* engine_exposure = game_device_data.resource_engine_exposure.get();
+        if (engine_exposure && engine_exposure != game_device_data.engine_exposure_srv_resource)
+        {
+            game_device_data.srv_engine_exposure.reset();
+            D3D11_SHADER_RESOURCE_VIEW_DESC srv_desc = {};
+            srv_desc.Format = DXGI_FORMAT_R16_FLOAT;
+            srv_desc.ViewDimension = D3D11_SRV_DIMENSION_TEXTURE2D;
+            srv_desc.Texture2D.MipLevels = 1;
+            native_device->CreateShaderResourceView(engine_exposure, &srv_desc, game_device_data.srv_engine_exposure.put());
+            game_device_data.engine_exposure_srv_resource = engine_exposure;
+        }
+        const auto exposure_shader = device_data.native_compute_shaders.find(CompileTimeStringHash("BAK SR Exposure"));
+        if (engine_exposure && game_device_data.srv_engine_exposure.get() && exposure_shader != device_data.native_compute_shaders.end() && exposure_shader->second.get())
+        {
+            DrawStateStack<DrawStateStackType::Compute> compute_state_stack;
+            compute_state_stack.Cache(native_device_context, device_data.uav_max_count);
+            ID3D11ShaderResourceView* srv = game_device_data.srv_engine_exposure.get();
+            ID3D11UnorderedAccessView* uav = game_device_data.uav_sr_exposure.get();
+            native_device_context->CSSetShader(exposure_shader->second.get(), nullptr, 0);
+            native_device_context->CSSetShaderResources(0, 1, &srv);
+            native_device_context->CSSetUnorderedAccessViews(0, 1, &uav, nullptr);
+            native_device_context->Dispatch(1, 1, 1);
+            compute_state_stack.Restore(native_device_context);
+        }
+        return game_device_data.texture_sr_exposure.get();
     }
 
     // Same math as the engine view scaling (ScaleScreenCoords) and unscaling (UnScaleScreenCoords)
@@ -780,6 +887,9 @@ public:
         float mip_bias_offset = 0.f;
         reshade::get_config_value(runtime, NAME, "MipBiasOffset", mip_bias_offset);
         g_mip_bias_offset.store(std::clamp(mip_bias_offset, -1.f, 1.f), std::memory_order_relaxed);
+        bool use_engine_exposure = true;
+        reshade::get_config_value(runtime, NAME, "UseEngineExposure", use_engine_exposure);
+        g_use_engine_exposure.store(use_engine_exposure, std::memory_order_relaxed);
     }
 
     void DrawImGuiSettings(DeviceData& device_data) override
@@ -808,6 +918,16 @@ public:
         if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
         {
             ImGui::SetTooltip("Added to the texture mip bias recommended for DLSS/FSR (log2(render / output resolution) - 1).\nHigher reduces texture shimmering in motion, lower is sharper. 0 is the recommended value.");
+        }
+        bool use_engine_exposure = g_use_engine_exposure.load(std::memory_order_relaxed);
+        if (ImGui::Checkbox("Use Game Exposure for Super Resolution", &use_engine_exposure))
+        {
+            g_use_engine_exposure.store(use_engine_exposure, std::memory_order_relaxed);
+            reshade::set_config_value(runtime, NAME, "UseEngineExposure", use_engine_exposure);
+        }
+        if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
+        {
+            ImGui::SetTooltip("Gives DLSS/FSR the game's eye adaptation exposure, instead of letting them estimate one.\nOnly DLSS presets J and K (and FSR) use it, other DLSS presets always estimate it.");
         }
     }
 
