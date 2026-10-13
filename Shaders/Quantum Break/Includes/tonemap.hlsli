@@ -149,15 +149,6 @@ APPLY_REINHARD_EXTENDED_PLUS_GENERATOR(float)
 APPLY_REINHARD_EXTENDED_PLUS_GENERATOR(float3)
 #undef APPLY_REINHARD_EXTENDED_PLUS_GENERATOR
 
-float ReinhardPiecewise(float x, float x_max = 1.f, float shoulder = 0.18f)
-{
-   const float x_min = 0.f;
-   float exposure = ComputeReinhardScale(x_max, x_min, shoulder, shoulder);
-   float tonemapped = mad(x, exposure, x_min) / mad(x, exposure / x_max, 1.f - x_min);
-
-   return lerp(x, tonemapped, step(shoulder, x));
-}
-
 float3 ApplyVanillaToneMap(float3 color, float white_clip = 8.f)
 {
    float luma = dot(color, float3(0.27, 0.67, 0.06));
@@ -195,17 +186,6 @@ float3 ApplyToneMap(float3 color, float white_clip = 8.f)
    }
 }
 
-float ComputeReinhardSmoothClampScale(float3 untonemapped, float rolloff_start = 0.18f, float output_max = 1.f)
-{
-   float peak = max3(untonemapped.r, untonemapped.g, untonemapped.b);
-
-   float mapped_peak = ReinhardPiecewise(peak, output_max, rolloff_start);
-
-   float scale = safeDivision(mapped_peak, peak, 1);
-
-   return scale;
-}
-
 float ComputeMaxChCompressionScale(float3 color)
 {
    if (TONE_MAP_TYPE == 0.f)
@@ -214,7 +194,7 @@ float ComputeMaxChCompressionScale(float3 color)
    }
    else
    {
-      return ComputeReinhardSmoothClampScale(color, 0.470719f);
+      return Tonemap::CInfinityRollOff::ComputeMaxChannelScale(color, 1.f, 0.470719f, 10.f);
    }
 }
 

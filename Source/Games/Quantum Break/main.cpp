@@ -546,10 +546,10 @@ public:
 #if ENABLE_SR
                   "\nMinHook (native camera / jitter) - Copyright (c) 2009-2017 Tsuda Kageyu. Licensed under BSD-2-Clause."
 #endif
-                  "\nNeutwo, LUT Scaling, and Film Grain (from RenoDX) - Copyright (c) 2026 Carlos Lopez Jr. Licensed under MIT."
+                  "\nLUT Scaling and Film Grain (from RenoDX) - Copyright (c) 2025 Carlos Lopez Jr. Licensed under MIT."
                   "");
-      static const std::string neutwo_license_link = std::string("RenoDX MIT License ") + std::string(ICON_FK_SEARCH);
-      if (ImGui::Button(neutwo_license_link.c_str()))
+      static const std::string renodx_license_link = std::string("RenoDX MIT License ") + std::string(ICON_FK_SEARCH);
+      if (ImGui::Button(renodx_license_link.c_str()))
       {
          system("start https://github.com/clshortfuse/renodx/blob/main/LICENSE");
       }

@@ -66,7 +66,7 @@ float3 ApplyUserColorGrading(float3 bt709, Config config)
 
       color = Oklab::oklab_to_linear_srgb(perceptual_new);
 
-      // Match RenoDX AP1-space clamp behavior before converting back to BT.709.
+      // Clamp negative AP1 channels before converting back to BT.709.
       float3 ap1 = BT709_To_AP1(color);
       ap1 = max(0, ap1);
       color = AP1_To_BT709(ap1);
