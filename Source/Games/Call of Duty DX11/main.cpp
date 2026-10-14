@@ -1610,34 +1610,54 @@ namespace CODs // partial
       int OnDrawOrDispatch_HandleRTVStateMultiple(ID3D11Device* native_device, ID3D11DeviceContext* native_device_context, DeviceData& device_data, int rtv_amount)
       {
          // RTV 0 to rtv_amount
-         ID3D11RenderTargetView** p = new ID3D11RenderTargetView*[rtv_amount];
-         native_device_context->OMGetRenderTargets(rtv_amount, p, nullptr); // get
+         // Fixed-size stack array (the old heap "new[]" here was never deleted, leaking memory on every draw call)
+         ID3D11RenderTargetView* rtvs[D3D11_SIMULTANEOUS_RENDER_TARGET_COUNT] = {};
+         if (rtv_amount < 0)
+            rtv_amount = 0;
+         if (rtv_amount > (int)D3D11_SIMULTANEOUS_RENDER_TARGET_COUNT)
+            rtv_amount = (int)D3D11_SIMULTANEOUS_RENDER_TARGET_COUNT;
+         native_device_context->OMGetRenderTargets(rtv_amount, rtvs, nullptr); // get (each non-null RTV is AddRef'd)
 
          // O(n^2)
+         int found = -1;
          for (int i = 0; i < rtv_amount; ++i)
          {
-            rtvstate_buffers.rtv.reset(p[i]); // take
-            if (!rtvstate_buffers.rtv)
+            if (!rtvs[i])
                continue;
 
-            // RTV0 Res
-            ID3D11Resource* p2 = nullptr;
-            rtvstate_buffers.rtv->GetResource(&p2); // get
-            rtvstate_buffers.res.reset(p2);         // take
-
-            // O(n) check if one of back_buffers
-            const auto rtv0_resource_handle = reinterpret_cast<uint64_t>(rtvstate_buffers.res.get());
-            for (const uint64_t bb_handle : device_data.back_buffers)
+            if (found < 0)
             {
-               if (bb_handle == rtv0_resource_handle)
+               // RTV Res
+               ID3D11Resource* res = nullptr;
+               rtvs[i]->GetResource(&res); // get (AddRef'd)
+
+               // O(n) check if one of back_buffers
+               const auto rtv_resource_handle = reinterpret_cast<uint64_t>(res);
+               for (const uint64_t bb_handle : device_data.back_buffers)
                {
-                  return i; // return the index of the RTV that is a back buffer
+                  if (bb_handle == rtv_resource_handle)
+                  {
+                     found = i;
+                     break;
+                  }
                }
+
+               if (found == i)
+               {
+                  rtvstate_buffers.rtv.reset(rtvs[i]); // take
+                  rtvstate_buffers.res.reset(res);     // take
+                  continue;
+               }
+
+               if (res)
+                  res->Release();
             }
+
+            // Release every RTV ref we don't keep (previously RTVs after the matching index were never released)
+            rtvs[i]->Release();
          }
 
-         // failed
-         return -1;
+         return found; // index of the RTV that is a back buffer, or -1 if none
       }
    };
 
