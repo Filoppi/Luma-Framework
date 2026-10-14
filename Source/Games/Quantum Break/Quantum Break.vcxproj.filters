@@ -3,8 +3,15 @@
   xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
   <ItemGroup>
     <ClCompile Include="main.cpp" />
+    <ClCompile Include="NativeHooks.cpp" />
+    <ClCompile Include="Upscaling.cpp" />
     <ClCompile Include="..\..\Core\unity_build.cpp" />
-    <ClInclude Include="ConstantBufferCache.hpp" />
+    <ClCompile Include="..\..\External\reshade\deps\minhook\src\buffer.c" />
+    <ClCompile Include="..\..\External\reshade\deps\minhook\src\hook.c" />
+    <ClCompile Include="..\..\External\reshade\deps\minhook\src\trampoline.c" />
+    <ClCompile Include="..\..\External\reshade\deps\minhook\src\hde\hde64.c" />
+    <ClInclude Include="NativeInputs.hpp" />
+    <ClInclude Include="NativeHooks.hpp" />
     <ClInclude Include="shared.h" />
     <ClInclude Include="Upscaling.hpp" />
   </ItemGroup>

@@ -3,8 +3,10 @@ IndentWidth: 3
 TabWidth: 3
 UseTab: Never
 BreakBeforeBraces: Allman
+InsertBraces: false
 AllowShortFunctionsOnASingleLine: None
-AllowShortIfStatementsOnASingleLine: false
+# Compact guard clauses are allowed; if/else chains remain expanded.
+AllowShortIfStatementsOnASingleLine: WithoutElse
 AllowShortLoopsOnASingleLine: false
 ColumnLimit: 0
 AlwaysBreakTemplateDeclarations: Yes

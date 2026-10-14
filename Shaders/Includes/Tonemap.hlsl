@@ -3,6 +3,7 @@
 
 #include "Common.hlsl"
 #include "ACES.hlsl"
+#include "CInfinityRolloff.hlsl"
 #include "DICE.hlsl"
 #include "ColorGradingLUT.hlsl"
 

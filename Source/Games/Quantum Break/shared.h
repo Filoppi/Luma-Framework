@@ -2,8 +2,7 @@
 
 #define GAME_QUANTUM_BREAK 1
 
-#define ENABLE_NGX 1
-#define ENABLE_FIDELITY_SK 1
+// SR feature defines come from UseLumaNGX/UseLumaFSR in the project, not a second source here.
 #define ENABLE_POST_DRAW_DISPATCH_CALLBACK 1
 
 #include <algorithm>

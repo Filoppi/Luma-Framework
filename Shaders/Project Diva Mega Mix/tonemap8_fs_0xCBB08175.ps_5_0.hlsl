@@ -84,8 +84,7 @@ void main(
   r0.xyz = r0.www ? r1.xyz : r0.xyz; //bloom or not
   
   colorUntonemapped = r0.xyz; //TODO: verify... somehow
-  //colorUntonemapped = gamma_to_linear(colorUntonemapped, GCT_POSITIVE, 2.2);
-  colorUntonemapped = gamma_sRGB_to_linear(colorUntonemapped, GCT_POSITIVE);
+  colorUntonemapped = DecodeIntermediate(max(0, colorUntonemapped));
 
   //tonemap
   r0.xyz = /* saturate */(r0.xyz * g_tone_scale.xyz + g_tone_offset.xyz); //clamp with color grade
@@ -102,7 +101,6 @@ void main(
   r1.xyz = r4.xxx ? r1.xyz : r2.xyz;
   r0.w = cmp(0 < g_fade_color.w);
   o0.xyz = r0.www ? r1.xyz : r0.xyz;
-  
-  Tonemap_Out(o0);
+
   return;
 }

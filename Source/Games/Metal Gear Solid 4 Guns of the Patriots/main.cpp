@@ -38,10 +38,6 @@ struct GameDeviceDataMetalGearSolid4 final : public GameDeviceData
 {
    MGS4GTAO::Data gtao_data;
 
-   // The resolution "DrawSMAA()" last created its (Luma managed) intermediate render targets at
-   uint32_t smaa_width = 0;
-   uint32_t smaa_height = 0;
-
    bool drawn_fxaa = false;
 
    CustomPixelShaderPassData correct_subtractive_blends_data;
@@ -466,19 +462,6 @@ public:
       // Only run SMAA on the main rendering. Mirror views also run FXAA so we can just leave that.
       if (rtv_texture_desc.Width != (UINT)device_data.render_resolution.x || rtv_texture_desc.Height != (UINT)device_data.render_resolution.y)
          return DrawOrDispatchOverrideType::None;
-
-      auto& managed_resources = device_data.managed_resources;
-
-      // "DrawSMAA()" only re-creates its resolution dependent resources when the swapchain is re-initialized, so do it ourselves in case the game ever changed its post processing resolution on its own.
-      // Note: the game resolution cannot change after boot anyway!
-      if (game_device_data.smaa_width != rtv_texture_desc.Width || game_device_data.smaa_height != rtv_texture_desc.Height)
-      {
-         managed_resources.depth_stencil_views["smaa_dsv"_h].reset();
-         managed_resources.render_target_views["smaa_edge_detection"_h].reset();
-         managed_resources.render_target_views["smaa_blending_weight_calculation"_h].reset();
-         game_device_data.smaa_width = rtv_texture_desc.Width;
-         game_device_data.smaa_height = rtv_texture_desc.Height;
-      }
 
       SetLumaConstantBuffers(native_device_context, cmd_list_data, device_data, stages, LumaConstantBufferType::LumaSettings);
       SetLumaConstantBuffers(native_device_context, cmd_list_data, device_data, stages, LumaConstantBufferType::LumaData);

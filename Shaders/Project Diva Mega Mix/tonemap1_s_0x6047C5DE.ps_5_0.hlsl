@@ -64,9 +64,9 @@ void main(
   #if CUSTOM_TESTBGSPRITES == 1
     r1.xyz = 0;
   #endif
-  r1.w = cmp(0 < v3.z); //threshold
+  r1.w = cmp(0 < v3.z); //toggle
   r1.xyz = r1.xyz + r0.xyz; //bloom add
-  r0.xyz = r1.www ? r1.xyz : r0.xyz; //dont draw if not surpasses threshold
+  r0.xyz = r1.www ? r1.xyz : r0.xyz; //dont draw if not allowed
 
   //overlays
   r1.x = cmp(0 < g_texcoord_transforms[0].w);
@@ -88,6 +88,7 @@ void main(
   }
 
   colorUntonemapped = r0.xyz;
+  // o0.xyz = colorUntonemapped; return; // debug
 
   //composite sprites that was rendered before this (complex)
   {
@@ -138,8 +139,7 @@ void main(
   }
 
   //linear colorU
-  //colorUntonemapped = gamma_to_linear(colorUntonemapped, GCT_POSITIVE, 2.2);
-  colorUntonemapped = gamma_sRGB_to_linear(colorUntonemapped, GCT_POSITIVE);
+  colorUntonemapped = DecodeIntermediate(max(0, colorUntonemapped));
 
   //tonemapper
   {
@@ -157,8 +157,10 @@ void main(
 
     Tonemap_ResolveComplexWithExposure(r0.xyz, colorUntonemapped, v3);
   }
+  // o0.xyz = r0.xyz; return; // debug
 
   r0.xyz = Tonemap_Do(colorUntonemapped, r0.xyz, v1.xy, g_textures_0_/* , g_tone_offset */);
+  // o0.xyz = r0.xyz; return; // debug
 
   //fade
   {
@@ -175,7 +177,6 @@ void main(
 
   //out
   o0 = r0;
-  Tonemap_Out(o0);
   return;
 }
 

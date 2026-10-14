@@ -34,7 +34,7 @@
 #include "../Includes/ColorGradingLUT.hlsl" // SimpleGamutClip
 #include "../Includes/DICE.hlsl"            // DICETonemap / DefaultDICESettings
 #include "../Includes/Reinhard.hlsl"        // Reinhard::ReinhardPiecewise: soft hue reference
-#include "Includes/MacLeodBoynton.hlsl"      // MacLeodBoynton::HueOnlyBT2020 (RenoDX-derived hue/purity model)
+#include "../Includes/MacLeodBoynton.hlsl"      // MacLeodBoynton::HueOnlyBT2020 (RenoDX-derived hue/purity model)
 // clang-format on
 
 // HDR / vanilla. 1 = extended UE3 grade + DICE display map (default). 0 = vanilla clamped SDR reference.

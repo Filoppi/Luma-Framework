@@ -28,7 +28,7 @@
 #include "../Includes/ColorGradingLUT.hlsl" // SimpleGamutClip
 #include "../Includes/DICE.hlsl"            // DICETonemap / DefaultDICESettings
 #include "../Includes/Reinhard.hlsl"        // Reinhard::ReinhardPiecewise, the soft hue reference
-#include "Includes/MacLeodBoynton.hlsl"     // MacLeodBoynton::HueOnlyBT2020. Byte-identical copy of the BL GOTY production model: do not edit here, sync it from "Borderlands GOTY Enhanced/Includes"
+#include "../Includes/MacLeodBoynton.hlsl" // MacLeodBoynton::HueOnlyBT2020
 // clang-format on
 
 #include "Includes/GameBindings.hlsl" // b3/b4, the dgVoodoo masks, ApplyDgvMask, PowUE3, DoFBlurAmount

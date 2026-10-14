@@ -1,0 +1,69 @@
+// ---- Created with 3Dmigoto v1.3.16 on Tue Sep 02 15:46:07 2025
+cbuffer Scene : register(b0)
+{
+  float4 g_transform : packoffset(c0);
+  float4 g_texcoord : packoffset(c1);
+}
+
+
+cbuffer Batch : register(b1)
+{
+  float4 g_texture_lod : packoffset(c0); // 0
+  float4 g_color_scale : packoffset(c1); // 0.25
+  float4 g_color_offset : packoffset(c2); // 0
+}
+
+SamplerState g_sampler_s : register(s0);
+Texture2D<float4> g_texture : register(t0);
+
+
+// 3Dmigoto declarations
+#define cmp -
+#include "./Includes/Common.hlsl"
+
+// Followed by 0x58A712B5 to copy back to orig res with more color scale/offset
+
+void main(
+  float4 v0 : SV_POSITION0,
+  float4 v1 : TEXCOORD0, // uv 0 1
+  float4 v2 : TEXCOORD1, // uv 2 3
+  float4 v3 : TEXCOORD2, // (new) uv 4 5
+  float4 v4 : TEXCOORD3, // (new) uv 6 7
+  out float4 o0 : SV_Target0)
+{
+  float4 r0,r1;
+  uint4 bitmask, uiDest;
+  float4 fDest;
+
+  // 4
+  r0 = g_texture.SampleLevel(g_sampler_s, v1.xy, g_texture_lod.x);
+  r1 = g_texture.SampleLevel(g_sampler_s, v1.zw, g_texture_lod.x);
+  r0 += r1;
+  r1 = g_texture.SampleLevel(g_sampler_s, v2.xy, g_texture_lod.x);
+  r0 += r1;
+  r1 = g_texture.SampleLevel(g_sampler_s, v2.zw, g_texture_lod.x);
+  r0 += r1;
+
+  // o0 = r0 * g_color_scale + g_color_offset;
+  // return;
+
+  // r0 = 0;
+
+  // 8
+  r1 = g_texture.SampleLevel(g_sampler_s, v3.xy, g_texture_lod.x);
+  r0 += r1 /* * 0.5 */;
+  r1 = g_texture.SampleLevel(g_sampler_s, v3.zw, g_texture_lod.x);
+  r0 += r1 /* * 0.5 */;
+  r1 = g_texture.SampleLevel(g_sampler_s, v4.xy, g_texture_lod.x);
+  r0 += r1 /* * 0.5 */;
+  r1 = g_texture.SampleLevel(g_sampler_s, v4.zw, g_texture_lod.x);
+  r0 += r1 /* * 0.5 */;
+
+  float4 scaleFor1Sample = g_color_scale * 4;
+  float4 scaleFor4Samples = scaleFor1Sample / 4;
+  float4 scaleFor6Samples = scaleFor1Sample / 6;
+  float4 scaleFor8Samples = scaleFor1Sample / 8;
+
+  o0 = r0 * scaleFor8Samples + g_color_offset;
+  return;
+}

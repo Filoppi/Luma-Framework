@@ -52,6 +52,7 @@ void main(
   }
   r1.xy = g_param.zw * g_texel_size.xy * GS.SSSRadius; // scaling this up makes SSS wider and stronger
 
+  // TODO: increase sample count for full res, but how do we extend these coefs?
   r0.xyz = r0.xyz * g_coef[0].xyz + float3(9.99999975e-006,9.99999975e-006,9.99999975e-006);
   r2.xyz = g_coef[0].xyz + float3(9.99999975e-006,9.99999975e-006,9.99999975e-006);
 
@@ -142,8 +143,8 @@ void main(
   r5.xyzw = v1.xyxy;
     // o0.xyz = r5.xyz; return; //debug
 
-  r0.w = 6;
-  r1.w = 0;
+  r0.w = 6; // initial value for g_coef[]
+  r1.w = 0; // count up to limit
 
   while (true) {
     r2.w = cmp((int)r1.w >= 5);

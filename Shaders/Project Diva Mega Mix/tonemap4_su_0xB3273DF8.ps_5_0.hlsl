@@ -128,8 +128,7 @@ void main(
   // r0.xyz = r2.xwy * r1.xxx + r0.xyz;
   Tonemap_SaveSprites(r2.xwy, r1.x, r0.xyz, colorUntonemapped);
   
-  //colorUntonemapped = gamma_to_linear(colorUntonemapped, GCT_POSITIVE, 2.2);
-  colorUntonemapped = gamma_sRGB_to_linear(colorUntonemapped, GCT_POSITIVE);
+  colorUntonemapped = DecodeIntermediate(max(0, colorUntonemapped));
 
   //tonemap
 //   r0.y = dot(r0.xyz, float3(0.300000012,0.589999974,0.109999999));
@@ -160,6 +159,5 @@ void main(
   o0.xyz = r1.xxx ? r1.yzw : r0.xyz;
   o0.w = r0.w;
 
-  Tonemap_Out(o0);
   return;
 }

@@ -326,7 +326,21 @@
   <ItemGroup>
     <ClCompile Include="..\..\Core\unity_build.cpp" />
     <ClCompile Include="main.cpp" />
-    <ClInclude Include="ConstantBufferCache.hpp" />
+    <ClCompile Include="NativeHooks.cpp">
+      <ExcludedFromBuild Condition="'$(UseLumaNGX)' != 'true' and '$(UseLumaFSR)' != 'true'">true</ExcludedFromBuild>
+    </ClCompile>
+    <!-- Core state is TU-local: Upscaling.cpp is included once by main.cpp. -->
+    <ClCompile Include="Upscaling.cpp">
+      <ExcludedFromBuild>true</ExcludedFromBuild>
+    </ClCompile>
+    <ClCompile Include="..\..\External\reshade\deps\minhook\src\buffer.c;..\..\External\reshade\deps\minhook\src\hook.c;..\..\External\reshade\deps\minhook\src\trampoline.c;..\..\External\reshade\deps\minhook\src\hde\hde64.c">
+      <ExcludedFromBuild Condition="'$(UseLumaNGX)' != 'true' and '$(UseLumaFSR)' != 'true'">true</ExcludedFromBuild>
+      <CompileAs>CompileAsC</CompileAs>
+      <TreatWarningAsError>false</TreatWarningAsError>
+      <PrecompiledHeader>NotUsing</PrecompiledHeader>
+    </ClCompile>
+    <ClInclude Include="NativeInputs.hpp" />
+    <ClInclude Include="NativeHooks.hpp" />
     <ClInclude Include="shared.h" />
     <ClInclude Include="Upscaling.hpp" />
   </ItemGroup>

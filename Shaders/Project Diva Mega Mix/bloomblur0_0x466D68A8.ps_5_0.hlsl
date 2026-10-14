@@ -27,7 +27,6 @@ void main(
   uint4 bitmask, uiDest;
   float4 fDest;
 
-#if 1
   r0.xyzw = g_texture.Sample(g_sampler_s, v1.xy).xyzw;
   r1.xyzw = g_texture.Sample(g_sampler_s, v1.zw).xyzw;
   r0.xyzw = r1.xyzw + r0.xyzw;
@@ -36,9 +35,6 @@ void main(
   r1.xyzw = g_texture.Sample(g_sampler_s, v2.zw).xyzw;
   r0.xyzw = r1.xyzw + r0.xyzw;
   o0.xyzw = g_color.xyzw * 0.25 * r0.xyzw;
-#elif 0
-  o0 = BloomUpsample1(v0.xy, g_texture, g_sampler_s, pow(2,1)) * g_color.xyzw;
-#endif
 
   return;
 }

@@ -78,8 +78,9 @@ void frag_main()
       float4 sr_color = g_tColor.Sample(g_sLinearClamp, scaled_uv);
       float4 sr_depth = g_tClipDepth.Sample(g_sLinearClamp, scaled_uv);
       gl_FragDepth = sr_depth.x;
+      // Vanilla grain and display mapping both expect gamma-encoded input.
+      sr_color.rgb = linear_to_sRGB_gamma(sr_color.rgb, GCT_POSITIVE);
       SV_Target = sr_color.rgb;
-      SV_Target.rgb = linear_to_sRGB_gamma(SV_Target.rgb, GCT_POSITIVE);
       if (CUSTOM_GRAIN_TYPE == 0.f)
       {
          SV_Target = float3(

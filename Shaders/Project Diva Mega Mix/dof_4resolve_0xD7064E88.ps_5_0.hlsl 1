@@ -1,0 +1,205 @@
+// ---- Created with 3Dmigoto v1.3.16 on Tue Sep 02 15:46:11 2025
+
+cbuffer PsCommon : register(b0)
+{
+  float4 g_depth_params : packoffset(c0);
+  float4 g_spread_scale : packoffset(c1);
+  float4 g_depth_params2 : packoffset(c2);
+  float4 g_texcoord_offset_for_upsample : packoffset(c3);
+  int4 g_dof_param : packoffset(c4);
+}
+
+SamplerState g_filtered_rgb_sampler_s : register(s0);
+SamplerState g_filtered_a_sampler_s : register(s1);
+SamplerState g_tile_sampler_s : register(s2);
+SamplerState g_full_res_color_sampler_s : register(s3);
+SamplerState g_full_res_depth_sampler_s : register(s4);
+Texture2D<float4> g_filtered_rgb : register(t0);
+Texture2D<float4> g_filtered_a : register(t1);
+Texture2D<float4> g_tile : register(t2);
+Texture2D<float4> g_full_res_color : register(t3);
+Texture2D<float4> g_full_res_depth : register(t4);
+
+
+// 3Dmigoto declarations
+#define cmp -
+
+
+void main(
+  float4 v0 : SV_POSITION0,
+  float4 v1 : TEXCOORD0,
+  out float4 o0 : SV_Target0)
+{
+  float4 r0,r1,r2,r3,r4,r5,r6,r7,r8,r9,r10,r11;
+  uint4 bitmask, uiDest;
+  float4 fDest;
+
+  r0.xyzw = g_full_res_color.SampleLevel(g_full_res_color_sampler_s, v1.xy, 0).xyzw;
+  r0.xyz = log2(abs(r0.xyz));
+  r0.xyz = float3(2.20000005,2.20000005,2.20000005) * r0.xyz;
+  r0.xyz = exp2(r0.xyz);
+  r1.x = cmp(3 >= (int)g_dof_param.w);
+  if (r1.x != 0) {
+    r1.xy = -g_texcoord_offset_for_upsample.xy + v1.xy;
+    r1.xyz = g_filtered_rgb.SampleLevel(g_filtered_rgb_sampler_s, r1.xy, 0).xyz;
+    r2.xy = g_texcoord_offset_for_upsample.xy * float2(1,-1) + v1.xy;
+    r2.xyz = g_filtered_rgb.SampleLevel(g_filtered_rgb_sampler_s, r2.xy, 0).xyz;
+    r3.xyz = g_filtered_rgb.SampleLevel(g_filtered_rgb_sampler_s, v1.xy, 0).xyz;
+    r4.x = 0;
+    r4.y = g_texcoord_offset_for_upsample.y;
+    r4.xy = v1.xy + r4.xy;
+    r4.xyz = g_filtered_rgb.SampleLevel(g_filtered_rgb_sampler_s, r4.xy, 0).xyz;
+    r5.xyz = min(r2.xyz, r1.xyz);
+    r6.xyz = max(r2.xyz, r1.xyz);
+    r7.xyz = max(r5.xyz, r1.xyz);
+    r1.xyz = min(r5.xyz, r1.xyz);
+    r5.xyz = min(r7.xyz, r6.xyz);
+    r6.xyz = max(r7.xyz, r6.xyz);
+    r7.xyz = max(r3.xyz, r2.xyz);
+    r2.xyz = min(r3.xyz, r2.xyz);
+    r8.xyz = min(r7.xyz, r3.xyz);
+    r7.xyz = max(r7.xyz, r3.xyz);
+    r9.xyz = max(r4.xyz, r3.xyz);
+    r3.xyz = min(r4.xyz, r3.xyz);
+    r10.xyz = min(r9.xyz, r4.xyz);
+    r4.xyz = max(r9.xyz, r4.xyz);
+    r1.xyz = max(r2.xyz, r1.xyz);
+    r1.xyz = max(r1.xyz, r3.xyz);
+    r2.xyz = min(r4.xyz, r7.xyz);
+    r2.xyz = min(r2.xyz, r6.xyz);
+    r3.xyz = min(r10.xyz, r8.xyz);
+    r4.xyz = max(r10.xyz, r8.xyz);
+    r3.xyz = max(r5.xyz, r3.xyz);
+    r3.xyz = min(r4.xyz, r3.xyz);
+    r4.xyz = min(r3.xyz, r2.xyz);
+    r2.xyz = max(r3.xyz, r2.xyz);
+    r1.xyz = max(r4.xyz, r1.xyz);
+    r1.xyz = min(r2.xyz, r1.xyz);
+  } else {
+    r1.w = cmp(4 >= (int)g_dof_param.w);
+    if (r1.w != 0) {
+      r2.xy = -g_texcoord_offset_for_upsample.xy + v1.xy;
+      r2.xyz = g_filtered_rgb.SampleLevel(g_filtered_rgb_sampler_s, r2.xy, 0).xyz;
+      r3.xyzw = g_texcoord_offset_for_upsample.xyxy * float4(1,-1,-1,1) + v1.xyxy;
+      r4.xyz = g_filtered_rgb.SampleLevel(g_filtered_rgb_sampler_s, r3.xy, 0).xyz;
+      r5.xyz = g_filtered_rgb.SampleLevel(g_filtered_rgb_sampler_s, v1.xy, 0).xyz;
+      r3.xyz = g_filtered_rgb.SampleLevel(g_filtered_rgb_sampler_s, r3.zw, 0).xyz;
+      r6.xy = g_texcoord_offset_for_upsample.xy + v1.xy;
+      r6.xyz = g_filtered_rgb.SampleLevel(g_filtered_rgb_sampler_s, r6.xy, 0).xyz;
+      r7.xyz = min(r4.xyz, r2.xyz);
+      r8.xyz = max(r4.xyz, r2.xyz);
+      r9.xyz = max(r7.xyz, r2.xyz);
+      r2.xyz = min(r7.xyz, r2.xyz);
+      r7.xyz = min(r9.xyz, r8.xyz);
+      r8.xyz = max(r9.xyz, r8.xyz);
+      r9.xyz = min(r5.xyz, r3.xyz);
+      r5.xyz = max(r5.xyz, r3.xyz);
+      r10.xyz = max(r9.xyz, r4.xyz);
+      r4.xyz = min(r9.xyz, r4.xyz);
+      r9.xyz = min(r10.xyz, r5.xyz);
+      r5.xyz = max(r10.xyz, r5.xyz);
+      r10.xyz = max(r6.xyz, r3.xyz);
+      r3.xyz = min(r6.xyz, r3.xyz);
+      r11.xyz = min(r10.xyz, r6.xyz);
+      r6.xyz = max(r10.xyz, r6.xyz);
+      r2.xyz = max(r4.xyz, r2.xyz);
+      r2.xyz = max(r2.xyz, r3.xyz);
+      r3.xyz = min(r6.xyz, r5.xyz);
+      r3.xyz = min(r3.xyz, r8.xyz);
+      r4.xyz = min(r11.xyz, r9.xyz);
+      r5.xyz = max(r11.xyz, r9.xyz);
+      r4.xyz = max(r7.xyz, r4.xyz);
+      r4.xyz = min(r5.xyz, r4.xyz);
+      r5.xyz = min(r4.xyz, r3.xyz);
+      r3.xyz = max(r4.xyz, r3.xyz);
+      r2.xyz = max(r5.xyz, r2.xyz);
+      r1.xyz = min(r3.xyz, r2.xyz);
+    } else {
+      r2.xyw = -g_texcoord_offset_for_upsample.xyy;
+      r2.xy = v1.xy + r2.xy;
+      r3.xyz = g_filtered_rgb.SampleLevel(g_filtered_rgb_sampler_s, r2.xy, 0).xyz;
+      r2.z = 0;
+      r2.xy = v1.xy + r2.zw;
+      r2.xyz = g_filtered_rgb.SampleLevel(g_filtered_rgb_sampler_s, r2.xy, 0).xyz;
+      r4.xyzw = g_texcoord_offset_for_upsample.xyxy * float4(1,-1,-1,1) + v1.xyxy;
+      r5.xyz = g_filtered_rgb.SampleLevel(g_filtered_rgb_sampler_s, r4.xy, 0).xyz;
+      r6.x = -g_texcoord_offset_for_upsample.x;
+      r6.yw = float2(0,0);
+      r4.xy = v1.xy + r6.xy;
+      r7.xyz = g_filtered_rgb.SampleLevel(g_filtered_rgb_sampler_s, r4.xy, 0).xyz;
+      r8.xyz = g_filtered_rgb.SampleLevel(g_filtered_rgb_sampler_s, v1.xy, 0).xyz;
+      r6.z = g_texcoord_offset_for_upsample.x;
+      r4.xy = v1.xy + r6.zw;
+      r6.xyz = g_filtered_rgb.SampleLevel(g_filtered_rgb_sampler_s, r4.xy, 0).xyz;
+      r4.xyz = g_filtered_rgb.SampleLevel(g_filtered_rgb_sampler_s, r4.zw, 0).xyz;
+      r9.x = 0;
+      r9.y = g_texcoord_offset_for_upsample.y;
+      r9.xy = v1.xy + r9.xy;
+      r9.xyz = g_filtered_rgb.SampleLevel(g_filtered_rgb_sampler_s, r9.xy, 0).xyz;
+      r10.xy = g_texcoord_offset_for_upsample.xy + v1.xy;
+      r10.xyz = g_filtered_rgb.SampleLevel(g_filtered_rgb_sampler_s, r10.xy, 0).xyz;
+      r11.xyz = min(r5.xyz, r2.xyz);
+      r2.xyz = max(r5.xyz, r2.xyz);
+      r5.xyz = max(r11.xyz, r3.xyz);
+      r3.xyz = min(r11.xyz, r3.xyz);
+      r11.xyz = min(r5.xyz, r2.xyz);
+      r2.xyz = max(r5.xyz, r2.xyz);
+      r5.xyz = min(r8.xyz, r6.xyz);
+      r6.xyz = max(r8.xyz, r6.xyz);
+      r8.xyz = max(r7.xyz, r5.xyz);
+      r5.xyz = min(r7.xyz, r5.xyz);
+      r7.xyz = min(r8.xyz, r6.xyz);
+      r6.xyz = max(r8.xyz, r6.xyz);
+      r8.xyz = min(r10.xyz, r9.xyz);
+      r9.xyz = max(r10.xyz, r9.xyz);
+      r10.xyz = max(r8.xyz, r4.xyz);
+      r4.xyz = min(r8.xyz, r4.xyz);
+      r8.xyz = min(r10.xyz, r9.xyz);
+      r9.xyz = max(r10.xyz, r9.xyz);
+      r3.xyz = max(r5.xyz, r3.xyz);
+      r3.xyz = max(r3.xyz, r4.xyz);
+      r4.xyz = min(r9.xyz, r6.xyz);
+      r2.xyz = min(r4.xyz, r2.xyz);
+      r4.xyz = min(r8.xyz, r7.xyz);
+      r5.xyz = max(r8.xyz, r7.xyz);
+      r4.xyz = max(r11.xyz, r4.xyz);
+      r4.xyz = min(r5.xyz, r4.xyz);
+      r5.xyz = min(r4.xyz, r2.xyz);
+      r2.xyz = max(r4.xyz, r2.xyz);
+      r3.xyz = max(r5.xyz, r3.xyz);
+      r1.xyz = min(r3.xyz, r2.xyz);
+    }
+  }
+  r1.w = g_filtered_a.SampleLevel(g_filtered_a_sampler_s, v1.xy, 0).x;
+  r2.x = g_full_res_depth.SampleLevel(g_full_res_depth_sampler_s, v1.xy, 0).x;
+  r2.x = r2.x * g_depth_params.x + g_depth_params.y;
+  r2.x = 1 / r2.x;
+  r2.x = g_depth_params2.x + -r2.x;
+  r2.x = -g_depth_params2.y + abs(r2.x);
+  r2.x = max(0, r2.x);
+  r2.x = r2.x * r2.x;
+  r2.x = g_depth_params2.z * r2.x;
+  r2.x = 1.44269502 * r2.x;
+  r2.x = exp2(r2.x);
+  r2.x = 1 + -r2.x;
+  r2.x = g_depth_params2.w * r2.x;
+  r2.y = g_tile.SampleLevel(g_tile_sampler_s, v1.zw, 0).y;
+  r2.xy = r2.xy * r2.xy;
+  r2.xy = max(float2(0.5,0.5), r2.xy);
+  r2.xy = float2(3.14159274,3.14159274) * r2.xy;
+  r2.x = 1 / r2.x;
+  r2.y = 1 / r2.y;
+  r2.y = r2.y + -r2.x;
+  r2.x = r2.x + r2.x;
+  r1.w = r1.w * r2.y + r2.x;
+  r1.w = 1 + -r1.w;
+  r1.w = -r1.w * r1.w + 1;
+  r1.w = saturate(r1.w * 4 + -0.200000003);
+  r0.xyz = -r1.xyz + r0.xyz;
+  r0.xyz = r1.www * r0.xyz + r1.xyz;
+  r0.xyz = log2(abs(r0.xyz));
+  r0.xyz = float3(0.454545468,0.454545468,0.454545468) * r0.xyz;
+  o0.xyz = exp2(r0.xyz);
+  o0.w = r0.w;
+  return;
+}

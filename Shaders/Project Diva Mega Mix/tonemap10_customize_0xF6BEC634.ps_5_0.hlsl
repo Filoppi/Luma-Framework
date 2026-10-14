@@ -94,8 +94,7 @@ void main(
 
   //Tonemap
   float3 colorUntonemapped = r0.xyz;
-  //colorUntonemapped = gamma_to_linear(colorUntonemapped, GCT_POSITIVE, 2.2);
-  colorUntonemapped = gamma_sRGB_to_linear(colorUntonemapped, GCT_POSITIVE);
+  colorUntonemapped = DecodeIntermediate(max(0, colorUntonemapped));
 
   #if CUSTOM_UPSCALE_TOON == 3
     const bool isIVT = false;
@@ -116,6 +115,5 @@ void main(
   o0.xyz = r1.xxx ? r1.yzw : r0.xyz;
   o0.w = r0.w;
   
-  Tonemap_Out(o0);
   return;
 }
