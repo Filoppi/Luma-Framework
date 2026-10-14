@@ -69,6 +69,7 @@ namespace
    // Render thread only
    uint32_t g_frame_index = 0;
    float2 g_frame_jitter_pixels = {};
+   float2 g_previous_frame_jitter_pixels = {}; // The jitter of the previous super resolution frame
    bool g_camera_velocity_rendered = false;
    bool g_camera_velocity_has_history = false;
    std::atomic<bool> g_use_engine_exposure = true;
@@ -505,6 +506,12 @@ struct GameDeviceDataBatmanArkhamKnight final : GameDeviceData
    ComPtr<ID3D11ShaderResourceView> srv_engine_exposure;
    ComPtr<ID3D11Texture2D> texture_sr_exposure;
    ComPtr<ID3D11UnorderedAccessView> uav_sr_exposure;
+   // Unjittered copy of the game motion vectors for super resolution (same size as the game ones)
+   ID3D11Resource* game_mvs_srv_resource = nullptr; // The resource "srv_game_mvs" was created for
+   ComPtr<ID3D11ShaderResourceView> srv_game_mvs;
+   ComPtr<ID3D11Texture2D> texture_sr_mvs;
+   ComPtr<ID3D11UnorderedAccessView> uav_sr_mvs;
+   ComPtr<ID3D11Buffer> cb_unjitter_mvs;
 };
 
 class BatmanArkhamKnight final : public Game
@@ -537,6 +544,7 @@ public:
       luma_data_cbuffer_index = 12;
 
       native_shaders_definitions.emplace(CompileTimeStringHash("BAK SR Exposure"), ShaderDefinition("Luma_BAK_SRExposure", reshade::api::pipeline_subobject_type::compute_shader));
+      native_shaders_definitions.emplace(CompileTimeStringHash("BAK Unjitter MVs"), ShaderDefinition("Luma_BAK_UnjitterMVs", reshade::api::pipeline_subobject_type::compute_shader));
    }
 
    void OnCreateDevice(ID3D11Device* native_device, DeviceData& device_data) override
@@ -663,7 +671,9 @@ public:
             settings_data.render_height = device_data.render_resolution.y;
             settings_data.dynamic_resolution = false;
             settings_data.hdr = true;
-            settings_data.mvs_jittered = true;
+            // Super resolution gets unjittered motion vectors (the game ones are jittered, see "UnjitterMVs()"), if that fails it gets the game ones, flagged as jittered.
+            ID3D11Resource* sr_mvs = UnjitterMVs(native_device, native_device_context, device_data);
+            settings_data.mvs_jittered = sr_mvs == nullptr;
 
             // MVs are "previous UV - current UV" (camera velocity matches thanks to the replaced shader), DLSS wants pixels.
             settings_data.mvs_x_scale = device_data.render_resolution.x;
@@ -679,7 +689,7 @@ public:
             SR::SuperResolutionImpl::DrawData draw_data;
             draw_data.source_color = resource_scene.get();
             draw_data.output_color = resource_out.get();
-            draw_data.motion_vectors = game_device_data.resource_mvs.get();
+            draw_data.motion_vectors = sr_mvs ? sr_mvs : game_device_data.resource_mvs.get();
             draw_data.depth_buffer = game_device_data.resource_depth.get();
             draw_data.exposure = sr_exposure;
 
@@ -694,6 +704,7 @@ public:
             draw_data.render_height = device_data.render_resolution.y;
 
             sr_implementations[device_data.sr_type]->Draw(sr_instance_data, native_device_context, draw_data);
+            g_previous_frame_jitter_pixels = g_frame_jitter_pixels;
             // The post processes need to switch to the output resolution (done in the hook of the first one)
             g_sr_upscaled_this_frame = device_data.render_resolution.x < device_data.output_resolution.x || device_data.render_resolution.y < device_data.output_resolution.y;
 
@@ -704,6 +715,100 @@ public:
       }
 
       return DrawOrDispatchOverrideType::None;
+   }
+
+   // Writes the game motion vectors without jitter into our texture and returns it, or null if unavailable.
+   // All the game velocities are computed from the jittered current and previous projections, so they include "previous jitter - current jitter" (measured in game:
+   // static geometry has exactly that), which is the same for every pixel. Removing it ourselves doesn't depend on how DLSS/FSR interpret jittered motion vectors.
+   static ID3D11Resource* UnjitterMVs(ID3D11Device* native_device, ID3D11DeviceContext* native_device_context, DeviceData& device_data)
+   {
+      auto& game_device_data = GetGameDeviceData(device_data);
+      ID3D11Resource* game_mvs = game_device_data.resource_mvs.get();
+      const auto unjitter_shader = device_data.native_compute_shaders.find(CompileTimeStringHash("BAK Unjitter MVs"));
+      if (!game_mvs || unjitter_shader == device_data.native_compute_shaders.end() || !unjitter_shader->second.get())
+      {
+         return nullptr;
+      }
+      ComPtr<ID3D11Texture2D> game_mvs_texture;
+      if (FAILED(game_mvs->QueryInterface(game_mvs_texture.put())))
+      {
+         return nullptr;
+      }
+      D3D11_TEXTURE2D_DESC game_mvs_desc;
+      game_mvs_texture->GetDesc(&game_mvs_desc);
+
+      if (game_mvs != game_device_data.game_mvs_srv_resource)
+      {
+         game_device_data.srv_game_mvs.reset();
+         D3D11_SHADER_RESOURCE_VIEW_DESC srv_desc = {};
+         srv_desc.Format = DXGI_FORMAT_R16G16_FLOAT;
+         srv_desc.ViewDimension = D3D11_SRV_DIMENSION_TEXTURE2D;
+         srv_desc.Texture2D.MipLevels = 1;
+         native_device->CreateShaderResourceView(game_mvs, &srv_desc, game_device_data.srv_game_mvs.put());
+         game_device_data.game_mvs_srv_resource = game_mvs;
+      }
+      D3D11_TEXTURE2D_DESC sr_mvs_desc = {};
+      if (game_device_data.texture_sr_mvs.get())
+      {
+         game_device_data.texture_sr_mvs->GetDesc(&sr_mvs_desc);
+      }
+      if (sr_mvs_desc.Width != game_mvs_desc.Width || sr_mvs_desc.Height != game_mvs_desc.Height)
+      {
+         game_device_data.texture_sr_mvs.reset();
+         game_device_data.uav_sr_mvs.reset();
+         D3D11_TEXTURE2D_DESC desc = {};
+         desc.Width = game_mvs_desc.Width;
+         desc.Height = game_mvs_desc.Height;
+         desc.MipLevels = 1;
+         desc.ArraySize = 1;
+         desc.Format = DXGI_FORMAT_R16G16_FLOAT;
+         desc.SampleDesc.Count = 1;
+         desc.Usage = D3D11_USAGE_DEFAULT;
+         desc.BindFlags = D3D11_BIND_SHADER_RESOURCE | D3D11_BIND_UNORDERED_ACCESS;
+         if (FAILED(native_device->CreateTexture2D(&desc, nullptr, game_device_data.texture_sr_mvs.put())) || FAILED(native_device->CreateUnorderedAccessView(game_device_data.texture_sr_mvs.get(), nullptr, game_device_data.uav_sr_mvs.put())))
+         {
+            game_device_data.texture_sr_mvs.reset();
+            game_device_data.uav_sr_mvs.reset();
+         }
+      }
+      if (!game_device_data.cb_unjitter_mvs.get())
+      {
+         D3D11_BUFFER_DESC desc = {};
+         desc.ByteWidth = sizeof(float4);
+         desc.Usage = D3D11_USAGE_DYNAMIC;
+         desc.BindFlags = D3D11_BIND_CONSTANT_BUFFER;
+         desc.CPUAccessFlags = D3D11_CPU_ACCESS_WRITE;
+         native_device->CreateBuffer(&desc, nullptr, game_device_data.cb_unjitter_mvs.put());
+      }
+      if (!game_device_data.srv_game_mvs.get() || !game_device_data.uav_sr_mvs.get() || !game_device_data.cb_unjitter_mvs.get())
+      {
+         return nullptr;
+      }
+
+      // Velocities are in UV, and the jitters are image offsets in render pixels (x right, y down), like the velocities
+      const float render_width = device_data.render_resolution.x;
+      const float render_height = device_data.render_resolution.y;
+      D3D11_MAPPED_SUBRESOURCE mapped;
+      if (FAILED(native_device_context->Map(game_device_data.cb_unjitter_mvs.get(), 0, D3D11_MAP_WRITE_DISCARD, 0, &mapped)))
+      {
+         return nullptr;
+      }
+      const float4 params = {(g_previous_frame_jitter_pixels.x - g_frame_jitter_pixels.x) / render_width, (g_previous_frame_jitter_pixels.y - g_frame_jitter_pixels.y) / render_height, render_width, render_height};
+      std::memcpy(mapped.pData, &params, sizeof(params));
+      native_device_context->Unmap(game_device_data.cb_unjitter_mvs.get(), 0);
+
+      DrawStateStack<DrawStateStackType::Compute> compute_state_stack;
+      compute_state_stack.Cache(native_device_context, device_data.uav_max_count);
+      ID3D11Buffer* cb = game_device_data.cb_unjitter_mvs.get();
+      ID3D11ShaderResourceView* srv = game_device_data.srv_game_mvs.get();
+      ID3D11UnorderedAccessView* uav = game_device_data.uav_sr_mvs.get();
+      native_device_context->CSSetShader(unjitter_shader->second.get(), nullptr, 0);
+      native_device_context->CSSetConstantBuffers(0, 1, &cb);
+      native_device_context->CSSetShaderResources(0, 1, &srv);
+      native_device_context->CSSetUnorderedAccessViews(0, 1, &uav, nullptr);
+      native_device_context->Dispatch((UINT(render_width) + 7) / 8, (UINT(render_height) + 7) / 8, 1);
+      compute_state_stack.Restore(native_device_context);
+      return game_device_data.texture_sr_mvs.get();
    }
 
    // Writes the super resolution exposure multiplier (1 / the engine exposure divisor) into our 1x1 texture and returns it, or null if unavailable.
