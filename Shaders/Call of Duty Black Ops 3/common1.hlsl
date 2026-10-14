@@ -56,40 +56,6 @@ float3 UCSFrom(float3 x, uint cs) {
   #endif
 }
 ////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
-//REC709
-#define DECODEREC709(T)\
-T DecodeRec709(T x) {\
-  T r0, r2, r3, r4;\
-  r0 = x;\
-  r2 = 0.0989999995 + r0; \
-  r2 = 0.909918129 * r2;\
-  r2 = pow(r2, 2.22222233);\
-  r3 = cmp(0.0810000002 >= r0);\
-  r4 = 0.222222224 * r0;\
-  r2 = r3 ? r4 : r2;\
-  return r2;\
-}
-DECODEREC709(float)
-DECODEREC709(float3)
-DECODEREC709(float4)
-#undef DECODEREC709
-
-#define ENCODEREC709(T)\
-T EncodeRec709(T x) {\
-  T r0, r1, r2;\
-  r1 = x;\
-  r0 = pow(r1, 0.449999988);\
-  r0 = r0 * 1.09899998 + -0.0989999995;\
-  r2 = cmp(0.0179999992 >= r1);\
-  r1 = 4.5 * r1;\
-  r0 = r2 ? r1 : r0;\
-  return r0;\
-}
-ENCODEREC709(float)
-ENCODEREC709(float3)
-ENCODEREC709(float4)
-#undef ENCODEREC709
-////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
 //https://github.com/clshortfuse/renodx/blob/main/src/shaders/tonemap/reinhard.hlsl
 namespace Reinhard {
   float ReinhardPiecewiseExtended(float x, float white_max, float x_max = 1.f, float shoulder = 0.18f)
