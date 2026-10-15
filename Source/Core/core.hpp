@@ -16261,6 +16261,15 @@ void Init(bool async)
 #if ENABLE_SR
       int sr_user_type_i = int(sr_user_type);
       reshade::get_config_value(runtime, NAME, "SRUserType", sr_user_type_i); // This will be reset later if not compatible
+      // Values unknown to this build (e.g. saved by a different version) fall back to auto
+      if (sr_user_type_i < int(SR::UserType::None) || sr_user_type_i > int(SR::UserType::FSR_4)
+#if !ENABLE_FSR4
+         || sr_user_type_i == int(SR::UserType::FSR_4)
+#endif
+         )
+      {
+         sr_user_type_i = int(SR::UserType::Auto);
+      }
       sr_user_type = SR::UserType(sr_user_type_i);
 
       int dlss_render_preset_i = static_cast<int>(dlss_render_preset);

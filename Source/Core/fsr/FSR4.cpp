@@ -33,6 +33,8 @@ namespace FidelityFX
       constexpr int fsr4_default_phase_count = 16;
       // Max number of DX12 command lists in flight. Note that we might run more than one SR pass per frame.
       constexpr size_t fsr4_command_allocators_count = 8;
+      // Max CPU wait on the DX12 GPU work (these waits are rare), to never hang the game if the GPU is stuck
+      constexpr DWORD fsr4_fence_timeout_ms = 2000;
 
       // The FidelityFX API "loader" dll, which then loads the actual effect dlls (e.g. "amd_fidelityfx_upscaler_dx12.dll") from its folder
       constexpr const wchar_t* fsr4_loader_dll_names[] = { L"amd_fidelityfx_dx12.dll", L"amd_fidelityfx_loader_dx12.dll" };
@@ -66,11 +68,13 @@ namespace FidelityFX
 #endif
       }
 
-      // Parses "4.1.1" like strings into a comparable number (ignoring anything after the numbers)
+      // Parses "4.1.1" like strings into a comparable number (skipping any text prefix, e.g. "FSR 4.0.2", and ignoring anything after the numbers)
       uint64_t ParseVersion(const char* name)
       {
          uint64_t parts[3] = {};
          int part = 0;
+         while (name && *name && (*name < '0' || *name > '9'))
+            ++name;
          for (const char* c = name; c && *c && part < 3; ++c)
          {
             if (*c >= '0' && *c <= '9')
@@ -83,7 +87,9 @@ namespace FidelityFX
          return (parts[0] << 40) | (parts[1] << 20) | parts[2];
       }
 
-      // Shared textures need a typed format for FSR to create views on them (copies work within the same typeless family)
+      // Shared textures need a typed format for FSR to create views on them (copies work within the same typeless family).
+      // sRGB is mapped to its UNORM equivalent: copies between them are raw bit copies (no conversion), so the input is passed through FSR in its encoded (gamma) space,
+      // and the output is copied back with the same bits, so the game reads it with the encoding it expects (no double/missing gamma).
       DXGI_FORMAT GetTypedFormat(DXGI_FORMAT format)
       {
          switch (format)
@@ -201,7 +207,7 @@ void main(uint3 id : SV_DispatchThreadID)
       UINT64 fence_value = 0;
       HANDLE fence_event = nullptr; // For the rare CPU waits (e.g. on resources destruction)
 
-      SR::SettingsCache<FSR4ContextData> cached_contexts;
+      SR::SettingsCache<FSR4ContextData, 2> cached_contexts; // Smaller than the others, as each context also has its own shared textures
       FSR4ContextData* current = nullptr;
 
       unsigned int logged_errors = 0;
@@ -211,20 +217,34 @@ void main(uint3 id : SV_DispatchThreadID)
          return logged_errors++ < 10; // Don't spam the log
       }
 
-      void WaitForFence(UINT64 value)
+      // Returns false if the GPU didn't reach the value in time (e.g. device removed/hung), so that we never hang the game
+      bool WaitForFence(UINT64 value)
       {
-         if (fence_12 && value > 0 && fence_12->GetCompletedValue() < value)
-         {
-            if (SUCCEEDED(fence_12->SetEventOnCompletion(value, fence_event)))
-            {
-               WaitForSingleObject(fence_event, INFINITE);
-            }
-         }
+         if (!fence_12 || value == 0 || fence_12->GetCompletedValue() >= value)
+            return true;
+         if (SUCCEEDED(fence_12->SetEventOnCompletion(value, fence_event)) && WaitForSingleObject(fence_event, fsr4_fence_timeout_ms) == WAIT_OBJECT_0)
+            return true;
+         if (fence_12->GetCompletedValue() >= value)
+            return true;
+         const HRESULT removed_reason_11 = device_11 ? device_11->GetDeviceRemovedReason() : S_OK;
+         const HRESULT removed_reason_12 = device_12 ? device_12->GetDeviceRemovedReason() : S_OK;
+         if (CanLogError())
+            Log(reshade::log::level::error, "FSR4: Timed out waiting for the DX12 GPU work (fence %llu, completed %llu), DX11 device removed reason = 0x%08X, DX12 device removed reason = 0x%08X",
+               static_cast<unsigned long long>(value), static_cast<unsigned long long>(fence_12->GetCompletedValue()), unsigned(removed_reason_11), unsigned(removed_reason_12));
+         return false;
       }
 
       void DestroyContext(FSR4ContextData& context_data)
       {
-         WaitForFence(context_data.last_used_fence_value); // Make sure the GPU isn't using it anymore
+         // Make sure the GPU isn't using it anymore. If it timed out on a live device, leak the context instead of risking a crash, if the device was removed it's safe to destroy.
+         const bool gpu_done = WaitForFence(context_data.last_used_fence_value) || (device_12 && FAILED(device_12->GetDeviceRemovedReason()));
+         if (!gpu_done)
+         {
+            Log(reshade::log::level::warning, "FSR4: Leaking a context (and its resources) that might still be in use by the GPU");
+            new FSR4ContextData(std::move(context_data)); // Intentionally leaked
+            context_data = FSR4ContextData();
+            return;
+         }
          if (context_data.context)
          {
             ffxReturnCode_t ret = ffx_destroy_context(&context_data.context, nullptr);
@@ -302,7 +322,8 @@ void main(uint3 id : SV_DispatchThreadID)
          {
             return true;
          }
-         WaitForFence(context_data.last_used_fence_value); // The previous one might still be in use
+         if (!WaitForFence(context_data.last_used_fence_value)) // The previous one might still be in use
+            return false;
          return CreateSharedTexture(texture, source_desc.Width, source_desc.Height, format, unordered_access);
       }
    };
@@ -569,9 +590,17 @@ void main(uint3 id : SV_DispatchThreadID)
       if (!custom_data)
          return;
 
+      // Wait for all the work to be done before destroying anything (this shouldn't take long).
+      // If the GPU is stuck (but the device wasn't removed), leak everything instead of hanging or risking a crash.
+      if (!custom_data->WaitForFence(custom_data->fence_value) && !(custom_data->device_12 && FAILED(custom_data->device_12->GetDeviceRemovedReason())))
+      {
+         Log(reshade::log::level::warning, "FSR4: Leaking the DX12 interop resources, as the GPU might still be using them");
+         custom_data = nullptr;
+         return;
+      }
+
       custom_data->cached_contexts.Clear([&](FSR4ContextData& context_data) { custom_data->DestroyContext(context_data); });
       custom_data->current = nullptr;
-      custom_data->WaitForFence(custom_data->fence_value); // Wait for all the work to be done before destroying anything (this shouldn't take long)
 
       HMODULE ffx_module = custom_data->ffx_module;
       if (custom_data->fence_event)
@@ -847,6 +876,25 @@ void main(uint3 id : SV_DispatchThreadID)
       if (draw_data.transparency_alpha)
          CopyToShared(context_data.transparency, draw_data.transparency_alpha);
       {
+         // If the depth is still bound as depth stencil, DX11 would null its SRV, so temporarily unbind it (keeping the render targets and UAVs)
+         ID3D11RenderTargetView* rtvs_raw[D3D11_SIMULTANEOUS_RENDER_TARGET_COUNT] = {};
+         ComPtr<ID3D11DepthStencilView> dsv;
+         command_list->OMGetRenderTargets(D3D11_SIMULTANEOUS_RENDER_TARGET_COUNT, rtvs_raw, &dsv);
+         ComPtr<ID3D11RenderTargetView> rtvs[D3D11_SIMULTANEOUS_RENDER_TARGET_COUNT]; // Release the references on scope exit
+         UINT rtvs_count = 0;
+         for (UINT i = 0; i < D3D11_SIMULTANEOUS_RENDER_TARGET_COUNT; i++)
+         {
+            rtvs[i].Attach(rtvs_raw[i]);
+            if (rtvs_raw[i])
+               rtvs_count = i + 1;
+         }
+         ComPtr<ID3D11Resource> dsv_resource;
+         if (dsv)
+            dsv->GetResource(&dsv_resource);
+         const bool unbind_dsv = dsv && dsv_resource.Get() == draw_data.depth_buffer;
+         if (unbind_dsv)
+            command_list->OMSetRenderTargetsAndUnorderedAccessViews(rtvs_count, rtvs_raw, nullptr, D3D11_KEEP_UNORDERED_ACCESS_VIEWS, 0, nullptr, nullptr);
+
          ID3D11ShaderResourceView* const srv = context_data.depth_source_srv.Get();
          ID3D11UnorderedAccessView* const uav = context_data.depth_uav.Get();
          command_list->CSSetShader(custom_data->depth_copy_cs.Get(), nullptr, 0);
@@ -858,6 +906,9 @@ void main(uint3 id : SV_DispatchThreadID)
          command_list->CSSetShaderResources(0, 1, &null_srv);
          command_list->CSSetUnorderedAccessViews(0, 1, &null_uav, nullptr);
          command_list->CSSetShader(nullptr, nullptr, 0);
+
+         if (unbind_dsv)
+            command_list->OMSetRenderTargetsAndUnorderedAccessViews(rtvs_count, rtvs_raw, dsv.Get(), D3D11_KEEP_UNORDERED_ACCESS_VIEWS, 0, nullptr, nullptr);
       }
 
       // DX11 -> DX12 sync. Flush to make sure DX11 submits its work (and the signal) before DX12 waits on it.
@@ -868,10 +919,13 @@ void main(uint3 id : SV_DispatchThreadID)
       // DX12: record the FSR dispatch
       const size_t allocator_index = custom_data->command_allocator_index;
       custom_data->command_allocator_index = (custom_data->command_allocator_index + 1) % fsr4_command_allocators_count;
-      custom_data->WaitForFence(custom_data->command_allocators_fence_values[allocator_index]); // Usually already done, as DX11 waited on it
       ID3D12CommandAllocator* command_allocator = custom_data->command_allocators[allocator_index].Get();
       ID3D12GraphicsCommandList* command_list_12 = custom_data->command_list_12.Get();
-      HRESULT hr = command_allocator->Reset();
+      HRESULT hr = custom_data->WaitForFence(custom_data->command_allocators_fence_values[allocator_index]) ? S_OK : HRESULT_FROM_WIN32(WAIT_TIMEOUT); // Usually already done, as DX11 waited on it
+      if (SUCCEEDED(hr))
+      {
+         hr = command_allocator->Reset();
+      }
       if (SUCCEEDED(hr))
       {
          hr = command_list_12->Reset(command_allocator, nullptr);
