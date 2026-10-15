@@ -120,7 +120,8 @@ struct SRPassData
    UINT output_height = 0;
    DXGI_FORMAT output_format = DXGI_FORMAT_UNKNOWN;
 
-   com_ptr<ID3D11Texture2D> output_color; // A copy of the TAA output that supports UAV, if the original one didn't
+   com_ptr<ID3D11Texture2D> output_color; // A copy of the TAA output that supports UAV, if the original one didn't (or if the output only covers part of the texture)
+   com_ptr<ID3D11Texture2D> last_output_texture; // The last texture SR wrote to (the game one or our copy), to copy from if the pass runs again in the same frame
    unsigned int last_render_width = 0;
    unsigned int last_render_height = 0;
    bool reset = true;
@@ -173,19 +174,79 @@ class UnrealEngine final : public Game // ### Rename this to your game's name ##
    }
 
 #if ENABLE_SR
-   static SRPassData* FindSRPass(GameDeviceDataUnrealEngine& game_device_data, const D3D11_TEXTURE2D_DESC& output_desc)
+   // The area of the TAA output texture that is actually written, which can be smaller than the texture (e.g. UE's render target pool can give TAA a bigger texture than the view, with the view in the top left corner)
+   struct SROutputSize
+   {
+      UINT width = 0;
+      UINT height = 0;
+      std::string candidates; // For logging
+   };
+   static SROutputSize GetSROutputSize(ID3D11DeviceContext* native_device_context, const GameDeviceDataUnrealEngine& game_device_data, bool is_compute_shader, const TAAShaderInfo& taa_shader_info, const D3D11_TEXTURE2D_DESC& output_desc)
+   {
+      SROutputSize output_size;
+      output_size.width = output_desc.Width;
+      output_size.height = output_desc.Height;
+      const UINT render_width = UINT(std::lrintf(game_device_data.render_resolution.x));
+      const UINT render_height = UINT(std::lrintf(game_device_data.render_resolution.y));
+      output_size.candidates = std::format("texture {}x{}, render {}x{}", output_desc.Width, output_desc.Height, render_width, render_height);
+      const char* source = "texture";
+
+      if (!is_compute_shader)
+      {
+         // Pixel shader TAA: the viewport is the output rect
+         D3D11_VIEWPORT viewport = {};
+         UINT num_viewports = 1;
+         native_device_context->RSGetViewports(&num_viewports, &viewport);
+         if (num_viewports >= 1)
+         {
+            output_size.candidates += std::format(", viewport {}x{} at {}x{}", viewport.Width, viewport.Height, viewport.TopLeftX, viewport.TopLeftY);
+         }
+         if (num_viewports >= 1 && viewport.TopLeftX == 0.f && viewport.TopLeftY == 0.f && viewport.Width >= 1.f && viewport.Height >= 1.f)
+         {
+            output_size.width = (std::min)(UINT(std::lrintf(viewport.Width)), output_desc.Width);
+            output_size.height = (std::min)(UINT(std::lrintf(viewport.Height)), output_desc.Height);
+            source = "viewport";
+         }
+      }
+      else if (taa_shader_info.source_texture_register >= 0)
+      {
+         // Compute shader TAA: there's no viewport, if the output texture is bigger than the view, but the same size as the (pooled) source color texture, this isn't an upscale, but a 1:1 pass in a bigger texture
+         com_ptr<ID3D11ShaderResourceView> source_color_srv;
+         native_device_context->CSGetShaderResources(taa_shader_info.source_texture_register, 1, &source_color_srv);
+         com_ptr<ID3D11Resource> source_color;
+         if (source_color_srv)
+            source_color_srv->GetResource(&source_color);
+         com_ptr<ID3D11Texture2D> source_color_texture;
+         if (source_color && SUCCEEDED(source_color->QueryInterface(&source_color_texture)))
+         {
+            D3D11_TEXTURE2D_DESC source_color_desc;
+            source_color_texture->GetDesc(&source_color_desc);
+            output_size.candidates += std::format(", source color texture {}x{}", source_color_desc.Width, source_color_desc.Height);
+            if (source_color_desc.Width == output_desc.Width && source_color_desc.Height == output_desc.Height && render_width > 0 && render_height > 0 && (output_desc.Width > render_width || output_desc.Height > render_height))
+            {
+               output_size.width = render_width;
+               output_size.height = render_height;
+               source = "render size (source and output textures have the same size)";
+            }
+         }
+      }
+      output_size.candidates += std::format(", chosen {}x{} from {}", output_size.width, output_size.height, source);
+      return output_size;
+   }
+
+   static SRPassData* FindSRPass(GameDeviceDataUnrealEngine& game_device_data, UINT output_width, UINT output_height, DXGI_FORMAT output_format)
    {
       for (auto& pass : game_device_data.sr_passes)
       {
-         if (pass.output_width == output_desc.Width && pass.output_height == output_desc.Height && pass.output_format == output_desc.Format)
+         if (pass.output_width == output_width && pass.output_height == output_height && pass.output_format == output_format)
             return &pass;
       }
       return nullptr;
    }
 
-   static SRPassData& GetOrAddSRPass(GameDeviceDataUnrealEngine& game_device_data, const D3D11_TEXTURE2D_DESC& output_desc)
+   static SRPassData& GetOrAddSRPass(GameDeviceDataUnrealEngine& game_device_data, const SROutputSize& output_size, DXGI_FORMAT output_format)
    {
-      SRPassData* pass = FindSRPass(game_device_data, output_desc);
+      SRPassData* pass = FindSRPass(game_device_data, output_size.width, output_size.height, output_format);
       if (!pass)
       {
          // Evict the least recently used one
@@ -195,10 +256,10 @@ class UnrealEngine final : public Game // ### Rename this to your game's name ##
             game_device_data.sr_passes.erase(lru);
          }
          pass = &game_device_data.sr_passes.emplace_back();
-         pass->output_width = output_desc.Width;
-         pass->output_height = output_desc.Height;
-         pass->output_format = output_desc.Format;
-         reshade::log::message(reshade::log::level::info, (std::string("Luma UE: New SR pass with output ") + std::to_string(output_desc.Width) + "x" + std::to_string(output_desc.Height) + ", passes: " + std::to_string(game_device_data.sr_passes.size())).c_str());
+         pass->output_width = output_size.width;
+         pass->output_height = output_size.height;
+         pass->output_format = output_format;
+         reshade::log::message(reshade::log::level::info, std::format("Luma UE: New SR pass with output {}x{} ({}), passes: {}", output_size.width, output_size.height, output_size.candidates, game_device_data.sr_passes.size()).c_str());
       }
       pass->last_used_frame = game_device_data.sr_frame_index;
       return *pass;
@@ -879,17 +940,22 @@ public:
          ASSERT_ONCE(SUCCEEDED(hr));
          // Only skip it if it's the same pass (output) we already drew SR for, other passes (e.g. with a different output resolution) run SR with their own context and history
          SRPassData* sr_pass = nullptr;
+         SROutputSize sr_output_size;
          if (output_color.get())
          {
             D3D11_TEXTURE2D_DESC output_texture_desc;
             output_color->GetDesc(&output_texture_desc);
-            sr_pass = FindSRPass(game_device_data, output_texture_desc);
+            sr_output_size = GetSROutputSize(native_device_context, game_device_data, is_compute_shader, taa_shader_info, output_texture_desc);
+            sr_pass = FindSRPass(game_device_data, sr_output_size.width, sr_output_size.height, output_texture_desc.Format);
          }
-         if (sr_pass && sr_pass->last_drawn_frame == game_device_data.sr_frame_index)
+         ID3D11Texture2D* sr_pass_output = sr_pass ? sr_pass->last_output_texture.get() : nullptr;
+         if (sr_pass && sr_pass->last_drawn_frame == game_device_data.sr_frame_index && sr_pass_output)
          {
-            if (sr_pass->output_color.get())
+            if (sr_pass_output != output_color.get())
             {
-               native_device_context->CopyResource(output_color.get(), sr_pass->output_color.get());
+               // Only the area of the view (the rest of the texture is left untouched)
+               const D3D11_BOX box = {0, 0, 0, sr_output_size.width, sr_output_size.height, 1};
+               native_device_context->CopySubresourceRegion(output_color.get(), 0, 0, 0, 0, sr_pass_output, 0, &box);
             }
             return DrawOrDispatchOverrideType::Skip;
          }
@@ -976,9 +1042,19 @@ public:
             // game_device_data.render_resolution     = {(float)taa_output_texture_desc.Width, (float)taa_output_texture_desc.Height, 1.0f / (float)taa_output_texture_desc.Width, 1.0f / (float)taa_output_texture_desc.Height};
             device_data.sr_render_resolution_scale = 1.0f; // DLAA only
 
+            // The output might only cover part of the texture (in the top left corner)
+            const SROutputSize sr_output_size = GetSROutputSize(native_device_context, game_device_data, is_compute_shader, taa_shader_info, taa_output_texture_desc);
+            const bool sr_output_is_sub_rect = sr_output_size.width != taa_output_texture_desc.Width || sr_output_size.height != taa_output_texture_desc.Height;
+            if (sr_output_is_sub_rect)
+            {
+               static std::atomic<bool> logged_sub_rect = false;
+               if (!logged_sub_rect.exchange(true))
+                  reshade::log::message(reshade::log::level::info, std::format("Luma UE: SR output only covers part of the TAA output texture ({})", sr_output_size.candidates).c_str());
+            }
+
             SR::SettingsData settings_data;
-            settings_data.output_width = taa_output_texture_desc.Width;
-            settings_data.output_height = taa_output_texture_desc.Height;
+            settings_data.output_width = sr_output_size.width;
+            settings_data.output_height = sr_output_size.height;
             settings_data.render_width = game_device_data.render_resolution.x;
             settings_data.render_height = game_device_data.render_resolution.y;
             settings_data.dynamic_resolution = true;
@@ -995,7 +1071,7 @@ public:
                game_device_data.sr_passes.clear();
                game_device_data.sr_passes_type = device_data.sr_type;
             }
-            SRPassData& sr_pass = GetOrAddSRPass(game_device_data, taa_output_texture_desc);
+            SRPassData& sr_pass = GetOrAddSRPass(game_device_data, sr_output_size, taa_output_texture_desc.Format);
             // Camera cuts and forced resets apply to all the passes
             if (device_data.force_reset_sr || game_device_data.camera_cut)
             {
@@ -1021,17 +1097,18 @@ public:
             sr_implementations[device_data.sr_type]->UpdateSettings(sr_instance_data, native_device_context, settings_data);
 
             constexpr bool dlss_use_native_uav = true;
-            bool dlss_output_supports_uav = dlss_use_native_uav && (taa_output_texture_desc.BindFlags & D3D11_BIND_UNORDERED_ACCESS) != 0;
+            // If the output only covers part of the texture, SR writes into a copy of the output area size, which is then copied into the texture area
+            bool dlss_output_supports_uav = dlss_use_native_uav && (taa_output_texture_desc.BindFlags & D3D11_BIND_UNORDERED_ACCESS) != 0 && !sr_output_is_sub_rect;
 
-            bool skip_dlss = taa_output_texture_desc.Width < sr_instance_data->min_resolution || taa_output_texture_desc.Height < sr_instance_data->min_resolution;
+            bool skip_dlss = sr_output_size.width < sr_instance_data->min_resolution || sr_output_size.height < sr_instance_data->min_resolution;
             bool dlss_output_changed = false;
             com_ptr<ID3D11Texture2D> sr_output_color;
             // Create a copy that supports Unordered Access if it wasn't already supported
             if (!dlss_output_supports_uav)
             {
                D3D11_TEXTURE2D_DESC dlss_output_texture_desc = taa_output_texture_desc;
-               // dlss_output_texture_desc.Width = std::lrintf(game_device_data.render_resolution.x);
-               // dlss_output_texture_desc.Height = std::lrintf(game_device_data.render_resolution.y);
+               dlss_output_texture_desc.Width = sr_output_size.width;
+               dlss_output_texture_desc.Height = sr_output_size.height;
                dlss_output_texture_desc.BindFlags |= D3D11_BIND_UNORDERED_ACCESS;
 
                if (sr_pass.output_color.get())
@@ -1055,9 +1132,9 @@ public:
             }
             else
             {
-               sr_pass.output_color = nullptr;
-               sr_output_color = output_color;
+               sr_output_color = output_color; // Note: we keep the pass output copy (if any), as passes can alternate between needing it or not
             }
+            sr_pass.last_output_texture = sr_output_color;
             if (!skip_dlss)
             {
                game_device_data.sr_source_color = nullptr;
@@ -1201,7 +1278,16 @@ public:
 
                   if (!dlss_output_supports_uav)
                   {
-                     native_device_context->CopyResource(output_color.get(), sr_output_color.get()); // DX11 doesn't need barriers
+                     if (sr_output_is_sub_rect)
+                     {
+                        // Only the area of the view (the rest of the texture is left untouched)
+                        const D3D11_BOX box = {0, 0, 0, sr_output_size.width, sr_output_size.height, 1};
+                        native_device_context->CopySubresourceRegion(output_color.get(), 0, 0, 0, 0, sr_output_color.get(), 0, &box);
+                     }
+                     else
+                     {
+                        native_device_context->CopyResource(output_color.get(), sr_output_color.get()); // DX11 doesn't need barriers
+                     }
                   }
 
                   return DrawOrDispatchOverrideType::Replaced;
