@@ -2,6 +2,8 @@
 
 #include "FSR.h"
 
+#include <functional>
+
 // FSR 4 (through the FidelityFX API DX12 dlls, loaded at runtime, not shipped with Luma), run on DX11 games through DX11->DX12 interop.
 // Opt in per game with "ENABLE_FSR4" (see "UseLumaFSR4" in "Luma.Features.props"). Requires the FSR 3 SDK to also be enabled.
 #if defined(_WIN64) && ENABLE_FIDELITY_SK && defined(ENABLE_FSR4) && ENABLE_FSR4 && __has_include("ffx_api/ffx_upscale.h")
@@ -16,9 +18,11 @@
 
 #if ENABLE_FSR4
 
+struct ID3D11ComputeShader;
+
 namespace FidelityFX
 {
-	// FSR 4 SR (DX12 FidelityFX API, through interop)
+	// FSR 4 SR (DX12 FidelityFX API, through interop). Only supported if the GPU (driver) offers an FSR 4 upscaler.
 	class FSR4 : public SR::SuperResolutionImpl
 	{
 	public:
@@ -36,14 +40,9 @@ namespace FidelityFX
 
 		virtual bool NeedsStateRestoration() const { return true; }
 
-		// Whether the dll offers an actual FSR 4.x version (as opposed to only FSR 3.x ones). Used to prefer it on automatic SR selection.
-		static bool HasNativeFSR4(const SR::InstanceData* data);
-
-		// ReShade wraps any DX12 device created in the process (and sends events for it to all addons),
-		// these allow the addon "init_device" callback to give us back the native (unwrapped) device we are creating internally,
-		// so that none of our DX12 work goes through ReShade (and FSR gets the real device).
-		static bool IsCreatingInteropDevice();
-		static void OnInteropDeviceInit(void* native_device);
+		// The Luma native shader that copies the depth into a R32_FLOAT texture (FSR 4 can't read DX11 depth stencil textures).
+		// The getter returns a new reference (or nullptr), as native shaders can be recompiled.
+		static void SetDepthCopyShader(SR::InstanceData* data, std::function<ID3D11ComputeShader*()> get_depth_copy_shader);
 	};
 }
 

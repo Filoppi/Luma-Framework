@@ -642,6 +642,9 @@ namespace
       { CompileTimeStringHash("Sanitize RGBA PS"), { "Luma_SanitizeRGBA", reshade::api::pipeline_subobject_type::pixel_shader } },
       { CompileTimeStringHash("Sanitize RGBA Mipped"), { "Luma_SanitizeRGBAMipped", reshade::api::pipeline_subobject_type::pixel_shader } },
       { CompileTimeStringHash("Gen Sanitized Mip"), { "Luma_GenerateSanitizedMip_CS", reshade::api::pipeline_subobject_type::compute_shader } },
+#if ENABLE_FSR4
+      { CompileTimeStringHash("Copy Depth CS"), { "Luma_CopyDepth_CS", reshade::api::pipeline_subobject_type::compute_shader } },
+#endif
 
       { CompileTimeStringHash("Draw Purple PS"), { "Luma_DrawColor_PS", reshade::api::pipeline_subobject_type::pixel_shader, nullptr, nullptr, { { "COLOR", "float4(1.0, 0.0, 1.0, 1.0)" } } } },
       { CompileTimeStringHash("Draw Purple CS"), { "Luma_DrawColor_CS", reshade::api::pipeline_subobject_type::compute_shader, nullptr, nullptr, { { "COLOR", "float4(1.0, 0.0, 1.0, 1.0)" } } } },
@@ -2660,13 +2663,6 @@ namespace
 
    bool OnCreateDevice(reshade::api::device_api api, uint32_t& api_version)
    {
-#if ENABLE_FSR4
-      // Our own internal DX12 device for FSR 4 interop
-      if (FidelityFX::FSR4::IsCreatingInteropDevice())
-      {
-         return false;
-      }
-#endif
 #if !CHECK_GRAPHICS_API_COMPATIBILITY
 #if DEVELOPMENT || TEST
       ASSERT_ONCE_MSG(api == reshade::api::device_api::d3d11, "Luma only supports DirectX 11 at the moment, add \"CHECK_GRAPHICS_API_COMPATIBILITY\" to ignore calls from other APIs");
@@ -2711,14 +2707,6 @@ namespace
 
    void OnInitDevice(reshade::api::device* device)
    {
-#if ENABLE_FSR4
-      // Our own internal DX12 device for FSR 4 interop, give back the native device (unwrapped by ReShade) to it
-      if (device->get_api() == reshade::api::device_api::d3d12 && FidelityFX::FSR4::IsCreatingInteropDevice())
-      {
-         FidelityFX::FSR4::OnInteropDeviceInit(reinterpret_cast<void*>(device->get_native()));
-         return;
-      }
-#endif
       // Always skip this one, don't use "SKIP_UNSUPPORTED_DEVICE_API", some games create devices of other graphics API without actually doing anything with them (e.g. Deus Ex HR)
       if (!IsSupportedGraphicsAPI(device->get_api())) return;
 
@@ -2900,16 +2888,25 @@ namespace
             }
          }
       }
-#if ENABLE_FSR4
-      // Prefer FSR 4 over FSR 3 on automatic selection, if the GPU actually supports FSR 4
-      if (device_data.sr_type == SR::Type::FSR && device_data.sr_implementations_instances.contains(SR::Type::FSR_4)
-         && FidelityFX::FSR4::HasNativeFSR4(device_data.sr_implementations_instances[SR::Type::FSR_4]))
       {
          const std::shared_lock lock_reshade(s_mutex_reshade);
          if (sr_user_type == SR::UserType::Auto)
          {
-            device_data.sr_type = SR::Type::FSR_4;
+            device_data.sr_type = SR::GetAutoType(device_data.sr_implementations_instances);
          }
+      }
+#if ENABLE_FSR4
+      if (const auto fsr4_instance = device_data.sr_implementations_instances.find(SR::Type::FSR_4); fsr4_instance != device_data.sr_implementations_instances.end())
+      {
+         FidelityFX::FSR4::SetDepthCopyShader(fsr4_instance->second, [&device_data]() -> ID3D11ComputeShader*
+            {
+               const std::shared_lock lock(s_mutex_shader_objects); // They could be getting recompiled
+               const auto cs = device_data.native_compute_shaders.find(CompileTimeStringHash("Copy Depth CS"));
+               if (cs == device_data.native_compute_shaders.end() || !cs->second.get())
+                  return nullptr;
+               cs->second->AddRef();
+               return cs->second.get();
+            });
       }
 #endif
       if (device_data.sr_type == SR::Type::None)
@@ -3039,19 +3036,14 @@ namespace
       }
 
 #if ENABLE_SR
-      auto* sr_instance_data = device_data.GetSRInstanceData();
-      if (sr_instance_data)
+      // All the initialized ones, not just the selected one (e.g. FSR 4 owns a DX12 device)
+      for (auto& sr_instance : device_data.sr_implementations_instances)
       {
-         sr_implementations[device_data.sr_type]->Deinit(sr_instance_data); // NOTE: this could stutter the game on closure as it forces unloading the SR DLL (if it's the last device instance?), but we can't avoid it
-         device_data.sr_implementations_instances[device_data.sr_type] = nullptr;
+         if (sr_instance.second)
+         {
+            sr_implementations[sr_instance.first]->Deinit(sr_instance.second); // NOTE: this could stutter the game on closure as it forces unloading the SR DLL (if it's the last device instance?), but we can't avoid it
+         }
       }
-#if ENABLE_FSR4
-      // The FSR 4 instance owns a DX12 device and shared resources, so always clear it, even if it wasn't the selected one
-      if (auto it = device_data.sr_implementations_instances.find(SR::Type::FSR_4); it != device_data.sr_implementations_instances.end() && it->second)
-      {
-         sr_implementations[SR::Type::FSR_4]->Deinit(it->second);
-      }
-#endif
 #endif // ENABLE_SR
 
       // Execute all Luma callbacks.
@@ -14230,22 +14222,7 @@ namespace
 
             SR::Type sr_type = device_data.sr_type;
 
-            SR::Type sr_auto_type = SR::Type::None;
-            // Pick the first supported one (they are in order of priority)
-            for (const auto& sr_implementation_instance : device_data.sr_implementations_instances)
-            {
-               if (sr_implementation_instance.second && sr_implementation_instance.second->is_supported)
-               {
-                  sr_auto_type = sr_implementation_instance.first;
-                  break;
-               }
-            }
-#if ENABLE_FSR4
-            if (sr_auto_type == SR::Type::FSR && device_data.sr_implementations_instances.contains(SR::Type::FSR_4) && FidelityFX::FSR4::HasNativeFSR4(device_data.sr_implementations_instances[SR::Type::FSR_4]))
-            {
-               sr_auto_type = SR::Type::FSR_4;
-            }
-#endif
+            const SR::Type sr_auto_type = SR::GetAutoType(device_data.sr_implementations_instances);
 
             // Note: if we reached here, it's guaranteed that the selected SR type is supported
             if (ImGui::BeginCombo("Super Resolution", selected_sr_user_type))
@@ -16261,15 +16238,6 @@ void Init(bool async)
 #if ENABLE_SR
       int sr_user_type_i = int(sr_user_type);
       reshade::get_config_value(runtime, NAME, "SRUserType", sr_user_type_i); // This will be reset later if not compatible
-      // Values unknown to this build (e.g. saved by a different version) fall back to auto
-      if (sr_user_type_i < int(SR::UserType::None) || sr_user_type_i > int(SR::UserType::FSR_4)
-#if !ENABLE_FSR4
-         || sr_user_type_i == int(SR::UserType::FSR_4)
-#endif
-         )
-      {
-         sr_user_type_i = int(SR::UserType::Auto);
-      }
       sr_user_type = SR::UserType(sr_user_type_i);
 
       int dlss_render_preset_i = static_cast<int>(dlss_render_preset);
