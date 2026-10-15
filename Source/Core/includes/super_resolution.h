@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <cmath>
 #include <cfloat>
+#include <map>
 
 struct ID3D11Device;
 struct ID3D11DeviceContext;
@@ -18,6 +19,7 @@ namespace SR
 		Auto,
 		DLSS,
 		FSR_3,
+		FSR_4,
 	};
 
 	// Put these in order of preference (most preferred first). For automatic selection.
@@ -25,6 +27,7 @@ namespace SR
 	{
 		DLSS,
 		FSR,
+		FSR_4, // Last to keep the previous values unchanged, see "GetAutoType()"
 		None = -1
 	};
 
@@ -40,6 +43,8 @@ namespace SR
 			return type == Type::DLSS;
 		case SR::UserType::FSR_3:
 			return type == Type::FSR;
+		case SR::UserType::FSR_4:
+			return type == Type::FSR_4;
 		}
 		return false;
 	}
@@ -141,6 +146,18 @@ namespace SR
 
 		virtual ~InstanceData() {}
 	};
+
+	// The first supported type in order of preference. "FSR_4" is last in "Type" (their values are exposed to shaders), but it's preferred over "FSR".
+	inline Type GetAutoType(const std::map<Type, InstanceData*>& instances)
+	{
+		Type auto_type = Type::None;
+		for (const auto& instance : instances)
+		{
+			if (instance.second && instance.second->is_supported && (auto_type == Type::None || (auto_type == Type::FSR && instance.first == Type::FSR_4)))
+				auto_type = instance.first;
+		}
+		return auto_type;
+	}
 
 	// A super resolution implementation,
 	// this is a generic term to include Temporal Anti Aliasing (with jittered rendering and motion vectors) and upscaling.

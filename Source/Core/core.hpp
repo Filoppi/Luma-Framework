@@ -176,6 +176,7 @@
 
 #include "dlss/DLSS.h" // see "ENABLE_NGX"
 #include "fsr/FSR.h" // see "ENABLE_FIDELITY_SK"
+#include "fsr/FSR4.h" // see "ENABLE_FSR4"
 
 #include "includes/containers.h"
 #include "includes/globals.h"
@@ -641,6 +642,9 @@ namespace
       { CompileTimeStringHash("Sanitize RGBA PS"), { "Luma_SanitizeRGBA", reshade::api::pipeline_subobject_type::pixel_shader } },
       { CompileTimeStringHash("Sanitize RGBA Mipped"), { "Luma_SanitizeRGBAMipped", reshade::api::pipeline_subobject_type::pixel_shader } },
       { CompileTimeStringHash("Gen Sanitized Mip"), { "Luma_GenerateSanitizedMip_CS", reshade::api::pipeline_subobject_type::compute_shader } },
+#if ENABLE_FSR4
+      { CompileTimeStringHash("Copy Depth CS"), { "Luma_CopyDepth_CS", reshade::api::pipeline_subobject_type::compute_shader } },
+#endif
 
       { CompileTimeStringHash("Draw Purple PS"), { "Luma_DrawColor_PS", reshade::api::pipeline_subobject_type::pixel_shader, nullptr, nullptr, { { "COLOR", "float4(1.0, 0.0, 1.0, 1.0)" } } } },
       { CompileTimeStringHash("Draw Purple CS"), { "Luma_DrawColor_CS", reshade::api::pipeline_subobject_type::compute_shader, nullptr, nullptr, { { "COLOR", "float4(1.0, 0.0, 1.0, 1.0)" } } } },
@@ -2884,6 +2888,27 @@ namespace
             }
          }
       }
+      {
+         const std::shared_lock lock_reshade(s_mutex_reshade);
+         if (sr_user_type == SR::UserType::Auto)
+         {
+            device_data.sr_type = SR::GetAutoType(device_data.sr_implementations_instances);
+         }
+      }
+#if ENABLE_FSR4
+      if (const auto fsr4_instance = device_data.sr_implementations_instances.find(SR::Type::FSR_4); fsr4_instance != device_data.sr_implementations_instances.end())
+      {
+         FidelityFX::FSR4::SetDepthCopyShader(fsr4_instance->second, [&device_data]() -> ID3D11ComputeShader*
+            {
+               const std::shared_lock lock(s_mutex_shader_objects); // They could be getting recompiled
+               const auto cs = device_data.native_compute_shaders.find(CompileTimeStringHash("Copy Depth CS"));
+               if (cs == device_data.native_compute_shaders.end() || !cs->second.get())
+                  return nullptr;
+               cs->second->AddRef();
+               return cs->second.get();
+            });
+      }
+#endif
       if (device_data.sr_type == SR::Type::None)
       {
          const std::unique_lock lock_reshade(s_mutex_reshade);
@@ -3011,10 +3036,13 @@ namespace
       }
 
 #if ENABLE_SR
-      auto* sr_instance_data = device_data.GetSRInstanceData();
-      if (sr_instance_data)
+      // All the initialized ones, not just the selected one (e.g. FSR 4 owns a DX12 device)
+      for (auto& sr_instance : device_data.sr_implementations_instances)
       {
-         sr_implementations[device_data.sr_type]->Deinit(sr_instance_data); // NOTE: this could stutter the game on closure as it forces unloading the SR DLL (if it's the last device instance?), but we can't avoid it
+         if (sr_instance.second)
+         {
+            sr_implementations[sr_instance.first]->Deinit(sr_instance.second); // NOTE: this could stutter the game on closure as it forces unloading the SR DLL (if it's the last device instance?), but we can't avoid it
+         }
       }
 #endif // ENABLE_SR
 
@@ -14188,20 +14216,13 @@ namespace
                selected_sr_user_type = "DLSS"; break;
             case SR::UserType::FSR_3:
                selected_sr_user_type = "FSR 3"; break;
+            case SR::UserType::FSR_4:
+               selected_sr_user_type = "FSR 4"; break;
             }
 
             SR::Type sr_type = device_data.sr_type;
 
-            SR::Type sr_auto_type = SR::Type::None;
-            // Pick the first supported one (they are in order of priority)
-            for (const auto& sr_implementation_instance : device_data.sr_implementations_instances)
-            {
-               if (sr_implementation_instance.second && sr_implementation_instance.second->is_supported)
-               {
-                  sr_auto_type = sr_implementation_instance.first;
-                  break;
-               }
-            }
+            const SR::Type sr_auto_type = SR::GetAutoType(device_data.sr_implementations_instances);
 
             // Note: if we reached here, it's guaranteed that the selected SR type is supported
             if (ImGui::BeginCombo("Super Resolution", selected_sr_user_type))
@@ -14237,6 +14258,9 @@ namespace
                   AddComboItem("Auto", SR::UserType::Auto, sr_auto_type, !device_data.sr_implementations_instances.empty());
                AddComboItem("DLSS", SR::UserType::DLSS, SR::Type::DLSS, device_data.sr_implementations_instances.contains(SR::Type::DLSS));
                AddComboItem("FSR 3", SR::UserType::FSR_3, SR::Type::FSR, device_data.sr_implementations_instances.contains(SR::Type::FSR));
+#if ENABLE_FSR4
+               AddComboItem("FSR 4", SR::UserType::FSR_4, SR::Type::FSR_4, device_data.sr_implementations_instances.contains(SR::Type::FSR_4));
+#endif
                ImGui::EndCombo();
             }
             if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
@@ -16164,6 +16188,9 @@ void Init(bool async)
 #endif
 #if ENABLE_FIDELITY_SK
    sr_implementations[SR::Type::FSR] = std::make_unique<FidelityFX::FSR>();
+#endif
+#if ENABLE_FSR4
+   sr_implementations[SR::Type::FSR_4] = std::make_unique<FidelityFX::FSR4>();
 #endif
 
    // Load settings
