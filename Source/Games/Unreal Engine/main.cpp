@@ -1213,6 +1213,14 @@ public:
                   // device_data.cb_luma_global_settings_dirty = true;
                   // device_data.sr_suppressed = true;
                   sr_pass.reset = true; // Only reset this pass
+
+                  // FSR 4 marks itself as unsupported if the DX11<->DX12 interop failed, fall back to FSR 3 (or nothing)
+                  if (device_data.sr_type == SR::Type::FSR_4 && sr_instance_data && !sr_instance_data->is_supported)
+                  {
+                     const auto fsr_instance = device_data.sr_implementations_instances.find(SR::Type::FSR);
+                     device_data.sr_type = (fsr_instance != device_data.sr_implementations_instances.end() && fsr_instance->second && fsr_instance->second->is_supported) ? SR::Type::FSR : SR::Type::None;
+                     reshade::log::message(reshade::log::level::warning, device_data.sr_type == SR::Type::FSR ? "Luma UE: FSR 4 failed, falling back to FSR 3" : "Luma UE: FSR 4 failed, disabling SR");
+                  }
                }
             }
          }

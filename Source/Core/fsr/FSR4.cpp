@@ -212,6 +212,14 @@ void main(uint3 id : SV_DispatchThreadID)
 
       unsigned int logged_errors = 0;
 
+      enum class SharedHandleType
+      {
+         Unknown,
+         Legacy,
+         NT,
+      };
+      SharedHandleType shared_handle_type = SharedHandleType::Unknown; // The first one that worked, then used for all textures
+
       bool CanLogError()
       {
          return logged_errors++ < 10; // Don't spam the log
@@ -261,40 +269,68 @@ void main(uint3 id : SV_DispatchThreadID)
       {
          texture = FSR4SharedTexture();
 
-         D3D12_HEAP_PROPERTIES heap_properties = {};
-         heap_properties.Type = D3D12_HEAP_TYPE_DEFAULT;
-         D3D12_RESOURCE_DESC desc = {};
-         desc.Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE2D;
+         // Created on DX11 (the game device) and opened on DX12, DX12 created textures failed to open on DX11 in some setups (E_INVALIDARG).
+         // Legacy (non NT) shared handles are tried first (the most compatible, e.g. with the ReShade proxy), then NT handles.
+         D3D11_TEXTURE2D_DESC desc = {};
          desc.Width = width;
          desc.Height = height;
-         desc.DepthOrArraySize = 1;
          desc.MipLevels = 1;
+         desc.ArraySize = 1;
          desc.Format = format;
          desc.SampleDesc.Count = 1;
-         desc.Layout = D3D12_TEXTURE_LAYOUT_UNKNOWN;
-         // Simultaneous access allows both APIs to access it without explicit layout transitions (we sync them with fences)
-         desc.Flags = D3D12_RESOURCE_FLAG_ALLOW_SIMULTANEOUS_ACCESS | (unordered_access ? D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS : D3D12_RESOURCE_FLAG_NONE);
+         desc.Usage = D3D11_USAGE_DEFAULT;
+         desc.BindFlags = D3D11_BIND_SHADER_RESOURCE | (unordered_access ? D3D11_BIND_UNORDERED_ACCESS : 0);
 
-         HRESULT hr = device_12->CreateCommittedResource(&heap_properties, D3D12_HEAP_FLAG_SHARED, &desc, D3D12_RESOURCE_STATE_COMMON, nullptr, IID_PPV_ARGS(&texture.resource_12));
+         HRESULT hr = E_FAIL;
+         for (SharedHandleType handle_type : { SharedHandleType::Legacy, SharedHandleType::NT })
+         {
+            if (shared_handle_type != SharedHandleType::Unknown && shared_handle_type != handle_type)
+               continue;
+
+            texture.resource_11 = nullptr;
+            texture.resource_12 = nullptr;
+            desc.MiscFlags = handle_type == SharedHandleType::NT ? (D3D11_RESOURCE_MISC_SHARED | D3D11_RESOURCE_MISC_SHARED_NTHANDLE) : D3D11_RESOURCE_MISC_SHARED;
+            hr = device_11->CreateTexture2D(&desc, nullptr, &texture.resource_11);
+            HANDLE shared_handle = nullptr;
+            if (SUCCEEDED(hr))
+            {
+               if (handle_type == SharedHandleType::NT)
+               {
+                  ComPtr<IDXGIResource1> dxgi_resource;
+                  hr = texture.resource_11->QueryInterface(IID_PPV_ARGS(&dxgi_resource));
+                  if (SUCCEEDED(hr))
+                     hr = dxgi_resource->CreateSharedHandle(nullptr, DXGI_SHARED_RESOURCE_READ | DXGI_SHARED_RESOURCE_WRITE, nullptr, &shared_handle);
+               }
+               else
+               {
+                  ComPtr<IDXGIResource> dxgi_resource;
+                  hr = texture.resource_11->QueryInterface(IID_PPV_ARGS(&dxgi_resource));
+                  if (SUCCEEDED(hr))
+                     hr = dxgi_resource->GetSharedHandle(&shared_handle);
+               }
+            }
+            if (SUCCEEDED(hr))
+            {
+               hr = device_12->OpenSharedHandle(shared_handle, IID_PPV_ARGS(&texture.resource_12));
+               if (handle_type == SharedHandleType::NT)
+                  CloseHandle(shared_handle); // Legacy handles aren't real handles and must not be closed
+            }
+            if (SUCCEEDED(hr))
+            {
+               if (shared_handle_type == SharedHandleType::Unknown)
+               {
+                  shared_handle_type = handle_type;
+                  Log(reshade::log::level::info, "FSR4: Sharing DX11 textures with DX12 through %s handles", handle_type == SharedHandleType::NT ? "NT" : "legacy (non NT)");
+               }
+               break;
+            }
+            Log(reshade::log::level::warning, "FSR4: Failed to share a DX11 texture with DX12 through %s handles (%ux%u format %u), hr = 0x%08X", handle_type == SharedHandleType::NT ? "NT" : "legacy (non NT)", width, height, unsigned(format), unsigned(hr));
+         }
          if (FAILED(hr))
          {
-            if (CanLogError())
-               Log(reshade::log::level::error, "FSR4: Failed to create shared DX12 texture %ux%u format %u, hr = 0x%08X", width, height, unsigned(format), unsigned(hr));
-            texture = FSR4SharedTexture();
-            return false;
-         }
-
-         HANDLE shared_handle = nullptr;
-         hr = device_12->CreateSharedHandle(texture.resource_12.Get(), nullptr, GENERIC_ALL, nullptr, &shared_handle);
-         if (SUCCEEDED(hr))
-         {
-            hr = device_11_1->OpenSharedResource1(shared_handle, IID_PPV_ARGS(&texture.resource_11));
-            CloseHandle(shared_handle);
-         }
-         if (FAILED(hr))
-         {
-            if (CanLogError())
-               Log(reshade::log::level::error, "FSR4: Failed to share DX12 texture with DX11 (%ux%u format %u), hr = 0x%08X", width, height, unsigned(format), unsigned(hr));
+            // Don't retry every frame, the backend is marked as unsupported and the game falls back to other SR/TAA
+            Log(reshade::log::level::error, "FSR4: DX11<->DX12 texture sharing failed, disabling FSR 4");
+            is_supported = false;
             texture = FSR4SharedTexture();
             return false;
          }
@@ -497,16 +533,37 @@ void main(uint3 id : SV_DispatchThreadID)
       }
       if (SUCCEEDED(hr))
       {
-         hr = custom_data->device_12->CreateFence(0, D3D12_FENCE_FLAG_SHARED, IID_PPV_ARGS(&custom_data->fence_12));
-      }
-      if (SUCCEEDED(hr))
-      {
          HANDLE shared_handle = nullptr;
-         hr = custom_data->device_12->CreateSharedHandle(custom_data->fence_12.Get(), nullptr, GENERIC_ALL, nullptr, &shared_handle);
+         hr = custom_data->device_12->CreateFence(0, D3D12_FENCE_FLAG_SHARED, IID_PPV_ARGS(&custom_data->fence_12));
+         if (SUCCEEDED(hr))
+            hr = custom_data->device_12->CreateSharedHandle(custom_data->fence_12.Get(), nullptr, GENERIC_ALL, nullptr, &shared_handle);
          if (SUCCEEDED(hr))
          {
             hr = custom_data->device_11_5->OpenSharedFence(shared_handle, IID_PPV_ARGS(&custom_data->fence_11));
             CloseHandle(shared_handle);
+         }
+         if (SUCCEEDED(hr))
+         {
+            Log(reshade::log::level::info, "FSR4: Shared fence created on DX12 and opened on DX11 (NT handle)");
+         }
+         else
+         {
+            // Try the other direction
+            Log(reshade::log::level::warning, "FSR4: Failed to share a DX12 fence with DX11, hr = 0x%08X, trying the other way around", unsigned(hr));
+            custom_data->fence_11 = nullptr;
+            custom_data->fence_12 = nullptr;
+            hr = custom_data->device_11_5->CreateFence(0, D3D11_FENCE_FLAG_SHARED, IID_PPV_ARGS(&custom_data->fence_11));
+            if (SUCCEEDED(hr))
+            {
+               hr = custom_data->fence_11->CreateSharedHandle(nullptr, GENERIC_ALL, nullptr, &shared_handle);
+               if (SUCCEEDED(hr))
+               {
+                  hr = custom_data->device_12->OpenSharedHandle(shared_handle, IID_PPV_ARGS(&custom_data->fence_12));
+                  CloseHandle(shared_handle);
+               }
+            }
+            if (SUCCEEDED(hr))
+               Log(reshade::log::level::info, "FSR4: Shared fence created on DX11 and opened on DX12 (NT handle)");
          }
       }
       if (FAILED(hr))
