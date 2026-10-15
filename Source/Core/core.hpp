@@ -176,6 +176,7 @@
 
 #include "dlss/DLSS.h" // see "ENABLE_NGX"
 #include "fsr/FSR.h" // see "ENABLE_FIDELITY_SK"
+#include "fsr/FSR4.h" // see "ENABLE_FSR4"
 
 #include "includes/containers.h"
 #include "includes/globals.h"
@@ -2659,6 +2660,13 @@ namespace
 
    bool OnCreateDevice(reshade::api::device_api api, uint32_t& api_version)
    {
+#if ENABLE_FSR4
+      // Our own internal DX12 device for FSR 4 interop
+      if (FidelityFX::FSR4::IsCreatingInteropDevice())
+      {
+         return false;
+      }
+#endif
 #if !CHECK_GRAPHICS_API_COMPATIBILITY
 #if DEVELOPMENT || TEST
       ASSERT_ONCE_MSG(api == reshade::api::device_api::d3d11, "Luma only supports DirectX 11 at the moment, add \"CHECK_GRAPHICS_API_COMPATIBILITY\" to ignore calls from other APIs");
@@ -2703,6 +2711,14 @@ namespace
 
    void OnInitDevice(reshade::api::device* device)
    {
+#if ENABLE_FSR4
+      // Our own internal DX12 device for FSR 4 interop, give back the native device (unwrapped by ReShade) to it
+      if (device->get_api() == reshade::api::device_api::d3d12 && FidelityFX::FSR4::IsCreatingInteropDevice())
+      {
+         FidelityFX::FSR4::OnInteropDeviceInit(reinterpret_cast<void*>(device->get_native()));
+         return;
+      }
+#endif
       // Always skip this one, don't use "SKIP_UNSUPPORTED_DEVICE_API", some games create devices of other graphics API without actually doing anything with them (e.g. Deus Ex HR)
       if (!IsSupportedGraphicsAPI(device->get_api())) return;
 
@@ -2884,6 +2900,18 @@ namespace
             }
          }
       }
+#if ENABLE_FSR4
+      // Prefer FSR 4 over FSR 3 on automatic selection, if the GPU actually supports FSR 4
+      if (device_data.sr_type == SR::Type::FSR && device_data.sr_implementations_instances.contains(SR::Type::FSR_4)
+         && FidelityFX::FSR4::HasNativeFSR4(device_data.sr_implementations_instances[SR::Type::FSR_4]))
+      {
+         const std::shared_lock lock_reshade(s_mutex_reshade);
+         if (sr_user_type == SR::UserType::Auto)
+         {
+            device_data.sr_type = SR::Type::FSR_4;
+         }
+      }
+#endif
       if (device_data.sr_type == SR::Type::None)
       {
          const std::unique_lock lock_reshade(s_mutex_reshade);
@@ -3015,7 +3043,15 @@ namespace
       if (sr_instance_data)
       {
          sr_implementations[device_data.sr_type]->Deinit(sr_instance_data); // NOTE: this could stutter the game on closure as it forces unloading the SR DLL (if it's the last device instance?), but we can't avoid it
+         device_data.sr_implementations_instances[device_data.sr_type] = nullptr;
       }
+#if ENABLE_FSR4
+      // The FSR 4 instance owns a DX12 device and shared resources, so always clear it, even if it wasn't the selected one
+      if (auto it = device_data.sr_implementations_instances.find(SR::Type::FSR_4); it != device_data.sr_implementations_instances.end() && it->second)
+      {
+         sr_implementations[SR::Type::FSR_4]->Deinit(it->second);
+      }
+#endif
 #endif // ENABLE_SR
 
       // Execute all Luma callbacks.
@@ -14188,6 +14224,8 @@ namespace
                selected_sr_user_type = "DLSS"; break;
             case SR::UserType::FSR_3:
                selected_sr_user_type = "FSR 3"; break;
+            case SR::UserType::FSR_4:
+               selected_sr_user_type = "FSR 4"; break;
             }
 
             SR::Type sr_type = device_data.sr_type;
@@ -14202,6 +14240,12 @@ namespace
                   break;
                }
             }
+#if ENABLE_FSR4
+            if (sr_auto_type == SR::Type::FSR && device_data.sr_implementations_instances.contains(SR::Type::FSR_4) && FidelityFX::FSR4::HasNativeFSR4(device_data.sr_implementations_instances[SR::Type::FSR_4]))
+            {
+               sr_auto_type = SR::Type::FSR_4;
+            }
+#endif
 
             // Note: if we reached here, it's guaranteed that the selected SR type is supported
             if (ImGui::BeginCombo("Super Resolution", selected_sr_user_type))
@@ -14237,6 +14281,9 @@ namespace
                   AddComboItem("Auto", SR::UserType::Auto, sr_auto_type, !device_data.sr_implementations_instances.empty());
                AddComboItem("DLSS", SR::UserType::DLSS, SR::Type::DLSS, device_data.sr_implementations_instances.contains(SR::Type::DLSS));
                AddComboItem("FSR 3", SR::UserType::FSR_3, SR::Type::FSR, device_data.sr_implementations_instances.contains(SR::Type::FSR));
+#if ENABLE_FSR4
+               AddComboItem("FSR 4", SR::UserType::FSR_4, SR::Type::FSR_4, device_data.sr_implementations_instances.contains(SR::Type::FSR_4));
+#endif
                ImGui::EndCombo();
             }
             if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
@@ -16164,6 +16211,9 @@ void Init(bool async)
 #endif
 #if ENABLE_FIDELITY_SK
    sr_implementations[SR::Type::FSR] = std::make_unique<FidelityFX::FSR>();
+#endif
+#if ENABLE_FSR4
+   sr_implementations[SR::Type::FSR_4] = std::make_unique<FidelityFX::FSR4>();
 #endif
 
    // Load settings

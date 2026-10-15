@@ -3,6 +3,8 @@
 #include <algorithm>
 #include <cmath>
 #include <cfloat>
+#include <memory>
+#include <vector>
 
 struct ID3D11Device;
 struct ID3D11DeviceContext;
@@ -18,13 +20,16 @@ namespace SR
 		Auto,
 		DLSS,
 		FSR_3,
+		FSR_4, // FSR 4 (or whatever the FidelityFX API DX12 dll offers), run through DX11->DX12 interop
 	};
 
 	// Put these in order of preference (most preferred first). For automatic selection.
+	// Note: "FSR_4" is last to keep the previous values unchanged (they are exposed to shaders in some games), the automatic selection prefers it over "FSR" manually.
 	enum class Type
 	{
 		DLSS,
 		FSR,
+		FSR_4,
 		None = -1
 	};
 
@@ -40,6 +45,8 @@ namespace SR
 			return type == Type::DLSS;
 		case SR::UserType::FSR_3:
 			return type == Type::FSR;
+		case SR::UserType::FSR_4:
+			return type == Type::FSR_4;
 		}
 		return false;
 	}
@@ -113,6 +120,81 @@ namespace SR
 				(auto_exposure == other.auto_exposure) &&
 				(render_preset == other.render_preset);
     	}
+	};
+
+	// Small LRU cache of SR "features"/contexts keyed by their settings.
+	// Some games alternate between different settings within the same frame (e.g. two TAA passes with a different output resolution),
+	// so this avoids re-creating the SR contexts every time (which is slow and resets their history).
+	// Entries have a stable address.
+	template<typename T, size_t MaxEntries = 4>
+	struct SettingsCache
+	{
+		struct Entry
+		{
+			SettingsData settings_data = {};
+			T value = {};
+			unsigned long long last_used = 0;
+		};
+		std::vector<std::unique_ptr<Entry>> entries;
+		unsigned long long use_counter = 0;
+
+		// Returns nullptr if not found. Marks it as most recently used.
+		T* Find(const SettingsData& settings_data)
+		{
+			for (auto& entry : entries)
+			{
+				if (entry->settings_data == settings_data)
+				{
+					entry->last_used = ++use_counter;
+					return &entry->value;
+				}
+			}
+			return nullptr;
+		}
+
+		// Destroys (through the callback) the least recently used entry if the cache is full, so a new one can be added
+		template<typename F>
+		void EvictIfFull(F&& destroy_func)
+		{
+			if (entries.size() < MaxEntries)
+				return;
+			auto lru = std::min_element(entries.begin(), entries.end(), [](const auto& a, const auto& b) { return a->last_used < b->last_used; });
+			destroy_func((*lru)->value);
+			entries.erase(lru);
+		}
+
+		// Removes a specific entry (e.g. if its creation failed)
+		template<typename F>
+		void Remove(const T* value, F&& destroy_func)
+		{
+			for (auto it = entries.begin(); it != entries.end(); ++it)
+			{
+				if (&(*it)->value == value)
+				{
+					destroy_func((*it)->value);
+					entries.erase(it);
+					return;
+				}
+			}
+		}
+
+		T& Add(const SettingsData& settings_data)
+		{
+			auto& entry = entries.emplace_back(std::make_unique<Entry>());
+			entry->settings_data = settings_data;
+			entry->last_used = ++use_counter;
+			return entry->value;
+		}
+
+		template<typename F>
+		void Clear(F&& destroy_func)
+		{
+			for (auto& entry : entries)
+			{
+				destroy_func(entry->value);
+			}
+			entries.clear();
+		}
 	};
 
 	// Interface to be subclassed. Represents a handle.

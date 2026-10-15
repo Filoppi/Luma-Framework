@@ -110,10 +110,35 @@ namespace
    }
 } // namespace
 
+#if ENABLE_SR
+// Some games run more than one TAA pass per frame (e.g. Scarlet Nexus alternates between a 1:1 pass and an upscaling one during combat hit effects),
+// each of these gets its own SR context (cached by the SR implementations by settings) and history, so we track their state separately.
+struct SRPassData
+{
+   // Key
+   UINT output_width = 0;
+   UINT output_height = 0;
+   DXGI_FORMAT output_format = DXGI_FORMAT_UNKNOWN;
+
+   com_ptr<ID3D11Texture2D> output_color; // A copy of the TAA output that supports UAV, if the original one didn't
+   unsigned int last_render_width = 0;
+   unsigned int last_render_height = 0;
+   bool reset = true;
+   uint64_t last_used_frame = 0;
+   uint64_t last_drawn_frame = UINT64_MAX;
+};
+constexpr size_t max_sr_passes = 4;
+// If a pass hasn't been drawn for this many frames, its history is considered stale
+constexpr uint64_t max_sr_pass_frames_without_history = 8;
+#endif // ENABLE_SR
+
 struct GameDeviceDataUnrealEngine final : public GameDeviceData
 {
 #if ENABLE_SR
    // SR
+   std::vector<SRPassData> sr_passes;
+   SR::Type sr_passes_type = SR::Type::None;
+   uint64_t sr_frame_index = 0;
    com_ptr<ID3D11Texture2D> sr_motion_vectors;
    com_ptr<ID3D11Resource> sr_source_color;
    com_ptr<ID3D11Resource> depth_buffer;
@@ -146,6 +171,39 @@ class UnrealEngine final : public Game // ### Rename this to your game's name ##
    {
       return *static_cast<GameDeviceDataUnrealEngine*>(device_data.game);
    }
+
+#if ENABLE_SR
+   static SRPassData* FindSRPass(GameDeviceDataUnrealEngine& game_device_data, const D3D11_TEXTURE2D_DESC& output_desc)
+   {
+      for (auto& pass : game_device_data.sr_passes)
+      {
+         if (pass.output_width == output_desc.Width && pass.output_height == output_desc.Height && pass.output_format == output_desc.Format)
+            return &pass;
+      }
+      return nullptr;
+   }
+
+   static SRPassData& GetOrAddSRPass(GameDeviceDataUnrealEngine& game_device_data, const D3D11_TEXTURE2D_DESC& output_desc)
+   {
+      SRPassData* pass = FindSRPass(game_device_data, output_desc);
+      if (!pass)
+      {
+         // Evict the least recently used one
+         if (game_device_data.sr_passes.size() >= max_sr_passes)
+         {
+            auto lru = std::min_element(game_device_data.sr_passes.begin(), game_device_data.sr_passes.end(), [](const SRPassData& a, const SRPassData& b) { return a.last_used_frame < b.last_used_frame; });
+            game_device_data.sr_passes.erase(lru);
+         }
+         pass = &game_device_data.sr_passes.emplace_back();
+         pass->output_width = output_desc.Width;
+         pass->output_height = output_desc.Height;
+         pass->output_format = output_desc.Format;
+         reshade::log::message(reshade::log::level::info, (std::string("Luma UE: New SR pass with output ") + std::to_string(output_desc.Width) + "x" + std::to_string(output_desc.Height) + ", passes: " + std::to_string(game_device_data.sr_passes.size())).c_str());
+      }
+      pass->last_used_frame = game_device_data.sr_frame_index;
+      return *pass;
+   }
+#endif // ENABLE_SR
 
    static void DecodeMotionVectorsPS(ID3D11DeviceContext* native_device_context, DeviceData& device_data, TAAShaderInfo& taa_shader_info)
    {
@@ -819,11 +877,22 @@ public:
          com_ptr<ID3D11Texture2D> output_color;
          HRESULT hr = output_color_resource->QueryInterface(&output_color);
          ASSERT_ONCE(SUCCEEDED(hr));
-         if (device_data.sr_output_color.get() && output_color.get())
+         // Only skip it if it's the same pass (output) we already drew SR for, other passes (e.g. with a different output resolution) run SR with their own context and history
+         SRPassData* sr_pass = nullptr;
+         if (output_color.get())
          {
-            native_device_context->CopyResource(output_color.get(), device_data.sr_output_color.get());
+            D3D11_TEXTURE2D_DESC output_texture_desc;
+            output_color->GetDesc(&output_texture_desc);
+            sr_pass = FindSRPass(game_device_data, output_texture_desc);
          }
-         return DrawOrDispatchOverrideType::Skip;
+         if (sr_pass && sr_pass->last_drawn_frame == game_device_data.sr_frame_index)
+         {
+            if (sr_pass->output_color.get())
+            {
+               native_device_context->CopyResource(output_color.get(), sr_pass->output_color.get());
+            }
+            return DrawOrDispatchOverrideType::Skip;
+         }
       }
 
       if (is_taa && device_data.sr_type != SR::Type::None && !device_data.sr_suppressed)
@@ -920,6 +989,35 @@ public:
             settings_data.render_preset = dlss_render_preset;
             settings_data.mvs_x_scale = 1.0f;
             settings_data.mvs_y_scale = 1.0f;
+            // Each pass (output) has its own SR context (the SR implementations cache them by settings, so alternating between them doesn't re-create them) and history
+            if (game_device_data.sr_passes_type != device_data.sr_type)
+            {
+               game_device_data.sr_passes.clear();
+               game_device_data.sr_passes_type = device_data.sr_type;
+            }
+            SRPassData& sr_pass = GetOrAddSRPass(game_device_data, taa_output_texture_desc);
+            // Camera cuts and forced resets apply to all the passes
+            if (device_data.force_reset_sr || game_device_data.camera_cut)
+            {
+               for (auto& pass : game_device_data.sr_passes)
+               {
+                  pass.reset = true;
+               }
+               device_data.force_reset_sr = false;
+               game_device_data.camera_cut = false;
+            }
+            // The SR implementation might have switched back to a context it created before for this resolution, which would have stale history
+            if (sr_pass.last_render_width != settings_data.render_width || sr_pass.last_render_height != settings_data.render_height)
+            {
+               sr_pass.reset = true;
+               sr_pass.last_render_width = settings_data.render_width;
+               sr_pass.last_render_height = settings_data.render_height;
+            }
+            if (sr_pass.last_drawn_frame != UINT64_MAX && game_device_data.sr_frame_index - sr_pass.last_drawn_frame > max_sr_pass_frames_without_history)
+            {
+               sr_pass.reset = true;
+            }
+
             sr_implementations[device_data.sr_type]->UpdateSettings(sr_instance_data, native_device_context, settings_data);
 
             constexpr bool dlss_use_native_uav = true;
@@ -927,6 +1025,7 @@ public:
 
             bool skip_dlss = taa_output_texture_desc.Width < sr_instance_data->min_resolution || taa_output_texture_desc.Height < sr_instance_data->min_resolution;
             bool dlss_output_changed = false;
+            com_ptr<ID3D11Texture2D> sr_output_color;
             // Create a copy that supports Unordered Access if it wasn't already supported
             if (!dlss_output_supports_uav)
             {
@@ -935,28 +1034,29 @@ public:
                // dlss_output_texture_desc.Height = std::lrintf(game_device_data.render_resolution.y);
                dlss_output_texture_desc.BindFlags |= D3D11_BIND_UNORDERED_ACCESS;
 
-               if (device_data.sr_output_color.get())
+               if (sr_pass.output_color.get())
                {
                   D3D11_TEXTURE2D_DESC prev_dlss_output_texture_desc;
-                  device_data.sr_output_color->GetDesc(&prev_dlss_output_texture_desc);
+                  sr_pass.output_color->GetDesc(&prev_dlss_output_texture_desc);
                   dlss_output_changed = prev_dlss_output_texture_desc.Width != dlss_output_texture_desc.Width || prev_dlss_output_texture_desc.Height != dlss_output_texture_desc.Height || prev_dlss_output_texture_desc.Format != dlss_output_texture_desc.Format;
                }
-               if (!device_data.sr_output_color.get() || dlss_output_changed)
+               if (!sr_pass.output_color.get() || dlss_output_changed)
                {
-                  device_data.sr_output_color = nullptr; // Make sure we discard the previous one
-                  hr = native_device->CreateTexture2D(&dlss_output_texture_desc, nullptr, &device_data.sr_output_color);
+                  sr_pass.output_color = nullptr; // Make sure we discard the previous one
+                  hr = native_device->CreateTexture2D(&dlss_output_texture_desc, nullptr, &sr_pass.output_color);
                   ASSERT_ONCE(SUCCEEDED(hr));
                }
                // Texture creation failed, we can't proceed with DLSS
-               if (!device_data.sr_output_color.get())
+               if (!sr_pass.output_color.get())
                {
                   skip_dlss = true;
                }
+               sr_output_color = sr_pass.output_color;
             }
             else
             {
-               ASSERT_ONCE(device_data.sr_output_color == nullptr);
-               device_data.sr_output_color = output_color;
+               sr_pass.output_color = nullptr;
+               sr_output_color = output_color;
             }
             if (!skip_dlss)
             {
@@ -1050,12 +1150,12 @@ public:
                }
 #endif
                // UE4 seems to skip taa on the first frame after a camera cut.
-               bool reset_sr = device_data.force_reset_sr || dlss_output_changed || game_device_data.camera_cut;
-               device_data.force_reset_sr = false;
+               // Camera cuts and forced resets have already been applied to all the passes above.
+               bool reset_sr = sr_pass.reset || dlss_output_changed;
 
                SR::SuperResolutionImpl::DrawData draw_data;
                draw_data.source_color = game_device_data.sr_source_color.get();
-               draw_data.output_color = device_data.sr_output_color.get();
+               draw_data.output_color = sr_output_color.get();
                draw_data.motion_vectors = game_device_data.sr_motion_vectors.get();
                draw_data.depth_buffer = game_device_data.depth_buffer.get();
                draw_data.pre_exposure = 0.0f; // automatic exposure
@@ -1074,14 +1174,15 @@ public:
                if (dlss_succeeded)
                {
                   device_data.has_drawn_sr = true;
+                  sr_pass.reset = false;
+                  sr_pass.last_drawn_frame = game_device_data.sr_frame_index;
                }
-               game_device_data.camera_cut = false;
                game_device_data.sr_source_color = nullptr;
                game_device_data.depth_buffer = nullptr;
 
                // Restore the previous state
 
-               if (device_data.has_drawn_sr)
+               if (dlss_succeeded) // Note: "has_drawn_sr" might have already been true from another pass this frame
                {
 #if DEVELOPMENT
                   const std::shared_lock lock_trace(s_mutex_trace);
@@ -1093,18 +1194,14 @@ public:
                      trace_draw_call_data.command_list = native_device_context;
                      trace_draw_call_data.custom_name = "DLSS";
                      // Re-use the RTV data for simplicity
-                     GetResourceInfo(device_data.sr_output_color.get(), trace_draw_call_data.rt_size[0], trace_draw_call_data.rt_format[0], &trace_draw_call_data.rt_type_name[0], &trace_draw_call_data.rt_hash[0]);
+                     GetResourceInfo(sr_output_color.get(), trace_draw_call_data.rt_size[0], trace_draw_call_data.rt_format[0], &trace_draw_call_data.rt_type_name[0], &trace_draw_call_data.rt_hash[0]);
                      cmd_list_data.trace_draw_calls_data.insert(cmd_list_data.trace_draw_calls_data.end() - 1, trace_draw_call_data);
                   }
 #endif
 
                   if (!dlss_output_supports_uav)
                   {
-                     native_device_context->CopyResource(output_color.get(), device_data.sr_output_color.get()); // DX11 doesn't need barriers
-                  }
-                  else
-                  {
-                     device_data.sr_output_color = nullptr;
+                     native_device_context->CopyResource(output_color.get(), sr_output_color.get()); // DX11 doesn't need barriers
                   }
 
                   return DrawOrDispatchOverrideType::Replaced;
@@ -1115,12 +1212,8 @@ public:
                   // cb_luma_global_settings.SRType = 0;
                   // device_data.cb_luma_global_settings_dirty = true;
                   // device_data.sr_suppressed = true;
-                  device_data.force_reset_sr = true;
+                  sr_pass.reset = true; // Only reset this pass
                }
-            }
-            if (dlss_output_supports_uav)
-            {
-               device_data.sr_output_color = nullptr;
             }
          }
       }
@@ -1134,6 +1227,9 @@ public:
       game_device_data.found_per_view_globals = false;
       game_device_data.camera_cut = !device_data.taa_detected && !device_data.has_drawn_sr && !device_data.force_reset_sr;
       device_data.has_drawn_sr = false;
+#if ENABLE_SR
+      game_device_data.sr_frame_index++;
+#endif
       game_device_data.jitter = {0.0f, 0.0f};
 
       if (device_data.primary_command_list_data)
@@ -1152,6 +1248,8 @@ public:
       game_device_data.depth_buffer = nullptr;
       game_device_data.sr_settings_data = nullptr;
       game_device_data.sr_draw_data = nullptr;
+      game_device_data.sr_passes.clear();
+      game_device_data.sr_passes_type = SR::Type::None;
    }
 
    void UpdateLumaInstanceDataCB(CB::LumaInstanceDataPadded& data, CommandListData& cmd_list_data, DeviceData& device_data) override

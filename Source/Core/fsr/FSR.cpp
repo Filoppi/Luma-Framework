@@ -18,13 +18,37 @@ namespace FidelityFX
 {
    constexpr int default_phase_count = 16;
 
-   struct FSRInstanceData : public SR::InstanceData
+   struct FSRContextData
    {
       FfxFsr3Context context = {};
       bool has_context = false;
       void* scratch_buffer = nullptr;
       int phase_count = default_phase_count;
    };
+
+   struct FSRInstanceData : public SR::InstanceData
+   {
+      // All the contexts we created, by settings, so we can quickly switch between them (e.g. if a game alternates between two output resolutions every frame).
+      // FFX contexts can't be moved in memory, the cache guarantees stable addresses.
+      SR::SettingsCache<FSRContextData> cached_contexts;
+      FSRContextData* current = nullptr; // The currently selected one (one of the cached ones)
+   };
+
+   void DestroyFSR3Context(FSRContextData& context_data)
+   {
+      if (context_data.has_context)
+      {
+         FfxErrorCode err_code = ffxFsr3ContextDestroy(&context_data.context);
+         if (err_code != FFX_OK)
+         {
+            printf_s("FSR3: ffxFsr3ContextDestroy failed, error = %d\n", static_cast<int>(err_code));
+         }
+         memset(&context_data.context, 0, sizeof(FfxFsr3Context));
+         context_data.has_context = false;
+      }
+      free(context_data.scratch_buffer);
+      context_data.scratch_buffer = nullptr;
+   }
 
    // TODO: delete
    double MillisecondsNow()
@@ -109,16 +133,11 @@ namespace FidelityFX
    {
       auto& custom_data = reinterpret_cast<FSRInstanceData*&>(data);
 
-      if (custom_data->has_context)
-      {
-         FfxErrorCode err_code = ffxFsr3ContextDestroy(&custom_data->context);
-         if (err_code != FFX_OK)
-         {
-            printf_s("FSR3: ffxFsr3ContextDestroy failed, error = %d\n", static_cast<int>(err_code));
-         }
+      if (!custom_data)
+         return;
 
-         free(custom_data->scratch_buffer);
-      }
+      custom_data->cached_contexts.Clear(DestroyFSR3Context);
+      custom_data->current = nullptr;
 
       delete custom_data;
       custom_data = nullptr;
@@ -143,8 +162,16 @@ namespace FidelityFX
          return false;
 
       // No need to re-instantiate FSR "features" if all the params are the same
-      if (memcmp(&settings_data, &custom_data->settings_data, sizeof(SR::SettingsData)) == 0 && custom_data->has_context)
+      if (custom_data->current && custom_data->current->has_context && settings_data == custom_data->settings_data)
       {
+         return true;
+      }
+
+      // Re-use a previously created context with the same settings, this also keeps its history
+      if (FSRContextData* cached_context = custom_data->cached_contexts.Find(settings_data); cached_context && cached_context->has_context)
+      {
+         custom_data->settings_data = settings_data;
+         custom_data->current = cached_context;
          return true;
       }
 
@@ -234,36 +261,33 @@ namespace FidelityFX
       }
 #endif
 
-      // Destroy any possible previously created context
-      if (custom_data->has_context)
+      // Destroy the least recently used context if we have too many (or one with the same settings that failed creation)
+      custom_data->current = nullptr;
+      if (FSRContextData* failed_context = custom_data->cached_contexts.Find(settings_data))
       {
-         err_code = ffxFsr3ContextDestroy(&custom_data->context);
-         if (err_code != FFX_OK)
-         {
-            printf_s("FSR3: ffxFsr3ContextDestroy failed, error = %d\n", static_cast<int>(err_code));
-         }
-         //custom_data->context = {}; // Probably not very useful
-         memset(&custom_data->context, 0, sizeof(FfxFsr3Context));
-         custom_data->has_context = false;
-
-         free(custom_data->scratch_buffer);
+         custom_data->cached_contexts.Remove(failed_context, DestroyFSR3Context);
       }
+      custom_data->cached_contexts.EvictIfFull(DestroyFSR3Context);
 
-      err_code = ffxFsr3ContextCreate(&custom_data->context, &context_desc);
+      FSRContextData& context_data = custom_data->cached_contexts.Add(settings_data);
+      err_code = ffxFsr3ContextCreate(&context_data.context, &context_desc);
       if (err_code != FFX_OK)
       {
          // TODO: set FSR as non compatible if this failed with a "non compatible" or "dll missing" error? Or try again?
          printf_s("FSR3: ffxFsr3ContextCreate failed, error = %d\n", static_cast<int>(err_code));
          ASSERT_ONCE_MSG(false, "Couldn't create FSR3 context");
          free(scratch_buffer);
+         custom_data->cached_contexts.Remove(&context_data, DestroyFSR3Context);
          return false;
       }
 
       custom_data->settings_data = settings_data;
-      custom_data->scratch_buffer = scratch_buffer;
-      custom_data->has_context = true;
+      context_data.scratch_buffer = scratch_buffer;
+      context_data.has_context = true;
 
-      custom_data->phase_count = ffxFsr3GetJitterPhaseCount(settings_data.render_width, settings_data.output_width);
+      context_data.phase_count = ffxFsr3GetJitterPhaseCount(settings_data.render_width, settings_data.output_width);
+
+      custom_data->current = &context_data;
 
       return true;
    }
@@ -271,12 +295,17 @@ namespace FidelityFX
    int FidelityFX::FSR::GetJitterPhases(const SR::InstanceData* data) const
    {
       auto& custom_data = reinterpret_cast<const FSRInstanceData*&>(data);
-      return custom_data->phase_count;
+      return custom_data->current ? custom_data->current->phase_count : default_phase_count;
    }
 
    bool FidelityFX::FSR::Draw(const SR::InstanceData* data, ID3D11DeviceContext* command_list, const DrawData& draw_data)
    {
       auto& custom_data = reinterpret_cast<const FSRInstanceData*&>(data);
+
+      if (!custom_data->current || !custom_data->current->has_context)
+      {
+         return false;
+      }
 
       FfxFsr3DispatchUpscaleDescription dispatch_upscale{};
 
@@ -346,7 +375,7 @@ namespace FidelityFX
       }
 #endif
 
-      FfxErrorCode err_code = ffxFsr3ContextDispatchUpscale(const_cast<FfxFsr3Context*>(&custom_data->context), &dispatch_upscale);
+      FfxErrorCode err_code = ffxFsr3ContextDispatchUpscale(&custom_data->current->context, &dispatch_upscale);
       if (err_code != FFX_OK)
       {
          printf_s("FSR3: ffxFsr3ContextDispatchUpscale failed, error = %d\n", static_cast<int>(err_code));

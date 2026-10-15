@@ -4,6 +4,8 @@
     <UseLumaDXP Condition="'$(UseLumaDXP)'==''">false</UseLumaDXP>
     <UseLumaNGX Condition="'$(UseLumaNGX)'==''">false</UseLumaNGX>
     <UseLumaFSR Condition="'$(UseLumaFSR)'==''">false</UseLumaFSR>
+    <!-- FSR 4 through DX11->DX12 interop (needs UseLumaFSR). The FidelityFX API DX12 dlls are loaded from the game folder at runtime, they aren't shipped. -->
+    <UseLumaFSR4 Condition="'$(UseLumaFSR4)'==''">false</UseLumaFSR4>
     <UseLumaFastNoise Condition="'$(UseLumaFastNoise)'==''">false</UseLumaFastNoise>
     <!-- On by default: NVAPI is a static lib that loads the driver's DLL at runtime, so it's harmless on non NVIDIA GPUs (init just fails). -->
     <UseLumaNVAPI Condition="'$(UseLumaNVAPI)'==''">true</UseLumaNVAPI>
@@ -65,6 +67,9 @@
     <ClCompile Condition="'$(UseLumaFSR)'=='true'">
       <AdditionalIncludeDirectories>$(LumaFSRRoot);%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
       <PreprocessorDefinitions>UNICODE;_UNICODE;ENABLE_FIDELITY_SK=1;%(PreprocessorDefinitions)</PreprocessorDefinitions>
+    </ClCompile>
+    <ClCompile Condition="'$(UseLumaFSR)'=='true' and '$(UseLumaFSR4)'=='true'">
+      <PreprocessorDefinitions>UNICODE;_UNICODE;ENABLE_FSR4=1;%(PreprocessorDefinitions)</PreprocessorDefinitions>
     </ClCompile>
     <ClCompile Condition="'$(UseLumaFastNoise)'=='true'">
       <PreprocessorDefinitions>UNICODE;_UNICODE;ENABLE_FAST_NOISE_TEXTURES=1;%(PreprocessorDefinitions)</PreprocessorDefinitions>

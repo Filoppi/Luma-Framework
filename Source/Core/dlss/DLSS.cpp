@@ -35,7 +35,9 @@ namespace NGX
 		{
 		}
 
-		DLSSInternalInstance								instance = {}; // Note that there could be more of these if we ever wished
+		DLSSInternalInstance								instance = {}; // The currently selected one (a copy of one of the cached ones)
+		// All the features we created, by settings, so we can quickly switch between them (e.g. if a game alternates between two output resolutions every frame)
+		SR::SettingsCache<DLSSInternalInstance>	cached_instances;
 		std::unordered_set<NVSDK_NGX_Handle*>		unique_handles;
 		std::unordered_set<NVSDK_NGX_Parameter*>	unique_parameters;
 		// Current global capabilities params (independent from the current settings/res).
@@ -287,7 +289,16 @@ bool NGX::DLSS::UpdateSettings(SR::InstanceData* data, ID3D11DeviceContext* comm
 		return true;
 	}
 
-	int quality_mode = static_cast<int>(NVSDK_NGX_PerfQuality_Value_Balanced); // Default to balanced if none is found
+	// Re-use a previously created feature with the same settings, this also keeps its history
+	DLSSInternalInstance* cached_instance = custom_data->cached_instances.Find(settings_data);
+	if (cached_instance && cached_instance->command_list.Get() == command_list)
+	{
+		custom_data->settings_data = settings_data;
+		custom_data->instance = *cached_instance;
+		return true;
+	}
+
+	int quality_mode =static_cast<int>(NVSDK_NGX_PerfQuality_Value_Balanced); // Default to balanced if none is found
 
 	unsigned int best_mode_delta = (std::numeric_limits<unsigned int>::max)(); // Wrap it around () because "max" might already be defined as macro
 
@@ -347,26 +358,45 @@ bool NGX::DLSS::UpdateSettings(SR::InstanceData* data, ID3D11DeviceContext* comm
 		quality_mode = NVSDK_NGX_PerfQuality_Value_DLAA; // Just in case (this isn't expected to happen)
 	}
 
-	// Release old DLSS instance before creating a new one to prevent memory leaks
-	if (custom_data->instance.super_sampling_feature != nullptr)
+	auto ReleaseInstance = [&](DLSSInternalInstance& instance)
 	{
-		NVSDK_NGX_D3D11_ReleaseFeature(custom_data->instance.super_sampling_feature);
-		custom_data->unique_handles.erase(custom_data->instance.super_sampling_feature);
-	}
-	if (custom_data->instance.runtime_params != nullptr)
+		if (instance.super_sampling_feature != nullptr)
+		{
+			NVSDK_NGX_D3D11_ReleaseFeature(instance.super_sampling_feature);
+			custom_data->unique_handles.erase(instance.super_sampling_feature);
+		}
+		if (instance.runtime_params != nullptr)
+		{
+			NVSDK_NGX_D3D11_DestroyParameters(instance.runtime_params);
+			custom_data->unique_parameters.erase(instance.runtime_params);
+		}
+		instance = {};
+	};
+
+	// Release old DLSS instances before creating a new one to prevent memory leaks (the current one might be one of them)
+	if (cached_instance)
 	{
-		NVSDK_NGX_D3D11_DestroyParameters(custom_data->instance.runtime_params);
-		custom_data->unique_parameters.erase(custom_data->instance.runtime_params);
+		custom_data->cached_instances.Remove(cached_instance, ReleaseInstance); // Created with a different command list
 	}
+	custom_data->cached_instances.EvictIfFull(ReleaseInstance);
+	custom_data->instance = {};
 
 	custom_data->settings_data = settings_data;
-	custom_data->instance.command_list.Reset(); // Just to be explicit
 	custom_data->instance = custom_data->CreateSuperSamplingFeature(command_list, quality_mode);
 	custom_data->unique_handles.insert(custom_data->instance.super_sampling_feature);
 	custom_data->unique_parameters.insert(custom_data->instance.runtime_params);
 
 	// If any of these are nullptr, then the initialization failed
-	return custom_data->instance.super_sampling_feature != nullptr && custom_data->instance.runtime_params != nullptr;
+	const bool succeeded = custom_data->instance.super_sampling_feature != nullptr && custom_data->instance.runtime_params != nullptr;
+	if (succeeded)
+	{
+		custom_data->cached_instances.Add(settings_data) = custom_data->instance;
+	}
+	else
+	{
+		ReleaseInstance(custom_data->instance);
+	}
+	return succeeded;
 }
 
 bool NGX::DLSS::Draw(const SR::InstanceData* data, ID3D11DeviceContext* command_list, const DrawData& draw_data)
