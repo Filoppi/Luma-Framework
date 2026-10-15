@@ -43,6 +43,19 @@ Github actions automatically build all game projects and package them with their
 Once your mod is ready, make a PR to the original repository.
 Make sure to test the mod in "Publishing" mode before wrapping it up, given that both the shaders and c++ code can change depending on the configuration.
 
+# FSR 4 (native)
+Luma can run AMD FSR 4 in DX11 games, by sharing the textures with an internal DX12 device on the same GPU (FSR 4 is DX12 only). It's built on top of the FSR 3 integration and falls back to it if FSR 4 can't run.
+
+### Enabling it in a game project
+- Set both "UseLumaFSR" and "UseLumaFSR4" to true in the game's vcxproj (or in the project properties "Features" page). This defines "ENABLE_FSR4". The "Unreal Engine" project already has it on.
+- No other code is needed: FSR 4 shows up as a new SR type (see "FSR4.h"/"FSR4.cpp" in "Source\Core\fsr"), and gets the same inputs as FSR 3 (jitter, motion vectors, depth, exposure etc).
+
+### Using it in game
+- The FidelityFX API DX12 dlls are not shipped with Luma. Copy "amd_fidelityfx_dx12.dll" and "amd_fidelityfx_upscaler_dx12.dll" (FidelityFX SDK 2.x, from the "PrebuiltSignedDLL" folder of https://github.com/GPUOpen-LibrariesAndSDKs/FidelityFX-SDK) next to the game executable (where ReShade and Luma are).
+- FSR 4 needs a GPU and driver that support it (AMD RDNA 4, e.g. RX 9000 series). The highest available FSR 4.x upscaler version is picked automatically.
+- In the Luma settings, select "FSR 4" as the Super Resolution type (saved as "SRUserType=4" under "[Luma]" in "ReShade.ini"). "Auto" also prefers FSR 4 over FSR 3 when it's supported.
+- Check "ReShade.log" for lines starting with "FSR4:": they report the loaded dll and upscaler version, the interop setup and any error. If anything fails, Luma logs it once and uses FSR 3 instead.
+
 # Comparison with RenoDX
 Luma is similar to RenoDX (https://github.com/clshortfuse/renodx), where it got some inspiration from, but Luma is more focused on modding games deep down, like for example adding and replacing entire rendering techniques, adding DLSS or Ultrawide support etc. Porting simple mods between the two is relatively easy.
 
