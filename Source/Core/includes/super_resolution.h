@@ -48,6 +48,22 @@ namespace SR
 		}
 		return false;
 	}
+
+#if DEVELOPMENT
+	constexpr const char* GetTypeName(Type type)
+	{
+		switch (type)
+		{
+		case Type::DLSS:
+			return "DLSS";
+		case Type::FSR:
+			return "FSR";
+		case Type::None:
+			break;
+		}
+		return "None";
+	}
+#endif
 	
 	// E.g. use base 2 for x and base 3 for y.
 	// Index should go from 0 to phases-1.
@@ -168,6 +184,9 @@ namespace SR
 	class SuperResolutionImpl
 	{
 	public:
+		// The implementations are owned and deleted through this base.
+		// A new virtual must also be forwarded by the DEVELOPMENT MCP wrapper ("Mcp::SrTap"), or it silently gets the defaults below there.
+		virtual ~SuperResolutionImpl() = default;
 		virtual bool HasInit(const InstanceData* data) const { return false; }
 		// Needs init to be called first
 		virtual bool IsSupported(const InstanceData* data) const { return false; }

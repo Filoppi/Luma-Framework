@@ -38,6 +38,10 @@
 #include <dxgi.h>
 #include <dxgi1_6.h>
 #include <Windows.h>
+#if DEVELOPMENT
+#include <sddl.h> // For the MCP pipe's security descriptor
+#pragma comment(lib, "Advapi32.lib")
+#endif
 #include <HighLevelMonitorConfigurationAPI.h> // For "SetMonitorBrightness"
 
 #include <cstdio>
@@ -201,6 +205,11 @@
 #include "utils/shader_compiler.hpp"
 #include "utils/display.hpp"
 #include "utils/resource.hpp"
+#if DEVELOPMENT
+// Before "draw.hpp", whose Luma pass helpers only queue trace entries while a capture runs.
+// Atomic so hot paths can check it without "s_mutex_trace" (and recheck it under the lock).
+static std::atomic<bool> trace_running = false; // For this frame
+#endif
 #include "utils/draw.hpp"
 #include "utils/system.h"
 
@@ -606,6 +615,9 @@ namespace
    }
 
    std::string shaders_compilation_errors; // errors and warning log
+#if DEVELOPMENT
+   std::vector<std::string> custom_shaders_compile_defines; // Name/value pairs of the last "CompileCustomShaders()", for "luma_get_settings"
+#endif
 
    // List of define values read by our settings shaders
    std::unordered_map<std::string, uint8_t> code_shaders_defines;
@@ -713,7 +725,6 @@ namespace
    thread_local reshade::api::format last_attempted_upgraded_resource_view_creation_view_format = reshade::api::format::unknown;
 
    bool trace_scheduled = false; // For next frame
-   bool trace_running = false; // For this frame
    uint32_t trace_count = 0; // Not exactly necessary but... it might help
 
    uint64_t last_drawn_shader = SHADER_HASH_NONE; // Not exactly thread safe but it's fine...
@@ -767,6 +778,7 @@ namespace
 
    // Forward declares:
    void DumpShader(uint32_t shader_hash);
+   void ForceToggleShaders(DeviceData& device_data, bool enabled); // Used by the MCP server, included before its definition
 #if ALLOW_SHADER_PATCHES_DUMPING && LUMA_PATCH_PROVIDERS != 0
    void DumpPatchedShader(uint32_t shader_hash);
 #endif
@@ -1317,6 +1329,9 @@ namespace
       {
          const std::unique_lock lock(s_mutex_loading);
          shaders_compilation_errors.clear();
+#if DEVELOPMENT
+         custom_shaders_compile_defines = shader_defines;
+#endif
       }
 
       auto directory = shaders_path;
@@ -5229,6 +5244,10 @@ namespace
       }
    }
 
+#if DEVELOPMENT
+#include "includes/mcp_server.inl"
+#endif // DEVELOPMENT
+
    void OnPresent(
       reshade::api::command_queue* queue,
       reshade::api::swapchain* swapchain,
@@ -5250,6 +5269,9 @@ namespace
       // Allow to tank performance to test auto rendering resolution scaling etc
       if (frame_sleep_ms > 0 && cb_luma_global_settings.FrameIndex % frame_sleep_interval == 0)
          Sleep(frame_sleep_ms);
+
+      // Before display composition, so a debug draw copy requested over MCP is read back and cleared before it's drawn
+      Mcp::OnPresent(device_data, cmd_list_data, native_device_context, swapchain);
 #endif  // DEVELOPMENT
 
       // If there are no shaders being currently replaced in the game,
@@ -5724,6 +5746,22 @@ namespace
       device_data.resource_upgrades.FlushPendingDestructions(queue->get_device(), device_data.mutex);
 
       game->OnPresent(native_device, device_data);
+
+#if DEVELOPMENT
+      // Luma passes the game drew at present (or outside its draw hooks) on this thread; ones queued for another context are dropped
+      {
+         const std::shared_lock lock_trace(s_mutex_trace);
+         if (trace_running && device_data.primary_command_list_data)
+         {
+            const std::unique_lock lock_trace_2(device_data.primary_command_list_data->mutex_trace);
+            MoveInjectedPassTraces(&device_data.primary_command_list_data->trace_draw_calls_data, device_data.primary_command_list.get());
+         }
+         else
+         {
+            injected_pass_traces.clear();
+         }
+      }
+#endif
 
 #if 0 // TODO: this breaks games atm, need more restrictive checks
       // Invalidate indirect mirrors when the scale-relevant state changed this frame (render resolution or
@@ -6585,6 +6623,21 @@ namespace
             draw_or_dispatch_override_type = game->OnDrawOrDispatch(native_device, native_device_context, cmd_list_data, device_data, stages, original_shader_hashes, is_custom_pass, updated_cbuffers, original_draw_dispatch_func);
          }
 
+#if DEVELOPMENT
+         {
+            const std::shared_lock lock_trace(s_mutex_trace);
+            if (trace_running)
+            {
+               const std::unique_lock lock_trace_2(cmd_list_data.mutex_trace);
+               // Luma passes the game drew from its hook (SMAA, RCAS, bloom, SR), after the draw's own entries
+               MoveInjectedPassTraces(&cmd_list_data.trace_draw_calls_data, native_device_context);
+            }
+            else
+            {
+               injected_pass_traces.clear();
+            }
+         }
+#endif
 
          if (draw_or_dispatch_override_type != DrawOrDispatchOverrideType::None)
          {
@@ -9217,9 +9270,10 @@ namespace
       return false;
    }
 
-   void OnCopyResource_Debug(reshade::api::command_list* cmd_list, reshade::api::resource source, reshade::api::resource dest, DXGI_FORMAT format = DXGI_FORMAT_UNKNOWN)
+   void OnCopyResource_Debug(reshade::api::command_list* cmd_list, reshade::api::resource source, reshade::api::resource dest, const TraceDrawCallData::CopyInfo& copy_info = {})
    {
 #if DEVELOPMENT
+      if (trace_running) // Unlocked early out, every copy (including buffer ones) comes through here
       {
          const std::shared_lock lock_trace(s_mutex_trace);
          if (trace_running)
@@ -9229,6 +9283,7 @@ namespace
             TraceDrawCallData trace_draw_call_data;
             trace_draw_call_data.type = TraceDrawCallData::TraceDrawCallType::CopyResource;
             trace_draw_call_data.command_list = (ID3D11DeviceContext*)(cmd_list->get_native());
+            trace_draw_call_data.copy_info = copy_info;
             ID3D11Resource* source_resource = reinterpret_cast<ID3D11Resource*>(source.handle);
             ID3D11Resource* target_resource = reinterpret_cast<ID3D11Resource*>(dest.handle);
             // Re-use the SRV and RTV data for simplicity
@@ -9583,6 +9638,17 @@ namespace
       return false;
    }
 
+#if DEVELOPMENT
+   // Only traced, buffer copies never need redirection
+   bool OnCopyBufferRegion(reshade::api::command_list* cmd_list, reshade::api::resource source, uint64_t source_offset, reshade::api::resource dest, uint64_t dest_offset, uint64_t size)
+   {
+      SKIP_UNSUPPORTED_DEVICE_API(cmd_list->get_device()->get_api(), false);
+
+      OnCopyResource_Debug(cmd_list, source, dest, {.kind = TraceDrawCallData::CopyKind::BufferRegion, .dest_offset = uint3{uint32_t(dest_offset), 0, 0}, .has_box = true, .box = D3D11_BOX{uint32_t(source_offset), 0, 0, uint32_t(source_offset + size), 1, 1}});
+      return false;
+   }
+#endif // DEVELOPMENT
+
    bool OnCopyResource(reshade::api::command_list* cmd_list, reshade::api::resource source, reshade::api::resource dest)
    {
       SKIP_UNSUPPORTED_DEVICE_API(cmd_list->get_device()->get_api(), false);
@@ -9636,7 +9702,7 @@ namespace
    {
       SKIP_UNSUPPORTED_DEVICE_API(cmd_list->get_device()->get_api(), false);
 
-      OnCopyResource_Debug(cmd_list, source, dest);
+      OnCopyResource_Debug(cmd_list, source, dest, {.kind = TraceDrawCallData::CopyKind::Region, .source_subresource = source_subresource, .dest_subresource = dest_subresource, .dest_offset = (dest_box ? uint3{dest_box->left, dest_box->top, dest_box->front} : uint3{}), .has_box = source_box != nullptr, .box = (source_box ? D3D11_BOX{source_box->left, source_box->top, source_box->front, source_box->right, source_box->bottom, source_box->back} : D3D11_BOX{})});
 
       {
          bool any_replaced = false;
@@ -9708,7 +9774,7 @@ namespace
    {
       SKIP_UNSUPPORTED_DEVICE_API(cmd_list->get_device()->get_api(), false);
 
-      OnCopyResource_Debug(cmd_list, source, dest);
+      OnCopyResource_Debug(cmd_list, source, dest, {.kind = TraceDrawCallData::CopyKind::Resolve, .source_subresource = source_subresource, .dest_subresource = dest_subresource, .dest_offset = uint3{dest_x, dest_y, dest_z}, .has_box = source_box != nullptr, .box = (source_box ? D3D11_BOX{source_box->left, source_box->top, source_box->front, source_box->right, source_box->bottom, source_box->back} : D3D11_BOX{}), .resolve_format = DXGI_FORMAT(format)});
 
       // Indirect upgrades
       {
@@ -9947,9 +10013,13 @@ namespace
 
    void ForceToggleShaders(reshade::api::effect_runtime* runtime, bool enabled)
    {
-      DeviceData& device_data = *runtime->get_device()->get_private_data<DeviceData>();
       // Note that this is not called on startup (even if the ReShade effects are enabled by default)
       // We were going to read custom keyboard events like this "GetAsyncKeyState(VK_ESCAPE) & 0x8000", but this seems like a better design
+      ForceToggleShaders(*runtime->get_device()->get_private_data<DeviceData>(), enabled);
+   }
+
+   void ForceToggleShaders(DeviceData& device_data, bool enabled)
+   {
       needs_unload_shaders = !enabled;
       last_pressed_unload = !enabled;
       needs_load_shaders = enabled; // This also re-compile shaders possibly
@@ -10780,7 +10850,7 @@ namespace
                               written_any_text = true;
                            }
 
-                           const char* sm = nullptr;
+                           const char* sm = pipeline->StageName();
 
                            // Pick the default color by shader type
                            if (pipeline->HasVertexShader())
@@ -10790,26 +10860,14 @@ namespace
                                  continue;
                               }
                               text_color = IM_COL32(192, 192, 0, 255); // Yellow
-                              sm = "VS";
                            }
-                           else if (pipeline->HasComputeShader())
+                           else if (pipeline->HasComputeShader() || pipeline->HasGeometryShader())
                            {
                               text_color = IM_COL32(192, 0, 192, 255); // Purple
-                              sm = "CS";
                            }
-                           else if (pipeline->HasGeometryShader())
-                           {
-                              text_color = IM_COL32(192, 0, 192, 255); // Purple
-                              sm = "GS";
-                           }
-                           else if (pipeline->HasPixelShader())
-                           {
-                              sm = "PS";
-                           }
-                           else // Invalid
+                           else if (!pipeline->HasPixelShader()) // Invalid
                            {
                               text_color = IM_COL32(255, 0, 0, 255); // Red
-                              sm = "XS";
                            }
 
                            // There should always be at least one
@@ -10835,22 +10893,8 @@ namespace
                            // Markers: "*" = custom-shader file clone, "#" =
                            // in-place sync, "#S" = sync clone, "#A" = async
                            // clone.
-                           if (is_custom_shader_clone)
-                           {
-                              name << "*";
-                           }
-                           else if (pipeline->patch_application_mode == Shader::PatchApplicationMode::Inplace)
-                           {
-                              name << "#";
-                           }
-                           else if (pipeline->cloned && pipeline->patch_application_mode == Shader::PatchApplicationMode::Sync)
-                           {
-                              name << "#S";
-                           }
-                           else if (pipeline->cloned && pipeline->patch_application_mode == Shader::PatchApplicationMode::Async)
-                           {
-                              name << "#A";
-                           }
+                           constexpr const char* replacement_markers[] = {"", "*", "#", "#S", "#A"};
+                           name << replacement_markers[size_t(pipeline->GetReplacement())];
 
                            // Find if the shader has been modified
 
@@ -12466,12 +12510,13 @@ namespace
                                        }
 
                                        ImGui::Text("");
-                                       ImGui::Text("Scissors Enabled: %s", draw_call_data.scissors ? "True" : "False");
+                                       ImGui::Text("Scissors Enabled: %s", draw_call_data.scissor_count >= 1 ? "True" : "False");
+                                       const D3D11_VIEWPORT& viewport_0 = draw_call_data.viewports[0]; // Zeroed if none
                                        ImGui::Text("Viewport 0: x: %s y:%s w: %s h: %s",
-                                          std::to_string(draw_call_data.viewport_0.x).c_str(),
-                                          std::to_string(draw_call_data.viewport_0.y).c_str(),
-                                          std::to_string(draw_call_data.viewport_0.z).c_str(),
-                                          std::to_string(draw_call_data.viewport_0.w).c_str());
+                                          std::to_string(viewport_0.TopLeftX).c_str(),
+                                          std::to_string(viewport_0.TopLeftY).c_str(),
+                                          std::to_string(viewport_0.Width).c_str(),
+                                          std::to_string(viewport_0.Height).c_str());
                                     }
 
                                     if (pipeline_pair->second->HasVertexShader() || pipeline_pair->second->HasPixelShader() || pipeline_pair->second->HasComputeShader())
@@ -15455,6 +15500,16 @@ void Init(bool async)
 #if ENABLE_FSR4
    sr_implementations[SR::Type::FSR_4] = std::make_unique<FidelityFX::FSR4>();
 #endif
+#if DEVELOPMENT
+   Mcp::Start();
+#if ENABLE_SR
+   // Games call through these pointers, so the MCP tap sees every settings update and draw
+   for (auto& [type, implementation] : sr_implementations)
+   {
+      implementation = std::make_unique<Mcp::SrTap>(std::move(implementation));
+   }
+#endif
+#endif
 
    // Load settings
    [[maybe_unused]] bool delete_old_shaders = false;
@@ -15915,6 +15970,7 @@ BOOL APIENTRY CoreMain(HMODULE h_module, DWORD fdw_reason, LPVOID lpv_reserved)
 #if DEVELOPMENT
       reshade::register_event<reshade::addon_event::map_buffer_region>(OnMapBufferRegion);
       reshade::register_event<reshade::addon_event::update_buffer_region>(OnUpdateBufferRegion);
+      reshade::register_event<reshade::addon_event::copy_buffer_region>(OnCopyBufferRegion);
 #if RESHADE_API_VERSION >= 18
       reshade::register_event<reshade::addon_event::update_buffer_region_command>(OnUpdateBufferRegionCommand);
 #endif
@@ -15975,6 +16031,7 @@ BOOL APIENTRY CoreMain(HMODULE h_module, DWORD fdw_reason, LPVOID lpv_reserved)
    case DLL_PROCESS_DETACH:
    {
 #if DEVELOPMENT
+      Mcp::Shutdown();
       if (game_window_original_proc && game_window != NULL && IsWindow(game_window))
       {
          SetWindowLongPtr(game_window, GWLP_WNDPROC, reinterpret_cast<LONG_PTR>(game_window_original_proc));
@@ -16037,6 +16094,7 @@ BOOL APIENTRY CoreMain(HMODULE h_module, DWORD fdw_reason, LPVOID lpv_reserved)
 #if DEVELOPMENT
       reshade::unregister_event<reshade::addon_event::map_buffer_region>(OnMapBufferRegion);
       reshade::unregister_event<reshade::addon_event::update_buffer_region>(OnUpdateBufferRegion);
+      reshade::unregister_event<reshade::addon_event::copy_buffer_region>(OnCopyBufferRegion);
 #if RESHADE_API_VERSION >= 18
       reshade::unregister_event<reshade::addon_event::update_buffer_region_command>(OnUpdateBufferRegionCommand);
 #endif

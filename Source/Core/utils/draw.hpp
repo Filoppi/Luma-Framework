@@ -446,23 +446,19 @@ void AddTraceDrawCallData(std::vector<TraceDrawCallData>& trace_draw_calls_data,
       assert(cached_shader);
       if (pipeline->HasPixelShader())
       {
-         UINT scissor_viewport_num = 0;
-         native_device_context->RSGetScissorRects(&scissor_viewport_num, nullptr); // This will get the number of scissor rects used
-         UINT scissor_viewport_num_max = min(scissor_viewport_num, 1);
-         D3D11_RECT scissor_rects;
-         native_device_context->RSGetScissorRects(&scissor_viewport_num_max, &scissor_rects); // This is useless
-         if (scissor_viewport_num_max >= 1)
-         {
-            trace_draw_call_data.scissors = true;
-         }
+         // The first call gets the number of bound rects/viewports
+         native_device_context->RSGetScissorRects(&trace_draw_call_data.scissor_count, nullptr);
+         native_device_context->RSGetScissorRects(&trace_draw_call_data.scissor_count, trace_draw_call_data.scissor_rects);
 
-         native_device_context->RSGetViewports(&scissor_viewport_num, nullptr); // This will get the number of viewports used
-         scissor_viewport_num_max = min(scissor_viewport_num, 1);
-         D3D11_VIEWPORT viewport;
-         native_device_context->RSGetViewports(&scissor_viewport_num_max, &viewport);
-         if (scissor_viewport_num_max >= 1)
+         native_device_context->RSGetViewports(&trace_draw_call_data.viewport_count, nullptr);
+         native_device_context->RSGetViewports(&trace_draw_call_data.viewport_count, trace_draw_call_data.viewports);
+
+         com_ptr<ID3D11RasterizerState> rasterizer_state;
+         native_device_context->RSGetState(&rasterizer_state);
+         trace_draw_call_data.has_rasterizer_state = rasterizer_state.get() != nullptr;
+         if (rasterizer_state)
          {
-            trace_draw_call_data.viewport_0 = { viewport.TopLeftX, viewport.TopLeftY, viewport.Width, viewport.Height };
+            rasterizer_state->GetDesc(&trace_draw_call_data.rasterizer_desc);
          }
 
          com_ptr<ID3D11RenderTargetView> rtvs[D3D11_SIMULTANEOUS_RENDER_TARGET_COUNT];
@@ -474,10 +470,13 @@ void AddTraceDrawCallData(std::vector<TraceDrawCallData>& trace_draw_calls_data,
          com_ptr<ID3D11DepthStencilState> depth_stencil_state;
          UINT stencil_ref;
          native_device_context->OMGetDepthStencilState(&depth_stencil_state, &stencil_ref);
+         trace_draw_call_data.stencil_ref = stencil_ref;
          if (depth_stencil_state)
          {
             D3D11_DEPTH_STENCIL_DESC depth_stencil_desc;
             depth_stencil_state->GetDesc(&depth_stencil_desc);
+            trace_draw_call_data.has_depth_stencil_state = true;
+            trace_draw_call_data.depth_stencil_desc = depth_stencil_desc;
 
             D3D11_DEPTH_STENCIL_VIEW_DESC dsv_desc = {};
             if (dsv.get())
@@ -888,19 +887,58 @@ void AddTraceDrawCallData(std::vector<TraceDrawCallData>& trace_draw_calls_data,
 }
 
 // Expects mutexes to already be locked
-void AddCustomTraceDrawCallData(std::vector<TraceDrawCallData>& trace_draw_calls_data, ID3D11DeviceContext* native_device_context, const char* name, ID3D11View* target_view, bool insert_before_last = false)
+void AddCustomTraceDrawCallData(std::vector<TraceDrawCallData>& trace_draw_calls_data, ID3D11DeviceContext* native_device_context, const char* name, ID3D11DeviceChild* target, bool insert_before_last = false)
 {
    TraceDrawCallData trace_draw_call_data;
    trace_draw_call_data.type = TraceDrawCallData::TraceDrawCallType::Custom;
    trace_draw_call_data.command_list = native_device_context;
    trace_draw_call_data.custom_name = name;
-   // Re-use the RTV data for simplicity (this is hardcoded to be read by "TraceDrawCallData::TraceDrawCallType::Custom" in imgui)
-   GetResourceInfo(target_view, trace_draw_call_data.rt_size[0], trace_draw_call_data.rt_format[0], &trace_draw_call_data.rt_type_name[0], &trace_draw_call_data.rt_hash[0]);
+   // Re-use the RTV data for simplicity (this is hardcoded to be read by "TraceDrawCallData::TraceDrawCallType::Custom" in imgui). "target" is a view or a resource.
+   if (com_ptr<ID3D11View> view; target && SUCCEEDED(target->QueryInterface(&view)))
+   {
+      GetResourceInfo(view.get(), trace_draw_call_data.rt_size[0], trace_draw_call_data.rt_format[0], &trace_draw_call_data.rt_type_name[0], &trace_draw_call_data.rt_hash[0]);
+   }
+   else if (com_ptr<ID3D11Resource> resource; target && SUCCEEDED(target->QueryInterface(&resource)))
+   {
+      GetResourceInfo(resource.get(), trace_draw_call_data.rt_size[0], trace_draw_call_data.rt_format[0], &trace_draw_call_data.rt_type_name[0], &trace_draw_call_data.rt_hash[0]);
+   }
 
    if (insert_before_last && !trace_draw_calls_data.empty())
       trace_draw_calls_data.insert(trace_draw_calls_data.end() - 1, trace_draw_call_data);
    else
       trace_draw_calls_data.push_back(trace_draw_call_data);
+}
+
+// Luma passes drawn by the Core helpers below while a capture runs, usually from a game's draw or present hook. They don't have the
+// command list's trace, so they queue here and Core moves the queue into it after those hooks (a pass drawn outside them is moved at
+// the next hook on its thread, later than where it ran).
+struct InjectedPassTrace
+{
+   ID3D11DeviceContext* context = nullptr;
+   const char* name = nullptr;
+   com_ptr<ID3D11DeviceChild> target; // A view or a resource
+};
+static thread_local std::vector<InjectedPassTrace> injected_pass_traces;
+
+void QueueInjectedPassTrace(ID3D11DeviceContext* context, const char* name, ID3D11DeviceChild* target)
+{
+   if (!trace_running)
+      return;
+   injected_pass_traces.push_back({.context = context, .name = name, .target = target});
+}
+
+// Moves the passes queued for "context" into "trace_draw_calls_data" and clears the queue (the other contexts' are dropped).
+// Expects the trace mutexes to already be locked.
+void MoveInjectedPassTraces(std::vector<TraceDrawCallData>* trace_draw_calls_data, ID3D11DeviceContext* context)
+{
+   for (const InjectedPassTrace& pass : injected_pass_traces)
+   {
+      if (pass.context == context)
+      {
+         AddCustomTraceDrawCallData(*trace_draw_calls_data, context, pass.name, pass.target.get());
+      }
+   }
+   injected_pass_traces.clear();
 }
 #endif
 
@@ -1642,6 +1680,10 @@ void DrawSMAA(ID3D11Device* device, ID3D11DeviceContext* device_context, DeviceD
    release_com_array(rtvs_original);
    release_com_array(ps_samplers_original);
    release_com_array(ps_srvs_original);
+
+#if DEVELOPMENT
+   QueueInjectedPassTrace(device_context, "Luma SMAA", rtv);
+#endif
 }
 
 #if ENABLE_RCAS
@@ -1688,6 +1730,10 @@ void DrawRCAS(ID3D11DeviceContext* device_context, DeviceData& device_data, ID3D
       device_data.native_vertex_shaders.at("Copy VS"_h).get(), device_data.native_pixel_shaders.at("RCAS PS"_h).get(), srv_source, rtv, size.x, size.y, false);
 
    draw_state_stack.Restore(device_context);
+
+#if DEVELOPMENT
+   QueueInjectedPassTrace(device_context, "Luma RCAS", rtv);
+#endif
 }
 #endif // ENABLE_RCAS
 
@@ -1758,15 +1804,24 @@ struct alignas(16) CBLumaBloomData
    float sigma;
 };
 
+// "DrawBloom"'s mip chains, sized from the scene (rebuilt on a scene size or mip count change)
+// TODO: Reorganize this better.
+static struct
+{
+   std::vector<ID3D11RenderTargetView*> rtv_mips_x;
+   std::vector<ID3D11ShaderResourceView*> srv_mips_x;
+   std::vector<ID3D11RenderTargetView*> rtv_mips_y;
+   std::vector<ID3D11ShaderResourceView*> srv_mips_y;
+   UINT last_scene_width = 0;
+   UINT last_scene_height = 0;
+   int last_nmips = -1;
+} draw_bloom_mips;
+
 void DrawBloom(ID3D11Device* device, ID3D11DeviceContext* device_context, DeviceData& device_data, ID3D11ShaderResourceView* srv_scene, int nmips, const float* sigmas, ID3D11ShaderResourceView** srv_bloom)
 {
    auto& managed_resources = device_data.managed_resources;
 
-   // TODO: Reorganize this better.
-   static std::vector<ID3D11RenderTargetView*> rtv_mips_x;
-   static std::vector<ID3D11ShaderResourceView*> srv_mips_x;
-   static std::vector<ID3D11RenderTargetView*> rtv_mips_y;
-   static std::vector<ID3D11ShaderResourceView*> srv_mips_y;
+   auto& [rtv_mips_x, srv_mips_x, rtv_mips_y, srv_mips_y, last_scene_width, last_scene_height, last_nmips] = draw_bloom_mips;
 
    // Backup IA.
    D3D11_PRIMITIVE_TOPOLOGY primitive_topology_original;
@@ -1820,9 +1875,6 @@ void DrawBloom(ID3D11Device* device, ID3D11DeviceContext* device_context, Device
 
    // The bloom mips are sized from the scene; reset them when the scene size or mip count changes
    // Needed for proper support of the new resource scaling feature.
-   static UINT last_scene_width = 0;
-   static UINT last_scene_height = 0;
-   static int last_nmips = -1;
    if (nmips != last_nmips || scene_width != last_scene_width || scene_height != last_scene_height)
    {
       ResetCOMArray(rtv_mips_x);
@@ -2055,6 +2107,9 @@ void DrawBloom(ID3D11Device* device, ID3D11DeviceContext* device_context, Device
    // Return the final bloom.
    *srv_bloom = srv_mips_y[0];
    (*srv_bloom)->AddRef();
+#if DEVELOPMENT
+   QueueInjectedPassTrace(device_context, "Luma Bloom", *srv_bloom);
+#endif
 
    // Restore.
    device_context->OMSetBlendState(blend_original.get(), blend_factor_original, sample_mask_original);

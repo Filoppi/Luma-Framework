@@ -168,6 +168,35 @@ namespace Shader
          }
          return false;
       }
+#if DEVELOPMENT
+      // The stage the frame capture shows, "XS" if none
+      const char* StageName() const
+      {
+         if (HasVertexShader()) return "VS";
+         if (HasComputeShader()) return "CS";
+         if (HasGeometryShader()) return "GS";
+         if (HasPixelShader()) return "PS";
+         return "XS";
+      }
+      // How this pipeline is replaced (the frame capture view's "*", "#", "#S", "#A" markers). Clone provenance comes from
+      // "clone_origin", as "patch_application_mode" is also stamped on file clones.
+      enum class Replacement : uint8_t
+      {
+         None,
+         File,
+         PatchInplace,
+         PatchSync,
+         PatchAsync,
+      };
+      Replacement GetReplacement() const
+      {
+         if (cloned && clone_origin == CloneOrigin::File) return Replacement::File;
+         if (patch_application_mode == PatchApplicationMode::Inplace) return Replacement::PatchInplace;
+         if (cloned && patch_application_mode == PatchApplicationMode::Sync) return Replacement::PatchSync;
+         if (cloned && patch_application_mode == PatchApplicationMode::Async) return Replacement::PatchAsync;
+         return Replacement::None;
+      }
+#endif
    };
 
    struct CachedShader
