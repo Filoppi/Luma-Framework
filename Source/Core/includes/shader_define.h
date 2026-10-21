@@ -3,7 +3,9 @@
 namespace Shader
 {
    constexpr uint32_t MAX_SHADER_DEFINES = // Avoid setting this too big as it bloats the ReShade config whether used or not. Don't go beyond 100 (max array index 99) without changing code related to this.
-#if DEVELOPMENT || TEST
+#ifdef MAX_SHADER_DEFINES_OVERRIDE
+      MAX_SHADER_DEFINES_OVERRIDE;
+#elif DEVELOPMENT || TEST
       50;
 #else
       30;
