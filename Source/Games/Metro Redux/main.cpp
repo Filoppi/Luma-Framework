@@ -99,6 +99,30 @@ namespace
                { return value * 0.02f; }
             },
             new Luma::Settings::Setting{
+               .key = "ColorGradeHighlightContrast",
+               .binding = &cb_luma_global_settings.GameSettings.highlight_contrast,
+               .type = Luma::Settings::SettingValueType::FLOAT,
+               .default_value = 50.f,
+               .can_reset = true,
+               .label = "Highlight Contrast",
+               .min = 0.f,
+               .max = 100.f,
+               .parse = [](float value)
+               { return value * 0.02f; }
+            },
+            new Luma::Settings::Setting{
+               .key = "ColorGradeShadowContrast",
+               .binding = &cb_luma_global_settings.GameSettings.shadow_contrast,
+               .type = Luma::Settings::SettingValueType::FLOAT,
+               .default_value = 50.f,
+               .can_reset = true,
+               .label = "Shadow Contrast",
+               .min = 0.f,
+               .max = 100.f,
+               .parse = [](float value)
+               { return value * 0.02f; }
+            },
+            new Luma::Settings::Setting{
                .key = "ColorGradeSaturation",
                .binding = &cb_luma_global_settings.GameSettings.saturation,
                .type = Luma::Settings::SettingValueType::FLOAT,
@@ -132,7 +156,7 @@ namespace
                .min = 0.f,
                .max = 100.f,
                .parse = [](float value)
-               { return value * 0.02f; }
+               { return value * 0.01f; }
             },
             new Luma::Settings::Setting{
                .key = "ColorGradeFlare",
@@ -144,7 +168,7 @@ namespace
                .min = 0.f,
                .max = 100.f,
                .parse = [](float value)
-               { return value * 0.02f; }
+               { return value * 0.0005f; }
             }
          }
       },
@@ -293,6 +317,10 @@ BOOL APIENTRY DllMain(HMODULE hModule, DWORD ul_reason_for_call, LPVOID lpReserv
          0xF398A1ED,
          0xA453ADB1,
          0xFA7FE535,
+         0x0F9D2B4D,
+         0x28677B5F,
+         0x3076B7D6,
+         0xFD8F63E3,
       };
 
       redirected_shader_hashes["Tonemap"] =
@@ -301,6 +329,10 @@ BOOL APIENTRY DllMain(HMODULE hModule, DWORD ul_reason_for_call, LPVOID lpReserv
          "F398A1ED",
          "A453ADB1",
          "FA7FE535",
+         "0F9D2B4D",
+         "28677B5F",
+         "3076B7D6",
+         "FD8F63E3",
       };
 
       swapchain_format_upgrade_type = TextureFormatUpgradesType::AllowedEnabled;
@@ -327,6 +359,10 @@ BOOL APIENTRY DllMain(HMODULE hModule, DWORD ul_reason_for_call, LPVOID lpReserv
          auto_texture_format_upgrade_shader_hashes[std::stoul("F398A1ED", nullptr, 16)] = { {0}, {} }; // Tonemap
          auto_texture_format_upgrade_shader_hashes[std::stoul("A453ADB1", nullptr, 16)] = { {0}, {} }; // Tonemap
          auto_texture_format_upgrade_shader_hashes[std::stoul("FA7FE535", nullptr, 16)] = { {0}, {} }; // Tonemap
+         auto_texture_format_upgrade_shader_hashes[std::stoul("0F9D2B4D", nullptr, 16)] = { {0}, {} }; // Tonemap
+         auto_texture_format_upgrade_shader_hashes[std::stoul("28677B5F", nullptr, 16)] = { {0}, {} }; // Tonemap
+         auto_texture_format_upgrade_shader_hashes[std::stoul("3076B7D6", nullptr, 16)] = { {0}, {} }; // Tonemap
+         auto_texture_format_upgrade_shader_hashes[std::stoul("FD8F63E3", nullptr, 16)] = { {0}, {} }; // Tonemap
          auto_texture_format_upgrade_shader_hashes[std::stoul("386FCE67", nullptr, 16)] = { {0}, {} }; // AA
       // ### Check these if textures are not upgraded ###
       texture_format_upgrades_2d_size_filters = 0 | (uint32_t)TextureFormatUpgrades2DSizeFilters::SwapchainResolution | (uint32_t)TextureFormatUpgrades2DSizeFilters::SwapchainAspectRatio;
