@@ -160,8 +160,6 @@ struct TraceDrawCallData
 
    DepthStateType depth_state = DepthStateType::Disabled;
    DepthStateType stencil_state = DepthStateType::Disabled;
-   bool scissors = false;
-   float4 viewport_0 = {};
    // Already includes all the render targets
    D3D11_BLEND_DESC1 blend_desc = {};
    FLOAT blend_factor[4] = { 1.f, 1.f, 1.f, 1.f };
@@ -229,6 +227,40 @@ struct TraceDrawCallData
    uint2 ds_size = {};
    std::string ds_hash = {}; // Ptr hash (not content hash)
    std::string ds_debug_name = {}; // Debug name of the texture or the view
+
+   // Full depth/stencil and rasterizer state (pixel shader entries only). Without a bound state object D3D11 uses its defaults.
+   bool has_depth_stencil_state = false;
+   D3D11_DEPTH_STENCIL_DESC depth_stencil_desc = {};
+   UINT stencil_ref = 0;
+   bool has_rasterizer_state = false;
+   D3D11_RASTERIZER_DESC rasterizer_desc = {};
+   UINT viewport_count = 0;
+   D3D11_VIEWPORT viewports[D3D11_VIEWPORT_AND_SCISSORRECT_OBJECT_COUNT_PER_PIPELINE] = {};
+   UINT scissor_count = 0;
+   D3D11_RECT scissor_rects[D3D11_VIEWPORT_AND_SCISSORRECT_OBJECT_COUNT_PER_PIPELINE] = {};
+
+   // Copy entries (source in "sr_*[0]", destination in "rt_*[0]")
+   enum class CopyKind : uint8_t
+   {
+      Resource,
+      Region,
+      Resolve,
+      BufferRegion,
+   };
+   struct CopyInfo
+   {
+      CopyKind kind = CopyKind::Resource;
+      UINT source_subresource = 0;
+      UINT dest_subresource = 0;
+      uint3 dest_offset = {}; // Bytes in "x" for buffer copies
+      bool has_box = false;
+      D3D11_BOX box = {}; // Source region (bytes in "left"/"right" for buffer copies)
+      DXGI_FORMAT resolve_format = DXGI_FORMAT_UNKNOWN;
+   };
+   CopyInfo copy_info;
+
+   // Free text game code attached to this entry during the capture (see "Mcp::Annotate")
+   std::string note;
 
    // TODO: these might not always be filled up!
    bool any_input_resources_format_upgraded = false;

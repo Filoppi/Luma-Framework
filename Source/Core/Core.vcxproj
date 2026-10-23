@@ -639,6 +639,7 @@
   </ItemGroup>
   <ItemGroup>
     <None Include="includes\resource_upgrades.inl" />
+    <None Include="includes\mcp_server.inl" />
   </ItemGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
   <ImportGroup Label="ExtensionTargets">

@@ -125,5 +125,8 @@
     <None Include="includes\resource_upgrades.inl">
       <Filter>Includes</Filter>
     </None>
+    <None Include="includes\mcp_server.inl">
+      <Filter>Includes</Filter>
+    </None>
   </ItemGroup>
 </Project>
