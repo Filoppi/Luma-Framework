@@ -321,7 +321,7 @@ static void drain_raw_queue(void)
    // Large, aligned stack buffer for bursts from high polling-rate devices.
    union
    {
-      max_align_t alignment;
+      RAWINPUT alignment; // Native input alignment, also supported by MSVC's C compiler.
       BYTE bytes[65536];
    } buffer;
    for (unsigned pass = 0; pass < 32; pass++)
