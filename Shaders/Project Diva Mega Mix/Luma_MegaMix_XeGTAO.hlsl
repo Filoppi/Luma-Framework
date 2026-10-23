@@ -253,6 +253,12 @@ GTAOConstants GetNDCToView(GTAOConstants c)
     return c;
 }
 
+float InverseLerpFallback0(float a, float b, float value)
+{
+  if (a == b) return 0.0;
+  return (value - a) / (b - a);
+}
+
 /////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
 /////////////////////
 // Depth PreFilter //
@@ -870,8 +876,8 @@ void XeGTAO_MainPassCS(uint2 pixCoord, float2 localNoise, const GTAOConstants co
 
         // float fogHScore = smoothstep(g_fog_height_params.y, g_fog_height_params.z, viewspaceZ) /* * g_fog_height_params.x */;
         // float fogSScore = smoothstep(g_fog_state_params.y, g_fog_state_params.z, viewspaceZ) /* * g_fog_state_params.x */;
-        float fogHScore = saturate(InverseLerp(g_fog_height_params.y, g_fog_height_params.z, viewspaceZ)) /* * g_fog_height_params.x */;
-        float fogSScore = saturate(InverseLerp(g_fog_state_params.y, g_fog_state_params.z, viewspaceZ)) /* * g_fog_state_params.x */;
+        float fogHScore = saturate(InverseLerpFallback0(g_fog_height_params.y, g_fog_height_params.z, viewspaceZ)) /* * g_fog_height_params.x */;
+        float fogSScore = saturate(InverseLerpFallback0(g_fog_state_params.y, g_fog_state_params.z, viewspaceZ)) /* * g_fog_state_params.x */;
         float fogScore = fogSScore/* max(fogHScore, fogSScore) */;
         fogScore = pow(fogScore, 0.777); // curve
         fogScore *= fogLuma; // color
@@ -880,7 +886,7 @@ void XeGTAO_MainPassCS(uint2 pixCoord, float2 localNoise, const GTAOConstants co
 #endif
 
         // Depth fade
-        float depthFade = InverseLerp( DEPTH_LINEAR_MAX * 0.88, DEPTH_LINEAR_MAX, viewspaceZ);
+        float depthFade = InverseLerp(DEPTH_LINEAR_MAX * 0.88, DEPTH_LINEAR_MAX, viewspaceZ);
         depthFade = saturate(depthFade);
         visibility = max(visibility, depthFade);
 
