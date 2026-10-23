@@ -1,0 +1,88 @@
+name: Build Quantum Break fixes for testing
+
+# Temporary fork-only build. Remove this file before the upstream PR.
+# Uploading it to the feature branch starts a build without creating a PR.
+on:
+  push:
+    branches:
+      - quantum-break-mouse-fix
+    paths:
+      - .github/workflows/build-quantum-break-fixes.yml
+      - Source/Games/Quantum Break/**
+      - Source/Core/**
+      - Shaders/Quantum Break/**
+
+permissions:
+  contents: read
+
+concurrency:
+  group: quantum-break-fork-test-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    if: github.repository == 'RicardoMercy/Luma-Framework'
+    runs-on: windows-2025-vs2026
+    timeout-minutes: 45
+    defaults:
+      run:
+        shell: pwsh
+    steps:
+      - name: Check out the uploaded source and pinned dependencies
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Set up MSBuild
+        uses: microsoft/setup-msbuild@v2
+
+      - name: Build complete Quantum Break Luma in Publishing mode
+        run: |
+          $ErrorActionPreference = 'Stop'
+          New-Item -ItemType Directory -Force -Path build | Out-Null
+          $filter = @{
+            solution = @{
+              path = 'Luma.sln'
+              projects = @('Source\Games\Quantum Break\Quantum Break.vcxproj')
+            }
+          }
+          $filter | ConvertTo-Json -Depth 4 | Set-Content Luma.slnf
+          msbuild Luma.slnf /m /p:Configuration=Publishing-Release /p:Platform=x64 /p:DefineConstants=REMOTE_BUILD=1 /v:minimal /fl '/flp:logfile=build\QuantumBreak.log;verbosity=normal' /bl:build\QuantumBreak.binlog
+          if ($LASTEXITCODE -ne 0) { throw 'The complete Luma build failed. See QuantumBreak.log.' }
+          $addon = 'Binaries\x64-Publishing-Release\Luma-Quantum Break.addon'
+          if (-not (Test-Path -LiteralPath $addon)) { throw "Expected add-on was not produced: $addon" }
+          $commit = git rev-parse HEAD
+          @(
+            "Repository: $env:GITHUB_REPOSITORY"
+            "Commit: $commit"
+            'Configuration: Publishing-Release, x64'
+            'This is an unvalidated test build, not an upstream release.'
+            'Use with an existing compatible Luma/ReShade installation.'
+            'Back up the installed Luma files and move the standalone MouseFix.addon64 outside the game folder before testing.'
+            'This package does not replace dxgi.dll. It uses your installed ReShade runtime.'
+          ) | Set-Content build\BUILDINFO.txt
+
+      - name: Package the integrated add-on with its original Luma shaders
+        run: |
+          $ErrorActionPreference = 'Stop'
+          & .\Scripts\package.ps1 -Project 'Quantum Break' -Config 'Publishing-Release' -Platform x64 -AddonPath (Join-Path $PWD 'Binaries\x64-Publishing-Release\Luma-Quantum Break.addon') -OutDir (Join-Path $PWD 'package')
+          if (-not (Test-Path -LiteralPath 'package\Luma-Quantum_Break.zip')) { throw 'The test ZIP was not produced.' }
+          Copy-Item -LiteralPath build\BUILDINFO.txt -Destination package\BUILDINFO.txt
+          Get-FileHash -LiteralPath 'package\Luma-Quantum_Break.zip' -Algorithm SHA256 | Format-List | Out-File package\SHA256.txt
+
+      - name: Upload test package
+        uses: actions/upload-artifact@v4
+        with:
+          name: Quantum-Break-Luma-test
+          path: package/*
+          if-no-files-found: error
+          retention-days: 7
+
+      - name: Upload compilation logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: Quantum-Break-build-logs
+          path: build/*
+          if-no-files-found: ignore
+          retention-days: 7
