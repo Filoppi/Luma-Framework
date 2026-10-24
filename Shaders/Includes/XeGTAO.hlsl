@@ -1,4 +1,4 @@
-// XeGTAO (https://github.com/GameTechDev/XeGTAO), shared by the games that replace their native AO with it.
+// XeGTAO (https://github.com/GameTechDev/XeGTAO) and VB-GTAO (https://cdrinmatane.github.io/posts/ssaovb-code/), shared by the games that replace their native AO with it.
 // Each game has its own "Luma_<Game>_XeGTAO.hlsl", which declares the game's cbuffers and textures,
 // defines the stuff below and then includes this.
 //
