@@ -92,6 +92,8 @@ public:
    // run. Must not take luma mutexes.
    // Requires "LUMA_PATCH_PROVIDERS".
    virtual void OnPatchedShadersPublished(DeviceData& device_data, const std::vector<uint32_t>& published_shader_hashes) {}
+   // This is called every frame on present, just before drawing Display Composition.
+   virtual void OnBeforeDisplayComposition(ID3D11Device* native_device, ID3D11DeviceContext* native_device_context, DeviceData& device_data) {}
    // This is called every frame just before sending out the final image to the display (the swapchain).
    // You can reliable reset any per frame setting here.
    virtual void OnPresent(ID3D11Device* native_device, DeviceData& device_data) {}
