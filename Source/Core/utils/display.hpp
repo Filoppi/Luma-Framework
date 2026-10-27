@@ -535,18 +535,19 @@ namespace Display
 		}
 	#endif
 
-	#if ENABLE_LEGACY_ADVANCED_COLOR
 		// Older Windows versions need to fall back to a simpler implementation.
 		// Note: from Windows 11 22H2 (build 22621), "Advanced Color" can also be enabled in SDR, so this returns false positives there (until 24H2, where the check above succeeds).
+		// Wine/Proton only implement this legacy query (from "DXVK_HDR" or the compositor HDR state), so we always use it there.
+		// The swapchain fallback below can't work on DXVK, as its output only reports HDR after a swapchain set an HDR color space.
+		static const bool isWine = GetProcAddress(GetModuleHandleW(L"ntdll.dll"), "wine_get_version") != nullptr;
 		DISPLAYCONFIG_GET_ADVANCED_COLOR_INFO colorInfo{};
-		if (GetColorInfo(hwnd, colorInfo, fallbackMonitor))
+		if ((ENABLE_LEGACY_ADVANCED_COLOR || isWine) && GetColorInfo(hwnd, colorInfo, fallbackMonitor))
 		{
 			enabled = colorInfo.advancedColorEnabled;
 			assert(!enabled || (colorInfo.advancedColorSupported && !colorInfo.advancedColorForceDisabled));
 			supported = enabled || (colorInfo.advancedColorSupported && !colorInfo.advancedColorForceDisabled);
 			return true;
 		}
-	#endif
 
 		if (swapChain)
 		{
