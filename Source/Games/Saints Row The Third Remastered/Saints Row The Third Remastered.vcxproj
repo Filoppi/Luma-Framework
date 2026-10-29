@@ -65,6 +65,10 @@
       <Context>Project</Context>
     </PropertyPageSchema>
   </ItemGroup>
+  <PropertyGroup>
+    <UseLumaNGX>true</UseLumaNGX>
+    <UseLumaFSR>true</UseLumaFSR>
+  </PropertyGroup>
   <ImportGroup Label="ExtensionSettings">
   </ImportGroup>
   <ImportGroup Label="PropertySheets">
@@ -133,7 +137,7 @@
       <MultiProcessorCompilation>true</MultiProcessorCompilation>
       <EnforceTypeConversionRules>true</EnforceTypeConversionRules>
       <LanguageStandard_C>stdclatest</LanguageStandard_C>
-      <ForcedIncludeFiles>%(ForcedIncludeFiles)</ForcedIncludeFiles>
+      <ForcedIncludeFiles>../../../Shaders/$(ProjectName)/Includes/GameCBuffers.hlsl;%(ForcedIncludeFiles)</ForcedIncludeFiles>
     </ClCompile>
     <ResourceCompile>
       <PreprocessorDefinitions>%(PreprocessorDefinitions);_DEBUG;_WINDOWS</PreprocessorDefinitions>
@@ -184,7 +188,7 @@
       <EnforceTypeConversionRules>true</EnforceTypeConversionRules>
       <MultiProcessorCompilation>true</MultiProcessorCompilation>
       <LanguageStandard_C>stdclatest</LanguageStandard_C>
-      <ForcedIncludeFiles>%(ForcedIncludeFiles)</ForcedIncludeFiles>
+      <ForcedIncludeFiles>../../../Shaders/$(ProjectName)/Includes/GameCBuffers.hlsl;%(ForcedIncludeFiles)</ForcedIncludeFiles>
     </ClCompile>
     <ResourceCompile>
       <PreprocessorDefinitions>%(PreprocessorDefinitions);_WINDOWS;NDEBUG</PreprocessorDefinitions>
@@ -233,7 +237,7 @@
       <EnforceTypeConversionRules>true</EnforceTypeConversionRules>
       <MultiProcessorCompilation>true</MultiProcessorCompilation>
       <LanguageStandard_C>stdclatest</LanguageStandard_C>
-      <ForcedIncludeFiles>%(ForcedIncludeFiles)</ForcedIncludeFiles>
+      <ForcedIncludeFiles>../../../Shaders/$(ProjectName)/Includes/GameCBuffers.hlsl;%(ForcedIncludeFiles)</ForcedIncludeFiles>
     </ClCompile>
     <ResourceCompile>
       <PreprocessorDefinitions>%(PreprocessorDefinitions);_WINDOWS;NDEBUG</PreprocessorDefinitions>
@@ -282,7 +286,7 @@
       <EnforceTypeConversionRules>true</EnforceTypeConversionRules>
       <MultiProcessorCompilation>true</MultiProcessorCompilation>
       <LanguageStandard_C>stdclatest</LanguageStandard_C>
-      <ForcedIncludeFiles>%(ForcedIncludeFiles)</ForcedIncludeFiles>
+      <ForcedIncludeFiles>../../../Shaders/$(ProjectName)/Includes/GameCBuffers.hlsl;%(ForcedIncludeFiles)</ForcedIncludeFiles>
     </ClCompile>
     <ResourceCompile>
       <PreprocessorDefinitions>%(PreprocessorDefinitions);_WINDOWS;NDEBUG</PreprocessorDefinitions>
@@ -317,6 +321,15 @@
   <ItemGroup>
     <ClCompile Include="..\..\Core\unity_build.cpp" />
     <ClCompile Include="main.cpp" />
+    <ClCompile Include="..\..\External\reshade\deps\minhook\src\buffer.c;..\..\External\reshade\deps\minhook\src\hook.c;..\..\External\reshade\deps\minhook\src\trampoline.c;..\..\External\reshade\deps\minhook\src\hde\hde64.c">
+      <CompileAs>CompileAsC</CompileAs>
+      <!-- Not the game's C++ cbuffer header -->
+      <ForcedIncludeFiles>
+      </ForcedIncludeFiles>
+      <TreatWarningAsError>false</TreatWarningAsError>
+      <PrecompiledHeader>NotUsing</PrecompiledHeader>
+    </ClCompile>
+    <ClInclude Include="SMAA_AreaTex_SharpU.h" />
   </ItemGroup>
   <!-- Apply feature settings after the final per-configuration properties. -->
   <Import Project="..\Luma.DXP.props" Condition="Exists('..\Luma.DXP.props')" />
