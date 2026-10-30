@@ -29,25 +29,8 @@ namespace Trace
             changed_selected = true;
             open_settings_tab = true;
 
-            {
-               debug_draw_pipeline = 0;
-               debug_draw_shader_hash = 0;
-               debug_draw_shader_hash_string[0] = 0;
-               debug_draw_custom_pass = 0;
-               debug_draw_pipeline_target_instance = -1;
-               debug_draw_pipeline_target_thread = std::thread::id();
-
-               device_data.debug_draw_frozen_draw_state_stack.reset();
-               device_data.debug_draw_texture = nullptr;
-               device_data.debug_draw_texture_format = DXGI_FORMAT_UNKNOWN;
-               device_data.debug_draw_texture_size = {};
-
-               track_buffer_pipeline = 0;
-               track_buffer_pipeline_target_instance = -1;
-               track_buffer_index = 0;
-
-               device_data.track_buffer_data.Clear();
-            }
+            ClearDebugDrawTarget(device_data);
+            ClearTrackBufferTarget(device_data);
 
             highlighted_resource = "";
 
@@ -611,91 +594,15 @@ namespace Trace
                         changed_selected = true;
                      }
                      ImGui::PopStyleColor();
-                     if (draw_call_data.type == TraceDrawCallData::TraceDrawCallType::Shader)
+                     if ((draw_call_data.type == TraceDrawCallData::TraceDrawCallType::Shader && is_valid) || (draw_call_data.type == TraceDrawCallData::TraceDrawCallType::Custom && draw_call_data.custom_stage != reshade::api::shader_stage(0)))
                      {
                         ImGui::SameLine();
                         ImGui::SetNextItemAllowOverlap(); // Allow the button to be clickable if rects overlap
                         if (ImGui::SmallButton(ICON_FK_SEARCH))
                         {
-                           // TODO: move all into a function
-
-                           int32_t target_instance = 0;
-                           for (int32_t i = 0; i < index; i++)
-                           {
-                              if (pipeline_handle == cmd_list_data.trace_draw_calls_data.at(i).pipeline_handle && draw_call_data.thread_id == cmd_list_data.trace_draw_calls_data.at(i).thread_id)
-                                 target_instance++;
-                           }
-
-                           debug_draw_pipeline = pipeline_pair->first; // Note: this is probably completely useless at the moment as we don't store the index of the pipeline instance the user had selected (e.g. "debug_draw_pipeline_target_instance")
-                           debug_draw_shader_hash = pipeline_pair->second->shader_hashes[0];
-                           std::string new_debug_draw_shader_hash_string = Shader::Hash_NumToStr(debug_draw_shader_hash);
-                           if (new_debug_draw_shader_hash_string.size() <= HASH_CHARACTERS_LENGTH)
-                              strcpy(&debug_draw_shader_hash_string[0], new_debug_draw_shader_hash_string.c_str());
-                           else
-                              debug_draw_shader_hash_string[0] = 0;
-                           device_data.debug_draw_frozen_draw_state_stack.reset();
-                           device_data.debug_draw_texture = nullptr;
-                           device_data.debug_draw_texture_format = DXGI_FORMAT_UNKNOWN;
-                           device_data.debug_draw_texture_size = {};
-                           debug_draw_pipeline_instance = 0;
-                           debug_draw_custom_pass = 0;
-                           debug_draw_pipeline_target_instance = target_instance;
-                           debug_draw_pipeline_target_thread = debug_draw_pipeline_instance_filter_by_thread ? draw_call_data.thread_id : std::thread::id();
-                           const auto prev_debug_draw_mode = debug_draw_mode;
-                           if (prev_debug_draw_mode == DebugDrawMode::Depth || prev_debug_draw_mode == DebugDrawMode::Stencil)
-                           {
-                              debug_draw_options &= ~(uint32_t)DebugDrawTextureOptionsMask::RedOnly;
-                           }
-                           if (prev_debug_draw_mode == DebugDrawMode::Custom)
-                           {
-                              debug_draw_view_index = 0;
-                              debug_draw_mip = 0;
-                              // Don't change it automatically in this pass, it will default to render target (usually) if we come from debugging somewhere else, and keep the last debugging mode otherwise
-                              debug_draw_mode = pipeline_pair->second->HasPixelShader() ? DebugDrawMode::RenderTarget : (pipeline_pair->second->HasComputeShader() ? DebugDrawMode::UnorderedAccessView : DebugDrawMode::ShaderResource);
-                           }
-                           // Fall back on depth if there main RT isn't valid
-                           if (debug_draw_mode == DebugDrawMode::RenderTarget && draw_call_data.rt_format[0] == DXGI_FORMAT_UNKNOWN && draw_call_data.depth_state != TraceDrawCallData::DepthStateType::Disabled)
-                           {
-                              debug_draw_mode = DebugDrawMode::Depth;
-                              debug_draw_options |= (uint32_t)DebugDrawTextureOptionsMask::RedOnly;
-                              debug_draw_mip = 0;
-                           }
-                           debug_draw_freeze_inputs = false; // Optional, but also unfreeze inputs automatically every time we swap the target pass here
-                        }
-                     }
-                     else if (draw_call_data.type == TraceDrawCallData::TraceDrawCallType::Custom && draw_call_data.custom_stage != reshade::api::shader_stage(0))
-                     {
-                        ImGui::SameLine();
-                        ImGui::SetNextItemAllowOverlap();
-                        if (ImGui::SmallButton(ICON_FK_SEARCH))
-                        {
-                           int32_t target_instance = 0;
-                           for (int32_t i = 0; i < index; i++)
-                           {
-                              const auto& other = cmd_list_data.trace_draw_calls_data.at(i);
-                              if (other.type == TraceDrawCallData::TraceDrawCallType::Custom && strcmp(other.custom_name, draw_call_data.custom_name) == 0 && draw_call_data.thread_id == other.thread_id)
-                                 target_instance++;
-                           }
-
-                           debug_draw_pipeline = 0;
-                           debug_draw_shader_hash = 0;
-                           debug_draw_shader_hash_string[0] = 0;
-                           debug_draw_custom_pass = CompileTimeStringHash(draw_call_data.custom_name);
-                           device_data.debug_draw_frozen_draw_state_stack.reset();
-                           device_data.debug_draw_texture = nullptr;
-                           device_data.debug_draw_texture_format = DXGI_FORMAT_UNKNOWN;
-                           device_data.debug_draw_texture_size = {};
-                           debug_draw_custom_pass_instance = 0;
-                           debug_draw_pipeline_target_instance = target_instance;
-                           debug_draw_pipeline_target_thread = debug_draw_pipeline_instance_filter_by_thread ? draw_call_data.thread_id : std::thread::id();
-                           if (debug_draw_mode == DebugDrawMode::Depth || debug_draw_mode == DebugDrawMode::Stencil)
-                           {
-                              debug_draw_options &= ~(uint32_t)DebugDrawTextureOptionsMask::RedOnly;
-                           }
-                           debug_draw_mode = draw_call_data.custom_stage == reshade::api::shader_stage::compute ? DebugDrawMode::UnorderedAccessView : DebugDrawMode::RenderTarget;
-                           debug_draw_view_index = 0;
-                           debug_draw_mip = 0;
-                           debug_draw_freeze_inputs = false;
+                           // Keep the last debugged view type, to quickly browse passes
+                           if (const auto target = FindPassTarget(device_data, cmd_list_data, index, debug_draw_pipeline_instance_filter_by_thread))
+                              SetDebugDrawTarget(device_data, *target, draw_call_data, true);
                         }
                      }
                      ImGui::PopID();
@@ -726,6 +633,98 @@ namespace Trace
          ImGui::EndChild(); // HashList
 
          ImGui::SameLine();
+         // The constant buffer the tracking read back (of a game pipeline, or a Luma pass by name) and the slot it reads
+         const auto draw_tracked_buffer = [&](const TraceDrawCallData& draw_call_data)
+         {
+            ImGui::SliderInt("Constant Buffer Tracked Index", &track_buffer_index, 0, D3D11_COMMONSHADER_CONSTANT_BUFFER_API_SLOT_COUNT - 1);
+
+            // Hacky way of retrieving the data if the tracked buffer was in a deferred command list and hence couldn't be mapped there
+            if (!device_data.track_buffer_data.data_valid && device_data.track_buffer_data.cb)
+            {
+               // Make sure we have the immediate context, because MapBufferData will fail otherwise.
+               ComPtr<ID3D11Device> native_device;
+               draw_call_data.command_list->GetDevice(native_device.put());
+               ComPtr<ID3D11DeviceContext> native_device_context;
+               native_device->GetImmediateContext(native_device_context.put());
+
+               D3D11_BUFFER_DESC desc = {};
+               device_data.track_buffer_data.cb->GetDesc(&desc);
+               device_data.track_buffer_data.data_valid = MapBufferData(device_data.track_buffer_data.cb, native_device_context.get(), device_data.track_buffer_data.data, desc.ByteWidth);
+            }
+
+            if (device_data.track_buffer_data.data_valid && !device_data.track_buffer_data.data.empty())
+            {
+               ImGui::NewLine();
+               ImGui::Text("Tracked Constant Buffer:");
+               ImGui::Text("Resource Hash: %s", device_data.track_buffer_data.hash.c_str());
+               const UINT tb_first = device_data.track_buffer_data.first_constant;
+               const UINT tb_num = device_data.track_buffer_data.num_constants;
+               // Each D3D11.1 "constant" is a float4 = 4 floats in our data vector.
+               // tb_num == 0 means D3D11.0 path (no partial-bind info): show the whole buffer.
+               const size_t tb_display_begin = (tb_num != 0) ? (size_t)tb_first * 4 : 0;
+               const size_t tb_display_end = (tb_num != 0) ? (size_t)(tb_first + tb_num) * 4 : device_data.track_buffer_data.data.size();
+               const size_t tb_display_end_clamped = (std::min)(tb_display_end, device_data.track_buffer_data.data.size());
+               if (tb_num != 0)
+               {
+                  ImGui::Text("Partial Bind: first constant %u, %u constants (floats %zu..%zu)", tb_first, tb_num, tb_display_begin, tb_display_end_clamped);
+               }
+               if (ImGui::BeginChild("TrackBufferScroll", ImVec2(0, 500), ImGuiChildFlags_Borders))
+               {
+                  // TODO: match with the shader assembly cbs etc (if the data is available)
+                  // TODO: add a matrix 4x4 view?
+                  if (ImGui::BeginTable("TrackBufferTable", 3, ImGuiTableFlags_Borders | ImGuiTableFlags_RowBg | ImGuiTableFlags_Resizable)) {
+                     ImGui::TableSetupColumn("Index", ImGuiTableColumnFlags_WidthFixed, 60.0f);
+                     ImGui::TableSetupColumn("Float Value", ImGuiTableColumnFlags_WidthStretch);
+                     ImGui::TableSetupColumn("Int Value", ImGuiTableColumnFlags_WidthStretch);
+                     ImGui::TableHeadersRow();
+
+                     for (size_t i = tb_display_begin; i < tb_display_end_clamped; ++i)
+                     {
+                        float this_data = device_data.track_buffer_data.data[i];
+                        ImGui::TableNextRow();
+                        ImGui::TableSetColumnIndex(0);
+                        static const char* components[] = { "x", "y", "z", "w" };
+                        size_t relative_i = i - tb_display_begin; // 0-based offset within the visible slice
+                        size_t group = relative_i / 4; // Split index by float4
+                        size_t comp_index = relative_i % 4; // Print out the x/y/w/z identifier
+                        ImGui::Text("%zu:%s", group, components[comp_index]);
+                        // First print as float
+                        ImGui::TableSetColumnIndex(1);
+                        // I'm not sure whether the auto float printing handles nan/inf
+                        if (std::isnan(this_data))
+                        {
+                           ImGui::Text("NaN");
+                        }
+                        else if (std::isinf(this_data))
+                        {
+                           ImGui::Text("Inf");
+                        }
+                        else
+                        {
+                           ImGui::Text("%.7f", this_data); // We need to show quite a bit of precision
+                        }
+                        // Then print as int (should work as uint/bool as well)
+                        ImGui::TableSetColumnIndex(2);
+                        ImGui::Text("%i", Math::AsInt(this_data));
+                     }
+                     ImGui::EndTable();
+                  }
+               }
+               ImGui::EndChild(); // TrackBufferScroll
+
+               if (ImGui::Button("Copy Constant Buffer Data to Clipboard (float)"))
+               {
+                  std::ostringstream oss;
+                  for (size_t i = tb_display_begin; i < tb_display_end_clamped; ++i) {
+                     oss << device_data.track_buffer_data.data[i];
+                     if (i + 1 < tb_display_end_clamped)
+                        oss << '\n';
+                  }
+                  System::CopyToClipboard(oss.str());
+               }
+            }
+         };
+
          // The state a trace entry recorded: a game draw's ("pipeline"), or a Luma pass's without one ("CustomDraw()").
          // Slots a draw callback changed ("UpdateDraw()") show what it bound, the replaced ones can show the game's original too.
          const auto draw_state_analysis = [&](const TraceDrawCallData& draw_call_data, CachedPipeline* pipeline, bool debug_draw_shader_enabled)
@@ -1723,99 +1722,104 @@ namespace Trace
 
                      {
                         std::unique_lock lock(s_mutex_generic);
-                        if (auto pipeline_pair = device_data.pipeline_cache_by_pipeline_handle.find(pipeline_handle); pipeline_pair != device_data.pipeline_cache_by_pipeline_handle.end() && pipeline_pair->second != nullptr)
+                        const auto pipeline_pair = device_data.pipeline_cache_by_pipeline_handle.find(pipeline_handle);
+                        CachedPipeline* const pipeline = pipeline_pair != device_data.pipeline_cache_by_pipeline_handle.end() ? pipeline_pair->second : nullptr;
+                        const bool is_luma_pass = draw_call_data.type == TraceDrawCallData::TraceDrawCallType::Custom && draw_call_data.custom_stage != reshade::api::shader_stage(0);
+                        if (pipeline || is_luma_pass)
                         {
                            if (ImGui::BeginChild("Settings and Info"))
                            {
-                              CachedShader* original_shader = nullptr; // We probably don't need to lock "s_mutex_dumping" for the duration of this read
-                              {
-                                 const std::lock_guard<std::recursive_mutex> lock_dumping(s_mutex_dumping);
-                                 for (auto shader_hash : pipeline_pair->second->shader_hashes)
-                                 {
-                                    auto custom_shader_pair = shader_cache.find(shader_hash);
-                                    if (custom_shader_pair != shader_cache.end())
-                                    {
-                                       original_shader = custom_shader_pair->second;
-                                    }
-                                 }
-                              }
+                              // The game shader's replacement, or the Luma pass's native shader
                               CachedCustomShader* custom_shader = nullptr; // We probably don't need to lock "s_mutex_loading" for the duration of this read
                               {
                                  const std::shared_lock lock(s_mutex_loading);
-                                 for (auto shader_hash : pipeline_pair->second->shader_hashes)
+                                 if (pipeline)
                                  {
-                                    auto custom_shader_pair = custom_shaders_cache.find(shader_hash);
-                                    if (custom_shader_pair != custom_shaders_cache.end())
+                                    for (auto shader_hash : pipeline->shader_hashes)
                                     {
-                                       custom_shader = custom_shader_pair->second;
+                                       auto custom_shader_pair = custom_shaders_cache.find(shader_hash);
+                                       if (custom_shader_pair != custom_shaders_cache.end())
+                                       {
+                                          custom_shader = custom_shader_pair->second;
+                                       }
                                     }
                                  }
+                                 else if (const auto custom_shader_pair = custom_shaders_cache.find(Shader::ShiftHash32ToHash64(draw_call_data.custom_shader_hash)); custom_shader_pair != custom_shaders_cache.end())
+                                 {
+                                    custom_shader = custom_shader_pair->second;
+                                 }
                               }
 
-                              if (pipeline_pair->second->HasPixelShader() || pipeline_pair->second->HasComputeShader())
-                              {
-                                 ImGui::Checkbox("Allow Shader Replace Draw NaNs", &allow_replace_draw_nans);
-                                 if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
-                                    ImGui::SetTooltip("Avoids accidentally enabling \"Draw NaN\" below, which could \"corrupt\" the game's rendering \"forever\".");
-                                 ImGui::SliderInt("Shader Replace Draw Type", reinterpret_cast<int*>(&pipeline_pair->second->replace_draw_type), 0, IM_ARRAYSIZE(CachedPipeline::shader_replace_draw_type_names) - (allow_replace_draw_nans ? 1 : 2), CachedPipeline::shader_replace_draw_type_names[(size_t)pipeline_pair->second->replace_draw_type], ImGuiSliderFlags_NoInput);
-                                 if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
-                                    ImGui::SetTooltip("Affects all the instances of this shader.\nNote that \"Draw Purple\" (Magenta) or \"Draw NaN\" might not always work, if it doesn't, it will skip the shader anyway. With compute shaders, the written area might not match at all.\nBe careful with NaNs as they can break temporal passes until the resolution is changed.");
+                              if (const auto definition = native_shaders_definitions.find(draw_call_data.custom_shader_hash); is_luma_pass && definition != native_shaders_definitions.end() && definition->second.file_name)
+                                 ImGui::Text("Luma Shader: %s", definition->second.file_name);
 
-                                 if (pipeline_pair->second->HasPixelShader())
+                              if (pipeline)
+                              {
+                                 if (pipeline->HasPixelShader() || pipeline->HasComputeShader())
                                  {
-                                    ImGui::SliderInt("Shader Custom Depth/Stencil Type", reinterpret_cast<int*>(&pipeline_pair->second->custom_depth_stencil), 0, IM_ARRAYSIZE(CachedPipeline::shader_custom_depth_stencil_type_names) - 1, CachedPipeline::shader_custom_depth_stencil_type_names[(size_t)pipeline_pair->second->custom_depth_stencil], ImGuiSliderFlags_NoInput);
+                                    ImGui::Checkbox("Allow Shader Replace Draw NaNs", &allow_replace_draw_nans);
                                     if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
-                                       ImGui::SetTooltip("Forces a custom depth and stencil state. For example, ignoring depth read tests, or forcing depth writes, meaning the affected polygons will draw on top of everything else.");
+                                       ImGui::SetTooltip("Avoids accidentally enabling \"Draw NaN\" below, which could \"corrupt\" the game's rendering \"forever\".");
+                                    ImGui::SliderInt("Shader Replace Draw Type", reinterpret_cast<int*>(&pipeline->replace_draw_type), 0, IM_ARRAYSIZE(CachedPipeline::shader_replace_draw_type_names) - (allow_replace_draw_nans ? 1 : 2), CachedPipeline::shader_replace_draw_type_names[(size_t)pipeline->replace_draw_type], ImGuiSliderFlags_NoInput);
+                                    if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
+                                       ImGui::SetTooltip("Affects all the instances of this shader.\nNote that \"Draw Purple\" (Magenta) or \"Draw NaN\" might not always work, if it doesn't, it will skip the shader anyway. With compute shaders, the written area might not match at all.\nBe careful with NaNs as they can break temporal passes until the resolution is changed.");
+
+                                    if (pipeline->HasPixelShader())
+                                    {
+                                       ImGui::SliderInt("Shader Custom Depth/Stencil Type", reinterpret_cast<int*>(&pipeline->custom_depth_stencil), 0, IM_ARRAYSIZE(CachedPipeline::shader_custom_depth_stencil_type_names) - 1, CachedPipeline::shader_custom_depth_stencil_type_names[(size_t)pipeline->custom_depth_stencil], ImGuiSliderFlags_NoInput);
+                                       if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
+                                          ImGui::SetTooltip("Forces a custom depth and stencil state. For example, ignoring depth read tests, or forcing depth writes, meaning the affected polygons will draw on top of everything else.");
+                                    }
                                  }
-                              }
 
-                              {
-                                 // Ensure the string has enough capacity for editing (e.g. 256 chars)
-                                 if (pipeline_pair->second->custom_name.capacity() < 128)
-                                    pipeline_pair->second->custom_name.resize(128);
-
-                                 // ImGui::InputText modifies the buffer in-place
-                                 if (ImGui::InputText("Shader Custom Name", pipeline_pair->second->custom_name.data(), pipeline_pair->second->custom_name.capacity()))
                                  {
-                                    pipeline_pair->second->custom_name.resize(strlen(pipeline_pair->second->custom_name.c_str())); // Optional
+                                    // Ensure the string has enough capacity for editing (e.g. 256 chars)
+                                    if (pipeline->custom_name.capacity() < 128)
+                                       pipeline->custom_name.resize(128);
+
+                                    // ImGui::InputText modifies the buffer in-place
+                                    if (ImGui::InputText("Shader Custom Name", pipeline->custom_name.data(), pipeline->custom_name.capacity()))
+                                    {
+                                       pipeline->custom_name.resize(strlen(pipeline->custom_name.c_str())); // Optional
+                                    }
                                  }
-                              }
 
-                              if (pipeline_pair->second->cloned && ImGui::Button("Unload"))
-                              {
-                                 pipeline_pair->second->manually_unloaded = true;
-                                 s_mutex_generic.unlock(); // Hack to avoid deadlocks with the device destroying pipelines // TODO: use "out_pipelines_to_destroy" instead (in all similar cases too)
-                                 UnloadCustomShaders(device_data, { pipeline_handle }, false);
-                                 s_mutex_generic.lock();
-                              }
+                                 if (pipeline->cloned && ImGui::Button("Unload"))
+                                 {
+                                    pipeline->manually_unloaded = true;
+                                    s_mutex_generic.unlock(); // Hack to avoid deadlocks with the device destroying pipelines // TODO: use "out_pipelines_to_destroy" instead (in all similar cases too)
+                                    UnloadCustomShaders(device_data, { pipeline_handle }, false);
+                                    s_mutex_generic.lock();
+                                 }
 
-                              if (ImGui::Button(pipeline_pair->second->cloned ? "Recompile" : "Load"))
-                              {
-                                 pipeline_pair->second->manually_unloaded = false;
-                                 reload = true;
-                                 recompile = true; // If this shader wasn't cloned, we'd need to compile it probably as it might not have already been compiled. If it was cloned, then our intent is to re-compile it anyway
-                              }
-                              if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
-                              {
-                                 ImGui::SetTooltip("Recompile and/or load/unload the custom shader that replaces the original one.");
-                              }
+                                 if (ImGui::Button(pipeline->cloned ? "Recompile" : "Load"))
+                                 {
+                                    pipeline->manually_unloaded = false;
+                                    reload = true;
+                                    recompile = true; // If this shader wasn't cloned, we'd need to compile it probably as it might not have already been compiled. If it was cloned, then our intent is to re-compile it anyway
+                                 }
+                                 if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
+                                 {
+                                    ImGui::SetTooltip("Recompile and/or load/unload the custom shader that replaces the original one.");
+                                 }
 
-                              bool copy_shader_hash = false;
-                              bool copy_shader_hash_exclude_0x = true;
-                              copy_shader_hash |= ImGui::Button("Copy Shader Hash to Clipboard");
-                              ImGui::SameLine();
-                              if (ImGui::Button("0x")) // Add a small button to copy it with the hash, it depends on the usage whether we need it or not
-                              {
-                                 copy_shader_hash = true;
-                                 copy_shader_hash_exclude_0x = false;
-                              }
-                              if (copy_shader_hash)
-                              {
-                                 const std::shared_lock lock(s_mutex_loading);
-                                 std::string shader_hash = (pipeline_pair->second->shader_hashes.size() > 0) ? Shader::Hash_NumToStr(pipeline_pair->second->shader_hashes[0]) : "????????";
-                                 if (!copy_shader_hash_exclude_0x)
-                                    shader_hash = "0x" + shader_hash; // Somehow we need to add "0x" in front of it manually // DX11 specific behaviour
-                                 System::CopyToClipboard(shader_hash);
+                                 bool copy_shader_hash = false;
+                                 bool copy_shader_hash_exclude_0x = true;
+                                 copy_shader_hash |= ImGui::Button("Copy Shader Hash to Clipboard");
+                                 ImGui::SameLine();
+                                 if (ImGui::Button("0x")) // Add a small button to copy it with the hash, it depends on the usage whether we need it or not
+                                 {
+                                    copy_shader_hash = true;
+                                    copy_shader_hash_exclude_0x = false;
+                                 }
+                                 if (copy_shader_hash)
+                                 {
+                                    const std::shared_lock lock(s_mutex_loading);
+                                    std::string shader_hash = (pipeline->shader_hashes.size() > 0) ? Shader::Hash_NumToStr(pipeline->shader_hashes[0]) : "????????";
+                                    if (!copy_shader_hash_exclude_0x)
+                                       shader_hash = "0x" + shader_hash; // Somehow we need to add "0x" in front of it manually // DX11 specific behaviour
+                                    System::CopyToClipboard(shader_hash);
+                                 }
                               }
 
                               if (custom_shader && custom_shader->is_hlsl && !custom_shader->file_path.empty() && ImGui::Button("Open hlsl in IDE"))
@@ -1831,43 +1835,18 @@ namespace Trace
                                  System::OpenExplorerToFile(custom_shader->file_path);
                               }
 
-                              bool debug_draw_shader_enabled = false; // Whether this shader/pipeline instance is the one we are draw debugging
-
-                              if (pipeline_pair->second->HasVertexShader() || pipeline_pair->second->HasPixelShader() || pipeline_pair->second->HasComputeShader())
+                              bool debug_draw_shader_enabled = false; // Whether this pass instance is the one we are draw debugging
+                              if (const auto debug_draw_target = FindPassTarget(device_data, cmd_list_data, selected_index, debug_draw_pipeline_instance_filter_by_thread))
                               {
-                                 debug_draw_shader_enabled = debug_draw_shader_hash == pipeline_pair->second->shader_hashes[0];
+                                 debug_draw_shader_enabled = IsDebugDrawTarget(*debug_draw_target);
 
-                                 const auto& trace_draw_call_data = draw_call_data;
-
-                                 int32_t target_instance = -1;
-                                 // Automatically calculate the index of the instance of this pipeline run, to directly select it on selection (this works as long as the current scene draw calls match the ones in the trace)
-                                 {
-                                    target_instance = 0;
-                                    for (int32_t i = 0; i < selected_index; i++)
-                                    {
-                                       if (pipeline_handle == cmd_list_data.trace_draw_calls_data.at(i).pipeline_handle && draw_call_data.thread_id == cmd_list_data.trace_draw_calls_data.at(i).thread_id)
-                                          target_instance++;
-                                    }
-
-                                    debug_draw_shader_enabled &= debug_draw_pipeline_target_instance < 0 || debug_draw_pipeline_target_instance == target_instance;
-                                 }
-
-                                 bool has_any_resources = false;
-                                 {
-                                    for (UINT i = 0; i < std::size(trace_draw_call_data.srv_format); i++)
-                                    {
-                                       if (trace_draw_call_data.IsSRVValid(i)) has_any_resources = true; break;
-                                    }
-                                    for (UINT i = 0; i < std::size(trace_draw_call_data.uav_format); i++)
-                                    {
-                                       if (trace_draw_call_data.IsUAVValid(i)) has_any_resources = true; break;
-                                    }
-                                    for (UINT i = 0; i < std::size(trace_draw_call_data.rtv_format); i++)
-                                    {
-                                       if (trace_draw_call_data.IsRTVValid(i)) has_any_resources = true; break;
-                                    }
-                                    if (trace_draw_call_data.IsDSVValid()) has_any_resources = true;
-                                 }
+                                 bool has_any_resources = draw_call_data.IsDSVValid();
+                                 for (UINT i = 0; i < std::size(draw_call_data.srv_format); i++)
+                                    has_any_resources |= draw_call_data.IsSRVValid(i);
+                                 for (UINT i = 0; i < std::size(draw_call_data.uav_format); i++)
+                                    has_any_resources |= draw_call_data.IsUAVValid(i);
+                                 for (UINT i = 0; i < std::size(draw_call_data.rtv_format); i++)
+                                    has_any_resources |= draw_call_data.IsRTVValid(i);
 
                                  // Note: yes, this can be done on vertex shaders too, as they might have resources!
                                  bool debug_draw_shader_just_enabled = false;
@@ -1879,79 +1858,10 @@ namespace Trace
                                     ASSERT_ONCE(device_data.native_pixel_shaders[CompileTimeStringHash("Display Composition")]); // This shader is necessary to draw this debug stuff
 
                                     if (debug_draw_shader_enabled)
-                                    {
-                                       debug_draw_pipeline = 0;
-                                       debug_draw_shader_hash = 0;
-                                       debug_draw_shader_hash_string[0] = 0;
-                                    }
+                                       ClearDebugDrawTarget(device_data);
                                     else
-                                    {
-                                       debug_draw_pipeline = pipeline_pair->first; // Note: this is probably completely useless at the moment as we don't store the index of the pipeline instance the user had selected (e.g. "debug_draw_pipeline_target_instance")
-                                       debug_draw_shader_hash = pipeline_pair->second->shader_hashes[0];
-                                       std::string new_debug_draw_shader_hash_string = Shader::Hash_NumToStr(debug_draw_shader_hash);
-                                       if (new_debug_draw_shader_hash_string.size() <= HASH_CHARACTERS_LENGTH)
-                                          strcpy(&debug_draw_shader_hash_string[0], new_debug_draw_shader_hash_string.c_str());
-                                       else
-                                          debug_draw_shader_hash_string[0] = 0;
-                                       debug_draw_shader_just_enabled = true;
-                                    }
-                                    device_data.debug_draw_frozen_draw_state_stack.reset(); // We need to force reset this anyway otherwise it might store a pointer to a "DrawStateStack<DrawStateStackType::Compute>" or a "DrawStateStack<DrawStateStackType::FullGraphcis>" and we wouldn't know about
-                                    device_data.debug_draw_texture = nullptr;
-                                    device_data.debug_draw_texture_format = DXGI_FORMAT_UNKNOWN;
-                                    device_data.debug_draw_texture_size = {};
-                                    debug_draw_pipeline_instance = 0;
-                                    debug_draw_custom_pass = 0;
-#if 1 // We could also let the user settings persist if we wished so, but automatically setting them is usually better
-                                    debug_draw_pipeline_target_instance = debug_draw_shader_enabled ? -1 : target_instance;
-                                    debug_draw_pipeline_target_thread = (!debug_draw_shader_enabled && debug_draw_pipeline_instance_filter_by_thread) ? draw_call_data.thread_id : std::thread::id();
-                                    const auto prev_debug_draw_mode = debug_draw_mode;
-                                    if (prev_debug_draw_mode == DebugDrawMode::Depth || prev_debug_draw_mode == DebugDrawMode::Stencil)
-                                    {
-                                       debug_draw_options &= ~(uint32_t)DebugDrawTextureOptionsMask::RedOnly;
-                                    }
-                                    if (prev_debug_draw_mode == DebugDrawMode::Custom)
-                                    {
-                                       debug_draw_mip = 0;
-                                    }
-                                    debug_draw_mode = pipeline_pair->second->HasPixelShader() ? DebugDrawMode::RenderTarget : (pipeline_pair->second->HasComputeShader() ? DebugDrawMode::UnorderedAccessView : DebugDrawMode::ShaderResource); // Do it regardless of "debug_draw_shader_enabled"
-                                    // Fall back on depth if there main RT isn't valid
-                                    if (debug_draw_mode == DebugDrawMode::RenderTarget && trace_draw_call_data.rt_format[0] == DXGI_FORMAT_UNKNOWN && draw_call_data.depth_state != TraceDrawCallData::DepthStateType::Disabled)
-                                    {
-                                       debug_draw_mode = DebugDrawMode::Depth;
-                                       debug_draw_options |= (uint32_t)DebugDrawTextureOptionsMask::RedOnly;
-                                       debug_draw_mip = 0;
-                                    }
-                                    if (debug_draw_mode != prev_debug_draw_mode)
-                                    {
-                                       debug_draw_view_index = 0;
-                                    }
-                                    // Preserve the last SRV/UAV/RTV index if we are passing between draw calls, it should help (e.g. during gbuffers rendering)
-                                    else if (debug_draw_shader_just_enabled)
-                                    {
-                                       if (debug_draw_mode == DebugDrawMode::RenderTarget)
-                                       {
-                                          if (debug_draw_view_index < 0 || debug_draw_view_index >= std::size(original_shader->rtvs) || !original_shader->rtvs[debug_draw_view_index])
-                                             debug_draw_view_index = 0;
-                                       }
-                                       else if (debug_draw_mode == DebugDrawMode::ShaderResource)
-                                       {
-                                          if (debug_draw_view_index < 0 || debug_draw_view_index >= std::size(original_shader->srvs) || !original_shader->srvs[debug_draw_view_index])
-                                             debug_draw_view_index = 0;
-                                       }
-                                       else if (debug_draw_mode == DebugDrawMode::UnorderedAccessView)
-                                       {
-                                          if (debug_draw_view_index < 0 || debug_draw_view_index >= std::size(original_shader->uavs) || !original_shader->uavs[debug_draw_view_index])
-                                             debug_draw_view_index = 0;
-                                       }
-                                       else // DebugDrawMode::Depth || DebugDrawMode::Stencil
-                                       {
-                                          debug_draw_view_index = 0;
-                                          debug_draw_mip = 0;
-                                       }
-                                    }
-                                    //debug_draw_replaced_pass = false;
-#endif
-
+                                       SetDebugDrawTarget(device_data, *debug_draw_target, draw_call_data, false);
+                                    debug_draw_shader_just_enabled = !debug_draw_shader_enabled;
                                     debug_draw_shader_enabled = !debug_draw_shader_enabled;
                                  }
                                  // Show that it's failing to retrieve the texture if we can!
@@ -1962,7 +1872,8 @@ namespace Trace
                                     ImGui::SmallButton(ICON_FK_WARNING);
                                     ImGui::EndDisabled();
                                  }
-                                 if (has_any_resources)
+                                 // Luma passes are recorded after they drew, so their inputs can't be frozen nor their blends disabled
+                                 if (has_any_resources && pipeline)
                                  {
                                     ImGui::SameLine();
                                     if (ImGui::Checkbox("Freeze Inputs", &debug_draw_freeze_inputs) && !debug_draw_freeze_inputs)
@@ -1975,127 +1886,33 @@ namespace Trace
                                     ImGui::Checkbox("Disable Blends", &debug_draw_disable_blends);
                                     ImGui::EndDisabled();
                                  }
+                              }
 
-                                 bool track_buffer_enabled = track_buffer_pipeline != 0 && track_buffer_pipeline == pipeline_pair->first;
-                                 track_buffer_enabled &= track_buffer_pipeline_target_instance < 0 || track_buffer_pipeline_target_instance == target_instance;
-                                 if (track_buffer_enabled ? ImGui::Button("Disable Constant Buffer Tracking") : ImGui::Button("Enable Constant Buffer Tracking"))
-                                 {
-                                    if (!track_buffer_enabled)
-                                    {
-                                       track_buffer_pipeline = pipeline_pair->first;
-                                       track_buffer_pipeline_target_instance = target_instance;
-                                       track_buffer_index = 0;
-                                    }
-                                    else
-                                    {
-                                       track_buffer_pipeline = 0;
-                                       track_buffer_pipeline_target_instance = -1;
-                                    }
-                                    track_buffer_enabled = !track_buffer_enabled;
-                                 }
-
+                              const auto track_buffer_target = FindPassTarget(device_data, cmd_list_data, selected_index, false); // The tracking counts instances across threads
+                              bool track_buffer_enabled = track_buffer_target && IsTrackBufferTarget(*track_buffer_target);
+                              if (track_buffer_target && (track_buffer_enabled ? ImGui::Button("Disable Constant Buffer Tracking") : ImGui::Button("Enable Constant Buffer Tracking")))
+                              {
                                  if (track_buffer_enabled)
-                                 {
-                                    ImGui::SliderInt("Constant Buffer Tracked Index", &track_buffer_index, 0, D3D11_COMMONSHADER_CONSTANT_BUFFER_API_SLOT_COUNT - 1);
-
-                                    // Hacky way of retrieving the data if the tracked buffer was in a deferred command list and hence couldn't be mapped there
-                                    if (!device_data.track_buffer_data.data_valid && device_data.track_buffer_data.cb)
-                                    {
-                                       // Make sure we have the immediate context, because MapBufferData will fail otherwise.
-                                       ComPtr<ID3D11Device> native_device;
-                                       draw_call_data.command_list->GetDevice(native_device.put());
-                                       ComPtr<ID3D11DeviceContext> native_device_context;
-                                       native_device->GetImmediateContext(native_device_context.put());
-
-                                       D3D11_BUFFER_DESC desc = {};
-                                       device_data.track_buffer_data.cb->GetDesc(&desc);
-                                       device_data.track_buffer_data.data_valid = MapBufferData(device_data.track_buffer_data.cb, native_device_context.get(), device_data.track_buffer_data.data, desc.ByteWidth);
-                                    }
-
-                                    if (device_data.track_buffer_data.data_valid && !device_data.track_buffer_data.data.empty())
-                                    {
-                                       ImGui::NewLine();
-                                       ImGui::Text("Tracked Constant Buffer:");
-                                       ImGui::Text("Resource Hash: %s", device_data.track_buffer_data.hash.c_str());
-                                       const UINT tb_first = device_data.track_buffer_data.first_constant;
-                                       const UINT tb_num = device_data.track_buffer_data.num_constants;
-                                       // Each D3D11.1 "constant" is a float4 = 4 floats in our data vector.
-                                       // tb_num == 0 means D3D11.0 path (no partial-bind info): show the whole buffer.
-                                       const size_t tb_display_begin = (tb_num != 0) ? (size_t)tb_first * 4 : 0;
-                                       const size_t tb_display_end = (tb_num != 0) ? (size_t)(tb_first + tb_num) * 4 : device_data.track_buffer_data.data.size();
-                                       const size_t tb_display_end_clamped = (std::min)(tb_display_end, device_data.track_buffer_data.data.size());
-                                       if (tb_num != 0)
-                                       {
-                                          ImGui::Text("Partial Bind: first constant %u, %u constants (floats %zu..%zu)", tb_first, tb_num, tb_display_begin, tb_display_end_clamped);
-                                       }
-                                       if (ImGui::BeginChild("TrackBufferScroll", ImVec2(0, 500), ImGuiChildFlags_Borders))
-                                       {
-                                          // TODO: match with the shader assembly cbs etc (if the data is available)
-                                          // TODO: add a matrix 4x4 view?
-                                          if (ImGui::BeginTable("TrackBufferTable", 3, ImGuiTableFlags_Borders | ImGuiTableFlags_RowBg | ImGuiTableFlags_Resizable)) {
-                                             ImGui::TableSetupColumn("Index", ImGuiTableColumnFlags_WidthFixed, 60.0f);
-                                             ImGui::TableSetupColumn("Float Value", ImGuiTableColumnFlags_WidthStretch);
-                                             ImGui::TableSetupColumn("Int Value", ImGuiTableColumnFlags_WidthStretch);
-                                             ImGui::TableHeadersRow();
-
-                                             for (size_t i = tb_display_begin; i < tb_display_end_clamped; ++i)
-                                             {
-                                                float this_data = device_data.track_buffer_data.data[i];
-                                                ImGui::TableNextRow();
-                                                ImGui::TableSetColumnIndex(0);
-                                                static const char* components[] = { "x", "y", "z", "w" };
-                                                size_t relative_i = i - tb_display_begin; // 0-based offset within the visible slice
-                                                size_t group = relative_i / 4; // Split index by float4
-                                                size_t comp_index = relative_i % 4; // Print out the x/y/w/z identifier
-                                                ImGui::Text("%zu:%s", group, components[comp_index]);
-                                                // First print as float
-                                                ImGui::TableSetColumnIndex(1);
-                                                // I'm not sure whether the auto float printing handles nan/inf
-                                                if (std::isnan(this_data))
-                                                {
-                                                   ImGui::Text("NaN");
-                                                }
-                                                else if (std::isinf(this_data))
-                                                {
-                                                   ImGui::Text("Inf");
-                                                }
-                                                else
-                                                {
-                                                   ImGui::Text("%.7f", this_data); // We need to show quite a bit of precision
-                                                }
-                                                // Then print as int (should work as uint/bool as well)
-                                                ImGui::TableSetColumnIndex(2);
-                                                ImGui::Text("%i", Math::AsInt(this_data));
-                                             }
-                                             ImGui::EndTable();
-                                          }
-                                       }
-                                       ImGui::EndChild(); // TrackBufferScroll
-
-                                       if (ImGui::Button("Copy Constant Buffer Data to Clipboard (float)"))
-                                       {
-                                          std::ostringstream oss;
-                                          for (size_t i = tb_display_begin; i < tb_display_end_clamped; ++i) {
-                                             oss << device_data.track_buffer_data.data[i];
-                                             if (i + 1 < tb_display_end_clamped)
-                                                oss << '\n';
-                                          }
-                                          System::CopyToClipboard(oss.str());
-                                       }
-                                    }
-                                 }
-                                 // Hacky: clear the data here...
+                                    ClearTrackBufferTarget(device_data);
                                  else
-                                 {
-                                    device_data.track_buffer_data.Clear();
-                                 }
+                                    SetTrackBufferTarget(device_data, *track_buffer_target);
+                                 track_buffer_enabled = !track_buffer_enabled;
+                              }
+                              if (track_buffer_enabled)
+                              {
+                                 draw_tracked_buffer(draw_call_data);
+                              }
+                              // Hacky: clear the data here...
+                              else
+                              {
+                                 device_data.track_buffer_data.Clear();
                               }
 
                               ImGui::NewLine();
                               ImGui::Text("State Analysis:");
                               if (ImGui::BeginChild("StateAnalysisScroll", ImVec2(0, -FLT_MIN), ImGuiChildFlags_Borders)) // I prefer it without a separate scrolling box for now
                               {
-                                 draw_state_analysis(draw_call_data, pipeline_pair->second, debug_draw_shader_enabled);
+                                 draw_state_analysis(draw_call_data, pipeline, debug_draw_shader_enabled);
                               }
                               ImGui::EndChild(); // StateAnalysisScroll
                            }
@@ -2103,28 +1920,12 @@ namespace Trace
                         }
                         lock.unlock(); // Needed to prevent "LoadCustomShaders()" from deadlocking, and anyway, there's no need to lock it beyond the for loop above
 
-                        if (draw_call_data.type == TraceDrawCallData::TraceDrawCallType::Custom && draw_call_data.custom_stage != reshade::api::shader_stage(0))
-                        {
-                           if (ImGui::BeginChild("Settings and Info"))
-                           {
-                              if (const auto definition = native_shaders_definitions.find(draw_call_data.custom_shader_hash); definition != native_shaders_definitions.end() && definition->second.file_name)
-                                 ImGui::Text("Luma Shader: %s", definition->second.file_name);
-                              ImGui::NewLine();
-                              ImGui::Text("State Analysis:");
-                              if (ImGui::BeginChild("StateAnalysisScroll", ImVec2(0, -FLT_MIN), ImGuiChildFlags_Borders))
-                              {
-                                 draw_state_analysis(draw_call_data, nullptr, debug_draw_custom_pass == CompileTimeStringHash(draw_call_data.custom_name));
-                              }
-                              ImGui::EndChild(); // StateAnalysisScroll
-                           }
-                           ImGui::EndChild(); // Settings and Info
-                        }
-                        else if (draw_call_data.type == TraceDrawCallData::TraceDrawCallType::CopyResource
+                        if (!pipeline && !is_luma_pass && (draw_call_data.type == TraceDrawCallData::TraceDrawCallType::CopyResource
                            || draw_call_data.type == TraceDrawCallData::TraceDrawCallType::CPURead
                            || draw_call_data.type == TraceDrawCallData::TraceDrawCallType::CPUWrite
                            || draw_call_data.type == TraceDrawCallData::TraceDrawCallType::BindResource
                            || draw_call_data.type == TraceDrawCallData::TraceDrawCallType::ClearResource
-                           || draw_call_data.type == TraceDrawCallData::TraceDrawCallType::Custom)
+                           || draw_call_data.type == TraceDrawCallData::TraceDrawCallType::Custom))
                         {
                            if (ImGui::BeginChild("Settings and Info"))
                            {
@@ -2334,6 +2135,18 @@ namespace Trace
                            disasm_string.assign(cache ? cache->disasm : "");
                         }
                      }
+                     else if (const auto& entry = cmd_list_data.trace_draw_calls_data.at(selected_index); entry.custom_shader_hash != 0)
+                     {
+                        const std::unique_lock lock_loading(s_mutex_loading);
+                        const auto custom_shader = custom_shaders_cache.find(Shader::ShiftHash32ToHash64(entry.custom_shader_hash));
+                        auto* cache = custom_shader != custom_shaders_cache.end() ? custom_shader->second : nullptr;
+                        if (cache && cache->disasm.empty())
+                        {
+                           auto disasm_code = Shader::DisassembleShader(cache->code.data(), cache->code.size());
+                           cache->disasm.assign(disasm_code.has_value() ? disasm_code.value() : "DISASSEMBLY FAILED");
+                        }
+                        disasm_string.assign(cache ? cache->disasm : "");
+                     }
                      else
                      {
                         disasm_string.clear();
@@ -2383,12 +2196,16 @@ namespace Trace
                      const auto pipeline_handle = cmd_list_data.trace_draw_calls_data.at(selected_index).pipeline_handle;
 
                      const std::shared_lock lock(s_mutex_generic);
-                     if (auto pipeline_pair = device_data.pipeline_cache_by_pipeline_handle.find(pipeline_handle);
-                        pipeline_pair != device_data.pipeline_cache_by_pipeline_handle.end() && pipeline_pair->second != nullptr)
+                     const auto pipeline_pair = device_data.pipeline_cache_by_pipeline_handle.find(pipeline_handle);
+                     const bool has_pipeline = pipeline_pair != device_data.pipeline_cache_by_pipeline_handle.end() && pipeline_pair->second != nullptr;
+                     const uint32_t luma_shader_hash = cmd_list_data.trace_draw_calls_data.at(selected_index).custom_shader_hash;
+                     if (has_pipeline || luma_shader_hash != 0)
                      {
-                        const auto pipeline = pipeline_pair->second;
                         const std::shared_lock lock_loading(s_mutex_loading);
-                        const auto custom_shader = !pipeline->shader_hashes.empty() ? custom_shaders_cache[pipeline->shader_hashes[0]] : nullptr;
+                        // The game shader's replacement, or a Luma pass's native shader
+                        const auto custom_shader_it = has_pipeline ? (pipeline_pair->second->shader_hashes.empty() ? custom_shaders_cache.end() : custom_shaders_cache.find(pipeline_pair->second->shader_hashes[0]))
+                           : custom_shaders_cache.find(Shader::ShiftHash32ToHash64(luma_shader_hash));
+                        const auto custom_shader = custom_shader_it != custom_shaders_cache.end() ? custom_shader_it->second : nullptr;
                         // If the custom shader has a compilation error, print that, otherwise read the file text
                         if (custom_shader != nullptr && !custom_shader->compilation_errors.empty())
                         {
@@ -2532,15 +2349,7 @@ namespace Trace
          ImGui::PushID("Debug Draw");
          if (ImGui::SmallButton(ICON_FK_UNDO))
          {
-            debug_draw_shader_hash_string[0] = 0;
-            debug_draw_shader_hash = 0;
-            debug_draw_pipeline = 0;
-            debug_draw_custom_pass = 0;
-
-            device_data.debug_draw_frozen_draw_state_stack.reset();
-            device_data.debug_draw_texture = nullptr;
-            device_data.debug_draw_texture_format = DXGI_FORMAT_UNKNOWN;
-            device_data.debug_draw_texture_size = {};
+            ClearDebugDrawTarget(device_data);
          }
          ImGui::PopID();
       }

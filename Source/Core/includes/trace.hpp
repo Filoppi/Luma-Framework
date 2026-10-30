@@ -420,6 +420,27 @@ namespace Trace
    // Core: at the end of every frame
    void EndFrame(DeviceData& device_data);
 
+   // A pass the debug draw and the constant buffer tracking can target: a game pipeline, or a Luma pass by name ("CustomDraw()")
+   struct PassTarget
+   {
+      uint64_t pipeline = 0;
+      uint32_t shader_hash = 0; // The pipeline's (first) shader, or the Luma pass's native shader
+      uint32_t custom_pass = 0;
+      reshade::api::shader_stage stage = reshade::api::shader_stage(0);
+      int32_t instance = 0; // Among the passes with the same identity in a frame, like the runtime counters
+      std::thread::id thread; // Set if the instances were counted on its thread only
+   };
+   // The pass of a captured entry (a game draw with a live pipeline, or a Luma pass), counting its instance among the previous entries (the ones
+   // recorded on its thread only, if "by_thread"). Needs "s_mutex_generic" and the command list's "mutex_trace" locked.
+   std::optional<PassTarget> FindPassTarget(const DeviceData& device_data, const CommandListData& cmd_list_data, size_t index, bool by_thread);
+   bool IsDebugDrawTarget(const PassTarget& target);
+   // Debug draws a pass, from its captured "entry". The view type follows the pass (render target, UAV, or SRV), unless "keep_mode" and the pass has the view.
+   void SetDebugDrawTarget(DeviceData& device_data, const PassTarget& target, const TraceDrawCallData& entry, bool keep_mode);
+   void ClearDebugDrawTarget(DeviceData& device_data);
+   bool IsTrackBufferTarget(const PassTarget& target);
+   void SetTrackBufferTarget(DeviceData& device_data, const PassTarget& target);
+   void ClearTrackBufferTarget(DeviceData& device_data);
+
    // The dev UI ("trace_ui.inl"): the Captured Commands tab, and the debug draw settings (in the Settings tab)
    void DrawCaptureTab(reshade::api::effect_runtime* runtime, DeviceData& device_data, bool& open_settings_tab);
    void DrawDebugDrawSettings(DeviceData& device_data);

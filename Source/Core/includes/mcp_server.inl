@@ -191,14 +191,16 @@ namespace Mcp
          uint64_t pipeline;
          int32_t target_instance;
          int32_t index;
+         uint32_t custom_pass;
 
          static TrackBufferSelection Current()
          {
-            return {Trace::track_buffer_pipeline, Trace::track_buffer_pipeline_target_instance, Trace::track_buffer_index};
+            return {Trace::track_buffer_pipeline, Trace::track_buffer_pipeline_target_instance, Trace::track_buffer_index, Trace::track_buffer_custom_pass};
          }
          void Apply() const
          {
             Trace::track_buffer_pipeline = pipeline;
+            Trace::track_buffer_custom_pass = custom_pass;
             Trace::track_buffer_pipeline_target_instance = target_instance;
             Trace::track_buffer_index = index;
          }
@@ -432,14 +434,14 @@ namespace Mcp
                if (pipeline->cloned || entry.drawn_origin != Shader::CloneOrigin::None)
                   w->Field("variant", EnumName(clone_origin_names, size_t(entry.drawn_origin)));
             }
-            if (entry.cancelled_or_replaced)
-               w->Field("cancelled_or_replaced", true);
-            if (!entry.replaced_slots.empty())
-               w->Field("updated", true);
             else
             {
                w->Field("stage", "unknown"); // Destroyed since the capture
             }
+            if (entry.cancelled_or_replaced)
+               w->Field("cancelled_or_replaced", true);
+            if (!entry.replaced_slots.empty())
+               w->Field("updated", true);
          }
          std::string flags;
          if (entry.any_input_resources_format_upgraded)
@@ -744,7 +746,9 @@ namespace Mcp
                return false;
             if (cancelled_only && !entry.cancelled_or_replaced)
                return false;
-            if (variant && (entry.type != Type::Shader || *variant != EnumName(clone_origin_names, size_t(entry.drawn_origin))))
+            // Like the "variant" field, only clones (or draws stamped by a variant) have one
+            const bool has_variant = (pipeline && pipeline->cloned) || entry.drawn_origin != Shader::CloneOrigin::None;
+            if (variant && (entry.type != Type::Shader || !has_variant || *variant != EnumName(clone_origin_names, size_t(entry.drawn_origin))))
                return false;
             const auto has_resource = [&](const auto& hashes)
             { return std::ranges::find(hashes, *resource) != std::end(hashes); };
@@ -769,36 +773,22 @@ namespace Mcp
                return false;
             }
             const TraceDrawCallData& entry = cmd_list_data.trace_draw_calls_data[index];
-            const bool deferred = IsDeferred(entry);
-            job->thread = deferred ? entry.thread_id : std::thread::id();
-            if (entry.type == TraceDrawCallData::TraceDrawCallType::Custom && entry.custom_stage != reshade::api::shader_stage(0))
-            {
-               // Instances of a Luma pass are counted by name, see "Trace::RecordCustomPass()"
-               job->instance = 0;
-               for (size_t i = 0; i < index; i++)
-               {
-                  const auto& other = cmd_list_data.trace_draw_calls_data[i];
-                  if (other.type == TraceDrawCallData::TraceDrawCallType::Custom && strcmp(other.custom_name, entry.custom_name) == 0 && (!deferred || other.thread_id == entry.thread_id))
-                     job->instance++;
-               }
-               job->custom_pass = Math::CompileTimeStringHash(entry.custom_name);
-               job->shader_hash = entry.custom_shader_hash;
-               job->stage = entry.custom_stage == reshade::api::shader_stage::compute ? "CS" : "PS";
-               return true;
-            }
-            pipeline = entry.type == TraceDrawCallData::TraceDrawCallType::Shader ? FindPipeline(device_data, entry.pipeline_handle) : nullptr;
-            if (!pipeline)
+            const auto target = Trace::FindPassTarget(device_data, cmd_list_data, index, IsDeferred(entry));
+            if (!target)
             {
                job->error = std::format("Trace index {} is not a shader pass with a live pipeline, or a Luma pass", index);
                return false;
             }
-            job->instance = 0;
-            for (size_t i = 0; i < index; i++)
+            job->instance = target->instance;
+            job->thread = target->thread;
+            if (target->custom_pass != 0)
             {
-               const auto& other = cmd_list_data.trace_draw_calls_data[i];
-               if (other.pipeline_handle == entry.pipeline_handle && (!deferred || other.thread_id == entry.thread_id))
-                  job->instance++;
+               job->custom_pass = target->custom_pass;
+               job->shader_hash = target->shader_hash;
+               job->stage = target->stage == reshade::api::shader_stage::compute ? "CS" : "PS";
+               return true;
             }
+            pipeline = FindPipeline(device_data, target->pipeline);
          }
          else if (const auto hash = job->HashArg("hash"))
          {
@@ -1217,7 +1207,7 @@ namespace Mcp
             const std::shared_lock lock_loading(s_mutex_loading);
             w.Field("has_compilation_errors", !shaders_compilation_errors.empty());
          }
-         w.Field("Trace::captured_count", Trace::captured_count);
+         w.Field("trace_count", Trace::captured_count);
          w.Field("swapchain_upgrade_type", uint32_t(swapchain_upgrade_type));
          w.Field("swapchain_format_upgrade_type", uint32_t(swapchain_format_upgrade_type));
          w.Field("texture_format_upgrades_type", uint32_t(texture_format_upgrades_type));
@@ -1510,9 +1500,9 @@ namespace Mcp
          {
             if (!ResolveTarget(job, device_data, cmd_list_data))
                return true;
-            if (job->stage == std::string_view("GS") || job->stage == std::string_view("XS") || job->custom_pass)
+            if (job->stage == std::string_view("GS") || job->stage == std::string_view("XS"))
             {
-               job->error = std::format("Constant buffer tracking doesn't support {} passes", job->custom_pass ? "Luma" : job->stage);
+               job->error = std::format("Constant buffer tracking doesn't support {} passes", job->stage);
                return true;
             }
             const int64_t slot = job->IntArg("slot", 0);
@@ -1523,7 +1513,7 @@ namespace Mcp
             }
             // Restored in "OnPresent" once the job finishes. The tracking has no thread filter.
             job->saved_track_buffer = TrackBufferSelection::Current();
-            TrackBufferSelection{job->pipeline_handle, job->instance, int32_t(slot)}.Apply();
+            TrackBufferSelection{job->pipeline_handle, job->instance, int32_t(slot), job->custom_pass}.Apply();
             device_data.track_buffer_data.Clear();
             job->result.Hash("hash", job->shader_hash).Field("stage", job->stage).Field("instance", job->instance).Field("slot", slot);
             job->phase = 1;

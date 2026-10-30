@@ -1392,6 +1392,153 @@ namespace Trace
          cmd_list_data.trace_draw_calls_data.reserve(reserve_size);
    }
 
+   std::optional<PassTarget> FindPassTarget(const DeviceData& device_data, const CommandListData& cmd_list_data, size_t index, bool by_thread)
+   {
+      if (index >= cmd_list_data.trace_draw_calls_data.size())
+         return std::nullopt;
+      const TraceDrawCallData& entry = cmd_list_data.trace_draw_calls_data[index];
+      PassTarget target;
+      bool is_luma_pass = false;
+      if (entry.type == TraceDrawCallData::TraceDrawCallType::Custom && entry.custom_stage != reshade::api::shader_stage(0))
+      {
+         is_luma_pass = true;
+         target.custom_pass = Math::CompileTimeStringHash(entry.custom_name);
+         target.shader_hash = entry.custom_shader_hash;
+         target.stage = entry.custom_stage;
+      }
+      else if (entry.type == TraceDrawCallData::TraceDrawCallType::Shader)
+      {
+         const auto pipeline_pair = device_data.pipeline_cache_by_pipeline_handle.find(entry.pipeline_handle);
+         if (pipeline_pair == device_data.pipeline_cache_by_pipeline_handle.end() || !pipeline_pair->second || pipeline_pair->second->shader_hashes.empty())
+            return std::nullopt;
+         const CachedPipeline* pipeline = pipeline_pair->second;
+         target.pipeline = entry.pipeline_handle;
+         target.shader_hash = pipeline->shader_hashes[0];
+         target.stage = pipeline->HasPixelShader() ? reshade::api::shader_stage::pixel : (pipeline->HasComputeShader() ? reshade::api::shader_stage::compute : reshade::api::shader_stage::vertex);
+      }
+      else
+      {
+         return std::nullopt;
+      }
+      if (by_thread)
+         target.thread = entry.thread_id;
+      for (size_t i = 0; i < index; i++)
+      {
+         const auto& other = cmd_list_data.trace_draw_calls_data[i];
+         if (by_thread && other.thread_id != entry.thread_id)
+            continue;
+         if (is_luma_pass ? (other.type == TraceDrawCallData::TraceDrawCallType::Custom && strcmp(other.custom_name, entry.custom_name) == 0) : (other.type == TraceDrawCallData::TraceDrawCallType::Shader && other.pipeline_handle == entry.pipeline_handle))
+            target.instance++;
+      }
+      return target;
+   }
+
+   bool IsDebugDrawTarget(const PassTarget& target)
+   {
+      const bool same_pass = target.custom_pass != 0 ? debug_draw_custom_pass == target.custom_pass : (debug_draw_custom_pass == 0 && debug_draw_shader_hash == target.shader_hash);
+      return same_pass && (debug_draw_pipeline_target_instance < 0 || debug_draw_pipeline_target_instance == target.instance);
+   }
+
+   void SetDebugDrawTarget(DeviceData& device_data, const PassTarget& target, const TraceDrawCallData& entry, bool keep_mode)
+   {
+      ClearDebugDrawTarget(device_data);
+      if (target.custom_pass != 0)
+      {
+         debug_draw_custom_pass = target.custom_pass;
+      }
+      else
+      {
+         debug_draw_pipeline = target.pipeline;
+         debug_draw_shader_hash = target.shader_hash;
+         const std::string shader_hash_string = Shader::Hash_NumToStr(debug_draw_shader_hash);
+         if (shader_hash_string.size() <= HASH_CHARACTERS_LENGTH)
+            strcpy(&debug_draw_shader_hash_string[0], shader_hash_string.c_str());
+      }
+      debug_draw_pipeline_target_instance = target.instance;
+      debug_draw_pipeline_target_thread = target.thread;
+
+      const auto prev_debug_draw_mode = debug_draw_mode;
+      if (prev_debug_draw_mode == DebugDrawMode::Depth || prev_debug_draw_mode == DebugDrawMode::Stencil)
+      {
+         debug_draw_options &= ~(uint32_t)DebugDrawTextureOptionsMask::RedOnly;
+      }
+      if (prev_debug_draw_mode == DebugDrawMode::Custom)
+      {
+         debug_draw_view_index = 0;
+         debug_draw_mip = 0;
+      }
+      if (!keep_mode || prev_debug_draw_mode == DebugDrawMode::Custom)
+      {
+         debug_draw_mode = target.stage == reshade::api::shader_stage::pixel ? DebugDrawMode::RenderTarget : (target.stage == reshade::api::shader_stage::compute ? DebugDrawMode::UnorderedAccessView : DebugDrawMode::ShaderResource);
+      }
+      // Preserve the last view index between passes that have it (e.g. during gbuffers rendering)
+      const auto has_view = [&](const auto& view_formats)
+      {
+         return debug_draw_view_index >= 0 && debug_draw_view_index < int32_t(std::size(view_formats))
+            && view_formats[debug_draw_view_index] != DXGI_FORMAT_UNKNOWN && view_formats[debug_draw_view_index] != DXGI_FORMAT(-1);
+      };
+      if (debug_draw_mode != prev_debug_draw_mode
+         || (debug_draw_mode == DebugDrawMode::RenderTarget && !has_view(entry.rtv_format))
+         || (debug_draw_mode == DebugDrawMode::ShaderResource && !has_view(entry.srv_format))
+         || (debug_draw_mode == DebugDrawMode::UnorderedAccessView && !has_view(entry.uav_format)))
+      {
+         debug_draw_view_index = 0;
+      }
+      // Fall back on depth if there main RT isn't valid
+      if (debug_draw_mode == DebugDrawMode::RenderTarget && entry.rt_format[0] == DXGI_FORMAT_UNKNOWN && entry.depth_state != TraceDrawCallData::DepthStateType::Disabled)
+      {
+         debug_draw_mode = DebugDrawMode::Depth;
+         debug_draw_options |= (uint32_t)DebugDrawTextureOptionsMask::RedOnly;
+      }
+      if (debug_draw_mode == DebugDrawMode::Depth || debug_draw_mode == DebugDrawMode::Stencil)
+      {
+         debug_draw_view_index = 0;
+         debug_draw_mip = 0;
+      }
+      debug_draw_freeze_inputs = false; // Unfreeze inputs automatically every time we swap the target pass
+   }
+
+   void ClearDebugDrawTarget(DeviceData& device_data)
+   {
+      debug_draw_pipeline = 0;
+      debug_draw_shader_hash = 0;
+      debug_draw_shader_hash_string[0] = 0;
+      debug_draw_custom_pass = 0;
+      debug_draw_pipeline_target_instance = -1;
+      debug_draw_pipeline_target_thread = std::thread::id();
+      debug_draw_pipeline_instance = 0;
+      debug_draw_custom_pass_instance = 0;
+      device_data.debug_draw_frozen_draw_state_stack.reset(); // It might store the state of another type of pass ("DrawStateStack<DrawStateStackType::Compute>" or "DrawStateStack<DrawStateStackType::FullGraphics>")
+      device_data.debug_draw_texture = nullptr;
+      device_data.debug_draw_texture_format = DXGI_FORMAT_UNKNOWN;
+      device_data.debug_draw_texture_size = {};
+   }
+
+   bool IsTrackBufferTarget(const PassTarget& target)
+   {
+      const bool same_pass = target.custom_pass != 0 ? track_buffer_custom_pass == target.custom_pass : (track_buffer_custom_pass == 0 && track_buffer_pipeline == target.pipeline);
+      return same_pass && (track_buffer_pipeline_target_instance < 0 || track_buffer_pipeline_target_instance == target.instance);
+   }
+
+   void SetTrackBufferTarget(DeviceData& device_data, const PassTarget& target)
+   {
+      ClearTrackBufferTarget(device_data);
+      track_buffer_pipeline = target.custom_pass != 0 ? 0 : target.pipeline;
+      track_buffer_custom_pass = target.custom_pass;
+      track_buffer_pipeline_target_instance = target.instance;
+   }
+
+   void ClearTrackBufferTarget(DeviceData& device_data)
+   {
+      track_buffer_pipeline = 0;
+      track_buffer_custom_pass = 0;
+      track_buffer_pipeline_target_instance = -1;
+      track_buffer_index = 0;
+      track_buffer_pipeline_instance = 0;
+      track_buffer_custom_pass_instance = 0;
+      device_data.track_buffer_data.Clear();
+   }
+
    void EndFrame(DeviceData& device_data)
    {
       // Clear at the end of every frame and re-capture it in the next frame if its still available

@@ -10324,12 +10324,7 @@ namespace
                      if (!debug_draw_resource_enabled) // Enabled
                      {
                         // Reset all the settings we don't need anymore, as they were for a different debug draw mode
-                        Trace::debug_draw_pipeline = 0;
-                        Trace::debug_draw_shader_hash = 0;
-                        Trace::debug_draw_custom_pass = 0;
-                        Trace::debug_draw_shader_hash_string[0] = 0;
-                        Trace::debug_draw_pipeline_target_instance = -1;
-                        Trace::debug_draw_pipeline_target_thread = std::thread::id();
+                        Trace::ClearDebugDrawTarget(device_data);
                         if (Trace::debug_draw_mode == Trace::DebugDrawMode::Depth || Trace::debug_draw_mode == Trace::DebugDrawMode::Stencil)
                         {
                            Trace::debug_draw_options &= ~(uint32_t)Trace::DebugDrawTextureOptionsMask::RedOnly;
@@ -10343,7 +10338,6 @@ namespace
                         // TODO: fix. As of now this is needed or the texture would be cleared every frame and then set again. We'd need to add a separate (temporary) non clear texture mode for it
                         Trace::debug_draw_auto_clear_texture = false;
 
-                        device_data.debug_draw_frozen_draw_state_stack.reset();
                         device_data.debug_draw_texture = selected_resource.get();
                         device_data.debug_draw_texture_format = selected_texture_format;
                         device_data.debug_draw_texture_size = selected_texture_size;

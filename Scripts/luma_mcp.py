@@ -56,7 +56,7 @@ READ_TARGET = {
     "view": {"type": "string", "description": "rtv (default), srv, uav, depth, stencil, swapchain, ui, registered:<name>"},
     "slot": {"type": "integer", "description": "View slot (default 0)"},
     "mip": {"type": "integer", "description": "Mip level (default 0)"},
-    "replaced": {"type": "boolean", "description": "Read the bindings of Luma's replaced pass (default true) or the original ones"},
+    "replaced": {"type": "boolean", "description": "For a pass the draw callbacks cancelled or replaced (cancelled_or_replaced): read what Luma drew instead (default true), or false to run the original pass for the readback. Draws that went through with swapped bindings (updated) always read what they drew, their original bindings are in luma_trace_get replaced_slots"},
 }
 COMPARE_OPTIONS = {
     "region": ANALYSIS["region"],
@@ -194,7 +194,7 @@ TOOLS = [
     ),
     tool(
         "luma_read_cbuffer",
-        "Read a constant buffer bound to a pass at draw time (VS, PS or CS). Returns float4 rows with float and uint views. "
+        "Read a constant buffer bound to a pass at draw time (VS, PS or CS, Luma passes included by index). Returns float4 rows with float and uint views. "
         "With 'frames' it reads it on N consecutive frames (jitter sequences, camera latches, half rate updates) and reports which rows change.",
         {**TARGET, "slot": {"type": "integer", "description": "Constant buffer register b<slot>"},
          "frames": {"type": "integer", "description": "Consecutive frames to read (default 1)"},
