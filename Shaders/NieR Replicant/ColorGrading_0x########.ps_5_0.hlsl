@@ -1,4 +1,21 @@
-#include "Common.hlsl"
+#include "Includes/Common.hlsl"
+
+#if _02D70327 || _151DE180 || _444114F8 || _45E46B73 || _6140A5AC || _906B6848 || _9716339C || _EF8E0BE4
+#define COLOR_CORRECTION
+#endif
+
+#if _1620C24C || _444114F8 || _6140A5AC || _690C605C || _906B6848 || _9716339C || _CE45E40C || _E45D3F6F
+#define RADIAL_BLUR
+#endif
+
+#if _02D70327 || _444114F8 || _45E46B73 || _906B6848 || _CE45E40C || _D207899C || _E45D3F6F || _E59C431D
+#define CHROMATIC_ABERRATION
+#endif
+
+#if _02D70327 || _1620C24C || _444114F8 || _6140A5AC || _70A11A47 || _CE45E40C || _E59C431D || _EF8E0BE4
+#define GRADATION
+#endif
+
 #define NEXT_REGISTER 0
 #define DECLARE_REGISTER(name) b##name
 
