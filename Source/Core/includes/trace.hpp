@@ -441,9 +441,6 @@ namespace Trace
    void SetTrackBufferTarget(DeviceData& device_data, const PassTarget& target);
    void ClearTrackBufferTarget(DeviceData& device_data);
 
-   // The dev UI ("trace_ui.inl"): the Captured Commands tab, and the debug draw settings (in the Settings tab)
-   void DrawCaptureTab(reshade::api::effect_runtime* runtime, DeviceData& device_data, bool& open_settings_tab);
-   void DrawDebugDrawSettings(DeviceData& device_data);
    // Core: moves the entries queued on this thread for "native_device_context" (Luma passes and markers) into its trace, outside of the draw hooks
    // (the other contexts' are dropped). Without a command list, they are dropped.
    void FlushQueued(CommandListData* cmd_list_data, ID3D11DeviceContext* native_device_context);

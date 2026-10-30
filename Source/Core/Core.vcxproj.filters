@@ -34,6 +34,9 @@
     <Filter Include="Includes">
       <UniqueIdentifier>{b448b214-cbb5-4ee4-a88f-4dae17079dfc}</UniqueIdentifier>
     </Filter>
+    <Filter Include="Includes\UI">
+      <UniqueIdentifier>{c8300da5-fb1e-4fcc-a77d-65e173f54475}</UniqueIdentifier>
+    </Filter>
     <Filter Include="Utils">
       <UniqueIdentifier>{b8e435d6-17be-4021-a8aa-c11c6ceb044c}</UniqueIdentifier>
     </Filter>
@@ -159,6 +162,9 @@
     <ClInclude Include="includes\trace.hpp">
       <Filter>Includes</Filter>
     </ClInclude>
+    <ClInclude Include="includes\ui\ui.hpp">
+      <Filter>Includes\UI</Filter>
+    </ClInclude>
     <ClInclude Include="includes\resource_upgrades.hpp">
       <Filter>Includes</Filter>
     </ClInclude>
@@ -173,8 +179,8 @@
     <None Include="includes\trace.inl">
       <Filter>Includes</Filter>
     </None>
-    <None Include="includes\trace_ui.inl">
-      <Filter>Includes</Filter>
+    <None Include="includes\ui\trace_ui.inl">
+      <Filter>Includes\UI</Filter>
     </None>
   </ItemGroup>
 </Project>

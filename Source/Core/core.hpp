@@ -202,6 +202,7 @@
 #include "includes/trace.hpp"
 #if DEVELOPMENT
 #include "includes/mcp.hpp"
+#include "includes/ui/ui.hpp"
 #endif
 
 #include "utils/format.hpp"
@@ -9814,7 +9815,7 @@ namespace
       {
          bool open_settings_tab = false;
 #if DEVELOPMENT
-         Trace::DrawCaptureTab(runtime, device_data, open_settings_tab);
+         UI::DrawCaptureTab(runtime, device_data, open_settings_tab);
 
 #if !GRAPHICS_ANALYZER
          // Show even if "custom_shaders_cache" was empty
@@ -11212,7 +11213,7 @@ namespace
                }
 
                ImGui::NewLine();
-               Trace::DrawDebugDrawSettings(device_data);
+               UI::DrawDebugDrawSettings(device_data);
 
 #if !GRAPHICS_ANALYZER // Graphics Analyzer doesn't want upgrades
                ImGui::NewLine();
@@ -11955,7 +11956,7 @@ namespace
 #include "includes/patch.inl"
 #if DEVELOPMENT
 #include "includes/trace.inl"
-#include "includes/trace_ui.inl"
+#include "includes/ui/trace_ui.inl"
 #include "includes/mcp_server.inl"
 #endif
 

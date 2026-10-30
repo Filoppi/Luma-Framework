@@ -632,6 +632,7 @@
     <ClInclude Include="includes\patch.hpp" />
     <ClInclude Include="includes\mcp.hpp" />
     <ClInclude Include="includes\trace.hpp" />
+    <ClInclude Include="includes\ui\ui.hpp" />
     <ClInclude Include="includes\math.h" />
     <ClInclude Include="includes\matrix.h" />
     <ClInclude Include="includes\recursive_shared_mutex.h" />
@@ -653,7 +654,7 @@
     <None Include="includes\resource_upgrades.inl" />
     <None Include="includes\mcp_server.inl" />
     <None Include="includes\trace.inl" />
-    <None Include="includes\trace_ui.inl" />
+    <None Include="includes\ui\trace_ui.inl" />
   </ItemGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
   <ImportGroup Label="ExtensionTargets">
