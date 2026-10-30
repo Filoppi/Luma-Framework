@@ -577,18 +577,7 @@ public:
 
             native_device_context->GenerateMips(auto_exposure_mip_chain_srv.get());
 
-#if DEVELOPMENT
-            const std::shared_lock lock_trace(s_mutex_trace);
-            if (trace_running)
-            {
-               const std::unique_lock lock_trace_2(cmd_list_data.mutex_trace);
-               TraceDrawCallData trace_draw_call_data;
-               trace_draw_call_data.type = TraceDrawCallData::TraceDrawCallType::Custom;
-               trace_draw_call_data.command_list = native_device_context;
-               trace_draw_call_data.custom_name = "Generate Auto Exposure Mips";
-               cmd_list_data.trace_draw_calls_data.insert(cmd_list_data.trace_draw_calls_data.end() - 1, trace_draw_call_data);
-            }
-#endif
+            Trace::Marker(native_device_context, "Generate Auto Exposure Mips");
             ID3D11ShaderResourceView* const auto_exposure_mip_last_srv_const = auto_exposure_mip_last_srv.get();
             native_device_context->PSSetShaderResources(0, 1, &auto_exposure_mip_last_srv_const);
 
@@ -784,21 +773,6 @@ public:
 
                   if (device_data.has_drawn_sr)
                   {
-#if DEVELOPMENT
-                     const std::shared_lock lock_trace(s_mutex_trace);
-                     if (trace_running)
-                     {
-                        const std::unique_lock lock_trace_2(cmd_list_data.mutex_trace);
-                        TraceDrawCallData trace_draw_call_data;
-                        trace_draw_call_data.type = TraceDrawCallData::TraceDrawCallType::Custom;
-                        trace_draw_call_data.command_list = native_device_context;
-                        trace_draw_call_data.custom_name = "Super Resolution";
-                        // Re-use the RTV data for simplicity
-                        GetResourceInfo(device_data.sr_output_color.get(), trace_draw_call_data.rt_size[0], trace_draw_call_data.rt_format[0], &trace_draw_call_data.rt_type_name[0], &trace_draw_call_data.rt_hash[0]);
-                        cmd_list_data.trace_draw_calls_data.insert(cmd_list_data.trace_draw_calls_data.end() - 1, trace_draw_call_data);
-                     }
-#endif
-
                      if (!dlss_output_supports_uav)
                      {
                         native_device_context->CopyResource(output_color.get(), device_data.sr_output_color.get()); // DX11 doesn't need barriers

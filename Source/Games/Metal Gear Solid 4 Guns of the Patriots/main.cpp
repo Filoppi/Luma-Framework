@@ -471,21 +471,6 @@ public:
       // so the same texture serves as both the edge detection and the neighborhood blending input (no linearization pass is needed).
       DrawSMAA(native_device, native_device_context, device_data, rtv_scene.get(), srv_scene.get(), srv_scene.get());
 
-#if DEVELOPMENT
-      const std::shared_lock lock_trace(s_mutex_trace);
-      if (trace_running)
-      {
-         const std::unique_lock lock_trace_2(cmd_list_data.mutex_trace);
-         TraceDrawCallData trace_draw_call_data;
-         trace_draw_call_data.type = TraceDrawCallData::TraceDrawCallType::Custom;
-         trace_draw_call_data.command_list = native_device_context;
-         trace_draw_call_data.custom_name = "SMAA";
-         // Re-use the RTV data for simplicity
-         GetResourceInfo(rtv_scene.get(), trace_draw_call_data.rt_size[0], trace_draw_call_data.rt_format[0], &trace_draw_call_data.rt_type_name[0], &trace_draw_call_data.rt_hash[0]);
-         cmd_list_data.trace_draw_calls_data.push_back(trace_draw_call_data);
-      }
-#endif
-
       return DrawOrDispatchOverrideType::Replaced;
    }
 
@@ -512,18 +497,7 @@ public:
       {
          // TODO: skip the game's depth linearization draw and redirect the game linearized depth texture to the GTAO one (which should be identical?, but has mips).
          // Alternatively just redirect it as a resource copy to their resource, which should be faster than running a linearization draw call (not by much).
-#if DEVELOPMENT
-         const std::shared_lock lock_trace(s_mutex_trace);
-         if (trace_running)
-         {
-            const std::unique_lock lock_trace_2(cmd_list_data.mutex_trace);
-            TraceDrawCallData trace_draw_call_data;
-            trace_draw_call_data.type = TraceDrawCallData::TraceDrawCallType::Custom;
-            trace_draw_call_data.command_list = native_device_context;
-            trace_draw_call_data.custom_name = "GTAO";
-            cmd_list_data.trace_draw_calls_data.push_back(trace_draw_call_data);
-         }
-#endif
+         Trace::Marker(native_device_context, "GTAO");
       }
 
       return DrawOrDispatchOverrideType::None;
@@ -878,24 +852,10 @@ public:
             ASSERT_ONCE(rtv_desc.ViewDimension == D3D11_RTV_DIMENSION_TEXTURE2DMS || rtv_desc.ViewDimension == D3D11_RTV_DIMENSION_TEXTURE2D);
          
             // Clip all negative values, like vanilla (I tried to clamp to the closest valid luminance instead, but it created weird colors)
-            DrawCustomPixelShaderPass(native_device, native_device_context, rtv.get(), device_data, ms ? Math::CompileTimeStringHash("Copy RGB Max 0 A Sat MS") : Math::CompileTimeStringHash("Copy RGB Max 0 A Sat"), game_device_data.correct_subtractive_blends_data);
+            DrawCustomPixelShaderPass(native_device, native_device_context, rtv.get(), device_data, ms ? Math::CompileTimeStringHash("Copy RGB Max 0 A Sat MS") : Math::CompileTimeStringHash("Copy RGB Max 0 A Sat"), game_device_data.correct_subtractive_blends_data, "Sanitize Subtractive Blends");
 
             draw_state_stack.Restore(native_device_context);
 
-#if DEVELOPMENT
-            const std::shared_lock lock_trace(s_mutex_trace);
-            if (trace_running)
-            {
-               const std::unique_lock lock_trace_2(cmd_list_data.mutex_trace);
-               TraceDrawCallData trace_draw_call_data;
-               trace_draw_call_data.type = TraceDrawCallData::TraceDrawCallType::Custom;
-               trace_draw_call_data.command_list = native_device_context;
-               trace_draw_call_data.custom_name = "Sanitize Subtractive Blends";
-               // Re-use the RTV data for simplicity
-               GetResourceInfo(rtv.get(), trace_draw_call_data.rt_size[0], trace_draw_call_data.rt_format[0], &trace_draw_call_data.rt_type_name[0], &trace_draw_call_data.rt_hash[0]);
-               cmd_list_data.trace_draw_calls_data.push_back(trace_draw_call_data);
-            }
-#endif
          }
       }
       // In any other case, disable the custom UI shaders that have ROV read/writes, given they cannot be conditional (based on runtime branches), and they are slow.

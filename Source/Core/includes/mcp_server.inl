@@ -164,15 +164,17 @@ namespace Mcp
          bool freeze_inputs;
          bool disable_blends;
          bool replaced_pass;
+         uint32_t custom_pass;
 
          static DebugDrawSelection Current()
          {
-            return {debug_draw_pipeline, debug_draw_shader_hash, debug_draw_pipeline_target_instance, debug_draw_pipeline_target_thread, debug_draw_mode, debug_draw_view_index, debug_draw_freeze_inputs, debug_draw_disable_blends, debug_draw_replaced_pass};
+            return {debug_draw_pipeline, debug_draw_shader_hash, debug_draw_pipeline_target_instance, debug_draw_pipeline_target_thread, debug_draw_mode, debug_draw_view_index, debug_draw_freeze_inputs, debug_draw_disable_blends, debug_draw_replaced_pass, debug_draw_custom_pass};
          }
          void Apply() const
          {
             debug_draw_pipeline = pipeline;
             debug_draw_shader_hash = shader_hash;
+            debug_draw_custom_pass = custom_pass;
             debug_draw_pipeline_target_instance = target_instance;
             debug_draw_pipeline_target_thread = target_thread;
             debug_draw_mode = mode;
@@ -220,6 +222,7 @@ namespace Mcp
          // The pass a readback targets (see "ResolveTarget")
          uint64_t pipeline_handle = 0;
          uint32_t shader_hash = 0;
+         uint32_t custom_pass = 0; // A Luma pass instead of a game pipeline, see "debug_draw_custom_pass"
          const char* stage = "";
          int32_t instance = 0;
          std::thread::id thread;
@@ -375,6 +378,12 @@ namespace Mcp
          const auto it = custom_shaders_cache.find(shader_hash);
          return it != custom_shaders_cache.end() ? it->second : nullptr;
       }
+      // Needs "s_mutex_loading" (shared). Luma's own shaders by their "native_shaders_definitions" key.
+      const Shader::CachedCustomShader* FindNativeShader(uint32_t native_shader_hash)
+      {
+         const auto it = custom_shaders_cache.find(Shader::ShiftHash32ToHash64(native_shader_hash));
+         return it != custom_shaders_cache.end() ? it->second : nullptr;
+      }
 
       void WriteCustomShader(JsonWriter* w, const Shader::CachedCustomShader& custom_shader, bool with_disasm)
       {
@@ -402,7 +411,11 @@ namespace Mcp
          if (IsDeferred(entry))
             w->Field("deferred", true);
          if (entry.type == TraceDrawCallData::TraceDrawCallType::Custom)
+         {
             w->Field("name", entry.custom_name);
+            if (entry.custom_stage != reshade::api::shader_stage(0))
+               w->Field("stage", entry.custom_stage == reshade::api::shader_stage::compute ? "CS" : "PS");
+         }
          if (entry.type == TraceDrawCallData::TraceDrawCallType::Shader)
          {
             if (const auto* pipeline = FindPipeline(device_data, entry.pipeline_handle))
@@ -419,6 +432,10 @@ namespace Mcp
                if (pipeline->cloned || entry.drawn_origin != Shader::CloneOrigin::None)
                   w->Field("variant", EnumName(clone_origin_names, size_t(entry.drawn_origin)));
             }
+            if (entry.cancelled_or_replaced)
+               w->Field("cancelled_or_replaced", true);
+            if (!entry.replaced_slots.empty())
+               w->Field("updated", true);
             else
             {
                w->Field("stage", "unknown"); // Destroyed since the capture
@@ -536,6 +553,13 @@ namespace Mcp
             }
 #endif
          }
+         else if (entry.custom_shader_hash != 0)
+         {
+            if (const auto definition = native_shaders_definitions.find(entry.custom_shader_hash); definition != native_shaders_definitions.end())
+               w->Field("luma_shader", definition->second.file_name);
+            if (const auto* custom_shader = FindNativeShader(entry.custom_shader_hash))
+               WriteCustomShader(w, *custom_shader, false);
+         }
 
          const auto& dd = entry.draw_dispatch_data;
          w->Key("draw").BeginObject();
@@ -548,7 +572,7 @@ namespace Mcp
 
          w->Field("depth_state", EnumName(TraceDrawCallData::depth_state_names, size_t(entry.depth_state)));
          w->Field("stencil_state", EnumName(TraceDrawCallData::depth_state_names, size_t(entry.stencil_state)));
-         if (pipeline && pipeline->HasPixelShader())
+         if ((pipeline && pipeline->HasPixelShader()) || entry.custom_stage == reshade::api::shader_stage::pixel)
             WriteRenderState(w, entry);
          if (entry.type == TraceDrawCallData::TraceDrawCallType::CopyResource)
          {
@@ -572,9 +596,9 @@ namespace Mcp
                w->Field("debug_name", debug_name);
          };
 
-         // Entries without a shader (copies, clears, CPU writes, Luma's passes) record whole resources instead of views: the target in
+         // Entries without a shader (copies, clears, CPU writes, markers) record whole resources instead of views: the target in
          // "rt_*[0]" (copy destination) and the source in "sr_*[0]" (copy source, bound buffer)
-         if (entry.type != TraceDrawCallData::TraceDrawCallType::Shader)
+         if (entry.type != TraceDrawCallData::TraceDrawCallType::Shader && entry.custom_stage == reshade::api::shader_stage(0))
          {
             const auto write_whole_resource = [&](const char* key, DXGI_FORMAT format, const uint4& size, const std::string& type, const std::string& hash)
             {
@@ -636,6 +660,46 @@ namespace Mcp
             w->Key("address_ids").BeginArray().Value(uint32_t(entry.samplers_address_u[i])).Value(uint32_t(entry.samplers_address_v[i])).Value(uint32_t(entry.samplers_address_w[i])).EndArray();
             w->Field("mip_lod_bias", entry.samplers_mip_lod_bias[i]); });
 
+         // Slots a draw callback changed ("Trace::UpdateDraw()"), with what it bound
+         if (const auto& replaced = entry.replaced_state; replaced && !entry.replaced_slots.empty())
+         {
+            constexpr const char* slot_kind_names[] = {"rtv", "srv", "uav", "dsv", "cb", "sampler"};
+            constexpr const char* slot_change_names[] = {"added", "replaced", "unbound"};
+            w->Key("replaced_slots").BeginArray();
+            for (const auto& [kind, slot, change] : entry.replaced_slots)
+            {
+               w->BeginObject().Field("kind", EnumName(slot_kind_names, size_t(kind))).Field("slot", slot).Field("change", EnumName(slot_change_names, size_t(change)));
+               if (change != TraceDrawCallData::SlotChange::Unbound)
+               {
+                  w->Key("replacement").BeginObject();
+                  switch (kind)
+                  {
+                  case TraceDrawCallData::SlotKind::RTV:
+                     write_resource(replaced->rt_format[slot], replaced->rtv_format[slot], replaced->rt_size[slot], replaced->rtv_size[slot], replaced->rtv_mip[slot], replaced->rt_type_name[slot], replaced->rt_hash[slot], replaced->rt_debug_name[slot]);
+                     break;
+                  case TraceDrawCallData::SlotKind::SRV:
+                     write_resource(replaced->sr_format[slot], replaced->srv_format[slot], replaced->sr_size[slot], replaced->srv_size[slot], replaced->srv_mip[slot], replaced->sr_type_name[slot], replaced->sr_hash[slot], replaced->sr_debug_name[slot]);
+                     break;
+                  case TraceDrawCallData::SlotKind::UAV:
+                     write_resource(replaced->ua_format[slot], replaced->uav_format[slot], replaced->ua_size[slot], replaced->uav_size[slot], replaced->uav_mip[slot], replaced->ua_type_name[slot], replaced->ua_hash[slot], replaced->ua_debug_name[slot]);
+                     break;
+                  case TraceDrawCallData::SlotKind::DSV:
+                     w->Format("format", replaced->ds_format).Format("view_format", replaced->dsv_format).Field("resource", replaced->ds_hash);
+                     break;
+                  case TraceDrawCallData::SlotKind::CB:
+                     w->Field("resource", replaced->cb_hash[slot]);
+                     break;
+                  case TraceDrawCallData::SlotKind::Sampler:
+                     w->Field("filter", GetFilterName(replaced->samplers_filter[slot])).Field("mip_lod_bias", replaced->samplers_mip_lod_bias[slot]);
+                     break;
+                  }
+                  w->EndObject();
+               }
+               w->EndObject();
+            }
+            w->EndArray();
+         }
+
          if (!entry.input_layout_hash.empty())
          {
             w->Field("input_layout", entry.input_layout_hash);
@@ -663,6 +727,7 @@ namespace Mcp
          bool include_bindings;
          bool include_buffer_writes;
          bool replaced_only;
+         bool cancelled_only;
          const std::string* type;
          std::optional<uint32_t> hash;
          const std::string* stage;
@@ -676,6 +741,8 @@ namespace Mcp
             if ((pipeline && pipeline->HasVertexShader() && !include_vs) || ((entry.type == Type::BindPipeline || entry.type == Type::BindResource) && !include_bindings) || (entry.type == Type::CPUWrite && entry.rt_type_name[0] == "Buffer" && !include_buffer_writes))
                return false;
             if ((type && *type != EnumName(trace_type_names, size_t(entry.type))) || (hash && (!pipeline || pipeline->shader_hashes[0] != *hash)) || (stage && (!pipeline || _stricmp(stage->c_str(), pipeline->StageName()) != 0)) || (replaced_only && (!pipeline || !IsReplaced(*pipeline))))
+               return false;
+            if (cancelled_only && !entry.cancelled_or_replaced)
                return false;
             if (variant && (entry.type != Type::Shader || *variant != EnumName(clone_origin_names, size_t(entry.drawn_origin))))
                return false;
@@ -702,14 +769,29 @@ namespace Mcp
                return false;
             }
             const TraceDrawCallData& entry = cmd_list_data.trace_draw_calls_data[index];
+            const bool deferred = IsDeferred(entry);
+            job->thread = deferred ? entry.thread_id : std::thread::id();
+            if (entry.type == TraceDrawCallData::TraceDrawCallType::Custom && entry.custom_stage != reshade::api::shader_stage(0))
+            {
+               // Instances of a Luma pass are counted by name, see "Trace::RecordCustomPass()"
+               job->instance = 0;
+               for (size_t i = 0; i < index; i++)
+               {
+                  const auto& other = cmd_list_data.trace_draw_calls_data[i];
+                  if (other.type == TraceDrawCallData::TraceDrawCallType::Custom && strcmp(other.custom_name, entry.custom_name) == 0 && (!deferred || other.thread_id == entry.thread_id))
+                     job->instance++;
+               }
+               job->custom_pass = Math::CompileTimeStringHash(entry.custom_name);
+               job->shader_hash = entry.custom_shader_hash;
+               job->stage = entry.custom_stage == reshade::api::shader_stage::compute ? "CS" : "PS";
+               return true;
+            }
             pipeline = entry.type == TraceDrawCallData::TraceDrawCallType::Shader ? FindPipeline(device_data, entry.pipeline_handle) : nullptr;
             if (!pipeline)
             {
-               job->error = std::format("Trace index {} is not a shader pass with a live pipeline", index);
+               job->error = std::format("Trace index {} is not a shader pass with a live pipeline, or a Luma pass", index);
                return false;
             }
-            const bool deferred = IsDeferred(entry);
-            job->thread = deferred ? entry.thread_id : std::thread::id();
             job->instance = 0;
             for (size_t i = 0; i < index; i++)
             {
@@ -896,7 +978,7 @@ namespace Mcp
       class SrTap final : public SR::SuperResolutionImpl
       {
       public:
-         explicit SrTap(std::unique_ptr<SR::SuperResolutionImpl> wrapped) : inner(std::move(wrapped))
+         SrTap(SR::Type type, std::unique_ptr<SR::SuperResolutionImpl> wrapped) : type(type), inner(std::move(wrapped))
          {
          }
 
@@ -941,7 +1023,7 @@ namespace Mcp
                      captured.textures.emplace_back(sr_resource_names[i], CloneResource(native_device.get(), command_list, resources[i]));
             }
             captured.draw_succeeded = inner->Draw(data, command_list, draw_data);
-            QueueInjectedPassTrace(command_list, "Luma Super Resolution", draw_data.output_color);
+            Trace::Marker(command_list, SR::GetTypeName(type), draw_data.output_color);
             if (capture && draw_data.output_color)
                captured.textures.emplace_back(sr_resource_names[std::size(resources) - 1], CloneResource(native_device.get(), command_list, draw_data.output_color));
             {
@@ -1057,6 +1139,7 @@ namespace Mcp
             bool succeeded = false;
          };
 
+         SR::Type type;
          std::unique_ptr<SR::SuperResolutionImpl> inner;
          std::atomic<uint32_t> init_count = 0;
          std::atomic<uint32_t> deinit_count = 0;
@@ -1297,6 +1380,7 @@ namespace Mcp
             .include_bindings = job->BoolArg("include_bindings", false),
             .include_buffer_writes = job->BoolArg("include_buffer_writes", false),
             .replaced_only = job->BoolArg("replaced_only", false),
+            .cancelled_only = job->BoolArg("cancelled_only", false),
             .type = job->Arg("type"),
             .hash = job->HashArg("hash"),
             .stage = job->Arg("stage"),
@@ -1406,7 +1490,7 @@ namespace Mcp
 
             // Restored in "OnPresent" once the job finishes. Blends stay on and inputs unfrozen, so the pass runs as the game drew it.
             job->saved_debug_draw = DebugDrawSelection::Current();
-            DebugDrawSelection{job->pipeline_handle, job->shader_hash, job->instance, job->thread, mode->second, int32_t(job->IntArg("slot", 0)), false, false, job->BoolArg("replaced", true)}.Apply();
+            DebugDrawSelection{job->pipeline_handle, job->custom_pass ? 0 : job->shader_hash, job->instance, job->thread, mode->second, int32_t(job->IntArg("slot", 0)), false, false, job->BoolArg("replaced", true), job->custom_pass}.Apply();
             device_data.debug_draw_texture = nullptr;
             job->result.Hash("hash", job->shader_hash).Field("instance", job->instance).Field("view", mode->first).Field("slot", debug_draw_view_index);
             job->phase = 1;
@@ -1426,9 +1510,9 @@ namespace Mcp
          {
             if (!ResolveTarget(job, device_data, cmd_list_data))
                return true;
-            if (job->stage == std::string_view("GS") || job->stage == std::string_view("XS"))
+            if (job->stage == std::string_view("GS") || job->stage == std::string_view("XS") || job->custom_pass)
             {
-               job->error = std::format("Constant buffer tracking doesn't support {} passes", job->stage);
+               job->error = std::format("Constant buffer tracking doesn't support {} passes", job->custom_pass ? "Luma" : job->stage);
                return true;
             }
             const int64_t slot = job->IntArg("slot", 0);
@@ -2589,31 +2673,9 @@ namespace Mcp
          { return dev_value.owner == owner; });
    }
 
-   void Annotate(CommandListData& cmd_list_data, std::string_view text, std::optional<int64_t> value)
+   std::unique_ptr<SR::SuperResolutionImpl> TapSuperResolution(SR::Type type, std::unique_ptr<SR::SuperResolutionImpl> implementation)
    {
-      if (!trace_running) // Cheap early out for the hot path, rechecked under the lock
-         return;
-      const std::shared_lock lock_trace(s_mutex_trace);
-      if (!trace_running)
-         return;
-      const std::unique_lock lock_trace_2(cmd_list_data.mutex_trace);
-      // Games can push their own custom entries after the shader ones
-      for (auto it = cmd_list_data.trace_draw_calls_data.rbegin(); it != cmd_list_data.trace_draw_calls_data.rend(); ++it)
-      {
-         if (it->type != TraceDrawCallData::TraceDrawCallType::Shader)
-            continue;
-         if (!it->note.empty())
-            it->note += ' ';
-         it->note += text;
-         if (value)
-            std::format_to(std::back_inserter(it->note), "={}", *value);
-         return;
-      }
-   }
-
-   std::unique_ptr<SR::SuperResolutionImpl> TapSuperResolution(std::unique_ptr<SR::SuperResolutionImpl> implementation)
-   {
-      return std::make_unique<SrTap>(std::move(implementation));
+      return std::make_unique<SrTap>(type, std::move(implementation));
    }
 
    void Start()

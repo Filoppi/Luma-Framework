@@ -26,9 +26,6 @@
     <ClCompile Include="interop\D3D12Interop.cpp">
       <Filter>Interop</Filter>
     </ClCompile>
-    <ClCompile Include="includes\instance_data.cpp">
-      <Filter>Includes</Filter>
-    </ClCompile>
   </ItemGroup>
   <ItemGroup>
     <Filter Include="DLSS">
@@ -159,6 +156,9 @@
     <ClInclude Include="includes\mcp.hpp">
       <Filter>Includes</Filter>
     </ClInclude>
+    <ClInclude Include="includes\trace.hpp">
+      <Filter>Includes</Filter>
+    </ClInclude>
     <ClInclude Include="includes\resource_upgrades.hpp">
       <Filter>Includes</Filter>
     </ClInclude>
@@ -168,6 +168,9 @@
       <Filter>Includes</Filter>
     </None>
     <None Include="includes\mcp_server.inl">
+      <Filter>Includes</Filter>
+    </None>
+    <None Include="includes\trace.inl">
       <Filter>Includes</Filter>
     </None>
   </ItemGroup>

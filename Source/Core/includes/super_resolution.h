@@ -58,6 +58,8 @@ namespace SR
 			return "DLSS";
 		case Type::FSR:
 			return "FSR";
+		case Type::FSR_4:
+			return "FSR 4";
 		case Type::None:
 			break;
 		}

@@ -273,23 +273,7 @@ public:
          // Avoids nans spreading over the transparency phase and TAA etc (character shaders occasionally spit out some)
          // Note: this is likely not needed anymore given we patch (almost) all shaders that draw on the scene buffer to avoid nans.
          if (test_index != 18)
-            SanitizeNaNs(native_device, native_device_context, game_device_data.scene_color_rtv.get(), device_data, game_device_data.sanitize_nans_data, true);
-
-#if DEVELOPMENT
-         const std::shared_lock lock_trace(s_mutex_trace);
-         if (trace_running)
-         {
-            const std::unique_lock lock_trace_2(cmd_list_data.mutex_trace);
-            TraceDrawCallData trace_draw_call_data;
-            trace_draw_call_data.type = TraceDrawCallData::TraceDrawCallType::Custom;
-            trace_draw_call_data.command_list = native_device_context;
-
-            trace_draw_call_data.custom_name = "Sanitize Scene Color NaNs";
-            // Re-use the RTV data for simplicity
-            GetResourceInfo(game_device_data.scene_color_rtv.get(), trace_draw_call_data.rt_size[0], trace_draw_call_data.rt_format[0], &trace_draw_call_data.rt_type_name[0], &trace_draw_call_data.rt_hash[0]);
-            cmd_list_data.trace_draw_calls_data.insert(cmd_list_data.trace_draw_calls_data.end() - 1, trace_draw_call_data); // Add this one before any other
-         }
-#endif
+            SanitizeNaNs(native_device, native_device_context, game_device_data.scene_color_rtv.get(), device_data, game_device_data.sanitize_nans_data, true, "Sanitize Scene Color NaNs");
 
          // Restore the compute state first, given it might be considered as output and take over SR bindings of the same resource
          compute_state_stack.Restore(native_device_context);

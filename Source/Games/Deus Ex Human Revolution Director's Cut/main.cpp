@@ -854,27 +854,12 @@ public:
                   // This game has hull shaders, we need to restore that too, and temporarily disable it!
                   native_device_context->HSGetShader(&hs, nullptr, nullptr);
 
-                  DrawCustomPixelShaderPass(native_device, native_device_context, game_device_data.lighting_buffer_rtv.get(), device_data, Math::CompileTimeStringHash("Modulate Lighting"), game_device_data.modulate_lighting_buffer_pass_data);
+                  DrawCustomPixelShaderPass(native_device, native_device_context, game_device_data.lighting_buffer_rtv.get(), device_data, Math::CompileTimeStringHash("Modulate Lighting"), game_device_data.modulate_lighting_buffer_pass_data, "Modulate Lighting");
                   game_device_data.has_modulated_lighting = true;
 
                   native_device_context->HSSetShader(hs.get(), nullptr, 0);
 
                   draw_state_stack.Restore(native_device_context);
-
-#if DEVELOPMENT
-                  const std::shared_lock lock_trace(s_mutex_trace);
-                  if (trace_running)
-                  {
-                     const std::unique_lock lock_trace_2(cmd_list_data.mutex_trace);
-                     TraceDrawCallData trace_draw_call_data;
-                     trace_draw_call_data.type = TraceDrawCallData::TraceDrawCallType::Custom;
-                     trace_draw_call_data.command_list = native_device_context;
-                     trace_draw_call_data.custom_name = "Modulate Lighting";
-                     // Re-use the RTV data for simplicity
-                     GetResourceInfo(game_device_data.lighting_buffer_rtv.get(), trace_draw_call_data.rt_size[0], trace_draw_call_data.rt_format[0], &trace_draw_call_data.rt_type_name[0], &trace_draw_call_data.rt_hash[0]);
-                     cmd_list_data.trace_draw_calls_data.insert(cmd_list_data.trace_draw_calls_data.end() - 1, trace_draw_call_data); // Add this one before any other
-                  }
-#endif
                }
 
                if (dsv)
@@ -931,24 +916,9 @@ public:
                      draw_state_stack.Cache(native_device_context, device_data.uav_max_count);
 
                      game_device_data.has_drawn_opaque_geometry = true;
-                     SanitizeNaNs(native_device, native_device_context, rtv.get(), device_data, game_device_data.sanitize_nans_data);
+                     SanitizeNaNs(native_device, native_device_context, rtv.get(), device_data, game_device_data.sanitize_nans_data, false, "Sanitize Scene Color NaNs");
 
                      draw_state_stack.Restore(native_device_context);
-
-#if DEVELOPMENT
-                     const std::shared_lock lock_trace(s_mutex_trace);
-                     if (trace_running)
-                     {
-                        const std::unique_lock lock_trace_2(cmd_list_data.mutex_trace);
-                        TraceDrawCallData trace_draw_call_data;
-                        trace_draw_call_data.type = TraceDrawCallData::TraceDrawCallType::Custom;
-                        trace_draw_call_data.command_list = native_device_context;
-                        trace_draw_call_data.custom_name = "Sanitize Scene Color NaNs";
-                        // Re-use the RTV data for simplicity
-                        GetResourceInfo(game_device_data.swapchain_rtv.get(), trace_draw_call_data.rt_size[0], trace_draw_call_data.rt_format[0], &trace_draw_call_data.rt_type_name[0], &trace_draw_call_data.rt_hash[0]);
-                        cmd_list_data.trace_draw_calls_data.insert(cmd_list_data.trace_draw_calls_data.end() - 1, trace_draw_call_data); // Add this one before any other
-                     }
-#endif
                   }
 
                   // To draw emissive objects, the game was setting the source and target blends to use the blend factor.

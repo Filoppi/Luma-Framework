@@ -199,6 +199,7 @@
 #include "includes/instance_data.h"
 #include "includes/game.h"
 #include "includes/com_ptr.h"
+#include "includes/trace.hpp"
 #if DEVELOPMENT
 #include "includes/mcp.hpp"
 #endif
@@ -287,6 +288,7 @@ namespace
    bool trace_ignore_vertex_shaders = true;
    bool trace_ignore_buffer_writes = true;
    bool trace_ignore_bindings = true;
+   bool trace_ignore_custom_draws = true; // Luma passes ("Trace::Draw()")
    bool trace_ignore_non_bound_shader_referenced_resources = true;
    bool allow_replace_draw_nans = false;
 #endif // DEVELOPMENT
@@ -742,8 +744,10 @@ namespace
       uint64_t debug_draw_pipeline = 0; // In DX11 shaders and pipelines are the same thing so this is kinda useless (excluding the rare case where multiple pipelines (compiled shader objects) were based on the same shader, and hence had the same hash)
       int32_t debug_draw_pipeline_target_instance = -1;
       std::thread::id debug_draw_pipeline_target_thread = std::thread::id(); // Filter target instances by thread, which would hopefully reliably match the command lists, over multiple frames
+      uint32_t debug_draw_custom_pass = 0; // A Luma pass instead of a game pipeline, by the hash of its "Trace::Draw()" name
 
       std::atomic<int32_t> debug_draw_pipeline_instance = 0; // Theoretically should be within "CommandListData" but this should work for most cases
+      std::atomic<int32_t> debug_draw_custom_pass_instance = 0;
 
       DebugDrawMode debug_draw_mode = DebugDrawMode::Custom;
       bool debug_draw_freeze_inputs = false; // Allows freezing the inputs/state of this pass, allowing you to edit the shader and seeing the results live. This is bundled with the textures debug draw feature because generally you don't need to freeze the inputs of any prior pass if not the very same one you are analyzing (or iterating upon). If the game stopped drawing the shader, debugging would also stop.
@@ -3934,59 +3938,10 @@ namespace
                            }
 #endif
 
-                           // RTVs
-                           for (UINT i = 0; i < shader_desc.OutputParameters; ++i)
-                           {
-                              D3D11_SIGNATURE_PARAMETER_DESC shader_output_desc;
-                              hr = shader_reflector->GetOutputParameterDesc(i, &shader_output_desc);
-                              if (SUCCEEDED(hr) && strcmp(shader_output_desc.SemanticName, "SV_Target") == 0)
-                              {
-                                 ASSERT_ONCE(shader_output_desc.SemanticIndex == shader_output_desc.Register && shader_output_desc.SemanticIndex < D3D11_SIMULTANEOUS_RENDER_TARGET_COUNT);
-                                 cached_shader->rtvs[shader_output_desc.SemanticIndex] = true;
-                                 found_any_rtvs = true;
-                              }
-                           }
-
-                           // SRVs and UAVs and samplers (it works for compute shaders too)
-                           for (UINT i = 0; i < shader_desc.BoundResources; ++i)
-                           {
-                              D3D11_SHADER_INPUT_BIND_DESC bind_desc;
-                              hr = shader_reflector->GetResourceBindingDesc(i, &bind_desc);
-                              if (SUCCEEDED(hr))
-                              {
-                                 for (UINT j = 0; j < bind_desc.BindCount; ++j)
-                                 {
-                                    if (bind_desc.Type == D3D_SIT_TEXTURE)
-                                    {
-                                       ASSERT_ONCE(bind_desc.BindPoint + j < D3D11_COMMONSHADER_INPUT_RESOURCE_SLOT_COUNT);
-                                       cached_shader->srvs[bind_desc.BindPoint + j] = true;
-                                       found_any_other_bindings = true;
-                                    }
-                                    else if (bind_desc.Type == D3D_SIT_UAV_RWTYPED)
-                                    {
-                                       ASSERT_ONCE(bind_desc.BindPoint + j < D3D11_1_UAV_SLOT_COUNT);
-                                       cached_shader->uavs[bind_desc.BindPoint + j] = true;
-                                       found_any_other_bindings = true;
-                                    }
-                                    // Verify that the cbuffer index and bind points match (they should always do)
-                                    else if (bind_desc.Type == D3D_SIT_CBUFFER)
-                                    {
-                                       ASSERT_ONCE(bind_desc.BindPoint + j < D3D11_COMMONSHADER_CONSTANT_BUFFER_API_SLOT_COUNT);
-                                       //ASSERT_ONCE(cached_shader->cbs[bind_desc.BindPoint + j]);
-                                       cached_shader->cbs[bind_desc.BindPoint + j] = true;
-                                    }
-                                    // These are always valid, even when the other ones aren't, so don't set "found_any_other_bindings" to true
-                                    else if (bind_desc.Type == D3D_SIT_SAMPLER)
-                                    {
-                                       ASSERT_ONCE(bind_desc.BindPoint + j < D3D11_COMMONSHADER_SAMPLER_SLOT_COUNT);
-                                       cached_shader->samplers[bind_desc.BindPoint + j] = true;
-                                    }
-                                 }
-                              }
-                           }
+                           Trace::ReflectShaderSlots(shader_reflector.get(), shader_desc, *cached_shader, found_any_rtvs, found_any_other_bindings);
 
                            // TODO: does this issue still happen now that we added more early out checks?
-                           // Note: sometimes the "GetResourceBindingDesc" above fails (it gives success, but then returns no bindings)... It might be related to "D3DCOMPILER_STRIP_REFLECTION_DATA",
+                           // Note: sometimes the "GetResourceBindingDesc" in "Trace::ReflectShaderSlots()" fails (it gives success, but then returns no bindings)... It might be related to "D3DCOMPILER_STRIP_REFLECTION_DATA",
                            // but we don't know for sure nor we can retrieve that flag, we wrote some heuristics to guess when it failed, then we pretend all bound resources are "valid" (to show them in the debug data).
                            if (found_any_other_bindings || (shader_desc.FloatInstructionCount != 0 || shader_desc.IntInstructionCount != 0 || shader_desc.UintInstructionCount != 0))
                            {
@@ -5651,22 +5606,7 @@ namespace
             }
 
             // Note: we don't really need to re-apply our custom cbuffers in most games (e.g. Prey), they are on indexes that are never used by the game's code
-            DrawCustomPixelShader(native_device_context, device_data.default_depth_stencil_state.get(), device_data.default_blend_state.get(), nullptr, device_data.native_vertex_shaders[CompileTimeStringHash("Copy VS")].get(), device_data.native_pixel_shaders[CompileTimeStringHash("Display Composition")].get(), device_data.display_composition_srv.get(), target_resource_texture_view.get(), target_desc.Width, target_desc.Height, false);
-
-#if DEVELOPMENT
-            {
-               const std::shared_lock lock_trace(s_mutex_trace);
-               if (trace_running)
-               {
-                  const std::unique_lock lock_trace_2(cmd_list_data.mutex_trace);
-                  TraceDrawCallData trace_draw_call_data;
-                  trace_draw_call_data.type = TraceDrawCallData::TraceDrawCallType::Custom;
-                  trace_draw_call_data.command_list = native_device_context;
-                  trace_draw_call_data.custom_name = "Luma Display Composition";
-                  cmd_list_data.trace_draw_calls_data.push_back(trace_draw_call_data);
-               }
-            }
-#endif // DEVELOPMENT
+            DrawCustomPixelShader(native_device_context, device_data.default_depth_stencil_state.get(), device_data.default_blend_state.get(), nullptr, device_data.native_vertex_shaders[CompileTimeStringHash("Copy VS")].get(), device_data.native_pixel_shaders[CompileTimeStringHash("Display Composition")].get(), device_data.display_composition_srv.get(), target_resource_texture_view.get(), target_desc.Width, target_desc.Height, false, "Luma Display Composition");
 
             if (ui_needs_composition)
             {
@@ -5727,6 +5667,7 @@ namespace
          // Leave "debug_draw_texture_format" and "debug_draw_texture_size", we need that in ImGUI (we'd need to clear it after ImGUI if necessary, but we skip drawing it if the texture isn't valid)
       }
       debug_draw_pipeline_instance = 0;
+      debug_draw_custom_pass_instance = 0;
 
 #if 0 // Optionally clear it every frame, to remove it if it wasn't found (this needs to be done elsewhere for now, because we print it below)
       device_data.track_buffer_data = {};
@@ -5753,11 +5694,11 @@ namespace
          if (trace_running && device_data.primary_command_list_data)
          {
             const std::unique_lock lock_trace_2(device_data.primary_command_list_data->mutex_trace);
-            MoveInjectedPassTraces(&device_data.primary_command_list_data->trace_draw_calls_data, device_data.primary_command_list.get());
+            Trace::MoveQueued(device_data.primary_command_list_data->trace_draw_calls_data, device_data.primary_command_list.get());
          }
          else
          {
-            injected_pass_traces.clear();
+            Trace::ClearQueued();
          }
       }
 #endif
@@ -6005,19 +5946,55 @@ namespace
             trace_start_index = cmd_list_data.trace_draw_calls_data.size();
             if (is_dispatch)
             {
-               AddTraceDrawCallData(cmd_list_data.trace_draw_calls_data, device_data, native_device_context, cmd_list_data.pipeline_state_original_compute_shader.handle, shader_cache, last_draw_dispatch_data, device_data.resource_upgrades.original_resource_views_to_mirrored_upgraded_resource_views);
+               Trace::AddDrawCall(cmd_list_data.trace_draw_calls_data, device_data, native_device_context, cmd_list_data.pipeline_state_original_compute_shader.handle, last_draw_dispatch_data);
             }
             else
             {
-               AddTraceDrawCallData(cmd_list_data.trace_draw_calls_data, device_data, native_device_context, cmd_list_data.pipeline_state_original_vertex_shader.handle, shader_cache, last_draw_dispatch_data, device_data.resource_upgrades.original_resource_views_to_mirrored_upgraded_resource_views);
+               Trace::AddDrawCall(cmd_list_data.trace_draw_calls_data, device_data, native_device_context, cmd_list_data.pipeline_state_original_vertex_shader.handle, last_draw_dispatch_data);
                if (cmd_list_data.pipeline_state_original_pixel_shader.handle != 0) // Somehow this can happen (e.g. query tests don't require pixel shaders)
                {
-                  AddTraceDrawCallData(cmd_list_data.trace_draw_calls_data, device_data, native_device_context, cmd_list_data.pipeline_state_original_pixel_shader.handle, shader_cache, last_draw_dispatch_data, device_data.resource_upgrades.original_resource_views_to_mirrored_upgraded_resource_views);
+                  Trace::AddDrawCall(cmd_list_data.trace_draw_calls_data, device_data, native_device_context, cmd_list_data.pipeline_state_original_pixel_shader.handle, last_draw_dispatch_data);
                }
             }
+            // Until the callbacks finish, see "Trace::UpdateDraw()"
+            cmd_list_data.trace_current_draw = {*trace_start_index, cmd_list_data.trace_draw_calls_data.size() - *trace_start_index};
          }
       }
 #endif //DEVELOPMENT
+
+#if DEVELOPMENT
+      // On every way out of the draw callbacks: stamps the variant the draw's shaders ran with (see "Shader::UsePipelineVariant()"), and moves the
+      // passes queued meanwhile into the trace: before the draw if it went through (they ran first), after it otherwise (they replaced it)
+      const auto finish_trace = [&](bool draw_went_through)
+      {
+         const std::shared_lock lock_trace(s_mutex_trace);
+         if (!trace_running)
+         {
+            Trace::ClearQueued();
+            return;
+         }
+         const std::unique_lock lock_trace_2(cmd_list_data.mutex_trace);
+         auto& entries = cmd_list_data.trace_draw_calls_data;
+         if (!trace_start_index)
+         {
+            Trace::MoveQueued(entries, native_device_context);
+            return;
+         }
+         auto& [first, count] = cmd_list_data.trace_current_draw;
+         for (size_t i = first; i < first + count && i < entries.size(); i++)
+         {
+            auto& entry = entries[i];
+            if (entry.type != TraceDrawCallData::TraceDrawCallType::Shader) continue;
+            if (entry.pipeline_handle == cmd_list_data.pipeline_state_original_compute_shader.handle) entry.drawn_origin = Shader::GetShaderOrigin(cmd_list_data, reshade::api::shader_stage::compute);
+            else if (entry.pipeline_handle == cmd_list_data.pipeline_state_original_vertex_shader.handle) entry.drawn_origin = Shader::GetShaderOrigin(cmd_list_data, reshade::api::shader_stage::vertex);
+            else if (entry.pipeline_handle == cmd_list_data.pipeline_state_original_pixel_shader.handle) entry.drawn_origin = Shader::GetShaderOrigin(cmd_list_data, reshade::api::shader_stage::pixel);
+         }
+         if (draw_went_through)
+            first += Trace::MoveQueued(entries, native_device_context, first);
+         else
+            Trace::MoveQueued(entries, native_device_context);
+      };
+#endif
 
       const bool mod_active = IsModActive(device_data);
 
@@ -6060,12 +6037,7 @@ namespace
                   do_ui = true;
 
 #if DEVELOPMENT
-                  const std::shared_lock lock_trace(s_mutex_trace);
-                  if (trace_running)
-                  {
-                     const std::unique_lock lock_trace_2(cmd_list_data.mutex_trace);
-                     AddCustomTraceDrawCallData(cmd_list_data.trace_draw_calls_data, native_device_context, "Redirect UI", rtv.get(), true);
-                  }
+                  Trace::Marker(native_device_context, "Redirect UI", rtv.get());
 #endif
                }
                else if (rtv == ui_texture_rtv_const)
@@ -6107,6 +6079,9 @@ namespace
       }
       else if (!is_dispatch && hide_ui && cmd_list_data.is_known_ui_shader_bound)
       {
+#if DEVELOPMENT
+         finish_trace(false);
+#endif
          return true; // Skip draw call
       }
 
@@ -6611,7 +6586,13 @@ namespace
          {
             draw_or_dispatch_override_type = OnDrawOrDispatchCustomPipeline(native_device_context,
                cmd_list_data, device_data, is_dispatch, updated_cbuffers, original_draw_dispatch_func);
-            if (draw_or_dispatch_override_type != DrawOrDispatchOverrideType::None) return true;
+            if (draw_or_dispatch_override_type != DrawOrDispatchOverrideType::None)
+            {
+#if DEVELOPMENT
+               finish_trace(false);
+#endif
+               return true;
+            }
          }
          is_custom_pass = is_dispatch ? cmd_list_data.pipeline_state_has_custom_compute_shader : cmd_list_data.pipeline_state_has_custom_graphics_shader;
          // Use the specific callback if there's one, and fall back on the generic one otherwise.
@@ -6625,27 +6606,7 @@ namespace
          }
 
 #if DEVELOPMENT
-         {
-            const std::shared_lock lock_trace(s_mutex_trace);
-            if (trace_running)
-            {
-               const std::unique_lock lock_trace_2(cmd_list_data.mutex_trace);
-               for (size_t i = trace_start_index.value_or(SIZE_MAX); i < cmd_list_data.trace_draw_calls_data.size(); i++)
-               {
-                  auto& entry = cmd_list_data.trace_draw_calls_data[i];
-                  if (entry.type != TraceDrawCallData::TraceDrawCallType::Shader) continue;
-                  if (entry.pipeline_handle == cmd_list_data.pipeline_state_original_compute_shader.handle) entry.drawn_origin = Shader::GetShaderOrigin(cmd_list_data, reshade::api::shader_stage::compute);
-                  else if (entry.pipeline_handle == cmd_list_data.pipeline_state_original_vertex_shader.handle) entry.drawn_origin = Shader::GetShaderOrigin(cmd_list_data, reshade::api::shader_stage::vertex);
-                  else if (entry.pipeline_handle == cmd_list_data.pipeline_state_original_pixel_shader.handle) entry.drawn_origin = Shader::GetShaderOrigin(cmd_list_data, reshade::api::shader_stage::pixel);
-               }
-               // Luma passes the game drew from its hook (SMAA, RCAS, bloom, SR), after the draw's own entries
-               MoveInjectedPassTraces(&cmd_list_data.trace_draw_calls_data, native_device_context);
-            }
-            else
-            {
-               injected_pass_traces.clear();
-            }
-         }
+         finish_trace(draw_or_dispatch_override_type == DrawOrDispatchOverrideType::None);
 #endif
 
          if (draw_or_dispatch_override_type != DrawOrDispatchOverrideType::None)
@@ -7006,20 +6967,7 @@ namespace
       // TODO: add performance tracing around these
       bool cancelled_or_replaced = OnDrawOrDispatch_Custom<false>(cmd_list, updated_cbuffers, original_draw_dispatch_func);
 #if DEVELOPMENT
-#if 0 // TODO: We should do this manually when replacing each draw call, we don't know if it was replaced or cancelled here
-      {
-         const std::shared_lock lock_trace(s_mutex_trace);
-         if (cancelled_or_replaced && trace_running)
-         {
-            const std::shared_lock lock_generic(s_mutex_generic);
-            const std::unique_lock lock_trace_2(cmd_list_data.mutex_trace);
-            if (cmd_list_data.pipeline_state_original_pixel_shader.handle != 0)
-            {
-               cmd_list_data.trace_draw_calls_data[cmd_list_data.trace_draw_calls_data.size() - 1].skipped = true;
-            }
-         }
-      }
-#endif
+      Trace::EndDraw(cmd_list_data, cancelled_or_replaced);
 
       // First run the draw call (don't delegate it to ReShade) and then copy its output
       if (wants_debug_draw)
@@ -7196,6 +7144,7 @@ namespace
       bool updated_cbuffers = false;
       bool cancelled_or_replaced = OnDrawOrDispatch_Custom<false>(cmd_list, updated_cbuffers, original_draw_dispatch_func);
 #if DEVELOPMENT
+      Trace::EndDraw(cmd_list_data, cancelled_or_replaced);
       // First run the draw call (don't delegate it to ReShade) and then copy its output
       if (wants_debug_draw)
       {
@@ -7335,6 +7284,7 @@ namespace
       bool updated_cbuffers = false;
       bool cancelled_or_replaced = OnDrawOrDispatch_Custom<true>(cmd_list, updated_cbuffers, original_draw_dispatch_func);
 #if DEVELOPMENT
+      Trace::EndDraw(cmd_list_data, cancelled_or_replaced);
       // First run the draw call (don't delegate it to ReShade) and then copy its output
       if (wants_debug_draw)
       {
@@ -7521,6 +7471,7 @@ namespace
          ? OnDrawOrDispatch_Custom<true>(cmd_list, updated_cbuffers, original_draw_dispatch_func)
          : OnDrawOrDispatch_Custom<false>(cmd_list, updated_cbuffers, original_draw_dispatch_func);
 #if DEVELOPMENT
+      Trace::EndDraw(cmd_list_data, cancelled_or_replaced);
       if (wants_debug_draw)
       {
          auto local_debug_draw_pipeline_instance = debug_draw_pipeline_instance.fetch_add(1);
@@ -9601,11 +9552,11 @@ namespace
 
                if (use_scale)
                {
-                  DrawCustomPixelShader(native_device_context, device_data.default_depth_stencil_state.get(), device_data.default_blend_state.get(), device_data.sampler_state_linear.get(), vs_scale.get(), ps_scale.get(), source_resource_texture_view.get(), target_resource_texture_view.get(), target_desc.Width, target_desc.Height, true);
+                  DrawCustomPixelShader(native_device_context, device_data.default_depth_stencil_state.get(), device_data.default_blend_state.get(), device_data.sampler_state_linear.get(), vs_scale.get(), ps_scale.get(), source_resource_texture_view.get(), target_resource_texture_view.get(), target_desc.Width, target_desc.Height, true, "Redirected Copy Resource");
                }
                else
                {
-                  DrawCustomPixelShader(native_device_context, device_data.default_depth_stencil_state.get(), device_data.default_blend_state.get(), nullptr, vs_copy.get(), ps_copy.get(), source_resource_texture_view.get(), target_resource_texture_view.get(), target_desc.Width, target_desc.Height, true);
+                  DrawCustomPixelShader(native_device_context, device_data.default_depth_stencil_state.get(), device_data.default_blend_state.get(), nullptr, vs_copy.get(), ps_copy.get(), source_resource_texture_view.get(), target_resource_texture_view.get(), target_desc.Width, target_desc.Height, true, "Redirected Copy Resource");
                }
 
 #if DEVELOPMENT
@@ -9613,19 +9564,10 @@ namespace
                   const std::shared_lock lock_trace(s_mutex_trace);
                   if (trace_running)
                   {
-                     const std::shared_lock lock_generic(s_mutex_generic);
                      CommandListData& cmd_list_data = *cmd_list->get_private_data<CommandListData>();
                      const std::unique_lock lock_trace_2(cmd_list_data.mutex_trace);
-                     const std::lock_guard<std::recursive_mutex> lock_dumping(s_mutex_dumping);
-
-                     // Highlight that the next capture data is redirected
-                     TraceDrawCallData trace_draw_call_data;
-                     trace_draw_call_data.type = TraceDrawCallData::TraceDrawCallType::Custom;
-                     trace_draw_call_data.command_list = native_device_context;
-                     trace_draw_call_data.custom_name = "Redirected Copy Resource";
-                     GetResourceInfo(source_resource_texture.get(), trace_draw_call_data.sr_size[0], trace_draw_call_data.sr_format[0], &trace_draw_call_data.sr_type_name[0], &trace_draw_call_data.sr_hash[0]);
-                     GetResourceInfo(target_resource_texture.get(), trace_draw_call_data.rt_size[0], trace_draw_call_data.rt_format[0], &trace_draw_call_data.rt_type_name[0], &trace_draw_call_data.rt_hash[0]);
-                     cmd_list_data.trace_draw_calls_data.push_back(trace_draw_call_data);
+                     // Copy hooks don't move the queue, and this has to be before the copy's own entry
+                     Trace::MoveQueued(cmd_list_data.trace_draw_calls_data, native_device_context);
                   }
                }
 #endif
@@ -10371,6 +10313,17 @@ namespace
       OverlayLog::Render();
    }
 
+   // "ImGui::SameLine()" before the next button (or checkbox) of a row, unless it doesn't fit in the window anymore: the row wraps
+   void SameLineIfFits(const char* next_label, bool checkbox = false)
+   {
+      const ImGuiStyle& style = ImGui::GetStyle();
+      const float label_width = ImGui::CalcTextSize(next_label, nullptr, true).x;
+      const float width = checkbox ? (ImGui::GetFrameHeight() + style.ItemInnerSpacing.x + label_width) : (label_width + style.FramePadding.x * 2.f);
+      ImGui::SameLine();
+      if (ImGui::GetContentRegionAvail().x < width)
+         ImGui::NewLine();
+   }
+
    // @see https://pthom.github.io/imgui_manual_online/manual/imgui_manual.html
    // This runs within the swapchain "Present()" function, and thus it's thread safe
    void OnRegisterMainOverlay(reshade::api::effect_runtime* runtime)
@@ -10390,12 +10343,12 @@ namespace
          trace_scheduled = true;
       }
 #if 0 // Currently not necessary
-      ImGui::SameLine();
+      SameLineIfFits("List Unique Shaders Only", true);
       ImGui::Checkbox("List Unique Shaders Only", &trace_list_unique_shaders_only);
 #endif
 
 #if !GRAPHICS_ANALYZER
-      ImGui::SameLine();
+      SameLineIfFits("Mod Enabled", true);
       bool mod_enabled = custom_shaders_enabled || !ignore_indirect_upgraded_textures || !ignore_upgraded_samplers;
       if (ImGui::Checkbox("Mod Enabled", &mod_enabled))
       {
@@ -10434,7 +10387,7 @@ namespace
          ImGui::SetTooltip("Unload all compiled and replaced shaders. The numbers shows how many shaders are being replaced at this moment in the game, from the custom loaded/compiled ones.\nThis will also reset many of their debug settings to default.\nYou can use ReShade's Global Effects Toggle Shortcut to toggle these on and off.");
       }
 
-      ImGui::SameLine();
+      SameLineIfFits("Reload Shaders");
 #endif // DEVELOPMENT || TEST
 
       bool needs_compilation = false;
@@ -10496,7 +10449,7 @@ namespace
 #if DEVELOPMENT || TEST
 #if LUMA_PATCH_PROVIDERS != 0
       // Patch-specific unload/reload: reload reads the recipes again and rebuilds their clones.
-      ImGui::SameLine();
+      SameLineIfFits("Unload Patches (000)");
       if (ImGui::Button(std::format("Unload Patches ({})", Patch::CountPatchedClones(device_data)).c_str()))
       {
          needs_unload_patches = true;
@@ -10506,7 +10459,7 @@ namespace
          ImGui::SetTooltip("Unload only the patched shaders (custom shader files are untouched).\nPatch clones are preserved until 'Reload Patches' rebuilds them.");
       }
 
-      ImGui::SameLine();
+      SameLineIfFits("Reload Patches");
       if (ImGui::Button("Reload Patches"))
       {
          needs_load_patches = true;
@@ -10517,7 +10470,7 @@ namespace
       }
 #endif // LUMA_PATCH_PROVIDERS != 0
 
-      ImGui::SameLine();
+      SameLineIfFits("Clean Shaders Cache");
       if (ImGui::Button("Clean Shaders Cache"))
       {
          const std::unique_lock lock_loading(s_mutex_loading);
@@ -10534,7 +10487,7 @@ namespace
 #endif
 
 #if DEVELOPMENT && _DEBUG // Not usually necessary, takes unnecessary space
-      ImGui::SameLine();
+      SameLineIfFits("Auto Load Shaders", true);
       ImGui::PushID("##AutoLoadCheckBox");
       if (ImGui::Checkbox("Auto Load Shaders", &auto_load))
       {
@@ -10553,14 +10506,14 @@ namespace
       ImGui::PopID();
 #endif // DEVELOPMENT
 #if DEVELOPMENT || TEST
-      ImGui::SameLine();
+      SameLineIfFits("Allow Custom Shaders", true);
       ImGui::Checkbox("Allow Custom Shaders", &custom_shaders_enabled);
       if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
       {
          ImGui::SetTooltip("Toggles all the mods custom shaders from applying (without unloading them).\nNote that this might break rendering, only use for testing or vanilla comparison.");
       }
 #if LUMA_PATCH_PROVIDERS != 0
-      ImGui::SameLine();
+      SameLineIfFits("Allow Patches", true);
       ImGui::Checkbox("Allow Patches", &allow_patches);
       if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
       {
@@ -10569,14 +10522,14 @@ namespace
 #endif // LUMA_PATCH_PROVIDERS != 0
 #endif // DEVELOPMENT || TEST
 #if DEVELOPMENT
-      ImGui::SameLine();
+      SameLineIfFits("Compile/Clear All Shaders", true);
       ImGui::Checkbox("Compile/Clear All Shaders", &compile_clear_all_shaders);
       if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
       {
          ImGui::SetTooltip("If enabled, shaders that aren't used by this mod will be compiled or cleared too.\nUseful to test if they compile properly after changes to c++ or shaders code.\nNote that some mods has specific shader defines configurations that we don't have access too here, but they should build nonetheless.");
       }
 
-      ImGui::SameLine();
+      SameLineIfFits("Auto Dump Shaders (000)", true);
       ImGui::PushID("##AutoDumpCheckBox");
       if (ImGui::Checkbox(std::format("Auto Dump Shaders ({})", shader_cache_count).c_str(), &auto_dump))
       {
@@ -10589,7 +10542,7 @@ namespace
 
       if (!auto_dump) // Only show if auto dump is off for convenience. Even if theoretically if we ever turned off auto dump for an instant, we might have missed dumping any shaders.
       {
-         ImGui::SameLine();
+         SameLineIfFits("Force Dump Shaders");
          ImGui::PushID("##DumpShaders");
          // "ALLOW_SHADERS_DUMPING" is expected to be on here
          if (ImGui::Button("Force Dump Shaders"))
@@ -10640,6 +10593,7 @@ namespace
                   debug_draw_pipeline = 0;
                   debug_draw_shader_hash = 0;
                   debug_draw_shader_hash_string[0] = 0;
+                  debug_draw_custom_pass = 0;
                   debug_draw_pipeline_target_instance = -1;
                   debug_draw_pipeline_target_thread = std::thread::id();
 
@@ -10683,15 +10637,17 @@ namespace
                }
             }
 
-            ImGui::SameLine();
+            SameLineIfFits("Show Command List / Thread Info", true);
             list_size_changed |= ImGui::Checkbox("Show Command List / Thread Info", &trace_show_command_list_info);
-            ImGui::SameLine();
+            SameLineIfFits("Ignore Vertex Shaders", true);
             list_size_changed |= ImGui::Checkbox("Ignore Vertex Shaders", &trace_ignore_vertex_shaders);
-            ImGui::SameLine();
+            SameLineIfFits("Ignore Buffer Writes", true);
             list_size_changed |= ImGui::Checkbox("Ignore Buffer Writes", &trace_ignore_buffer_writes);
-            ImGui::SameLine();
+            SameLineIfFits("Ignore Bindings", true);
             list_size_changed |= ImGui::Checkbox("Ignore Bindings", &trace_ignore_bindings);
-            ImGui::SameLine();
+            SameLineIfFits("Ignore Custom Draws", true);
+            list_size_changed |= ImGui::Checkbox("Ignore Custom Draws", &trace_ignore_custom_draws);
+            SameLineIfFits("Ignore Non Bound Shader Referenced Resources", true);
             ImGui::Checkbox("Ignore Non Bound Shader Referenced Resources", &trace_ignore_non_bound_shader_referenced_resources);
 
             if (ImGui::BeginChild("HashList", ImVec2(500, -FLT_MIN), ImGuiChildFlags_ResizeX))
@@ -10731,6 +10687,9 @@ namespace
                         else if (draw_call_data.type == TraceDrawCallData::TraceDrawCallType::BindPipeline
                            || draw_call_data.type == TraceDrawCallData::TraceDrawCallType::BindResource) {
                            if (trace_ignore_bindings) continue;
+                        }
+                        else if (draw_call_data.type == TraceDrawCallData::TraceDrawCallType::Custom) {
+                           if (trace_ignore_custom_draws && draw_call_data.custom_stage != reshade::api::shader_stage(0)) continue;
                         }
                         actual_trace_count++;
                         trace_draw_calls_index_inverse_redirector.emplace_back(index);
@@ -10995,6 +10954,20 @@ namespace
                               text_color = custom_shader->compilation_error ? IM_COL32(255, 0, 0, 255) : IM_COL32(255, 165, 0, 255); // Red for Error, Orange for Warning
                            }
 
+                           if (draw_call_data.cancelled_or_replaced)
+                           {
+                              name << " (cancelled/replaced)";
+                              text_color = IM_COL32(128, 128, 128, 255); // Grey
+                           }
+                           else if (is_replaced_shader_clone && draw_call_data.drawn_origin == Shader::CloneOrigin::None)
+                           {
+                              name << " (ran original)";
+                           }
+                           if (!draw_call_data.replaced_slots.empty())
+                           {
+                              name << " (updated)";
+                           }
+
                            if (same_as_selected)
                            {
 #if 0 // We already do this better above
@@ -11158,6 +11131,8 @@ namespace
                         }
                         else if (draw_call_data.type == TraceDrawCallData::TraceDrawCallType::Custom)
                         {
+                           if (trace_ignore_custom_draws && draw_call_data.custom_stage != reshade::api::shader_stage(0)) continue;
+
                            if (trace_show_command_list_info)
                            {
                               name << std::setfill('0') << std::setw(3) << index << std::setw(0);
@@ -11223,6 +11198,7 @@ namespace
                               device_data.debug_draw_texture_format = DXGI_FORMAT_UNKNOWN;
                               device_data.debug_draw_texture_size = {};
                               debug_draw_pipeline_instance = 0;
+                              debug_draw_custom_pass = 0;
                               debug_draw_pipeline_target_instance = target_instance;
                               debug_draw_pipeline_target_thread = debug_draw_pipeline_instance_filter_by_thread ? draw_call_data.thread_id : std::thread::id();
                               const auto prev_debug_draw_mode = debug_draw_mode;
@@ -11245,6 +11221,41 @@ namespace
                                  debug_draw_mip = 0;
                               }
                               debug_draw_freeze_inputs = false; // Optional, but also unfreeze inputs automatically every time we swap the target pass here
+                           }
+                        }
+                        else if (draw_call_data.type == TraceDrawCallData::TraceDrawCallType::Custom && draw_call_data.custom_stage != reshade::api::shader_stage(0))
+                        {
+                           ImGui::SameLine();
+                           ImGui::SetNextItemAllowOverlap();
+                           if (ImGui::SmallButton(ICON_FK_SEARCH))
+                           {
+                              int32_t target_instance = 0;
+                              for (int32_t i = 0; i < index; i++)
+                              {
+                                 const auto& other = cmd_list_data.trace_draw_calls_data.at(i);
+                                 if (other.type == TraceDrawCallData::TraceDrawCallType::Custom && strcmp(other.custom_name, draw_call_data.custom_name) == 0 && draw_call_data.thread_id == other.thread_id)
+                                    target_instance++;
+                              }
+
+                              debug_draw_pipeline = 0;
+                              debug_draw_shader_hash = 0;
+                              debug_draw_shader_hash_string[0] = 0;
+                              debug_draw_custom_pass = CompileTimeStringHash(draw_call_data.custom_name);
+                              device_data.debug_draw_frozen_draw_state_stack.reset();
+                              device_data.debug_draw_texture = nullptr;
+                              device_data.debug_draw_texture_format = DXGI_FORMAT_UNKNOWN;
+                              device_data.debug_draw_texture_size = {};
+                              debug_draw_custom_pass_instance = 0;
+                              debug_draw_pipeline_target_instance = target_instance;
+                              debug_draw_pipeline_target_thread = debug_draw_pipeline_instance_filter_by_thread ? draw_call_data.thread_id : std::thread::id();
+                              if (debug_draw_mode == DebugDrawMode::Depth || debug_draw_mode == DebugDrawMode::Stencil)
+                              {
+                                 debug_draw_options &= ~(uint32_t)DebugDrawTextureOptionsMask::RedOnly;
+                              }
+                              debug_draw_mode = draw_call_data.custom_stage == reshade::api::shader_stage::compute ? DebugDrawMode::UnorderedAccessView : DebugDrawMode::RenderTarget;
+                              debug_draw_view_index = 0;
+                              debug_draw_mip = 0;
+                              debug_draw_freeze_inputs = false;
                            }
                         }
                         ImGui::PopID();
@@ -11275,6 +11286,982 @@ namespace
             ImGui::EndChild(); // HashList
 
             ImGui::SameLine();
+            // The state a trace entry recorded: a game draw's ("pipeline"), or a Luma pass's without one ("Trace::Draw()").
+            // Slots a draw callback changed ("Trace::UpdateDraw()") show what it bound, the replaced ones can show the game's original too.
+            const auto draw_state_analysis = [&](const TraceDrawCallData& draw_call_data, CachedPipeline* pipeline, bool debug_draw_shader_enabled)
+            {
+               const bool has_vs = pipeline && pipeline->HasVertexShader();
+               const bool has_ps = pipeline ? pipeline->HasPixelShader() : draw_call_data.custom_stage == reshade::api::shader_stage::pixel;
+               const bool has_cs = pipeline ? pipeline->HasComputeShader() : draw_call_data.custom_stage == reshade::api::shader_stage::compute;
+
+               static const TraceDrawCallData* last_draw_call_data = nullptr;
+               static std::set<std::pair<TraceDrawCallData::SlotKind, UINT>> original_slots; // Replaced slots showing the original
+               if (last_draw_call_data != &draw_call_data)
+               {
+                  last_draw_call_data = &draw_call_data;
+                  original_slots.clear();
+               }
+               const auto FindReplacedSlot = [&](TraceDrawCallData::SlotKind kind, UINT slot) -> const TraceDrawCallData::ReplacedSlot*
+               {
+                  const auto replaced_slot = std::ranges::find_if(draw_call_data.replaced_slots, [&](const TraceDrawCallData::ReplacedSlot& replaced_slot)
+                     { return replaced_slot.kind == kind && replaced_slot.slot == slot; });
+                  return replaced_slot != draw_call_data.replaced_slots.end() && draw_call_data.replaced_state ? &*replaced_slot : nullptr;
+               };
+               const auto SlotData = [&](TraceDrawCallData::SlotKind kind, UINT slot) -> const TraceDrawCallData&
+               {
+                  const auto* replaced_slot = FindReplacedSlot(kind, slot);
+                  if (!replaced_slot || replaced_slot->change == TraceDrawCallData::SlotChange::Unbound || original_slots.contains({kind, slot}))
+                     return draw_call_data;
+                  return *draw_call_data.replaced_state;
+               };
+               const auto DrawSlotChange = [&](TraceDrawCallData::SlotKind kind, UINT slot)
+               {
+                  const auto* replaced_slot = FindReplacedSlot(kind, slot);
+                  if (!replaced_slot)
+                     return;
+                  constexpr const char* slot_change_names[] = {"Added", "Replaced", "Unbound"};
+                  ImGui::PushStyleColor(ImGuiCol_Text, IM_COL32(255, 165, 0, 255)); // Orange
+                  ImGui::Text("%s by the game", slot_change_names[size_t(replaced_slot->change)]);
+                  ImGui::PopStyleColor();
+                  if (replaced_slot->change == TraceDrawCallData::SlotChange::Replaced)
+                  {
+                     bool show_original = original_slots.contains({kind, slot});
+                     if (ImGui::Checkbox("Show the Game's Original", &show_original))
+                     {
+                        if (show_original)
+                           original_slots.emplace(kind, slot);
+                        else
+                           original_slots.erase({kind, slot});
+                     }
+                  }
+               };
+               bool is_first_draw = true;
+
+               if (has_cs)
+               {
+                  ImGui::Text("Indirect: %s", draw_call_data.draw_dispatch_data.indirect ? "True" : "False");
+                  ImGui::Text("Dispatch Count: %ux%ux%u", draw_call_data.draw_dispatch_data.dispatch_count.x, draw_call_data.draw_dispatch_data.dispatch_count.y, draw_call_data.draw_dispatch_data.dispatch_count.z);
+                  is_first_draw = false;
+               }
+               else if (!pipeline && has_ps)
+               {
+                  ImGui::Text("Vertex Count: %u", draw_call_data.draw_dispatch_data.vertex_count);
+                  is_first_draw = false;
+               }
+               else if (has_vs)
+               {
+                  ImGui::Text("Indirect: %s", draw_call_data.draw_dispatch_data.indirect ? "True" : "False");
+                  ImGui::NewLine();
+                  ImGui::Text("Vertex Count: %u", draw_call_data.draw_dispatch_data.vertex_count);
+                  ImGui::Text("Instance Count: %u", draw_call_data.draw_dispatch_data.instance_count);
+                  ImGui::Text("First Vertex: %u", draw_call_data.draw_dispatch_data.first_vertex);
+                  ImGui::Text("First Instance: %u", draw_call_data.draw_dispatch_data.first_instance);
+                  ImGui::Text("Index Count: %u", draw_call_data.draw_dispatch_data.index_count);
+                  ImGui::Text("First Index: %u", draw_call_data.draw_dispatch_data.first_index);
+                  ImGui::Text("Vertex Offset: %i", draw_call_data.draw_dispatch_data.vertex_offset);
+                  ImGui::Text("Indexed: %s", draw_call_data.draw_dispatch_data.indexed ? "True" : "False"); // TODO: do we need this? Is "index_count" enough? The functions would be different.
+
+                  auto GetPrimitiveTopologyName = [](D3D_PRIMITIVE_TOPOLOGY topology) -> const char*
+                     {
+                        switch (topology)
+                        {
+                        case D3D_PRIMITIVE_TOPOLOGY_UNDEFINED:         return "UNDEFINED";
+                        case D3D_PRIMITIVE_TOPOLOGY_POINTLIST:         return "POINTLIST";
+                        case D3D_PRIMITIVE_TOPOLOGY_LINELIST:          return "LINELIST";
+                        case D3D_PRIMITIVE_TOPOLOGY_LINESTRIP:         return "LINESTRIP";
+                        case D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST:      return "TRIANGLELIST";
+                        case D3D_PRIMITIVE_TOPOLOGY_TRIANGLESTRIP:     return "TRIANGLESTRIP";
+                        case D3D_PRIMITIVE_TOPOLOGY_TRIANGLEFAN:       return "TRIANGLEFAN";
+                        case D3D_PRIMITIVE_TOPOLOGY_LINELIST_ADJ:      return "LINELIST ADJ";
+                        case D3D_PRIMITIVE_TOPOLOGY_LINESTRIP_ADJ:     return "LINESTRIP ADJ";
+                        case D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST_ADJ:  return "TRIANGLELIST ADJ";
+                        case D3D_PRIMITIVE_TOPOLOGY_TRIANGLESTRIP_ADJ: return "TRIANGLESTRIP ADJ";
+                        default:                                       return "UNKNOWN";
+                        }
+                     };
+                  ImGui::NewLine();
+                  ImGui::Text("Primitive Topology: %s", GetPrimitiveTopologyName(draw_call_data.primitive_topology));
+
+                  for (size_t i = 0; i < draw_call_data.vertex_buffer_hashes.size(); i++)
+                  {
+                     ImGui::NewLine();
+                     ImGui::Text("Vertex Buffer %u: %s", i, draw_call_data.vertex_buffer_hashes[i].c_str());
+                     ImGui::Text("Input Layout %u Format: %s", i, GetFormatNameSafe(draw_call_data.input_layouts_formats[i]));
+                  }
+
+                  ImGui::NewLine();
+                  ImGui::Text("Input Buffer: %s", draw_call_data.input_layout_hash.c_str());
+                  ImGui::Text("Input Buffer Format: %s", GetFormatNameSafe(draw_call_data.index_buffer_format));
+                  ImGui::Text("Input Buffer Offset: %u", draw_call_data.index_buffer_offset);
+
+                  ImGui::Text("Input Layout: %s", draw_call_data.index_buffer_hash.c_str());
+                  is_first_draw = false;
+               }
+
+               if (has_vs || has_ps || has_cs)
+               {
+                  for (UINT i = 0; i < TraceDrawCallData::srvs_size; i++)
+                  {
+                     const TraceDrawCallData& slot_data = SlotData(TraceDrawCallData::SlotKind::SRV, i);
+                     auto srv_format = slot_data.srv_format[i];
+                     if (srv_format == DXGI_FORMAT_UNKNOWN) // Resource was not valid
+                     {
+                        continue;
+                     }
+                     const bool non_referenced = srv_format == DXGI_FORMAT(-1);
+                     if (trace_ignore_non_bound_shader_referenced_resources && srv_format == DXGI_FORMAT(-1))
+                     {
+                        continue;
+                     }
+                     auto sr_format = slot_data.sr_format[i];
+                     auto sr_size = slot_data.sr_size[i];
+                     auto srv_size = slot_data.srv_size[i];
+                     auto sr_hash = slot_data.sr_hash[i];
+                     auto sr_type_name = slot_data.sr_type_name[i];
+                     auto sr_is_rt = slot_data.sr_is_rt[i];
+                     auto sr_is_ua = slot_data.sr_is_ua[i];
+
+                     ImGui::PushID(i);
+
+                     if (!is_first_draw) { ImGui::Text(""); };
+                     is_first_draw = false;
+                     ImGui::PushStyleColor(ImGuiCol_Text, IM_COL32(245, 230, 140, 255)); // Faint Yellow
+                     ImGui::Text("SRV Index: %u", i);
+                     ImGui::PopStyleColor();
+                     DrawSlotChange(TraceDrawCallData::SlotKind::SRV, i);
+                     if (non_referenced)
+                     {
+                        ImGui::PushStyleColor(ImGuiCol_Text, IM_COL32(255, 0, 0, 255)); // Red
+                        ImGui::Text("R Referenced but Not Bound");
+                        ImGui::PopStyleColor();
+                        continue;
+                     }
+                     ImGui::Text("R Hash: %s", sr_hash.c_str());
+                     if (!slot_data.sr_debug_name[i].empty())
+                        ImGui::Text("R Debug Name: %s", slot_data.sr_debug_name[i].c_str());
+                     ImGui::Text("R Type: %s", sr_type_name.c_str());
+                     if (GetFormatName(sr_format) != nullptr)
+                     {
+                        ImGui::Text("R Format: %s", GetFormatName(sr_format));
+                     }
+                     else
+                     {
+                        ImGui::Text("R Format: %u", sr_format);
+                     }
+                     if (GetFormatName(srv_format) != nullptr)
+                     {
+                        ImGui::Text("RV Format: %s", GetFormatName(srv_format));
+                     }
+                     else
+                     {
+                        ImGui::Text("RV Format: %u", srv_format);
+                     }
+                     ImGui::Text("R Size: %ux%ux%ux%u", sr_size.x, sr_size.y, sr_size.z, sr_size.w);
+                     ImGui::Text("RV Mip: %u", slot_data.srv_mip[i]);
+                     ImGui::Text("RV Size: %ux%ux%u", srv_size.x, srv_size.y, srv_size.z);
+                     ImGui::Text("R is RT: %s", sr_is_rt ? "True" : "False"); // TODO: add if they have CPU access, or immutable etc, and also whether they are a depth buffer (DSV)
+                     ImGui::Text("R is UA: %s", sr_is_ua ? "True" : "False");
+                     bool upgraded = false;
+                     {
+                        const std::shared_lock lock(device_data.mutex);
+                        // TODO: store this information in the trace list, it might expire otherwise, or even be incorrect if ptrs were re-used. Also this info isn't shown if we use indirect texture upgrades.
+                        for (auto upgraded_resource_pair : device_data.resource_upgrades.original_upgraded_resources_formats)
+                        {
+                           void* upgraded_resource_ptr = reinterpret_cast<void*>(upgraded_resource_pair.first);
+                           if (sr_hash == std::to_string(std::hash<void*>{}(upgraded_resource_ptr)))
+                           {
+                              ImGui::Text("R: Direct Upgraded");
+
+                              ImGui::Text("R Original Format: %s", GetFormatName(DXGI_FORMAT(upgraded_resource_pair.second)));
+
+                              if (const auto it = device_data.resource_upgrades.original_upgraded_resource_views_formats.find(reinterpret_cast<uint64_t>(slot_data.srvs[i])); it != device_data.resource_upgrades.original_upgraded_resource_views_formats.end())
+                              {
+                                 const auto& [native_resource, original_view_format] = it->second;
+                                 ASSERT_ONCE(native_resource == upgraded_resource_pair.first); // Uh!?
+
+                                 DXGI_FORMAT upgraded_view_format = slot_data.srv_format[i]; // This only works with direct upgrades, otherwise it'd be the original view format
+                                 // If the game already tried to create a view in the upgraded format, it means it simply read the format from the upgraded texture,
+                                 // and thus we can assume the original format would have been the same as the original texture (or anyway the most obvious non typeless version of it)
+                                 DXGI_FORMAT adjusted_original_view_format = (DXGI_FORMAT(original_view_format) == upgraded_view_format) ? DXGI_FORMAT(upgraded_resource_pair.second) : DXGI_FORMAT(original_view_format);
+
+                                 ImGui::Text("RV Original Format: %s", GetFormatName(adjusted_original_view_format));
+                                 // TODO: if the native texture format is TYPELESS, don't send this warning? Alternatively keep track of how the resource was last used (with what view it was written to, if any), and base the state off of that,
+                                 // then check the current state of the backbuffer and whether it's currently holding linear or gamma space colors (we don't store that anywhere atm, given it's not that simple).
+                                 // We could also send a message in case the upgraded format was float and the original format was not linear, but that's kinda obvious already (that the current color encoding might not be the most optimal).
+                                 if (IsLinearFormat(DXGI_FORMAT(upgraded_resource_pair.second)) != IsLinearFormat(DXGI_FORMAT(adjusted_original_view_format)))
+                                 {
+                                    ImGui::PushStyleColor(ImGuiCol_Text, IM_COL32(255, 0, 0, 255)); // Red
+                                    ImGui::Text("RV Gamma Change");
+                                    ImGui::PopStyleColor();
+                                 }
+                              }
+
+                              upgraded = true;
+                           
+                              break;
+                           }
+                        }
+                        for (auto upgraded_resource_pair : device_data.resource_upgrades.original_resources_to_mirrored_upgraded_resources)
+                        {
+                           void* upgraded_resource_ptr = reinterpret_cast<void*>(upgraded_resource_pair.first);
+                           if (sr_hash == std::to_string(std::hash<void*>{}(upgraded_resource_ptr)))
+                           {
+                              if (upgraded_resource_pair.second.is_scaled)
+                              {
+                                 ImGui::Text("R Indirect Upgraded Size: %ux%u", upgraded_resource_pair.second.mirror_width, upgraded_resource_pair.second.mirror_height);
+                              }
+                              ImGui::Text("R: Indirect Upgraded");
+                              upgraded = true;
+                              break;
+                           }
+                        }
+                     }
+
+                     const bool is_highlighted_resource = highlighted_resource == sr_hash;
+                     if (is_highlighted_resource ? ImGui::Button("Unhighlight Resource") : ImGui::Button("Highlight Resource"))
+                     {
+                        highlighted_resource = is_highlighted_resource ? "" : sr_hash;
+                     }
+
+                     // TODO: hide the button if the resource is a buffer
+                     if (debug_draw_shader_enabled && (debug_draw_mode != DebugDrawMode::ShaderResource || debug_draw_view_index != i) && ImGui::Button("Debug Draw Resource"))
+                     {
+                        if (debug_draw_mode == DebugDrawMode::Depth || debug_draw_mode == DebugDrawMode::Stencil)
+                        {
+                           debug_draw_options &= ~(uint32_t)DebugDrawTextureOptionsMask::RedOnly;
+                        }
+                        debug_draw_mode = DebugDrawMode::ShaderResource;
+                        debug_draw_view_index = i;
+                        debug_draw_mip = slot_data.srv_mip[i];
+                     }
+
+                     ImGui::PopID();
+                  }
+               }
+
+               if (has_ps || has_cs)
+               {
+                  for (UINT i = 0; i < TraceDrawCallData::uavs_size; i++)
+                  {
+                     const TraceDrawCallData& slot_data = SlotData(TraceDrawCallData::SlotKind::UAV, i);
+                     auto uav_format = slot_data.uav_format[i];
+                     if (uav_format == DXGI_FORMAT_UNKNOWN) // Resource was not valid
+                     {
+                        continue;
+                     }
+                     const bool non_referenced = uav_format == DXGI_FORMAT(-1);
+                     if (trace_ignore_non_bound_shader_referenced_resources && uav_format == DXGI_FORMAT(-1))
+                     {
+                        continue;
+                     }
+                     auto ua_format = slot_data.ua_format[i];
+                     auto ua_size = slot_data.ua_size[i];
+                     auto uav_size = slot_data.uav_size[i];
+                     auto ua_hash = slot_data.ua_hash[i];
+                     auto ua_type_name = slot_data.ua_type_name[i];
+                     auto ua_is_rt = slot_data.ua_is_rt[i];
+
+                     ImGui::PushID(i + TraceDrawCallData::srvs_size); // Offset by the max amount of previous iterations from above
+
+                     if (!is_first_draw) { ImGui::Text(""); };
+                     is_first_draw = false;
+                     ImGui::PushStyleColor(ImGuiCol_Text, IM_COL32(200, 170, 230, 255)); // Faint Purple
+                     ImGui::Text("UAV Index: %u", i);
+                     ImGui::PopStyleColor();
+                     DrawSlotChange(TraceDrawCallData::SlotKind::UAV, i);
+                     if (non_referenced)
+                     {
+                        ImGui::PushStyleColor(ImGuiCol_Text, IM_COL32(255, 0, 0, 255)); // Red
+                        ImGui::Text("R Referenced but Not Bound");
+                        ImGui::PopStyleColor();
+                        continue;
+                     }
+                     ImGui::Text("R Hash: %s", ua_hash.c_str());
+                     if (!slot_data.ua_debug_name[i].empty())
+                        ImGui::Text("R Debug Name: %s", slot_data.ua_debug_name[i].c_str());
+                     ImGui::Text("R Type: %s", ua_type_name.c_str());
+                     if (GetFormatName(ua_format) != nullptr)
+                     {
+                        ImGui::Text("R Format: %s", GetFormatName(ua_format));
+                     }
+                     else
+                     {
+                        ImGui::Text("R Format: %u", ua_format);
+                     }
+                     if (GetFormatName(uav_format) != nullptr)
+                     {
+                        ImGui::Text("RV Format: %s", GetFormatName(uav_format));
+                     }
+                     else
+                     {
+                        ImGui::Text("RV Format: %u", uav_format);
+                     }
+                     ImGui::Text("R Size: %ux%ux%ux%u", ua_size.x, ua_size.y, ua_size.z, ua_size.w);
+                     ImGui::Text("RV Mip: %u", slot_data.uav_mip[i]);
+                     ImGui::Text("RV Size: %ux%ux%u", uav_size.x, uav_size.y, uav_size.z);
+                     ImGui::Text("R is RT: %s", ua_is_rt ? "True" : "False");
+                     bool upgraded = false;
+                     {
+                        const std::shared_lock lock(device_data.mutex);
+                        for (auto upgraded_resource_pair : device_data.resource_upgrades.original_upgraded_resources_formats)
+                        {
+                           void* upgraded_resource_ptr = reinterpret_cast<void*>(upgraded_resource_pair.first);
+                           if (ua_hash == std::to_string(std::hash<void*>{}(upgraded_resource_ptr)))
+                           {
+                              ImGui::Text("R: Direct Upgraded");
+
+                              ImGui::Text("R Original Format: %s", GetFormatName(DXGI_FORMAT(upgraded_resource_pair.second)));
+
+                              if (const auto it = device_data.resource_upgrades.original_upgraded_resource_views_formats.find(reinterpret_cast<uint64_t>(slot_data.uavs[i])); it != device_data.resource_upgrades.original_upgraded_resource_views_formats.end())
+                              {
+                                 const auto& [native_resource, original_view_format] = it->second;
+                                 ASSERT_ONCE(native_resource == upgraded_resource_pair.first); // Uh!?
+                                 DXGI_FORMAT upgraded_view_format = slot_data.uav_format[i]; // This only works with direct upgrades, otherwise it'd be the original view format
+                                 DXGI_FORMAT adjusted_original_view_format = (DXGI_FORMAT(original_view_format) == upgraded_view_format) ? DXGI_FORMAT(upgraded_resource_pair.second) : DXGI_FORMAT(original_view_format);
+                                 ImGui::Text("RV Original Format: %s", GetFormatName(adjusted_original_view_format));
+                                 if (IsLinearFormat(DXGI_FORMAT(upgraded_resource_pair.second)) != IsLinearFormat(adjusted_original_view_format))
+                                 {
+                                    ImGui::PushStyleColor(ImGuiCol_Text, IM_COL32(255, 0, 0, 255)); // Red
+                                    ImGui::Text("RV Gamma Change");
+                                    ImGui::PopStyleColor();
+                                 }
+                              }
+
+                              upgraded = true;
+
+                              break;
+                           }
+                        }
+                        for (auto upgraded_resource_pair : device_data.resource_upgrades.original_resources_to_mirrored_upgraded_resources)
+                        {
+                           void* upgraded_resource_ptr = reinterpret_cast<void*>(upgraded_resource_pair.first);
+                           if (ua_hash == std::to_string(std::hash<void*>{}(upgraded_resource_ptr)))
+                           {
+                              if (upgraded_resource_pair.second.is_scaled)
+                              {
+                                 ImGui::Text("R Indirect Upgraded Size: %ux%u", upgraded_resource_pair.second.mirror_width, upgraded_resource_pair.second.mirror_height);
+                              }
+                              ImGui::Text("R: Indirect Upgraded");
+                              upgraded = true;
+                              break;
+                           }
+                        }
+                     }
+
+                     const bool is_highlighted_resource = highlighted_resource == ua_hash;
+                     if (is_highlighted_resource ? ImGui::Button("Unhighlight Resource") : ImGui::Button("Highlight Resource"))
+                     {
+                        highlighted_resource = is_highlighted_resource ? "" : ua_hash;
+                     }
+
+                     if (pipeline && !upgraded && texture_format_upgrades_type == TextureFormatUpgradesType::AllowedEnabled && ImGui::Button("Indirect Upgrade Resource Format (By Shader)"))
+                     {
+                        auto_texture_format_upgrade_shader_hashes[pipeline->shader_hashes[0]] = AutoTextureFormatUpgradeShaderHash{ std::vector<uint8_t>(), std::vector<uint8_t>{ uint8_t(i) }, false }; // DX11 logic
+                     }
+
+                     if (debug_draw_shader_enabled && (debug_draw_mode != DebugDrawMode::UnorderedAccessView || debug_draw_view_index != i) && ImGui::Button("Debug Draw Resource"))
+                     {
+                        if (debug_draw_mode == DebugDrawMode::Depth || debug_draw_mode == DebugDrawMode::Stencil)
+                        {
+                           debug_draw_options &= ~(uint32_t)DebugDrawTextureOptionsMask::RedOnly;
+                        }
+                        debug_draw_mode = DebugDrawMode::UnorderedAccessView;
+                        debug_draw_view_index = i;
+                        debug_draw_mip = slot_data.uav_mip[i];
+                     }
+
+                     if (pipeline)
+                     {
+                        bool is_redirection_target = pipeline->redirect_data.target_type == CachedPipeline::RedirectData::RedirectTargetType::UAV && pipeline->redirect_data.target_index == i;
+                        if (pipeline->redirect_data.source_type != CachedPipeline::RedirectData::RedirectSourceType::None && is_redirection_target && ImGui::Button("Disable Copy"))
+                        {
+                           pipeline->redirect_data.source_type = CachedPipeline::RedirectData::RedirectSourceType::None;
+                           pipeline->redirect_data.target_type = CachedPipeline::RedirectData::RedirectTargetType::None;
+                           pipeline->redirect_data.source_index = 0;
+                           pipeline->redirect_data.target_index = 0;
+                           is_redirection_target = false;
+                        }
+                        if ((pipeline->redirect_data.source_type != CachedPipeline::RedirectData::RedirectSourceType::SRV || !is_redirection_target) && ImGui::Button("Copy from SRV"))
+                        {
+                           pipeline->redirect_data.source_type = CachedPipeline::RedirectData::RedirectSourceType::SRV;
+                           pipeline->redirect_data.target_type = CachedPipeline::RedirectData::RedirectTargetType::UAV;
+                           pipeline->redirect_data.source_index = 0;
+                           pipeline->redirect_data.target_index = i;
+                           is_redirection_target = true;
+                        }
+                        if ((pipeline->redirect_data.source_type != CachedPipeline::RedirectData::RedirectSourceType::UAV || !is_redirection_target) && ImGui::Button("Copy from UAV"))
+                        {
+                           pipeline->redirect_data.source_type = CachedPipeline::RedirectData::RedirectSourceType::UAV;
+                           pipeline->redirect_data.target_type = CachedPipeline::RedirectData::RedirectTargetType::UAV;
+                           pipeline->redirect_data.source_index = 0;
+                           pipeline->redirect_data.target_index = i;
+                           is_redirection_target = true;
+                        }
+                        if (is_redirection_target)
+                        {
+                           ImGui::SliderInt("Copy from View Index", &pipeline->redirect_data.source_index, 0, D3D11_COMMONSHADER_INPUT_RESOURCE_SLOT_COUNT /*The largest allowed view count by type*/);
+                        }
+                     }
+
+                     ImGui::PopID();
+                  }
+               }
+
+               if (has_ps)
+               {
+                  auto blend_desc = draw_call_data.blend_desc;
+
+                  for (UINT i = 0; i < TraceDrawCallData::rtvs_size; i++)
+                  {
+                     const TraceDrawCallData& slot_data = SlotData(TraceDrawCallData::SlotKind::RTV, i);
+                     auto rtv_format = slot_data.rtv_format[i];
+                     if (rtv_format == DXGI_FORMAT_UNKNOWN) // Resource was not valid
+                     {
+                        continue;
+                     }
+                     const bool non_referenced = rtv_format == DXGI_FORMAT(-1);
+                     if (trace_ignore_non_bound_shader_referenced_resources && rtv_format == DXGI_FORMAT(-1))
+                     {
+                        continue;
+                     }
+                     auto rt_format = slot_data.rt_format[i];
+                     auto rt_size = slot_data.rt_size[i];
+                     auto rtv_size = slot_data.rtv_size[i];
+                     auto rt_hash = slot_data.rt_hash[i];
+                     auto rt_type_name = slot_data.rt_type_name[i];
+
+                     ImGui::PushID(i + TraceDrawCallData::srvs_size + TraceDrawCallData::uavs_size); // Offset by the max amount of previous iterations from above
+
+                     if (!is_first_draw) { ImGui::Text(""); };
+                     is_first_draw = false;
+                     ImGui::PushStyleColor(ImGuiCol_Text, IM_COL32(160, 200, 255, 255)); // Faint Blue
+                     ImGui::Text("RTV Index: %u", i);
+                     ImGui::PopStyleColor();
+                     DrawSlotChange(TraceDrawCallData::SlotKind::RTV, i);
+                     if (non_referenced)
+                     {
+                        ImGui::PushStyleColor(ImGuiCol_Text, IM_COL32(255, 0, 0, 255)); // Red
+                        ImGui::Text("R Referenced but Not Bound");
+                        ImGui::PopStyleColor();
+                        continue;
+                     }
+                     ImGui::Text("R Hash: %s", rt_hash.c_str());
+                     if (!slot_data.rt_debug_name[i].empty())
+                        ImGui::Text("R Debug Name: %s", slot_data.rt_debug_name[i].c_str());
+                     ImGui::Text("R Type: %s", rt_type_name.c_str());
+                     if (GetFormatName(rt_format) != nullptr)
+                     {
+                        ImGui::Text("R Format: %s", GetFormatName(rt_format));
+                     }
+                     else
+                     {
+                        ImGui::Text("R Format: %u", rt_format);
+                     }
+                     if (GetFormatName(rtv_format) != nullptr)
+                     {
+                        ImGui::Text("RV Format: %s", GetFormatName(rtv_format));
+                     }
+                     else
+                     {
+                        ImGui::Text("RV Format: %u", rtv_format);
+                     }
+                     ImGui::Text("R Size: %ux%ux%ux%u", rt_size.x, rt_size.y, rt_size.z, rt_size.w);
+                     ImGui::Text("RV Mip: %u", slot_data.rtv_mip[i]);
+                     ImGui::Text("RV Size: %ux%ux%u", rtv_size.x, rtv_size.y, rtv_size.z);
+                     ImGui::Text("R is Swapchain: %s", slot_data.rt_is_swapchain[i] ? "True" : "False"); // TODO: add this for compute shaders / UAVs toos
+                     bool upgraded = false;
+                     bool indirect_upgraded = false;
+                     {
+                        const std::shared_lock lock(device_data.mutex);
+                        // TODO: this is missing the "R is UAV" print
+                        for (auto upgraded_resource_pair : device_data.resource_upgrades.original_upgraded_resources_formats)
+                        {
+                           void* upgraded_resource_ptr = reinterpret_cast<void*>(upgraded_resource_pair.first);
+                           if (rt_hash == std::to_string(std::hash<void*>{}(upgraded_resource_ptr)))
+                           {
+                              ImGui::Text("R: Direct Upgraded");
+
+                              ImGui::Text("R Original Format: %s", GetFormatName(DXGI_FORMAT(upgraded_resource_pair.second)));
+
+                              // TODO: why does this flicker on and off in Deux Ex HR when it writes on the swapchain for material draws?
+                              if (const auto it = device_data.resource_upgrades.original_upgraded_resource_views_formats.find(reinterpret_cast<uint64_t>(slot_data.rtvs[i])); it != device_data.resource_upgrades.original_upgraded_resource_views_formats.end())
+                              {
+                                 const auto& [native_resource, original_view_format] = it->second;
+                                 ASSERT_ONCE(native_resource == upgraded_resource_pair.first); // Uh!?
+                                 DXGI_FORMAT upgraded_view_format = slot_data.rtv_format[i]; // This only works with direct upgrades, otherwise it'd be the original view format
+                                 DXGI_FORMAT adjusted_original_view_format = (DXGI_FORMAT(original_view_format) == upgraded_view_format) ? DXGI_FORMAT(upgraded_resource_pair.second) : DXGI_FORMAT(original_view_format);
+                                 ImGui::Text("RV Original Format: %s", GetFormatName(adjusted_original_view_format));
+                                 if (IsLinearFormat(DXGI_FORMAT(upgraded_resource_pair.second)) != IsLinearFormat(adjusted_original_view_format))
+                                 {
+                                    ImGui::PushStyleColor(ImGuiCol_Text, IM_COL32(255, 0, 0, 255)); // Red
+                                    ImGui::Text("RV Gamma Change");
+                                    ImGui::PopStyleColor();
+                                 }
+                              }
+
+                              upgraded = true;
+
+                              break;
+                           }
+                        }
+                        for (auto upgraded_resource_pair : device_data.resource_upgrades.original_resources_to_mirrored_upgraded_resources)
+                        {
+                           void* upgraded_resource_ptr = reinterpret_cast<void*>(upgraded_resource_pair.first);
+                           if (rt_hash == std::to_string(std::hash<void*>{}(upgraded_resource_ptr)))
+                           {
+                              if (upgraded_resource_pair.second.is_scaled)
+                              {
+                                 ImGui::Text("R Indirect Upgraded Size: %ux%u", upgraded_resource_pair.second.mirror_width, upgraded_resource_pair.second.mirror_height);
+                              }
+                              ImGui::Text("R: Indirect Upgraded");
+                              upgraded = true;
+                              indirect_upgraded = true;
+                              break;
+                           }
+                        }
+                     }
+
+                     // Blend mode
+                     {
+                        bool pop_text_style_color = false;
+                        // Print out invalid blend modes.
+                        // Note: this is assuming that indirect upgrades always upgrade to a signed float type, which is generally true. Ideally we'd implement something like "GetBestResourceViewUpgradeFormat(slot_data.rtv_format[i])" here, but given it's just a warning, it doesn't really matter
+                        if (IsRGBAFormat(slot_data.rtv_format[i], true) && (indirect_upgraded || IsSignedFloatFormat(slot_data.rtv_format[i])) && IsBlendInverted(slot_data.blend_desc, 1, false, i))
+                        {
+                           ImGui::PushStyleColor(ImGuiCol_Text, IM_COL32(255, 105, 0, 255)); // Orange
+                           pop_text_style_color = true;
+                        }
+
+                        const D3D11_RENDER_TARGET_BLEND_DESC1& render_target_blend_desc = blend_desc.IndependentBlendEnable ? blend_desc.RenderTarget[i] : blend_desc.RenderTarget[0];
+                        // See "ui_data.blend_mode" for details on usage
+                        if (render_target_blend_desc.BlendEnable)
+                        {
+                           bool has_drawn_blend_rgb_text = false;
+
+                           if (render_target_blend_desc.SrcBlend == D3D11_BLEND::D3D11_BLEND_BLEND_FACTOR || render_target_blend_desc.DestBlend == D3D11_BLEND::D3D11_BLEND_BLEND_FACTOR
+                              || render_target_blend_desc.SrcBlend == D3D11_BLEND::D3D11_BLEND_INV_BLEND_FACTOR || render_target_blend_desc.DestBlend == D3D11_BLEND::D3D11_BLEND_INV_BLEND_FACTOR)
+                           {
+                              ImGui::Text("Blend RGB Mode: Blend Factor (Any)");
+                              has_drawn_blend_rgb_text = true;
+                           }
+                           else if (render_target_blend_desc.SrcBlend == D3D11_BLEND::D3D11_BLEND_ZERO && render_target_blend_desc.DestBlend == D3D11_BLEND::D3D11_BLEND_ZERO)
+                           {
+                              ImGui::Text("Blend RGB Mode: Zero (Override Color with Zero)");
+                              has_drawn_blend_rgb_text = true;
+                           }
+
+                           if (!has_drawn_blend_rgb_text && render_target_blend_desc.BlendOp == D3D11_BLEND_OP::D3D11_BLEND_OP_ADD)
+                           {
+                              if (render_target_blend_desc.SrcBlend == D3D11_BLEND::D3D11_BLEND_ONE && render_target_blend_desc.DestBlend == D3D11_BLEND::D3D11_BLEND_ONE)
+                              {
+                                 ImGui::Text("Blend RGB Mode: Additive Color");
+                                 has_drawn_blend_rgb_text = true;
+                              }
+                              else if (render_target_blend_desc.SrcBlend == D3D11_BLEND::D3D11_BLEND_SRC_ALPHA && render_target_blend_desc.DestBlend == D3D11_BLEND::D3D11_BLEND_ONE)
+                              {
+                                 ImGui::Text("Blend RGB Mode: Additive Alpha");
+                                 has_drawn_blend_rgb_text = true;
+                              }
+                              else if (render_target_blend_desc.SrcBlend == D3D11_BLEND::D3D11_BLEND_SRC_ALPHA_SAT && render_target_blend_desc.DestBlend == D3D11_BLEND::D3D11_BLEND_ONE)
+                              {
+                                 ImGui::Text("Blend RGB Mode: Additive Alpha (Saturated)");
+                                 has_drawn_blend_rgb_text = true;
+                              }
+                              else if (render_target_blend_desc.SrcBlend == D3D11_BLEND::D3D11_BLEND_ONE && render_target_blend_desc.DestBlend == D3D11_BLEND::D3D11_BLEND_INV_SRC_ALPHA)
+                              {
+                                 ImGui::Text("Blend RGB Mode: Premultiplied Alpha"); // The alpha was supposedly (but not necessarily) pre-multiplied in the rgb before the pixel shader output
+                                 has_drawn_blend_rgb_text = true;
+                              }
+                              else if (render_target_blend_desc.SrcBlend == D3D11_BLEND::D3D11_BLEND_SRC_ALPHA && render_target_blend_desc.DestBlend == D3D11_BLEND::D3D11_BLEND_INV_SRC_ALPHA)
+                              {
+                                 ImGui::Text("Blend RGB Mode: Straight Alpha");
+                                 has_drawn_blend_rgb_text = true;
+                              }
+                              else if (render_target_blend_desc.SrcBlend == D3D11_BLEND::D3D11_BLEND_SRC_ALPHA_SAT && render_target_blend_desc.DestBlend == D3D11_BLEND::D3D11_BLEND_INV_SRC_ALPHA)
+                              {
+                                 ImGui::Text("Blend RGB Mode: Straight Alpha (Saturated)");
+                                 has_drawn_blend_rgb_text = true;
+                              }
+                              // Often used for lighting, glow, or compositing effects where the destination alpha controls how much of the source contributes
+                              else if (render_target_blend_desc.SrcBlend == D3D11_BLEND::D3D11_BLEND_DEST_ALPHA && render_target_blend_desc.DestBlend == D3D11_BLEND::D3D11_BLEND_ONE)
+                              {
+                                 ImGui::Text("Blend RGB Mode: Reverse Premultiplied Alpha");
+                                 has_drawn_blend_rgb_text = true;
+                              }
+                              else if (render_target_blend_desc.SrcBlend == D3D11_BLEND::D3D11_BLEND_DEST_COLOR && render_target_blend_desc.DestBlend == D3D11_BLEND::D3D11_BLEND_ZERO)
+                              {
+                                 ImGui::Text("Blend RGB Mode: Multiplicative Color");
+                                 has_drawn_blend_rgb_text = true;
+                              }
+                              // It's enabled but it's as if it was disabled
+                              else if (render_target_blend_desc.SrcBlend == D3D11_BLEND::D3D11_BLEND_ONE && render_target_blend_desc.DestBlend == D3D11_BLEND::D3D11_BLEND_ZERO)
+                              {
+                                 ImGui::Text("Blend RGB Mode: Disabled");
+                                 has_drawn_blend_rgb_text = true;
+                              }
+                           }
+                           // This subtracts the source from the target
+                           else if (!has_drawn_blend_rgb_text && render_target_blend_desc.BlendOp == D3D11_BLEND_OP::D3D11_BLEND_OP_REV_SUBTRACT)
+                           {
+                              if (render_target_blend_desc.SrcBlend == D3D11_BLEND::D3D11_BLEND_ONE && render_target_blend_desc.DestBlend == D3D11_BLEND::D3D11_BLEND_ONE)
+                              {
+                                 ImGui::Text("Blend RGB Mode: Subtractive Color");
+                                 has_drawn_blend_rgb_text = true;
+                              }
+                              else if (render_target_blend_desc.SrcBlend == D3D11_BLEND::D3D11_BLEND_SRC_ALPHA && render_target_blend_desc.DestBlend == D3D11_BLEND::D3D11_BLEND_ONE)
+                              {
+                                 ImGui::Text("Blend RGB Mode: Subtractive Alpha");
+                                 has_drawn_blend_rgb_text = true;
+                              }
+                              else if (render_target_blend_desc.SrcBlend == D3D11_BLEND::D3D11_BLEND_SRC_ALPHA_SAT && render_target_blend_desc.DestBlend == D3D11_BLEND::D3D11_BLEND_ONE)
+                              {
+                                 ImGui::Text("Blend RGB Mode: Subtractive Alpha (Saturated)");
+                                 has_drawn_blend_rgb_text = true;
+                              }
+                              else if (render_target_blend_desc.SrcBlend == D3D11_BLEND::D3D11_BLEND_ZERO && render_target_blend_desc.DestBlend == D3D11_BLEND::D3D11_BLEND_ONE)
+                              {
+                                 ImGui::Text("Blend RGB Mode: Disabled");
+                                 has_drawn_blend_rgb_text = true;
+                              }
+                              else
+                              {
+                                 ImGui::Text("Blend RGB Mode: Subtractive (Any)");
+                                 has_drawn_blend_rgb_text = true;
+                              }
+                           }
+
+                           if (!has_drawn_blend_rgb_text)
+                           {
+                              ImGui::Text("Blend RGB Mode: Unknown");
+                              has_drawn_blend_rgb_text = true;
+                           }
+
+                           if ((render_target_blend_desc.RenderTargetWriteMask & (D3D11_COLOR_WRITE_ENABLE_RED | D3D11_COLOR_WRITE_ENABLE_GREEN | D3D11_COLOR_WRITE_ENABLE_BLUE)) == 0)
+                           {
+                              ImGui::SameLine();
+                              ImGui::Text(" (Ignored)");
+                           }
+
+                           // TODO: add "SampleMask" etc (stencil too, together with stencil debug draw, but that goes with depth)
+                           ImGui::Text("Blend RGB Mode Details: (Src * %s) %s (Dest * %s)", GetBlendName(render_target_blend_desc.SrcBlend), GetBlendOpName(render_target_blend_desc.BlendOp), GetBlendName(render_target_blend_desc.DestBlend));
+
+                           bool has_drawn_blend_a_text = false;
+
+                           // It's enabled but it's as if it was disabled
+                           if (render_target_blend_desc.SrcBlendAlpha == D3D11_BLEND::D3D11_BLEND_BLEND_FACTOR || render_target_blend_desc.DestBlendAlpha == D3D11_BLEND::D3D11_BLEND_BLEND_FACTOR
+                              || render_target_blend_desc.SrcBlendAlpha == D3D11_BLEND::D3D11_BLEND_INV_BLEND_FACTOR || render_target_blend_desc.DestBlendAlpha == D3D11_BLEND::D3D11_BLEND_INV_BLEND_FACTOR)
+                           {
+                              ImGui::Text("Blend A Mode: Blend Factor (Any)");
+                              has_drawn_blend_a_text = true;
+                           }
+                           if (render_target_blend_desc.SrcBlendAlpha == D3D11_BLEND::D3D11_BLEND_ZERO && render_target_blend_desc.DestBlendAlpha == D3D11_BLEND::D3D11_BLEND_ZERO)
+                           {
+                              ImGui::Text("Blend A Mode: Zero (Overwrite Alpha with Zero)");
+                              has_drawn_blend_a_text = true;
+                           }
+
+                           if (!has_drawn_blend_a_text && render_target_blend_desc.BlendOpAlpha == D3D11_BLEND_OP::D3D11_BLEND_OP_ADD)
+                           {
+                              if (render_target_blend_desc.SrcBlendAlpha == D3D11_BLEND::D3D11_BLEND_SRC_ALPHA && render_target_blend_desc.DestBlendAlpha == D3D11_BLEND::D3D11_BLEND_INV_SRC_ALPHA)
+                              {
+                                 ImGui::Text("Blend A Mode: Standard Transparency");
+                                 has_drawn_blend_a_text = true;
+                              }
+                              else if (render_target_blend_desc.SrcBlendAlpha == D3D11_BLEND::D3D11_BLEND_SRC_ALPHA_SAT && render_target_blend_desc.DestBlendAlpha == D3D11_BLEND::D3D11_BLEND_INV_SRC_ALPHA)
+                              {
+                                 ImGui::Text("Blend A Mode: Standard Transparency (Saturated)");
+                                 has_drawn_blend_a_text = true;
+                              }
+                              else if (render_target_blend_desc.SrcBlendAlpha == D3D11_BLEND::D3D11_BLEND_DEST_ALPHA && render_target_blend_desc.DestBlendAlpha == D3D11_BLEND::D3D11_BLEND_ZERO)
+                              {
+                                 ImGui::Text("Blend A Mode: Multiplicative");
+                                 has_drawn_blend_a_text = true;
+                              }
+                              else if (render_target_blend_desc.SrcBlendAlpha == D3D11_BLEND::D3D11_BLEND_ONE && render_target_blend_desc.DestBlendAlpha == D3D11_BLEND::D3D11_BLEND_ONE)
+                              {
+                                 ImGui::Text("Blend A Mode: Additive");
+                                 has_drawn_blend_a_text = true;
+                              }
+                              else if (render_target_blend_desc.SrcBlendAlpha == D3D11_BLEND::D3D11_BLEND_ONE && render_target_blend_desc.DestBlendAlpha == D3D11_BLEND::D3D11_BLEND_ZERO)
+                              {
+                                 ImGui::Text("Blend A Mode: Source Alpha (Overwrite Alpha, Blending Disabled)");
+                                 has_drawn_blend_a_text = true;
+                              }
+                              else if (render_target_blend_desc.SrcBlendAlpha == D3D11_BLEND::D3D11_BLEND_ZERO && render_target_blend_desc.DestBlendAlpha == D3D11_BLEND::D3D11_BLEND_ONE)
+                              {
+                                 ImGui::Text("Blend A Mode: Destination Alpha (Preserve Alpha)");
+                                 has_drawn_blend_a_text = true;
+                              }
+                           }
+                           else if (!has_drawn_blend_a_text && render_target_blend_desc.BlendOpAlpha == D3D11_BLEND_OP::D3D11_BLEND_OP_REV_SUBTRACT)
+                           {
+                              ImGui::Text("Blend A Mode: Subtractive (Any)");
+                              has_drawn_blend_a_text = true;
+                           }
+
+                           if (!has_drawn_blend_a_text)
+                           {
+                              ImGui::Text("Blend A Mode: Unknown");
+                              has_drawn_blend_a_text = true;
+                           }
+
+                           if ((render_target_blend_desc.RenderTargetWriteMask & D3D11_COLOR_WRITE_ENABLE_ALPHA) == 0)
+                           {
+                              ImGui::SameLine();
+                              ImGui::Text("(Ignored)");
+                           }
+
+                           ImGui::Text("Blend A Mode Details: (Src * %s) %s (Dest * %s)", GetBlendName(render_target_blend_desc.SrcBlendAlpha), GetBlendOpName(render_target_blend_desc.BlendOpAlpha), GetBlendName(render_target_blend_desc.DestBlendAlpha));
+                        }
+                        else if (render_target_blend_desc.LogicOpEnable)
+                        {
+                           ImGui::Text("Logic Op Mode: %s", GetLogicOpName(render_target_blend_desc.LogicOp));
+                        }
+                        else
+                        {
+                           ImGui::Text("Blend and Logic Op Mode: Disabled");
+                        }
+
+                        if (pop_text_style_color)
+                        {
+                           ImGui::PopStyleColor();
+                        }
+
+                        // This applies even if blending is disabled!
+                        if ((render_target_blend_desc.RenderTargetWriteMask & D3D11_COLOR_WRITE_ENABLE_ALL) == D3D11_COLOR_WRITE_ENABLE_ALL)
+                        {
+                           ImGui::Text("Write Mask: All");
+                        }
+                        else if ((render_target_blend_desc.RenderTargetWriteMask & D3D11_COLOR_WRITE_ENABLE_ALL) == 0)
+                        {
+                           ImGui::Text("Write Mask: None");
+                        }
+                        else
+                        {
+                           ImGui::Text("Write Mask:");
+                           if (render_target_blend_desc.RenderTargetWriteMask & D3D11_COLOR_WRITE_ENABLE_RED)   ImGui::SameLine(), ImGui::Text(" R");
+                           if (render_target_blend_desc.RenderTargetWriteMask & D3D11_COLOR_WRITE_ENABLE_GREEN) ImGui::SameLine(), ImGui::Text(" G");
+                           if (render_target_blend_desc.RenderTargetWriteMask & D3D11_COLOR_WRITE_ENABLE_BLUE)  ImGui::SameLine(), ImGui::Text(" B");
+                           if (render_target_blend_desc.RenderTargetWriteMask & D3D11_COLOR_WRITE_ENABLE_ALPHA) ImGui::SameLine(), ImGui::Text(" A");
+                        }
+                     }
+
+                     // Show even if all blend modes are disabled, given that it might still be useful to track its state
+                     ImGui::Text("Blend Factor: %f %f %f %f", slot_data.blend_factor[0], slot_data.blend_factor[1], slot_data.blend_factor[2], slot_data.blend_factor[3]);
+
+                     const bool is_highlighted_resource = highlighted_resource == rt_hash;
+                     if (is_highlighted_resource ? ImGui::Button("Unhighlight Resource") : ImGui::Button("Highlight Resource"))
+                     {
+                        highlighted_resource = is_highlighted_resource ? "" : rt_hash;
+                     }
+
+                     if (pipeline && !upgraded && texture_format_upgrades_type == TextureFormatUpgradesType::AllowedEnabled && ImGui::Button("Indirect Upgrade Resource Format (By Shader)"))
+                     {
+                        auto_texture_format_upgrade_shader_hashes[pipeline->shader_hashes[0]] = AutoTextureFormatUpgradeShaderHash{ std::vector<uint8_t>{ uint8_t(i) }, std::vector<uint8_t>(), false }; // DX11 logic
+                     }
+
+                     if (debug_draw_shader_enabled && (debug_draw_mode != DebugDrawMode::RenderTarget || debug_draw_view_index != i) && ImGui::Button("Debug Draw Resource"))
+                     {
+                        if (debug_draw_mode == DebugDrawMode::Depth || debug_draw_mode == DebugDrawMode::Stencil)
+                        {
+                           debug_draw_options &= ~(uint32_t)DebugDrawTextureOptionsMask::RedOnly;
+                        }
+                        debug_draw_mode = DebugDrawMode::RenderTarget;
+                        debug_draw_view_index = i;
+                        debug_draw_mip = slot_data.rtv_mip[i];
+                     }
+
+                     if (pipeline)
+                     {
+                        bool is_redirection_target = pipeline->redirect_data.target_type == CachedPipeline::RedirectData::RedirectTargetType::RTV && pipeline->redirect_data.target_index == i;
+                        if (pipeline->redirect_data.source_type != CachedPipeline::RedirectData::RedirectSourceType::None && is_redirection_target && ImGui::Button("Disable Copy"))
+                        {
+                           pipeline->redirect_data.source_type = CachedPipeline::RedirectData::RedirectSourceType::None;
+                           pipeline->redirect_data.target_type = CachedPipeline::RedirectData::RedirectTargetType::None;
+                           pipeline->redirect_data.source_index = 0;
+                           pipeline->redirect_data.target_index = 0;
+                           is_redirection_target = false;
+                        }
+                        if ((pipeline->redirect_data.source_type != CachedPipeline::RedirectData::RedirectSourceType::SRV || !is_redirection_target) && ImGui::Button("Copy from SRV"))
+                        {
+                           pipeline->redirect_data.source_type = CachedPipeline::RedirectData::RedirectSourceType::SRV;
+                           pipeline->redirect_data.target_type = CachedPipeline::RedirectData::RedirectTargetType::RTV;
+                           pipeline->redirect_data.source_index = 0;
+                           pipeline->redirect_data.target_index = i;
+                           is_redirection_target = true;
+                        }
+                        if ((pipeline->redirect_data.source_type != CachedPipeline::RedirectData::RedirectSourceType::UAV || !is_redirection_target) && ImGui::Button("Copy from UAV"))
+                        {
+                           pipeline->redirect_data.source_type = CachedPipeline::RedirectData::RedirectSourceType::UAV;
+                           pipeline->redirect_data.target_type = CachedPipeline::RedirectData::RedirectTargetType::RTV;
+                           pipeline->redirect_data.source_index = 0;
+                           pipeline->redirect_data.target_index = i;
+                           is_redirection_target = true;
+                        }
+                        if (is_redirection_target)
+                        {
+                           ImGui::SliderInt("Copy from View Index", &pipeline->redirect_data.source_index, 0, D3D11_COMMONSHADER_INPUT_RESOURCE_SLOT_COUNT /*The largest allowed view count by type*/);
+                        }
+                     }
+
+                     ImGui::PopID();
+                  }
+
+                  // Only print this when enabled given it's rare (it's MSAA transparency dithering basically)
+                  if (blend_desc.AlphaToCoverageEnable)
+                  {
+                     if (!is_first_draw) { ImGui::Text(""); };
+                     // Don't set "is_first_draw" to true to let depth printing have a space too
+                     ImGui::Text("Alpha to Coverage Enable: %s", blend_desc.AlphaToCoverageEnable ? "True" : "False");
+                  }
+
+                  if (!is_first_draw) { ImGui::Text(""); }; // No views drew before, skip space
+                  is_first_draw = false;
+                  ImGui::Text("Depth State: %s", TraceDrawCallData::depth_state_names[(size_t)draw_call_data.depth_state]);
+                  ImGui::Text("Stencil State: %s", TraceDrawCallData::depth_state_names[(size_t)draw_call_data.stencil_state]);
+
+                  const TraceDrawCallData& dsv_data = SlotData(TraceDrawCallData::SlotKind::DSV, 0);
+                  if (dsv_data.dsv_format != DXGI_FORMAT_UNKNOWN && (dsv_data.depth_state != TraceDrawCallData::DepthStateType::Disabled && dsv_data.depth_state != TraceDrawCallData::DepthStateType::Invalid) || dsv_data.stencil_state != TraceDrawCallData::DepthStateType::Disabled)
+                  {
+                     // Note: "trace_ignore_non_bound_shader_referenced_resources" isn't implemented here
+
+                     ImGui::PushID(TraceDrawCallData::rtvs_size + TraceDrawCallData::srvs_size + TraceDrawCallData::uavs_size); // Offset by the max amount of previous iterations from above
+
+                     ImGui::Text("");
+                     ImGui::PushStyleColor(ImGuiCol_Text, IM_COL32(190, 160, 120, 255)); // Faint Brown
+                     ImGui::Text("Depth/Stencil");
+                     ImGui::PopStyleColor();
+                     DrawSlotChange(TraceDrawCallData::SlotKind::DSV, 0);
+                     ImGui::Text("R Hash: %s", dsv_data.ds_hash.c_str());
+                     if (!dsv_data.ds_debug_name.empty())
+                        ImGui::Text("R Debug Name: %s", dsv_data.ds_debug_name.c_str());
+                     if (GetFormatName(dsv_data.ds_format) != nullptr)
+                     {
+                        ImGui::Text("R Format: %s", GetFormatName(dsv_data.ds_format));
+                     }
+                     else
+                     {
+                        ImGui::Text("R Format: %u", dsv_data.ds_format);
+                     }
+                     if (GetFormatName(dsv_data.dsv_format) != nullptr)
+                     {
+                        ImGui::Text("RV Format: %s", GetFormatName(dsv_data.dsv_format));
+                     }
+                     else
+                     {
+                        ImGui::Text("RV Format: %u", dsv_data.dsv_format);
+                     }
+                     ImGui::Text("R Size: %ux%u", dsv_data.ds_size.x, dsv_data.ds_size.y); // Should match all the Render Targets size
+                     {
+                        const std::shared_lock lock(device_data.mutex);
+                        for (uint64_t upgraded_resource : device_data.resource_upgrades.upgraded_resources)
+                        {
+                           void* upgraded_resource_ptr = reinterpret_cast<void*>(upgraded_resource);
+                           if (dsv_data.ds_hash == std::to_string(std::hash<void*>{}(upgraded_resource_ptr)))
+                           {
+                              ImGui::Text("R: Direct Upgraded");
+                              break;
+                           }
+                        }
+                        for (auto upgraded_resource_pair : device_data.resource_upgrades.original_resources_to_mirrored_upgraded_resources)
+                        {
+                           void* upgraded_resource_ptr = reinterpret_cast<void*>(upgraded_resource_pair.first);
+                           if (dsv_data.ds_hash == std::to_string(std::hash<void*>{}(upgraded_resource_ptr)))
+                           {
+                              if (upgraded_resource_pair.second.is_scaled)
+                              {
+                                 ImGui::Text("R Indirect Upgraded Size: %ux%u", upgraded_resource_pair.second.mirror_width, upgraded_resource_pair.second.mirror_height);
+                              }
+                              ImGui::Text("R: Indirect Upgraded");
+                              break;
+                           }
+                        }
+                     }
+
+                     const bool is_highlighted_resource = highlighted_resource == dsv_data.ds_hash;
+                     if (is_highlighted_resource ? ImGui::Button("Unhighlight Resource") : ImGui::Button("Highlight Resource"))
+                     {
+                        highlighted_resource = is_highlighted_resource ? "" : dsv_data.ds_hash;
+                     }
+
+                     ImGui::PopID();
+                  }
+
+                  const bool has_valid_depth = draw_call_data.depth_state != TraceDrawCallData::DepthStateType::Disabled
+                     && draw_call_data.depth_state != TraceDrawCallData::DepthStateType::Invalid;
+                  if (has_valid_depth && debug_draw_shader_enabled && debug_draw_mode != DebugDrawMode::Depth && ImGui::Button("Debug Draw Depth Resource"))
+                  {
+                     debug_draw_mode = DebugDrawMode::Depth;
+                     debug_draw_view_index = 0;
+                     debug_draw_options |= (uint32_t)DebugDrawTextureOptionsMask::RedOnly;
+                     debug_draw_mip = 0;
+                  }
+                  const bool has_valid_stencil = draw_call_data.stencil_state != TraceDrawCallData::DepthStateType::Disabled && draw_call_data.stencil_state != TraceDrawCallData::DepthStateType::Invalid;
+                  if (has_valid_stencil && debug_draw_shader_enabled && debug_draw_mode != DebugDrawMode::Stencil && ImGui::Button("Debug Draw Stencil Resource"))
+                  {
+                     debug_draw_mode = DebugDrawMode::Stencil;
+                     debug_draw_view_index = 0;
+                     debug_draw_options |= (uint32_t)DebugDrawTextureOptionsMask::RedOnly;
+                     debug_draw_mip = 0;
+                  }
+
+                  ImGui::Text("");
+                  ImGui::Text("Scissors Enabled: %s", draw_call_data.scissor_count >= 1 ? "True" : "False");
+                  const D3D11_VIEWPORT& viewport_0 = draw_call_data.viewports[0]; // Zeroed if none
+                  ImGui::Text("Viewport 0: x: %s y:%s w: %s h: %s",
+                     std::to_string(viewport_0.TopLeftX).c_str(),
+                     std::to_string(viewport_0.TopLeftY).c_str(),
+                     std::to_string(viewport_0.Width).c_str(),
+                     std::to_string(viewport_0.Height).c_str());
+               }
+
+               if (has_vs || has_ps || has_cs)
+               {
+                  for (UINT i = 0; i < D3D11_COMMONSHADER_SAMPLER_SLOT_COUNT; i++)
+                  {
+                     const TraceDrawCallData& slot_data = SlotData(TraceDrawCallData::SlotKind::Sampler, i);
+                     if (int(slot_data.samplers_filter[i]) >= 0)
+                     {
+                        ImGui::PushID(i + TraceDrawCallData::srvs_size + TraceDrawCallData::uavs_size + TraceDrawCallData::rtvs_size); // Offset by the max amount of previous iterations from above
+                        ImGui::Text("");
+                        ImGui::Text("Sampler Index: %u", i);
+                        DrawSlotChange(TraceDrawCallData::SlotKind::Sampler, i);
+                        ImGui::Text("Sampler Filter: %s", GetFilterName(slot_data.samplers_filter[i]));
+                        ImGui::Text("Sampler Address U: %s", GetTextureAddressModeName(slot_data.samplers_address_u[i]));
+                        ImGui::Text("Sampler Address V: %s", GetTextureAddressModeName(slot_data.samplers_address_v[i]));
+                        ImGui::Text("Sampler Address W: %s", GetTextureAddressModeName(slot_data.samplers_address_w[i]));
+                        ImGui::Text("Sampler Mip LOD bias: %f", slot_data.samplers_mip_lod_bias[i]);
+                        ImGui::PopID();
+                     }
+                  }
+
+                  for (UINT i = 0; i < D3D11_COMMONSHADER_CONSTANT_BUFFER_API_SLOT_COUNT; i++)
+                  {
+                     const TraceDrawCallData& slot_data = SlotData(TraceDrawCallData::SlotKind::CB, i);
+                     if (slot_data.cbs[i])
+                     {
+                        ImGui::PushID(i + TraceDrawCallData::srvs_size + TraceDrawCallData::uavs_size + TraceDrawCallData::rtvs_size + D3D11_COMMONSHADER_SAMPLER_SLOT_COUNT); // Offset by the max amount of previous iterations from above
+                        ImGui::Text("");
+                        ImGui::Text("CB Index: %u", i);
+                        DrawSlotChange(TraceDrawCallData::SlotKind::CB, i);
+                        ImGui::Text("CB Hash: %s", slot_data.cb_hash[i].c_str());
+                        if (slot_data.cb_num_constants[i] != 0)
+                        {
+                           const bool is_partial = slot_data.cb_first_constant[i] != 0 || slot_data.cb_num_constants[i] != D3D11_REQ_CONSTANT_BUFFER_ELEMENT_COUNT;
+                           ImGui::Text("CB First Constant: %u%s", slot_data.cb_first_constant[i], is_partial ? " (partial)" : "");
+                           ImGui::Text("CB Num Constants: %u", slot_data.cb_num_constants[i]);
+                        }
+                        const bool is_highlighted_resource = highlighted_resource == slot_data.cb_hash[i];
+                        if (is_highlighted_resource ? ImGui::Button("Unhighlight Resource") : ImGui::Button("Highlight Resource"))
+                        {
+                           highlighted_resource = is_highlighted_resource ? "" : slot_data.cb_hash[i];
+                        }
+                        ImGui::PopID();
+                     }
+                  }
+               }
+            };
+
             if (ImGui::BeginChild("##ShaderDetails", ImVec2(0, 0)))
             {
                ImGui::BeginDisabled(selected_index == -1);
@@ -11473,6 +12460,7 @@ namespace
                                        device_data.debug_draw_texture_format = DXGI_FORMAT_UNKNOWN;
                                        device_data.debug_draw_texture_size = {};
                                        debug_draw_pipeline_instance = 0;
+                                       debug_draw_custom_pass = 0;
 #if 1 // We could also let the user settings persist if we wished so, but automatically setting them is usually better
                                        debug_draw_pipeline_target_instance = debug_draw_shader_enabled ? -1 : target_instance;
                                        debug_draw_pipeline_target_thread = (!debug_draw_shader_enabled && debug_draw_pipeline_instance_filter_by_thread) ? draw_call_data.thread_id : std::thread::id();
@@ -11667,908 +12655,7 @@ namespace
                                  ImGui::Text("State Analysis:");
                                  if (ImGui::BeginChild("StateAnalysisScroll", ImVec2(0, -FLT_MIN), ImGuiChildFlags_Borders)) // I prefer it without a separate scrolling box for now
                                  {
-                                    bool is_first_draw = true;
-
-                                    if (pipeline_pair->second->HasComputeShader())
-                                    {
-                                       ImGui::Text("Indirect: %s", draw_call_data.draw_dispatch_data.indirect ? "True" : "False");
-                                       ImGui::Text("Dispatch Count: %ux%ux%u", draw_call_data.draw_dispatch_data.dispatch_count.x, draw_call_data.draw_dispatch_data.dispatch_count.y, draw_call_data.draw_dispatch_data.dispatch_count.z);
-                                       is_first_draw = false;
-                                    }
-                                    else if (pipeline_pair->second->HasVertexShader())
-                                    {
-                                       ImGui::Text("Indirect: %s", draw_call_data.draw_dispatch_data.indirect ? "True" : "False");
-                                       ImGui::NewLine();
-                                       ImGui::Text("Vertex Count: %u", draw_call_data.draw_dispatch_data.vertex_count);
-                                       ImGui::Text("Instance Count: %u", draw_call_data.draw_dispatch_data.instance_count);
-                                       ImGui::Text("First Vertex: %u", draw_call_data.draw_dispatch_data.first_vertex);
-                                       ImGui::Text("First Instance: %u", draw_call_data.draw_dispatch_data.first_instance);
-                                       ImGui::Text("Index Count: %u", draw_call_data.draw_dispatch_data.index_count);
-                                       ImGui::Text("First Index: %u", draw_call_data.draw_dispatch_data.first_index);
-                                       ImGui::Text("Vertex Offset: %i", draw_call_data.draw_dispatch_data.vertex_offset);
-                                       ImGui::Text("Indexed: %s", draw_call_data.draw_dispatch_data.indexed ? "True" : "False"); // TODO: do we need this? Is "index_count" enough? The functions would be different.
-
-                                       auto GetPrimitiveTopologyName = [](D3D_PRIMITIVE_TOPOLOGY topology) -> const char*
-                                          {
-                                             switch (topology)
-                                             {
-                                             case D3D_PRIMITIVE_TOPOLOGY_UNDEFINED:         return "UNDEFINED";
-                                             case D3D_PRIMITIVE_TOPOLOGY_POINTLIST:         return "POINTLIST";
-                                             case D3D_PRIMITIVE_TOPOLOGY_LINELIST:          return "LINELIST";
-                                             case D3D_PRIMITIVE_TOPOLOGY_LINESTRIP:         return "LINESTRIP";
-                                             case D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST:      return "TRIANGLELIST";
-                                             case D3D_PRIMITIVE_TOPOLOGY_TRIANGLESTRIP:     return "TRIANGLESTRIP";
-                                             case D3D_PRIMITIVE_TOPOLOGY_TRIANGLEFAN:       return "TRIANGLEFAN";
-                                             case D3D_PRIMITIVE_TOPOLOGY_LINELIST_ADJ:      return "LINELIST ADJ";
-                                             case D3D_PRIMITIVE_TOPOLOGY_LINESTRIP_ADJ:     return "LINESTRIP ADJ";
-                                             case D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST_ADJ:  return "TRIANGLELIST ADJ";
-                                             case D3D_PRIMITIVE_TOPOLOGY_TRIANGLESTRIP_ADJ: return "TRIANGLESTRIP ADJ";
-                                             default:                                       return "UNKNOWN";
-                                             }
-                                          };
-                                       ImGui::NewLine();
-                                       ImGui::Text("Primitive Topology: %s", GetPrimitiveTopologyName(draw_call_data.primitive_topology));
-
-                                       for (size_t i = 0; i < draw_call_data.vertex_buffer_hashes.size(); i++)
-                                       {
-                                          ImGui::NewLine();
-                                          ImGui::Text("Vertex Buffer %u: %s", i, draw_call_data.vertex_buffer_hashes[i].c_str());
-                                          ImGui::Text("Input Layout %u Format: %s", i, GetFormatNameSafe(draw_call_data.input_layouts_formats[i]));
-                                       }
-
-                                       ImGui::NewLine();
-                                       ImGui::Text("Input Buffer: %s", draw_call_data.input_layout_hash.c_str());
-                                       ImGui::Text("Input Buffer Format: %s", GetFormatNameSafe(draw_call_data.index_buffer_format));
-                                       ImGui::Text("Input Buffer Offset: %u", draw_call_data.index_buffer_offset);
-
-                                       ImGui::Text("Input Layout: %s", draw_call_data.index_buffer_hash.c_str());
-                                       is_first_draw = false;
-                                    }
-
-                                    if (pipeline_pair->second->HasVertexShader() || pipeline_pair->second->HasPixelShader() || pipeline_pair->second->HasComputeShader())
-                                    {
-                                       for (UINT i = 0; i < TraceDrawCallData::srvs_size; i++)
-                                       {
-                                          auto srv_format = draw_call_data.srv_format[i];
-                                          if (srv_format == DXGI_FORMAT_UNKNOWN) // Resource was not valid
-                                          {
-                                             continue;
-                                          }
-                                          const bool non_referenced = srv_format == DXGI_FORMAT(-1);
-                                          if (trace_ignore_non_bound_shader_referenced_resources && srv_format == DXGI_FORMAT(-1))
-                                          {
-                                             continue;
-                                          }
-                                          auto sr_format = draw_call_data.sr_format[i];
-                                          auto sr_size = draw_call_data.sr_size[i];
-                                          auto srv_size = draw_call_data.srv_size[i];
-                                          auto sr_hash = draw_call_data.sr_hash[i];
-                                          auto sr_type_name = draw_call_data.sr_type_name[i];
-                                          auto sr_is_rt = draw_call_data.sr_is_rt[i];
-                                          auto sr_is_ua = draw_call_data.sr_is_ua[i];
-
-                                          ImGui::PushID(i);
-
-                                          if (!is_first_draw) { ImGui::Text(""); };
-                                          is_first_draw = false;
-                                          ImGui::PushStyleColor(ImGuiCol_Text, IM_COL32(245, 230, 140, 255)); // Faint Yellow
-                                          ImGui::Text("SRV Index: %u", i);
-                                          ImGui::PopStyleColor();
-                                          if (non_referenced)
-                                          {
-                                             ImGui::PushStyleColor(ImGuiCol_Text, IM_COL32(255, 0, 0, 255)); // Red
-                                             ImGui::Text("R Referenced but Not Bound");
-                                             ImGui::PopStyleColor();
-                                             continue;
-                                          }
-                                          ImGui::Text("R Hash: %s", sr_hash.c_str());
-                                          if (!draw_call_data.sr_debug_name[i].empty())
-                                             ImGui::Text("R Debug Name: %s", draw_call_data.sr_debug_name[i].c_str());
-                                          ImGui::Text("R Type: %s", sr_type_name.c_str());
-                                          if (GetFormatName(sr_format) != nullptr)
-                                          {
-                                             ImGui::Text("R Format: %s", GetFormatName(sr_format));
-                                          }
-                                          else
-                                          {
-                                             ImGui::Text("R Format: %u", sr_format);
-                                          }
-                                          if (GetFormatName(srv_format) != nullptr)
-                                          {
-                                             ImGui::Text("RV Format: %s", GetFormatName(srv_format));
-                                          }
-                                          else
-                                          {
-                                             ImGui::Text("RV Format: %u", srv_format);
-                                          }
-                                          ImGui::Text("R Size: %ux%ux%ux%u", sr_size.x, sr_size.y, sr_size.z, sr_size.w);
-                                          ImGui::Text("RV Mip: %u", draw_call_data.srv_mip[i]);
-                                          ImGui::Text("RV Size: %ux%ux%u", srv_size.x, srv_size.y, srv_size.z);
-                                          ImGui::Text("R is RT: %s", sr_is_rt ? "True" : "False"); // TODO: add if they have CPU access, or immutable etc, and also whether they are a depth buffer (DSV)
-                                          ImGui::Text("R is UA: %s", sr_is_ua ? "True" : "False");
-                                          bool upgraded = false;
-                                          {
-                                             const std::shared_lock lock(device_data.mutex);
-                                             // TODO: store this information in the trace list, it might expire otherwise, or even be incorrect if ptrs were re-used. Also this info isn't shown if we use indirect texture upgrades.
-                                             for (auto upgraded_resource_pair : device_data.resource_upgrades.original_upgraded_resources_formats)
-                                             {
-                                                void* upgraded_resource_ptr = reinterpret_cast<void*>(upgraded_resource_pair.first);
-                                                if (sr_hash == std::to_string(std::hash<void*>{}(upgraded_resource_ptr)))
-                                                {
-                                                   ImGui::Text("R: Direct Upgraded");
-
-                                                   ImGui::Text("R Original Format: %s", GetFormatName(DXGI_FORMAT(upgraded_resource_pair.second)));
-
-                                                   if (const auto it = device_data.resource_upgrades.original_upgraded_resource_views_formats.find(reinterpret_cast<uint64_t>(draw_call_data.srvs[i])); it != device_data.resource_upgrades.original_upgraded_resource_views_formats.end())
-                                                   {
-                                                      const auto& [native_resource, original_view_format] = it->second;
-                                                      ASSERT_ONCE(native_resource == upgraded_resource_pair.first); // Uh!?
-
-                                                      DXGI_FORMAT upgraded_view_format = draw_call_data.srv_format[i]; // This only works with direct upgrades, otherwise it'd be the original view format
-                                                      // If the game already tried to create a view in the upgraded format, it means it simply read the format from the upgraded texture,
-                                                      // and thus we can assume the original format would have been the same as the original texture (or anyway the most obvious non typeless version of it)
-                                                      DXGI_FORMAT adjusted_original_view_format = (DXGI_FORMAT(original_view_format) == upgraded_view_format) ? DXGI_FORMAT(upgraded_resource_pair.second) : DXGI_FORMAT(original_view_format);
-
-                                                      ImGui::Text("RV Original Format: %s", GetFormatName(adjusted_original_view_format));
-                                                      // TODO: if the native texture format is TYPELESS, don't send this warning? Alternatively keep track of how the resource was last used (with what view it was written to, if any), and base the state off of that,
-                                                      // then check the current state of the backbuffer and whether it's currently holding linear or gamma space colors (we don't store that anywhere atm, given it's not that simple).
-                                                      // We could also send a message in case the upgraded format was float and the original format was not linear, but that's kinda obvious already (that the current color encoding might not be the most optimal).
-                                                      if (IsLinearFormat(DXGI_FORMAT(upgraded_resource_pair.second)) != IsLinearFormat(DXGI_FORMAT(adjusted_original_view_format)))
-                                                      {
-                                                         ImGui::PushStyleColor(ImGuiCol_Text, IM_COL32(255, 0, 0, 255)); // Red
-                                                         ImGui::Text("RV Gamma Change");
-                                                         ImGui::PopStyleColor();
-                                                      }
-                                                   }
-
-                                                   upgraded = true;
-                                                
-                                                   break;
-                                                }
-                                             }
-                                             for (auto upgraded_resource_pair : device_data.resource_upgrades.original_resources_to_mirrored_upgraded_resources)
-                                             {
-                                                void* upgraded_resource_ptr = reinterpret_cast<void*>(upgraded_resource_pair.first);
-                                                if (sr_hash == std::to_string(std::hash<void*>{}(upgraded_resource_ptr)))
-                                                {
-                                                   if (upgraded_resource_pair.second.is_scaled)
-                                                   {
-                                                      ImGui::Text("R Indirect Upgraded Size: %ux%u", upgraded_resource_pair.second.mirror_width, upgraded_resource_pair.second.mirror_height);
-                                                   }
-                                                   ImGui::Text("R: Indirect Upgraded");
-                                                   upgraded = true;
-                                                   break;
-                                                }
-                                             }
-                                          }
-
-                                          const bool is_highlighted_resource = highlighted_resource == sr_hash;
-                                          if (is_highlighted_resource ? ImGui::Button("Unhighlight Resource") : ImGui::Button("Highlight Resource"))
-                                          {
-                                             highlighted_resource = is_highlighted_resource ? "" : sr_hash;
-                                          }
-
-                                          // TODO: hide the button if the resource is a buffer
-                                          if (debug_draw_shader_enabled && (debug_draw_mode != DebugDrawMode::ShaderResource || debug_draw_view_index != i) && ImGui::Button("Debug Draw Resource"))
-                                          {
-                                             if (debug_draw_mode == DebugDrawMode::Depth || debug_draw_mode == DebugDrawMode::Stencil)
-                                             {
-                                                debug_draw_options &= ~(uint32_t)DebugDrawTextureOptionsMask::RedOnly;
-                                             }
-                                             debug_draw_mode = DebugDrawMode::ShaderResource;
-                                             debug_draw_view_index = i;
-                                             debug_draw_mip = draw_call_data.srv_mip[i];
-                                          }
-
-                                          ImGui::PopID();
-                                       }
-                                    }
-
-                                    if (pipeline_pair->second->HasPixelShader() || pipeline_pair->second->HasComputeShader())
-                                    {
-                                       for (UINT i = 0; i < TraceDrawCallData::uavs_size; i++)
-                                       {
-                                          auto uav_format = draw_call_data.uav_format[i];
-                                          if (uav_format == DXGI_FORMAT_UNKNOWN) // Resource was not valid
-                                          {
-                                             continue;
-                                          }
-                                          const bool non_referenced = uav_format == DXGI_FORMAT(-1);
-                                          if (trace_ignore_non_bound_shader_referenced_resources && uav_format == DXGI_FORMAT(-1))
-                                          {
-                                             continue;
-                                          }
-                                          auto ua_format = draw_call_data.ua_format[i];
-                                          auto ua_size = draw_call_data.ua_size[i];
-                                          auto uav_size = draw_call_data.uav_size[i];
-                                          auto ua_hash = draw_call_data.ua_hash[i];
-                                          auto ua_type_name = draw_call_data.ua_type_name[i];
-                                          auto ua_is_rt = draw_call_data.ua_is_rt[i];
-
-                                          ImGui::PushID(i + TraceDrawCallData::srvs_size); // Offset by the max amount of previous iterations from above
-
-                                          if (!is_first_draw) { ImGui::Text(""); };
-                                          is_first_draw = false;
-                                          ImGui::PushStyleColor(ImGuiCol_Text, IM_COL32(200, 170, 230, 255)); // Faint Purple
-                                          ImGui::Text("UAV Index: %u", i);
-                                          ImGui::PopStyleColor();
-                                          if (non_referenced)
-                                          {
-                                             ImGui::PushStyleColor(ImGuiCol_Text, IM_COL32(255, 0, 0, 255)); // Red
-                                             ImGui::Text("R Referenced but Not Bound");
-                                             ImGui::PopStyleColor();
-                                             continue;
-                                          }
-                                          ImGui::Text("R Hash: %s", ua_hash.c_str());
-                                          if (!draw_call_data.ua_debug_name[i].empty())
-                                             ImGui::Text("R Debug Name: %s", draw_call_data.ua_debug_name[i].c_str());
-                                          ImGui::Text("R Type: %s", ua_type_name.c_str());
-                                          if (GetFormatName(ua_format) != nullptr)
-                                          {
-                                             ImGui::Text("R Format: %s", GetFormatName(ua_format));
-                                          }
-                                          else
-                                          {
-                                             ImGui::Text("R Format: %u", ua_format);
-                                          }
-                                          if (GetFormatName(uav_format) != nullptr)
-                                          {
-                                             ImGui::Text("RV Format: %s", GetFormatName(uav_format));
-                                          }
-                                          else
-                                          {
-                                             ImGui::Text("RV Format: %u", uav_format);
-                                          }
-                                          ImGui::Text("R Size: %ux%ux%ux%u", ua_size.x, ua_size.y, ua_size.z, ua_size.w);
-                                          ImGui::Text("RV Mip: %u", draw_call_data.uav_mip[i]);
-                                          ImGui::Text("RV Size: %ux%ux%u", uav_size.x, uav_size.y, uav_size.z);
-                                          ImGui::Text("R is RT: %s", ua_is_rt ? "True" : "False");
-                                          bool upgraded = false;
-                                          {
-                                             const std::shared_lock lock(device_data.mutex);
-                                             for (auto upgraded_resource_pair : device_data.resource_upgrades.original_upgraded_resources_formats)
-                                             {
-                                                void* upgraded_resource_ptr = reinterpret_cast<void*>(upgraded_resource_pair.first);
-                                                if (ua_hash == std::to_string(std::hash<void*>{}(upgraded_resource_ptr)))
-                                                {
-                                                   ImGui::Text("R: Direct Upgraded");
-
-                                                   ImGui::Text("R Original Format: %s", GetFormatName(DXGI_FORMAT(upgraded_resource_pair.second)));
-
-                                                   if (const auto it = device_data.resource_upgrades.original_upgraded_resource_views_formats.find(reinterpret_cast<uint64_t>(draw_call_data.uavs[i])); it != device_data.resource_upgrades.original_upgraded_resource_views_formats.end())
-                                                   {
-                                                      const auto& [native_resource, original_view_format] = it->second;
-                                                      ASSERT_ONCE(native_resource == upgraded_resource_pair.first); // Uh!?
-                                                      DXGI_FORMAT upgraded_view_format = draw_call_data.uav_format[i]; // This only works with direct upgrades, otherwise it'd be the original view format
-                                                      DXGI_FORMAT adjusted_original_view_format = (DXGI_FORMAT(original_view_format) == upgraded_view_format) ? DXGI_FORMAT(upgraded_resource_pair.second) : DXGI_FORMAT(original_view_format);
-                                                      ImGui::Text("RV Original Format: %s", GetFormatName(adjusted_original_view_format));
-                                                      if (IsLinearFormat(DXGI_FORMAT(upgraded_resource_pair.second)) != IsLinearFormat(adjusted_original_view_format))
-                                                      {
-                                                         ImGui::PushStyleColor(ImGuiCol_Text, IM_COL32(255, 0, 0, 255)); // Red
-                                                         ImGui::Text("RV Gamma Change");
-                                                         ImGui::PopStyleColor();
-                                                      }
-                                                   }
-
-                                                   upgraded = true;
-
-                                                   break;
-                                                }
-                                             }
-                                             for (auto upgraded_resource_pair : device_data.resource_upgrades.original_resources_to_mirrored_upgraded_resources)
-                                             {
-                                                void* upgraded_resource_ptr = reinterpret_cast<void*>(upgraded_resource_pair.first);
-                                                if (ua_hash == std::to_string(std::hash<void*>{}(upgraded_resource_ptr)))
-                                                {
-                                                   if (upgraded_resource_pair.second.is_scaled)
-                                                   {
-                                                      ImGui::Text("R Indirect Upgraded Size: %ux%u", upgraded_resource_pair.second.mirror_width, upgraded_resource_pair.second.mirror_height);
-                                                   }
-                                                   ImGui::Text("R: Indirect Upgraded");
-                                                   upgraded = true;
-                                                   break;
-                                                }
-                                             }
-                                          }
-
-                                          const bool is_highlighted_resource = highlighted_resource == ua_hash;
-                                          if (is_highlighted_resource ? ImGui::Button("Unhighlight Resource") : ImGui::Button("Highlight Resource"))
-                                          {
-                                             highlighted_resource = is_highlighted_resource ? "" : ua_hash;
-                                          }
-
-                                          if (!upgraded && texture_format_upgrades_type == TextureFormatUpgradesType::AllowedEnabled && ImGui::Button("Indirect Upgrade Resource Format (By Shader)"))
-                                          {
-                                             auto_texture_format_upgrade_shader_hashes[pipeline_pair->second->shader_hashes[0]] = AutoTextureFormatUpgradeShaderHash{ std::vector<uint8_t>(), std::vector<uint8_t>{ uint8_t(i) }, false }; // DX11 logic
-                                          }
-
-                                          if (debug_draw_shader_enabled && (debug_draw_mode != DebugDrawMode::UnorderedAccessView || debug_draw_view_index != i) && ImGui::Button("Debug Draw Resource"))
-                                          {
-                                             if (debug_draw_mode == DebugDrawMode::Depth || debug_draw_mode == DebugDrawMode::Stencil)
-                                             {
-                                                debug_draw_options &= ~(uint32_t)DebugDrawTextureOptionsMask::RedOnly;
-                                             }
-                                             debug_draw_mode = DebugDrawMode::UnorderedAccessView;
-                                             debug_draw_view_index = i;
-                                             debug_draw_mip = draw_call_data.uav_mip[i];
-                                          }
-
-                                          bool is_redirection_target = pipeline_pair->second->redirect_data.target_type == CachedPipeline::RedirectData::RedirectTargetType::UAV && pipeline_pair->second->redirect_data.target_index == i;
-                                          if (pipeline_pair->second->redirect_data.source_type != CachedPipeline::RedirectData::RedirectSourceType::None && is_redirection_target && ImGui::Button("Disable Copy"))
-                                          {
-                                             pipeline_pair->second->redirect_data.source_type = CachedPipeline::RedirectData::RedirectSourceType::None;
-                                             pipeline_pair->second->redirect_data.target_type = CachedPipeline::RedirectData::RedirectTargetType::None;
-                                             pipeline_pair->second->redirect_data.source_index = 0;
-                                             pipeline_pair->second->redirect_data.target_index = 0;
-                                             is_redirection_target = false;
-                                          }
-                                          if ((pipeline_pair->second->redirect_data.source_type != CachedPipeline::RedirectData::RedirectSourceType::SRV || !is_redirection_target) && ImGui::Button("Copy from SRV"))
-                                          {
-                                             pipeline_pair->second->redirect_data.source_type = CachedPipeline::RedirectData::RedirectSourceType::SRV;
-                                             pipeline_pair->second->redirect_data.target_type = CachedPipeline::RedirectData::RedirectTargetType::UAV;
-                                             pipeline_pair->second->redirect_data.source_index = 0;
-                                             pipeline_pair->second->redirect_data.target_index = i;
-                                             is_redirection_target = true;
-                                          }
-                                          if ((pipeline_pair->second->redirect_data.source_type != CachedPipeline::RedirectData::RedirectSourceType::UAV || !is_redirection_target) && ImGui::Button("Copy from UAV"))
-                                          {
-                                             pipeline_pair->second->redirect_data.source_type = CachedPipeline::RedirectData::RedirectSourceType::UAV;
-                                             pipeline_pair->second->redirect_data.target_type = CachedPipeline::RedirectData::RedirectTargetType::UAV;
-                                             pipeline_pair->second->redirect_data.source_index = 0;
-                                             pipeline_pair->second->redirect_data.target_index = i;
-                                             is_redirection_target = true;
-                                          }
-                                          if (is_redirection_target)
-                                          {
-                                             ImGui::SliderInt("Copy from View Index", &pipeline_pair->second->redirect_data.source_index, 0, D3D11_COMMONSHADER_INPUT_RESOURCE_SLOT_COUNT /*The largest allowed view count by type*/);
-                                          }
-
-                                          ImGui::PopID();
-                                       }
-                                    }
-
-                                    if (pipeline_pair->second->HasPixelShader())
-                                    {
-                                       auto blend_desc = draw_call_data.blend_desc;
-
-                                       for (UINT i = 0; i < TraceDrawCallData::rtvs_size; i++)
-                                       {
-                                          auto rtv_format = draw_call_data.rtv_format[i];
-                                          if (rtv_format == DXGI_FORMAT_UNKNOWN) // Resource was not valid
-                                          {
-                                             continue;
-                                          }
-                                          const bool non_referenced = rtv_format == DXGI_FORMAT(-1);
-                                          if (trace_ignore_non_bound_shader_referenced_resources && rtv_format == DXGI_FORMAT(-1))
-                                          {
-                                             continue;
-                                          }
-                                          auto rt_format = draw_call_data.rt_format[i];
-                                          auto rt_size = draw_call_data.rt_size[i];
-                                          auto rtv_size = draw_call_data.rtv_size[i];
-                                          auto rt_hash = draw_call_data.rt_hash[i];
-                                          auto rt_type_name = draw_call_data.rt_type_name[i];
-
-                                          ImGui::PushID(i + TraceDrawCallData::srvs_size + TraceDrawCallData::uavs_size); // Offset by the max amount of previous iterations from above
-
-                                          if (!is_first_draw) { ImGui::Text(""); };
-                                          is_first_draw = false;
-                                          ImGui::PushStyleColor(ImGuiCol_Text, IM_COL32(160, 200, 255, 255)); // Faint Blue
-                                          ImGui::Text("RTV Index: %u", i);
-                                          ImGui::PopStyleColor();
-                                          if (non_referenced)
-                                          {
-                                             ImGui::PushStyleColor(ImGuiCol_Text, IM_COL32(255, 0, 0, 255)); // Red
-                                             ImGui::Text("R Referenced but Not Bound");
-                                             ImGui::PopStyleColor();
-                                             continue;
-                                          }
-                                          ImGui::Text("R Hash: %s", rt_hash.c_str());
-                                          if (!draw_call_data.rt_debug_name[i].empty())
-                                             ImGui::Text("R Debug Name: %s", draw_call_data.rt_debug_name[i].c_str());
-                                          ImGui::Text("R Type: %s", rt_type_name.c_str());
-                                          if (GetFormatName(rt_format) != nullptr)
-                                          {
-                                             ImGui::Text("R Format: %s", GetFormatName(rt_format));
-                                          }
-                                          else
-                                          {
-                                             ImGui::Text("R Format: %u", rt_format);
-                                          }
-                                          if (GetFormatName(rtv_format) != nullptr)
-                                          {
-                                             ImGui::Text("RV Format: %s", GetFormatName(rtv_format));
-                                          }
-                                          else
-                                          {
-                                             ImGui::Text("RV Format: %u", rtv_format);
-                                          }
-                                          ImGui::Text("R Size: %ux%ux%ux%u", rt_size.x, rt_size.y, rt_size.z, rt_size.w);
-                                          ImGui::Text("RV Mip: %u", draw_call_data.rtv_mip[i]);
-                                          ImGui::Text("RV Size: %ux%ux%u", rtv_size.x, rtv_size.y, rtv_size.z);
-                                          ImGui::Text("R is Swapchain: %s", draw_call_data.rt_is_swapchain[i] ? "True" : "False"); // TODO: add this for compute shaders / UAVs toos
-                                          bool upgraded = false;
-                                          bool indirect_upgraded = false;
-                                          {
-                                             const std::shared_lock lock(device_data.mutex);
-                                             // TODO: this is missing the "R is UAV" print
-                                             for (auto upgraded_resource_pair : device_data.resource_upgrades.original_upgraded_resources_formats)
-                                             {
-                                                void* upgraded_resource_ptr = reinterpret_cast<void*>(upgraded_resource_pair.first);
-                                                if (rt_hash == std::to_string(std::hash<void*>{}(upgraded_resource_ptr)))
-                                                {
-                                                   ImGui::Text("R: Direct Upgraded");
-
-                                                   ImGui::Text("R Original Format: %s", GetFormatName(DXGI_FORMAT(upgraded_resource_pair.second)));
-
-                                                   // TODO: why does this flicker on and off in Deux Ex HR when it writes on the swapchain for material draws?
-                                                   if (const auto it = device_data.resource_upgrades.original_upgraded_resource_views_formats.find(reinterpret_cast<uint64_t>(draw_call_data.rtvs[i])); it != device_data.resource_upgrades.original_upgraded_resource_views_formats.end())
-                                                   {
-                                                      const auto& [native_resource, original_view_format] = it->second;
-                                                      ASSERT_ONCE(native_resource == upgraded_resource_pair.first); // Uh!?
-                                                      DXGI_FORMAT upgraded_view_format = draw_call_data.rtv_format[i]; // This only works with direct upgrades, otherwise it'd be the original view format
-                                                      DXGI_FORMAT adjusted_original_view_format = (DXGI_FORMAT(original_view_format) == upgraded_view_format) ? DXGI_FORMAT(upgraded_resource_pair.second) : DXGI_FORMAT(original_view_format);
-                                                      ImGui::Text("RV Original Format: %s", GetFormatName(adjusted_original_view_format));
-                                                      if (IsLinearFormat(DXGI_FORMAT(upgraded_resource_pair.second)) != IsLinearFormat(adjusted_original_view_format))
-                                                      {
-                                                         ImGui::PushStyleColor(ImGuiCol_Text, IM_COL32(255, 0, 0, 255)); // Red
-                                                         ImGui::Text("RV Gamma Change");
-                                                         ImGui::PopStyleColor();
-                                                      }
-                                                   }
-
-                                                   upgraded = true;
-
-                                                   break;
-                                                }
-                                             }
-                                             for (auto upgraded_resource_pair : device_data.resource_upgrades.original_resources_to_mirrored_upgraded_resources)
-                                             {
-                                                void* upgraded_resource_ptr = reinterpret_cast<void*>(upgraded_resource_pair.first);
-                                                if (rt_hash == std::to_string(std::hash<void*>{}(upgraded_resource_ptr)))
-                                                {
-                                                   if (upgraded_resource_pair.second.is_scaled)
-                                                   {
-                                                      ImGui::Text("R Indirect Upgraded Size: %ux%u", upgraded_resource_pair.second.mirror_width, upgraded_resource_pair.second.mirror_height);
-                                                   }
-                                                   ImGui::Text("R: Indirect Upgraded");
-                                                   upgraded = true;
-                                                   indirect_upgraded = true;
-                                                   break;
-                                                }
-                                             }
-                                          }
-
-                                          // Blend mode
-                                          {
-                                             bool pop_text_style_color = false;
-                                             // Print out invalid blend modes.
-                                             // Note: this is assuming that indirect upgrades always upgrade to a signed float type, which is generally true. Ideally we'd implement something like "GetBestResourceViewUpgradeFormat(draw_call_data.rtv_format[i])" here, but given it's just a warning, it doesn't really matter
-                                             if (IsRGBAFormat(draw_call_data.rtv_format[i], true) && (indirect_upgraded || IsSignedFloatFormat(draw_call_data.rtv_format[i])) && IsBlendInverted(draw_call_data.blend_desc, 1, false, i))
-                                             {
-                                                ImGui::PushStyleColor(ImGuiCol_Text, IM_COL32(255, 105, 0, 255)); // Orange
-                                                pop_text_style_color = true;
-                                             }
-
-                                             const D3D11_RENDER_TARGET_BLEND_DESC1& render_target_blend_desc = blend_desc.IndependentBlendEnable ? blend_desc.RenderTarget[i] : blend_desc.RenderTarget[0];
-                                             // See "ui_data.blend_mode" for details on usage
-                                             if (render_target_blend_desc.BlendEnable)
-                                             {
-                                                bool has_drawn_blend_rgb_text = false;
-
-                                                if (render_target_blend_desc.SrcBlend == D3D11_BLEND::D3D11_BLEND_BLEND_FACTOR || render_target_blend_desc.DestBlend == D3D11_BLEND::D3D11_BLEND_BLEND_FACTOR
-                                                   || render_target_blend_desc.SrcBlend == D3D11_BLEND::D3D11_BLEND_INV_BLEND_FACTOR || render_target_blend_desc.DestBlend == D3D11_BLEND::D3D11_BLEND_INV_BLEND_FACTOR)
-                                                {
-                                                   ImGui::Text("Blend RGB Mode: Blend Factor (Any)");
-                                                   has_drawn_blend_rgb_text = true;
-                                                }
-                                                else if (render_target_blend_desc.SrcBlend == D3D11_BLEND::D3D11_BLEND_ZERO && render_target_blend_desc.DestBlend == D3D11_BLEND::D3D11_BLEND_ZERO)
-                                                {
-                                                   ImGui::Text("Blend RGB Mode: Zero (Override Color with Zero)");
-                                                   has_drawn_blend_rgb_text = true;
-                                                }
-
-                                                if (!has_drawn_blend_rgb_text && render_target_blend_desc.BlendOp == D3D11_BLEND_OP::D3D11_BLEND_OP_ADD)
-                                                {
-                                                   if (render_target_blend_desc.SrcBlend == D3D11_BLEND::D3D11_BLEND_ONE && render_target_blend_desc.DestBlend == D3D11_BLEND::D3D11_BLEND_ONE)
-                                                   {
-                                                      ImGui::Text("Blend RGB Mode: Additive Color");
-                                                      has_drawn_blend_rgb_text = true;
-                                                   }
-                                                   else if (render_target_blend_desc.SrcBlend == D3D11_BLEND::D3D11_BLEND_SRC_ALPHA && render_target_blend_desc.DestBlend == D3D11_BLEND::D3D11_BLEND_ONE)
-                                                   {
-                                                      ImGui::Text("Blend RGB Mode: Additive Alpha");
-                                                      has_drawn_blend_rgb_text = true;
-                                                   }
-                                                   else if (render_target_blend_desc.SrcBlend == D3D11_BLEND::D3D11_BLEND_SRC_ALPHA_SAT && render_target_blend_desc.DestBlend == D3D11_BLEND::D3D11_BLEND_ONE)
-                                                   {
-                                                      ImGui::Text("Blend RGB Mode: Additive Alpha (Saturated)");
-                                                      has_drawn_blend_rgb_text = true;
-                                                   }
-                                                   else if (render_target_blend_desc.SrcBlend == D3D11_BLEND::D3D11_BLEND_ONE && render_target_blend_desc.DestBlend == D3D11_BLEND::D3D11_BLEND_INV_SRC_ALPHA)
-                                                   {
-                                                      ImGui::Text("Blend RGB Mode: Premultiplied Alpha"); // The alpha was supposedly (but not necessarily) pre-multiplied in the rgb before the pixel shader output
-                                                      has_drawn_blend_rgb_text = true;
-                                                   }
-                                                   else if (render_target_blend_desc.SrcBlend == D3D11_BLEND::D3D11_BLEND_SRC_ALPHA && render_target_blend_desc.DestBlend == D3D11_BLEND::D3D11_BLEND_INV_SRC_ALPHA)
-                                                   {
-                                                      ImGui::Text("Blend RGB Mode: Straight Alpha");
-                                                      has_drawn_blend_rgb_text = true;
-                                                   }
-                                                   else if (render_target_blend_desc.SrcBlend == D3D11_BLEND::D3D11_BLEND_SRC_ALPHA_SAT && render_target_blend_desc.DestBlend == D3D11_BLEND::D3D11_BLEND_INV_SRC_ALPHA)
-                                                   {
-                                                      ImGui::Text("Blend RGB Mode: Straight Alpha (Saturated)");
-                                                      has_drawn_blend_rgb_text = true;
-                                                   }
-                                                   // Often used for lighting, glow, or compositing effects where the destination alpha controls how much of the source contributes
-                                                   else if (render_target_blend_desc.SrcBlend == D3D11_BLEND::D3D11_BLEND_DEST_ALPHA && render_target_blend_desc.DestBlend == D3D11_BLEND::D3D11_BLEND_ONE)
-                                                   {
-                                                      ImGui::Text("Blend RGB Mode: Reverse Premultiplied Alpha");
-                                                      has_drawn_blend_rgb_text = true;
-                                                   }
-                                                   else if (render_target_blend_desc.SrcBlend == D3D11_BLEND::D3D11_BLEND_DEST_COLOR && render_target_blend_desc.DestBlend == D3D11_BLEND::D3D11_BLEND_ZERO)
-                                                   {
-                                                      ImGui::Text("Blend RGB Mode: Multiplicative Color");
-                                                      has_drawn_blend_rgb_text = true;
-                                                   }
-                                                   // It's enabled but it's as if it was disabled
-                                                   else if (render_target_blend_desc.SrcBlend == D3D11_BLEND::D3D11_BLEND_ONE && render_target_blend_desc.DestBlend == D3D11_BLEND::D3D11_BLEND_ZERO)
-                                                   {
-                                                      ImGui::Text("Blend RGB Mode: Disabled");
-                                                      has_drawn_blend_rgb_text = true;
-                                                   }
-                                                }
-                                                // This subtracts the source from the target
-                                                else if (!has_drawn_blend_rgb_text && render_target_blend_desc.BlendOp == D3D11_BLEND_OP::D3D11_BLEND_OP_REV_SUBTRACT)
-                                                {
-                                                   if (render_target_blend_desc.SrcBlend == D3D11_BLEND::D3D11_BLEND_ONE && render_target_blend_desc.DestBlend == D3D11_BLEND::D3D11_BLEND_ONE)
-                                                   {
-                                                      ImGui::Text("Blend RGB Mode: Subtractive Color");
-                                                      has_drawn_blend_rgb_text = true;
-                                                   }
-                                                   else if (render_target_blend_desc.SrcBlend == D3D11_BLEND::D3D11_BLEND_SRC_ALPHA && render_target_blend_desc.DestBlend == D3D11_BLEND::D3D11_BLEND_ONE)
-                                                   {
-                                                      ImGui::Text("Blend RGB Mode: Subtractive Alpha");
-                                                      has_drawn_blend_rgb_text = true;
-                                                   }
-                                                   else if (render_target_blend_desc.SrcBlend == D3D11_BLEND::D3D11_BLEND_SRC_ALPHA_SAT && render_target_blend_desc.DestBlend == D3D11_BLEND::D3D11_BLEND_ONE)
-                                                   {
-                                                      ImGui::Text("Blend RGB Mode: Subtractive Alpha (Saturated)");
-                                                      has_drawn_blend_rgb_text = true;
-                                                   }
-                                                   else if (render_target_blend_desc.SrcBlend == D3D11_BLEND::D3D11_BLEND_ZERO && render_target_blend_desc.DestBlend == D3D11_BLEND::D3D11_BLEND_ONE)
-                                                   {
-                                                      ImGui::Text("Blend RGB Mode: Disabled");
-                                                      has_drawn_blend_rgb_text = true;
-                                                   }
-                                                   else
-                                                   {
-                                                      ImGui::Text("Blend RGB Mode: Subtractive (Any)");
-                                                      has_drawn_blend_rgb_text = true;
-                                                   }
-                                                }
-
-                                                if (!has_drawn_blend_rgb_text)
-                                                {
-                                                   ImGui::Text("Blend RGB Mode: Unknown");
-                                                   has_drawn_blend_rgb_text = true;
-                                                }
-
-                                                if ((render_target_blend_desc.RenderTargetWriteMask & (D3D11_COLOR_WRITE_ENABLE_RED | D3D11_COLOR_WRITE_ENABLE_GREEN | D3D11_COLOR_WRITE_ENABLE_BLUE)) == 0)
-                                                {
-                                                   ImGui::SameLine();
-                                                   ImGui::Text(" (Ignored)");
-                                                }
-
-                                                // TODO: add "SampleMask" etc (stencil too, together with stencil debug draw, but that goes with depth)
-                                                ImGui::Text("Blend RGB Mode Details: (Src * %s) %s (Dest * %s)", GetBlendName(render_target_blend_desc.SrcBlend), GetBlendOpName(render_target_blend_desc.BlendOp), GetBlendName(render_target_blend_desc.DestBlend));
-
-                                                bool has_drawn_blend_a_text = false;
-
-                                                // It's enabled but it's as if it was disabled
-                                                if (render_target_blend_desc.SrcBlendAlpha == D3D11_BLEND::D3D11_BLEND_BLEND_FACTOR || render_target_blend_desc.DestBlendAlpha == D3D11_BLEND::D3D11_BLEND_BLEND_FACTOR
-                                                   || render_target_blend_desc.SrcBlendAlpha == D3D11_BLEND::D3D11_BLEND_INV_BLEND_FACTOR || render_target_blend_desc.DestBlendAlpha == D3D11_BLEND::D3D11_BLEND_INV_BLEND_FACTOR)
-                                                {
-                                                   ImGui::Text("Blend A Mode: Blend Factor (Any)");
-                                                   has_drawn_blend_a_text = true;
-                                                }
-                                                if (render_target_blend_desc.SrcBlendAlpha == D3D11_BLEND::D3D11_BLEND_ZERO && render_target_blend_desc.DestBlendAlpha == D3D11_BLEND::D3D11_BLEND_ZERO)
-                                                {
-                                                   ImGui::Text("Blend A Mode: Zero (Overwrite Alpha with Zero)");
-                                                   has_drawn_blend_a_text = true;
-                                                }
-
-                                                if (!has_drawn_blend_a_text && render_target_blend_desc.BlendOpAlpha == D3D11_BLEND_OP::D3D11_BLEND_OP_ADD)
-                                                {
-                                                   if (render_target_blend_desc.SrcBlendAlpha == D3D11_BLEND::D3D11_BLEND_SRC_ALPHA && render_target_blend_desc.DestBlendAlpha == D3D11_BLEND::D3D11_BLEND_INV_SRC_ALPHA)
-                                                   {
-                                                      ImGui::Text("Blend A Mode: Standard Transparency");
-                                                      has_drawn_blend_a_text = true;
-                                                   }
-                                                   else if (render_target_blend_desc.SrcBlendAlpha == D3D11_BLEND::D3D11_BLEND_SRC_ALPHA_SAT && render_target_blend_desc.DestBlendAlpha == D3D11_BLEND::D3D11_BLEND_INV_SRC_ALPHA)
-                                                   {
-                                                      ImGui::Text("Blend A Mode: Standard Transparency (Saturated)");
-                                                      has_drawn_blend_a_text = true;
-                                                   }
-                                                   else if (render_target_blend_desc.SrcBlendAlpha == D3D11_BLEND::D3D11_BLEND_DEST_ALPHA && render_target_blend_desc.DestBlendAlpha == D3D11_BLEND::D3D11_BLEND_ZERO)
-                                                   {
-                                                      ImGui::Text("Blend A Mode: Multiplicative");
-                                                      has_drawn_blend_a_text = true;
-                                                   }
-                                                   else if (render_target_blend_desc.SrcBlendAlpha == D3D11_BLEND::D3D11_BLEND_ONE && render_target_blend_desc.DestBlendAlpha == D3D11_BLEND::D3D11_BLEND_ONE)
-                                                   {
-                                                      ImGui::Text("Blend A Mode: Additive");
-                                                      has_drawn_blend_a_text = true;
-                                                   }
-                                                   else if (render_target_blend_desc.SrcBlendAlpha == D3D11_BLEND::D3D11_BLEND_ONE && render_target_blend_desc.DestBlendAlpha == D3D11_BLEND::D3D11_BLEND_ZERO)
-                                                   {
-                                                      ImGui::Text("Blend A Mode: Source Alpha (Overwrite Alpha, Blending Disabled)");
-                                                      has_drawn_blend_a_text = true;
-                                                   }
-                                                   else if (render_target_blend_desc.SrcBlendAlpha == D3D11_BLEND::D3D11_BLEND_ZERO && render_target_blend_desc.DestBlendAlpha == D3D11_BLEND::D3D11_BLEND_ONE)
-                                                   {
-                                                      ImGui::Text("Blend A Mode: Destination Alpha (Preserve Alpha)");
-                                                      has_drawn_blend_a_text = true;
-                                                   }
-                                                }
-                                                else if (!has_drawn_blend_a_text && render_target_blend_desc.BlendOpAlpha == D3D11_BLEND_OP::D3D11_BLEND_OP_REV_SUBTRACT)
-                                                {
-                                                   ImGui::Text("Blend A Mode: Subtractive (Any)");
-                                                   has_drawn_blend_a_text = true;
-                                                }
-
-                                                if (!has_drawn_blend_a_text)
-                                                {
-                                                   ImGui::Text("Blend A Mode: Unknown");
-                                                   has_drawn_blend_a_text = true;
-                                                }
-
-                                                if ((render_target_blend_desc.RenderTargetWriteMask & D3D11_COLOR_WRITE_ENABLE_ALPHA) == 0)
-                                                {
-                                                   ImGui::SameLine();
-                                                   ImGui::Text("(Ignored)");
-                                                }
-
-                                                ImGui::Text("Blend A Mode Details: (Src * %s) %s (Dest * %s)", GetBlendName(render_target_blend_desc.SrcBlendAlpha), GetBlendOpName(render_target_blend_desc.BlendOpAlpha), GetBlendName(render_target_blend_desc.DestBlendAlpha));
-                                             }
-                                             else if (render_target_blend_desc.LogicOpEnable)
-                                             {
-                                                ImGui::Text("Logic Op Mode: %s", GetLogicOpName(render_target_blend_desc.LogicOp));
-                                             }
-                                             else
-                                             {
-                                                ImGui::Text("Blend and Logic Op Mode: Disabled");
-                                             }
-
-                                             if (pop_text_style_color)
-                                             {
-                                                ImGui::PopStyleColor();
-                                             }
-
-                                             // This applies even if blending is disabled!
-                                             if ((render_target_blend_desc.RenderTargetWriteMask & D3D11_COLOR_WRITE_ENABLE_ALL) == D3D11_COLOR_WRITE_ENABLE_ALL)
-                                             {
-                                                ImGui::Text("Write Mask: All");
-                                             }
-                                             else if ((render_target_blend_desc.RenderTargetWriteMask & D3D11_COLOR_WRITE_ENABLE_ALL) == 0)
-                                             {
-                                                ImGui::Text("Write Mask: None");
-                                             }
-                                             else
-                                             {
-                                                ImGui::Text("Write Mask:");
-                                                if (render_target_blend_desc.RenderTargetWriteMask & D3D11_COLOR_WRITE_ENABLE_RED)   ImGui::SameLine(), ImGui::Text(" R");
-                                                if (render_target_blend_desc.RenderTargetWriteMask & D3D11_COLOR_WRITE_ENABLE_GREEN) ImGui::SameLine(), ImGui::Text(" G");
-                                                if (render_target_blend_desc.RenderTargetWriteMask & D3D11_COLOR_WRITE_ENABLE_BLUE)  ImGui::SameLine(), ImGui::Text(" B");
-                                                if (render_target_blend_desc.RenderTargetWriteMask & D3D11_COLOR_WRITE_ENABLE_ALPHA) ImGui::SameLine(), ImGui::Text(" A");
-                                             }
-                                          }
-
-                                          // Show even if all blend modes are disabled, given that it might still be useful to track its state
-                                          ImGui::Text("Blend Factor: %f %f %f %f", draw_call_data.blend_factor[0], draw_call_data.blend_factor[1], draw_call_data.blend_factor[2], draw_call_data.blend_factor[3]);
-
-                                          const bool is_highlighted_resource = highlighted_resource == rt_hash;
-                                          if (is_highlighted_resource ? ImGui::Button("Unhighlight Resource") : ImGui::Button("Highlight Resource"))
-                                          {
-                                             highlighted_resource = is_highlighted_resource ? "" : rt_hash;
-                                          }
-
-                                          if (!upgraded && texture_format_upgrades_type == TextureFormatUpgradesType::AllowedEnabled && ImGui::Button("Indirect Upgrade Resource Format (By Shader)"))
-                                          {
-                                             auto_texture_format_upgrade_shader_hashes[pipeline_pair->second->shader_hashes[0]] = AutoTextureFormatUpgradeShaderHash{ std::vector<uint8_t>{ uint8_t(i) }, std::vector<uint8_t>(), false }; // DX11 logic
-                                          }
-
-                                          if (debug_draw_shader_enabled && (debug_draw_mode != DebugDrawMode::RenderTarget || debug_draw_view_index != i) && ImGui::Button("Debug Draw Resource"))
-                                          {
-                                             if (debug_draw_mode == DebugDrawMode::Depth || debug_draw_mode == DebugDrawMode::Stencil)
-                                             {
-                                                debug_draw_options &= ~(uint32_t)DebugDrawTextureOptionsMask::RedOnly;
-                                             }
-                                             debug_draw_mode = DebugDrawMode::RenderTarget;
-                                             debug_draw_view_index = i;
-                                             debug_draw_mip = draw_call_data.rtv_mip[i];
-                                          }
-
-                                          bool is_redirection_target = pipeline_pair->second->redirect_data.target_type == CachedPipeline::RedirectData::RedirectTargetType::RTV && pipeline_pair->second->redirect_data.target_index == i;
-                                          if (pipeline_pair->second->redirect_data.source_type != CachedPipeline::RedirectData::RedirectSourceType::None && is_redirection_target && ImGui::Button("Disable Copy"))
-                                          {
-                                             pipeline_pair->second->redirect_data.source_type = CachedPipeline::RedirectData::RedirectSourceType::None;
-                                             pipeline_pair->second->redirect_data.target_type = CachedPipeline::RedirectData::RedirectTargetType::None;
-                                             pipeline_pair->second->redirect_data.source_index = 0;
-                                             pipeline_pair->second->redirect_data.target_index = 0;
-                                             is_redirection_target = false;
-                                          }
-                                          if ((pipeline_pair->second->redirect_data.source_type != CachedPipeline::RedirectData::RedirectSourceType::SRV || !is_redirection_target) && ImGui::Button("Copy from SRV"))
-                                          {
-                                             pipeline_pair->second->redirect_data.source_type = CachedPipeline::RedirectData::RedirectSourceType::SRV;
-                                             pipeline_pair->second->redirect_data.target_type = CachedPipeline::RedirectData::RedirectTargetType::RTV;
-                                             pipeline_pair->second->redirect_data.source_index = 0;
-                                             pipeline_pair->second->redirect_data.target_index = i;
-                                             is_redirection_target = true;
-                                          }
-                                          if ((pipeline_pair->second->redirect_data.source_type != CachedPipeline::RedirectData::RedirectSourceType::UAV || !is_redirection_target) && ImGui::Button("Copy from UAV"))
-                                          {
-                                             pipeline_pair->second->redirect_data.source_type = CachedPipeline::RedirectData::RedirectSourceType::UAV;
-                                             pipeline_pair->second->redirect_data.target_type = CachedPipeline::RedirectData::RedirectTargetType::RTV;
-                                             pipeline_pair->second->redirect_data.source_index = 0;
-                                             pipeline_pair->second->redirect_data.target_index = i;
-                                             is_redirection_target = true;
-                                          }
-                                          if (is_redirection_target)
-                                          {
-                                             ImGui::SliderInt("Copy from View Index", &pipeline_pair->second->redirect_data.source_index, 0, D3D11_COMMONSHADER_INPUT_RESOURCE_SLOT_COUNT /*The largest allowed view count by type*/);
-                                          }
-
-                                          ImGui::PopID();
-                                       }
-
-                                       // Only print this when enabled given it's rare (it's MSAA transparency dithering basically)
-                                       if (blend_desc.AlphaToCoverageEnable)
-                                       {
-                                          if (!is_first_draw) { ImGui::Text(""); };
-                                          // Don't set "is_first_draw" to true to let depth printing have a space too
-                                          ImGui::Text("Alpha to Coverage Enable: %s", blend_desc.AlphaToCoverageEnable ? "True" : "False");
-                                       }
-
-                                       if (!is_first_draw) { ImGui::Text(""); }; // No views drew before, skip space
-                                       is_first_draw = false;
-                                       ImGui::Text("Depth State: %s", TraceDrawCallData::depth_state_names[(size_t)draw_call_data.depth_state]);
-                                       ImGui::Text("Stencil State: %s", TraceDrawCallData::depth_state_names[(size_t)draw_call_data.stencil_state]);
-
-                                       if (draw_call_data.dsv_format != DXGI_FORMAT_UNKNOWN && (draw_call_data.depth_state != TraceDrawCallData::DepthStateType::Disabled && draw_call_data.depth_state != TraceDrawCallData::DepthStateType::Invalid) || draw_call_data.stencil_state != TraceDrawCallData::DepthStateType::Disabled)
-                                       {
-                                          // Note: "trace_ignore_non_bound_shader_referenced_resources" isn't implemented here
-
-                                          ImGui::PushID(TraceDrawCallData::rtvs_size + TraceDrawCallData::srvs_size + TraceDrawCallData::uavs_size); // Offset by the max amount of previous iterations from above
-
-                                          ImGui::Text("");
-                                          ImGui::PushStyleColor(ImGuiCol_Text, IM_COL32(190, 160, 120, 255)); // Faint Brown
-                                          ImGui::Text("Depth/Stencil");
-                                          ImGui::PopStyleColor();
-                                          ImGui::Text("R Hash: %s", draw_call_data.ds_hash.c_str());
-                                          if (!draw_call_data.ds_debug_name.empty())
-                                             ImGui::Text("R Debug Name: %s", draw_call_data.ds_debug_name.c_str());
-                                          if (GetFormatName(draw_call_data.ds_format) != nullptr)
-                                          {
-                                             ImGui::Text("R Format: %s", GetFormatName(draw_call_data.ds_format));
-                                          }
-                                          else
-                                          {
-                                             ImGui::Text("R Format: %u", draw_call_data.ds_format);
-                                          }
-                                          if (GetFormatName(draw_call_data.dsv_format) != nullptr)
-                                          {
-                                             ImGui::Text("RV Format: %s", GetFormatName(draw_call_data.dsv_format));
-                                          }
-                                          else
-                                          {
-                                             ImGui::Text("RV Format: %u", draw_call_data.dsv_format);
-                                          }
-                                          ImGui::Text("R Size: %ux%u", draw_call_data.ds_size.x, draw_call_data.ds_size.y); // Should match all the Render Targets size
-                                          {
-                                             const std::shared_lock lock(device_data.mutex);
-                                             for (uint64_t upgraded_resource : device_data.resource_upgrades.upgraded_resources)
-                                             {
-                                                void* upgraded_resource_ptr = reinterpret_cast<void*>(upgraded_resource);
-                                                if (draw_call_data.ds_hash == std::to_string(std::hash<void*>{}(upgraded_resource_ptr)))
-                                                {
-                                                   ImGui::Text("R: Direct Upgraded");
-                                                   break;
-                                                }
-                                             }
-                                             for (auto upgraded_resource_pair : device_data.resource_upgrades.original_resources_to_mirrored_upgraded_resources)
-                                             {
-                                                void* upgraded_resource_ptr = reinterpret_cast<void*>(upgraded_resource_pair.first);
-                                                if (draw_call_data.ds_hash == std::to_string(std::hash<void*>{}(upgraded_resource_ptr)))
-                                                {
-                                                   if (upgraded_resource_pair.second.is_scaled)
-                                                   {
-                                                      ImGui::Text("R Indirect Upgraded Size: %ux%u", upgraded_resource_pair.second.mirror_width, upgraded_resource_pair.second.mirror_height);
-                                                   }
-                                                   ImGui::Text("R: Indirect Upgraded");
-                                                   break;
-                                                }
-                                             }
-                                          }
-
-                                          const bool is_highlighted_resource = highlighted_resource == draw_call_data.ds_hash;
-                                          if (is_highlighted_resource ? ImGui::Button("Unhighlight Resource") : ImGui::Button("Highlight Resource"))
-                                          {
-                                             highlighted_resource = is_highlighted_resource ? "" : draw_call_data.ds_hash;
-                                          }
-
-                                          ImGui::PopID();
-                                       }
-
-                                       const bool has_valid_depth = draw_call_data.depth_state != TraceDrawCallData::DepthStateType::Disabled
-                                          && draw_call_data.depth_state != TraceDrawCallData::DepthStateType::Invalid;
-                                       if (has_valid_depth && debug_draw_shader_enabled && debug_draw_mode != DebugDrawMode::Depth && ImGui::Button("Debug Draw Depth Resource"))
-                                       {
-                                          debug_draw_mode = DebugDrawMode::Depth;
-                                          debug_draw_view_index = 0;
-                                          debug_draw_options |= (uint32_t)DebugDrawTextureOptionsMask::RedOnly;
-                                          debug_draw_mip = 0;
-                                       }
-                                       const bool has_valid_stencil = draw_call_data.stencil_state != TraceDrawCallData::DepthStateType::Disabled && draw_call_data.stencil_state != TraceDrawCallData::DepthStateType::Invalid;
-                                       if (has_valid_stencil && debug_draw_shader_enabled && debug_draw_mode != DebugDrawMode::Stencil && ImGui::Button("Debug Draw Stencil Resource"))
-                                       {
-                                          debug_draw_mode = DebugDrawMode::Stencil;
-                                          debug_draw_view_index = 0;
-                                          debug_draw_options |= (uint32_t)DebugDrawTextureOptionsMask::RedOnly;
-                                          debug_draw_mip = 0;
-                                       }
-
-                                       ImGui::Text("");
-                                       ImGui::Text("Scissors Enabled: %s", draw_call_data.scissor_count >= 1 ? "True" : "False");
-                                       const D3D11_VIEWPORT& viewport_0 = draw_call_data.viewports[0]; // Zeroed if none
-                                       ImGui::Text("Viewport 0: x: %s y:%s w: %s h: %s",
-                                          std::to_string(viewport_0.TopLeftX).c_str(),
-                                          std::to_string(viewport_0.TopLeftY).c_str(),
-                                          std::to_string(viewport_0.Width).c_str(),
-                                          std::to_string(viewport_0.Height).c_str());
-                                    }
-
-                                    if (pipeline_pair->second->HasVertexShader() || pipeline_pair->second->HasPixelShader() || pipeline_pair->second->HasComputeShader())
-                                    {
-                                       for (UINT i = 0; i < D3D11_COMMONSHADER_SAMPLER_SLOT_COUNT; i++)
-                                       {
-                                          if (int(draw_call_data.samplers_filter[i]) >= 0)
-                                          {
-                                             ImGui::PushID(i + TraceDrawCallData::srvs_size + TraceDrawCallData::uavs_size + TraceDrawCallData::rtvs_size); // Offset by the max amount of previous iterations from above
-                                             ImGui::Text("");
-                                             ImGui::Text("Sampler Index: %u", i);
-                                             ImGui::Text("Sampler Filter: %s", GetFilterName(draw_call_data.samplers_filter[i]));
-                                             ImGui::Text("Sampler Address U: %s", GetTextureAddressModeName(draw_call_data.samplers_address_u[i]));
-                                             ImGui::Text("Sampler Address V: %s", GetTextureAddressModeName(draw_call_data.samplers_address_v[i]));
-                                             ImGui::Text("Sampler Address W: %s", GetTextureAddressModeName(draw_call_data.samplers_address_w[i]));
-                                             ImGui::Text("Sampler Mip LOD bias: %f", draw_call_data.samplers_mip_lod_bias[i]);
-                                             ImGui::PopID();
-                                          }
-                                       }
-
-                                       for (UINT i = 0; i < D3D11_COMMONSHADER_CONSTANT_BUFFER_API_SLOT_COUNT; i++)
-                                       {
-                                          if (draw_call_data.cbs[i])
-                                          {
-                                             ImGui::PushID(i + TraceDrawCallData::srvs_size + TraceDrawCallData::uavs_size + TraceDrawCallData::rtvs_size + D3D11_COMMONSHADER_SAMPLER_SLOT_COUNT); // Offset by the max amount of previous iterations from above
-                                             ImGui::Text("");
-                                             ImGui::Text("CB Index: %u", i);
-                                             ImGui::Text("CB Hash: %s", draw_call_data.cb_hash[i].c_str());
-                                             if (draw_call_data.cb_num_constants[i] != 0)
-                                             {
-                                                const bool is_partial = draw_call_data.cb_first_constant[i] != 0 || draw_call_data.cb_num_constants[i] != D3D11_REQ_CONSTANT_BUFFER_ELEMENT_COUNT;
-                                                ImGui::Text("CB First Constant: %u%s", draw_call_data.cb_first_constant[i], is_partial ? " (partial)" : "");
-                                                ImGui::Text("CB Num Constants: %u", draw_call_data.cb_num_constants[i]);
-                                             }
-                                             const bool is_highlighted_resource = highlighted_resource == draw_call_data.cb_hash[i];
-                                             if (is_highlighted_resource ? ImGui::Button("Unhighlight Resource") : ImGui::Button("Highlight Resource"))
-                                             {
-                                                highlighted_resource = is_highlighted_resource ? "" : draw_call_data.cb_hash[i];
-                                             }
-                                             ImGui::PopID();
-                                          }
-                                       }
-                                    }
+                                    draw_state_analysis(draw_call_data, pipeline_pair->second, debug_draw_shader_enabled);
                                  }
                                  ImGui::EndChild(); // StateAnalysisScroll
                               }
@@ -12576,7 +12663,23 @@ namespace
                            }
                            lock.unlock(); // Needed to prevent "LoadCustomShaders()" from deadlocking, and anyway, there's no need to lock it beyond the for loop above
 
-                           if (draw_call_data.type == TraceDrawCallData::TraceDrawCallType::CopyResource
+                           if (draw_call_data.type == TraceDrawCallData::TraceDrawCallType::Custom && draw_call_data.custom_stage != reshade::api::shader_stage(0))
+                           {
+                              if (ImGui::BeginChild("Settings and Info"))
+                              {
+                                 if (const auto definition = native_shaders_definitions.find(draw_call_data.custom_shader_hash); definition != native_shaders_definitions.end() && definition->second.file_name)
+                                    ImGui::Text("Luma Shader: %s", definition->second.file_name);
+                                 ImGui::NewLine();
+                                 ImGui::Text("State Analysis:");
+                                 if (ImGui::BeginChild("StateAnalysisScroll", ImVec2(0, -FLT_MIN), ImGuiChildFlags_Borders))
+                                 {
+                                    draw_state_analysis(draw_call_data, nullptr, debug_draw_custom_pass == CompileTimeStringHash(draw_call_data.custom_name));
+                                 }
+                                 ImGui::EndChild(); // StateAnalysisScroll
+                              }
+                              ImGui::EndChild(); // Settings and Info
+                           }
+                           else if (draw_call_data.type == TraceDrawCallData::TraceDrawCallType::CopyResource
                               || draw_call_data.type == TraceDrawCallData::TraceDrawCallType::CPURead
                               || draw_call_data.type == TraceDrawCallData::TraceDrawCallType::CPUWrite
                               || draw_call_data.type == TraceDrawCallData::TraceDrawCallType::BindResource
@@ -13460,6 +13563,7 @@ namespace
                         // Reset all the settings we don't need anymore, as they were for a different debug draw mode
                         debug_draw_pipeline = 0;
                         debug_draw_shader_hash = 0;
+                        debug_draw_custom_pass = 0;
                         debug_draw_shader_hash_string[0] = 0;
                         debug_draw_pipeline_target_instance = -1;
                         debug_draw_pipeline_target_thread = std::thread::id();
@@ -14370,6 +14474,7 @@ namespace
                   if (debug_draw_shader_hash != 0)
                   {
                      debug_draw_pipeline = 0;
+                     debug_draw_custom_pass = 0;
                   }
 
                   device_data.debug_draw_frozen_draw_state_stack.reset();
@@ -14379,7 +14484,7 @@ namespace
                }
                ImGui::SameLine();
                // Allow it to go through if we have a custom debug draw texture set
-               bool debug_draw_enabled = debug_draw_shader_hash != 0 || debug_draw_pipeline != 0 || (debug_draw_mode == DebugDrawMode::Custom && device_data.debug_draw_texture.get()); // It wants to be shown (if it manages!)
+               bool debug_draw_enabled = debug_draw_shader_hash != 0 || debug_draw_pipeline != 0 || debug_draw_custom_pass != 0 || (debug_draw_mode == DebugDrawMode::Custom && device_data.debug_draw_texture.get()); // It wants to be shown (if it manages!)
                // Show the reset button for both conditions or they could get stuck
                if (debug_draw_enabled)
                {
@@ -14389,6 +14494,7 @@ namespace
                      debug_draw_shader_hash_string[0] = 0;
                      debug_draw_shader_hash = 0;
                      debug_draw_pipeline = 0;
+                     debug_draw_custom_pass = 0;
 
                      device_data.debug_draw_frozen_draw_state_stack.reset();
                      device_data.debug_draw_texture = nullptr;
@@ -15471,6 +15577,7 @@ namespace
 #include "includes/shaders.inl"
 #include "includes/patch.inl"
 #if DEVELOPMENT
+#include "includes/trace.inl"
 #include "includes/mcp_server.inl"
 #endif
 
@@ -15518,7 +15625,7 @@ void Init(bool async)
    // Games call through these pointers, so the MCP tap sees every settings update and draw
    for (auto& [type, implementation] : sr_implementations)
    {
-      implementation = Mcp::TapSuperResolution(std::move(implementation));
+      implementation = Mcp::TapSuperResolution(type, std::move(implementation));
    }
 #endif
 #endif

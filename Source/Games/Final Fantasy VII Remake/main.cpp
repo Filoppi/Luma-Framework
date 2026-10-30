@@ -1169,6 +1169,7 @@ public:
          {
             native_device_context->DrawIndexed(3, 6, 0);
          }
+         Trace::Draw(native_device_context, "Output HDR Tonemap", 3);
 
          // ===== Pass 2: UI Composition to final RT =====
          // Restore original RTV
@@ -1191,6 +1192,7 @@ public:
 
          // Draw fullscreen quad
          native_device_context->Draw(4, 0);
+         Trace::Draw(native_device_context, "Output HDR UI Composition", 4);
 
          // Restore VS, PS, topology
          native_device_context->VSSetShader(prev_vs.get(), nullptr, 0);
@@ -1203,21 +1205,6 @@ public:
          // Just unbind to be safe.
          ID3D11ShaderResourceView* null_srv = nullptr;
          native_device_context->PSSetShaderResources(1, 1, &null_srv);
-
-#if DEVELOPMENT
-         {
-            const std::shared_lock lock_trace(s_mutex_trace);
-            if (trace_running)
-            {
-               const std::unique_lock lock_trace_2(cmd_list_data.mutex_trace);
-               TraceDrawCallData trace_draw_call_data;
-               trace_draw_call_data.type = TraceDrawCallData::TraceDrawCallType::Custom;
-               trace_draw_call_data.command_list = native_device_context;
-               trace_draw_call_data.custom_name = "Output HDR Two-Pass (Tonemap + UI Composition)";
-               cmd_list_data.trace_draw_calls_data.push_back(trace_draw_call_data);
-            }
-         }
-#endif
 
          return DrawOrDispatchOverrideType::Replaced;
       }
@@ -1330,6 +1317,7 @@ public:
          {
             native_device_context->DrawIndexed(3, 6, 0);
          }
+         Trace::Draw(native_device_context, "Output SDR Tonemap", 3);
 
          // ===== Pass 2: UI Composition to final RT =====
          ID3D11RenderTargetView* const* restored_rtvs = (ID3D11RenderTargetView**)std::addressof(original_rtvs[0]);
@@ -1351,6 +1339,7 @@ public:
 
          // Draw fullscreen quad
          native_device_context->Draw(4, 0);
+         Trace::Draw(native_device_context, "Output SDR UI Composition", 4);
 
          // Restore VS, PS, topology
          native_device_context->VSSetShader(prev_vs.get(), nullptr, 0);
@@ -1360,21 +1349,6 @@ public:
          // Unbind intermediate from t1
          ID3D11ShaderResourceView* null_srv = nullptr;
          native_device_context->PSSetShaderResources(1, 1, &null_srv);
-
-#if DEVELOPMENT
-         {
-            const std::shared_lock lock_trace(s_mutex_trace);
-            if (trace_running)
-            {
-               const std::unique_lock lock_trace_2(cmd_list_data.mutex_trace);
-               TraceDrawCallData trace_draw_call_data;
-               trace_draw_call_data.type = TraceDrawCallData::TraceDrawCallType::Custom;
-               trace_draw_call_data.command_list = native_device_context;
-               trace_draw_call_data.custom_name = "Output SDR Two-Pass (Tonemap + UI Composition)";
-               cmd_list_data.trace_draw_calls_data.push_back(trace_draw_call_data);
-            }
-         }
-#endif
 
          return DrawOrDispatchOverrideType::Replaced;
       }
@@ -1590,22 +1564,8 @@ public:
 
                   // Finally draw:
                   native_device_context->Draw(4, 0);
+                  Trace::Draw(native_device_context, "DLSS Decode Motion Vectors", 4);
                   // native_device_context->DrawIndexed(3, 6, 0); // Original call would have been this, but we swap the pixel and vertex shaders
-
-#if DEVELOPMENT
-                  const std::shared_lock lock_trace(s_mutex_trace);
-                  if (trace_running)
-                  {
-                     const std::unique_lock lock_trace_2(cmd_list_data.mutex_trace);
-                     TraceDrawCallData trace_draw_call_data;
-                     trace_draw_call_data.type = TraceDrawCallData::TraceDrawCallType::Custom;
-                     trace_draw_call_data.command_list = native_device_context;
-                     trace_draw_call_data.custom_name = "DLSS Decode Motion Vectors";
-                     // Re-use the RTV data for simplicity
-                     GetResourceInfo(game_device_data.sr_motion_vectors.get(), trace_draw_call_data.rt_size[0], trace_draw_call_data.rt_format[0], &trace_draw_call_data.rt_type_name[0], &trace_draw_call_data.rt_hash[0]);
-                     cmd_list_data.trace_draw_calls_data.insert(cmd_list_data.trace_draw_calls_data.end() - 1, trace_draw_call_data);
-                  }
-#endif
 
                   // Restore the state
                   native_device_context->VSSetShader(prev_shader_vx.get(), nullptr, 0);
@@ -1664,21 +1624,6 @@ public:
 
                if (device_data.has_drawn_sr)
                {
-#if DEVELOPMENT
-                  const std::shared_lock lock_trace(s_mutex_trace);
-                  if (trace_running)
-                  {
-                     const std::unique_lock lock_trace_2(cmd_list_data.mutex_trace);
-                     TraceDrawCallData trace_draw_call_data;
-                     trace_draw_call_data.type = TraceDrawCallData::TraceDrawCallType::Custom;
-                     trace_draw_call_data.command_list = native_device_context;
-                     trace_draw_call_data.custom_name = "DLSS";
-                     // Re-use the RTV data for simplicity
-                     GetResourceInfo(device_data.sr_output_color.get(), trace_draw_call_data.rt_size[0], trace_draw_call_data.rt_format[0], &trace_draw_call_data.rt_type_name[0], &trace_draw_call_data.rt_hash[0]);
-                     cmd_list_data.trace_draw_calls_data.insert(cmd_list_data.trace_draw_calls_data.end() - 1, trace_draw_call_data);
-                  }
-#endif
-
                   // Upscaling happened later (during tonemapping) natively but we anticipate it with DLSS
                   game_device_data.has_drawn_upscaling = true;
 

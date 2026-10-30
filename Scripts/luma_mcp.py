@@ -98,7 +98,8 @@ TOOLS = [
     tool(
         "luma_trace_capture",
         "Capture one frame with Luma's own frame trace. Unlike RenoDX DevKit it includes Luma's injected passes as type custom entries "
-        "(Luma SMAA, RCAS, Bloom, Super Resolution, display composition, redirected copies/UI, and what a game mod traces itself; a pass "
+        "(Luma SMAA, RCAS, bloom, display composition, redirected copies/UI and the game mod's own passes, with the state they drew with like "
+        "shader entries (stage, luma_shader); DLSS/FSR draws and phase markers by name only; a pass "
         "replacing a game draw, e.g. XeGTAO, is a note on that draw), "
         "merged deferred context work, clears/copies, and which shader variant ran. With 'trigger' it keeps capturing until a frame contains that shader. "
         "With 'frames' it captures several frames and returns draws per shader hash per frame (a capture spans two presents). "
@@ -120,10 +121,11 @@ TOOLS = [
         "luma_trace_list",
         "List entries of the last capture (compact). Hides VS entries, bindings and buffer writes by default (like the dev UI). "
         "Fields: index, type, stage, hash, replaced (none/file/patch_*), variant (what ran for a cloned shader: original/file/patch, original when a "
-        "recipe resource was missing or the game picked it), upgrade_flags (^ input upgraded, v output upgraded, \\ / scaled), rt0, depth, "
+        "recipe resource was missing or the game picked it), cancelled_or_replaced (the draw callbacks didn't let the draw through), updated (they changed its bindings, see luma_trace_get), upgrade_flags (^ input upgraded, v output upgraded, \\ / scaled), rt0, depth, "
         "copy_kind, note (the game's own per draw decision, e.g. mv / jitter / unpatched / mv_reject=N).",
         {"type": {"type": "string", "description": "shader, custom, copy, clear, present, cpu_read, cpu_write, ..."},
          "variant": {"type": "string", "description": "Only shader entries that ran this variant: original, file, patch"},
+         "cancelled_only": {"type": "boolean", "description": "Only shader entries the draw callbacks cancelled or replaced"},
          "hash": {"type": "string", "description": "Only entries of this shader (0x12345678)"}, "stage": {"type": "string", "description": "PS, VS, CS, GS"},
          "resource": {"type": "string", "description": "Resource id (the 'resource' field of luma_trace_get) read or written by the entry"},
          "replaced_only": {"type": "boolean", "description": "Only entries whose shader Luma replaced or patched"},
@@ -137,7 +139,8 @@ TOOLS = [
         "Full state of one captured entry: RTV/SRV/UAV/DSV resource and view formats and sizes, blend per RT, depth/stencil (func, write, stencil ref/ops), "
         "rasterizer (cull, scissor enable, depth clip/bias), all viewports and scissor rects, samplers (filter, address, mip bias), bound cbuffers (with D3D11.1 ranges), "
         "input layout, draw/dispatch arguments, copy kind/regions (copy, region, resolve, buffer), the source/target resources of copies, clears, CPU writes and Luma passes, clear values, custom shader file and compilation errors, "
-        "the recipes of the shader's current patch clone. "
+        "the recipes of the shader's current patch clone, a Luma pass's shader file (luma_shader) and compilation errors, and replaced_slots: "
+        "the views, cbuffers and samplers the game mod's draw callback added, replaced or unbound (the rest of the entry is what the game bound). "
         "The state is recorded before the game mod's draw hook runs: a viewport it scales, a blend or shader it swaps in are not shown "
         "(read the result with luma_read_resource instead).",
         {"index": {"type": "integer", "description": "Entry index from luma_trace_list"}}, ["index"],
@@ -146,7 +149,8 @@ TOOLS = [
         "luma_read_resource",
         "Read back a view of a pass right after it drew (the frame after the call, not a stale live read). Works for any format, including depth/stencil, "
         "3D LUTs, arrays, MSAA (resolved), BC, r16/rg16, r11g11b10. Writes the raw .bin + .json meta, returns per-channel stats (min/max/mean/percentiles, "
-        "NaN/Inf/negative/above 1/exact zero) and a PNG preview path. PS and CS passes only (use the PS entry of a draw). view=swapchain or ui reads the "
+        "NaN/Inf/negative/above 1/exact zero) and a PNG preview path. PS and CS passes only (use the PS entry of a draw), including Luma passes "
+        "(custom entries with a stage) by index. view=swapchain or ui reads the "
         "back buffer or Luma's UI texture at present (before display composition), no pass needed. view=registered:<name> reads one of Luma's own "
         "textures (SMAA input/predication mask/output, GTAO depth mips, motion vectors, core.bloom with mip=, core.smaa_edges...; see luma_dev_values kind "
         "texture) at present: its last content, usually this frame's.",

@@ -1668,18 +1668,7 @@ public:
             game_device_data.frame_phase = FramePhase::FORWARD;
             counter++;
             //reshade::log::message(reshade::log::level::info, std::format("Frame phase: Forward, count: {}.", counter).c_str());
-#if DEVELOPMENT
-            const std::shared_lock lock_trace(s_mutex_trace);
-            if (trace_running)
-            {
-               const std::unique_lock lock_trace_2(cmd_list_data.mutex_trace);
-               TraceDrawCallData trace_draw_call_data;
-               trace_draw_call_data.type = TraceDrawCallData::TraceDrawCallType::Custom;
-               trace_draw_call_data.command_list = native_device_context;
-               trace_draw_call_data.custom_name = "Forward Start";
-               cmd_list_data.trace_draw_calls_data.insert(cmd_list_data.trace_draw_calls_data.end() - 1, trace_draw_call_data);
-            }
-#endif
+            Trace::Marker(native_device_context, "Forward Start");
          }
          return DrawOrDispatchOverrideType::None;
       }
@@ -1973,18 +1962,7 @@ public:
                            game_device_data.motion_vectors_rtv.get()};
                         native_device_context->OMSetRenderTargets(6, updated_render_target_views, game_device_data.current_dsv);
                         game_device_data.current_rtvs[5] = game_device_data.motion_vectors_rtv.get();
-#if DEVELOPMENT
-                        const std::shared_lock lock_trace(s_mutex_trace);
-                        if (trace_running)
-                        {
-                           const std::unique_lock lock_trace_2(cmd_list_data.mutex_trace);
-                           TraceDrawCallData trace_draw_call_data;
-                           trace_draw_call_data.type = TraceDrawCallData::TraceDrawCallType::Custom;
-                           trace_draw_call_data.command_list = native_device_context;
-                           trace_draw_call_data.custom_name = "GBuffer Override RT 5";
-                           cmd_list_data.trace_draw_calls_data.insert(cmd_list_data.trace_draw_calls_data.end() - 1, trace_draw_call_data);
-                        }
-#endif
+                        Trace::Marker(native_device_context, "GBuffer Override RT 5");
                      }
                   }
                   else
@@ -2021,18 +1999,7 @@ public:
                               game_device_data.motion_vectors_rtv.get()};
                            native_device_context->OMSetRenderTargets(2, updated_render_target_views, game_device_data.current_dsv);
                            game_device_data.current_rtvs[1] = game_device_data.motion_vectors_rtv.get();
-#if DEVELOPMENT
-                           const std::shared_lock lock_trace(s_mutex_trace);
-                           if (trace_running)
-                           {
-                              const std::unique_lock lock_trace_2(cmd_list_data.mutex_trace);
-                              TraceDrawCallData trace_draw_call_data;
-                              trace_draw_call_data.type = TraceDrawCallData::TraceDrawCallType::Custom;
-                              trace_draw_call_data.command_list = native_device_context;
-                              trace_draw_call_data.custom_name = "Forward Override RT 1";
-                              cmd_list_data.trace_draw_calls_data.insert(cmd_list_data.trace_draw_calls_data.end() - 1, trace_draw_call_data);
-                           }
-#endif
+                           Trace::Marker(native_device_context, "Forward Override RT 1");
                         }
                      }
                   }
@@ -2329,19 +2296,7 @@ public:
          game_device_data.frame_phase = FramePhase::GBUFFER;
          counter++;
          //reshade::log::message(reshade::log::level::info, std::format("Frame phase: GBuffer, count: {}.", counter).c_str());
-#if DEVELOPMENT
-         const std::shared_lock lock_trace(s_mutex_trace);
-         if (trace_running)
-         {
-            CommandListData& cmd_list_data = *cmd_list->get_private_data<CommandListData>();
-            const std::unique_lock lock_trace_2(cmd_list_data.mutex_trace);
-            TraceDrawCallData trace_draw_call_data;
-            trace_draw_call_data.type = TraceDrawCallData::TraceDrawCallType::Custom;
-            trace_draw_call_data.command_list = native_device_context.get();
-            trace_draw_call_data.custom_name = "GBuffer Start";
-            cmd_list_data.trace_draw_calls_data.insert(cmd_list_data.trace_draw_calls_data.end() - 1, trace_draw_call_data);
-         }
-#endif
+         Trace::Marker(native_device_context.get(), "GBuffer Start");
       }
    }
    
@@ -2406,19 +2361,7 @@ public:
          {
             game_device_data.frame_phase = FramePhase::UNDEFINED;
             //reshade::log::message(reshade::log::level::info, "Frame phase: Undefined.");
-#if DEVELOPMENT
-            const std::shared_lock lock_trace(s_mutex_trace);
-            if (trace_running)
-            {
-               CommandListData& cmd_list_data = *cmd_list->get_private_data<CommandListData>();
-               const std::unique_lock lock_trace_2(cmd_list_data.mutex_trace);
-               TraceDrawCallData trace_draw_call_data;
-               trace_draw_call_data.type = TraceDrawCallData::TraceDrawCallType::Custom;
-               trace_draw_call_data.command_list = native_device_context.get();
-               trace_draw_call_data.custom_name = "Forward End";
-               cmd_list_data.trace_draw_calls_data.insert(cmd_list_data.trace_draw_calls_data.end() - 1, trace_draw_call_data);
-            }
-#endif
+            Trace::Marker(native_device_context.get(), "Forward End");
          }
       }
 
@@ -2443,19 +2386,7 @@ public:
       {
          game_device_data.frame_phase = FramePhase::UNDEFINED;
          //reshade::log::message(reshade::log::level::info, "Frame phase: Undefined.");
-#if DEVELOPMENT
-         const std::shared_lock lock_trace(s_mutex_trace);
-         if (trace_running)
-         {
-            CommandListData& cmd_list_data = *cmd_list->get_private_data<CommandListData>();
-            const std::unique_lock lock_trace_2(cmd_list_data.mutex_trace);
-            TraceDrawCallData trace_draw_call_data;
-            trace_draw_call_data.type = TraceDrawCallData::TraceDrawCallType::Custom;
-            trace_draw_call_data.command_list = native_device_context.get();
-            trace_draw_call_data.custom_name = "GBuffer End";
-            cmd_list_data.trace_draw_calls_data.insert(cmd_list_data.trace_draw_calls_data.end() - 1, trace_draw_call_data);
-         }
-#endif
+         Trace::Marker(native_device_context.get(), "GBuffer End");
       }
       return false;
    }

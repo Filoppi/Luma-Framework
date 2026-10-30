@@ -236,6 +236,7 @@ class UnrealEngine final : public Game // ### Rename this to your game's name ##
       native_device_context->PSSetSamplers(0, 1, &sampler_state_point);
       native_device_context->OMSetRenderTargets(1, &dlss_motion_vectors_rtv_const, nullptr);
       native_device_context->Draw(4, 0);
+      Trace::Draw(native_device_context, "SR Decode Motion Vectors", 4);
    }
 
    static void DecodeMotionVectorsCS(ID3D11DeviceContext* context, DeviceData& device_data, TAAShaderInfo& taa_shader_info)
@@ -272,10 +273,8 @@ class UnrealEngine final : public Game // ### Rename this to your game's name ##
       UINT height = static_cast<UINT>(game_device_data.render_resolution.y);
       UINT groupsX = (width + 8 - 1) / 8;
       UINT groupsY = (height + 8 - 1) / 8;
-      context->Dispatch(
-         groupsX,
-         groupsY,
-         1);
+      context->Dispatch(groupsX, groupsY, 1);
+      Trace::Dispatch(context, "SR Decode Motion Vectors", groupsX, groupsY, 1);
    }
 
    static void DecodeMotionVectors(bool is_compute_shader, ID3D11DeviceContext* context, DeviceData& device_data, TAAShaderInfo& taa_shader_info)
@@ -716,21 +715,7 @@ public:
                UINT groupsY = (height + tonemap_lut_thread_size - 1) / tonemap_lut_thread_size;
                UINT groupsZ = game_device_data.tonemap_lut_texture_is_3d ? ((depth + tonemap_lut_thread_size - 1) / tonemap_lut_thread_size) : 1;
                native_device_context->Dispatch(groupsX, groupsY, groupsZ);
-
-#if DEVELOPMENT
-               const std::shared_lock lock_trace(s_mutex_trace);
-               if (trace_running)
-               {
-                  const std::unique_lock lock_trace_2(cmd_list_data.mutex_trace);
-                  TraceDrawCallData trace_draw_call_data;
-                  trace_draw_call_data.type = TraceDrawCallData::TraceDrawCallType::Custom;
-                  trace_draw_call_data.command_list = native_device_context;
-                  trace_draw_call_data.custom_name = "Upgrade Tonemap LUT";
-                  // Re-use the RTV data for simplicity
-                  GetResourceInfo(game_device_data.tonemap_lut_texture.get(), trace_draw_call_data.rt_size[0], trace_draw_call_data.rt_format[0], &trace_draw_call_data.rt_type_name[0], &trace_draw_call_data.rt_hash[0]);
-                  cmd_list_data.trace_draw_calls_data.insert(cmd_list_data.trace_draw_calls_data.end() - 1, trace_draw_call_data);
-               }
-#endif
+               Trace::Dispatch(native_device_context, "Upgrade Tonemap LUT", groupsX, groupsY, groupsZ);
 
                // Restore everything for extra safety (likely not needed!)
                compute_state_stack.Restore(native_device_context);
@@ -1107,20 +1092,6 @@ public:
                DecodeMotionVectors(is_compute_shader, native_device_context, device_data, taa_shader_info);
                ID3D11RenderTargetView* const* rtvs_const = (ID3D11RenderTargetView**)std::addressof(render_target_views[0]);
                native_device_context->OMSetRenderTargets(D3D11_SIMULTANEOUS_RENDER_TARGET_COUNT, rtvs_const, depth_stencil_view.get());
-#if DEVELOPMENT
-               const std::shared_lock lock_trace(s_mutex_trace);
-               if (trace_running)
-               {
-                  const std::unique_lock lock_trace_2(cmd_list_data.mutex_trace);
-                  TraceDrawCallData trace_draw_call_data;
-                  trace_draw_call_data.type = TraceDrawCallData::TraceDrawCallType::Custom;
-                  trace_draw_call_data.command_list = native_device_context;
-                  trace_draw_call_data.custom_name = "SR Decode Motion Vectors";
-                  // Re-use the RTV data for simplicity
-                  GetResourceInfo(game_device_data.sr_motion_vectors.get(), trace_draw_call_data.rt_size[0], trace_draw_call_data.rt_format[0], &trace_draw_call_data.rt_type_name[0], &trace_draw_call_data.rt_hash[0]);
-                  cmd_list_data.trace_draw_calls_data.insert(cmd_list_data.trace_draw_calls_data.end() - 1, trace_draw_call_data);
-               }
-#endif
                // UE4 seems to skip taa on the first frame after a camera cut.
                bool reset_sr = device_data.force_reset_sr || dlss_output_changed || game_device_data.camera_cut;
                device_data.force_reset_sr = false;
@@ -1155,21 +1126,6 @@ public:
 
                if (device_data.has_drawn_sr)
                {
-#if DEVELOPMENT
-                  const std::shared_lock lock_trace(s_mutex_trace);
-                  if (trace_running)
-                  {
-                     const std::unique_lock lock_trace_2(cmd_list_data.mutex_trace);
-                     TraceDrawCallData trace_draw_call_data;
-                     trace_draw_call_data.type = TraceDrawCallData::TraceDrawCallType::Custom;
-                     trace_draw_call_data.command_list = native_device_context;
-                     trace_draw_call_data.custom_name = "DLSS";
-                     // Re-use the RTV data for simplicity
-                     GetResourceInfo(device_data.sr_output_color.get(), trace_draw_call_data.rt_size[0], trace_draw_call_data.rt_format[0], &trace_draw_call_data.rt_type_name[0], &trace_draw_call_data.rt_hash[0]);
-                     cmd_list_data.trace_draw_calls_data.insert(cmd_list_data.trace_draw_calls_data.end() - 1, trace_draw_call_data);
-                  }
-#endif
-
                   CopySROutput(native_device_context, output_color.get(), device_data.sr_output_color.get(), sr_output_size); // DX11 doesn't need barriers
                   game_device_data.sr_drawn_source = game_device_data.sr_source_color;
                   game_device_data.sr_drawn_output = device_data.sr_output_color;

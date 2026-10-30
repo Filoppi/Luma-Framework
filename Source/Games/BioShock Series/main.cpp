@@ -704,18 +704,7 @@ public:
 
             native_device_context->CopyResource(game_device_data.scene_texture.get(), rtr.get());
 
-#if DEVELOPMENT
-            const std::shared_lock lock_trace(s_mutex_trace);
-            if (trace_running)
-            {
-               const std::unique_lock lock_trace_2(cmd_list_data.mutex_trace);
-               TraceDrawCallData trace_draw_call_data;
-               trace_draw_call_data.type = TraceDrawCallData::TraceDrawCallType::Custom;
-               trace_draw_call_data.command_list = native_device_context;
-               trace_draw_call_data.custom_name = "Copy Fog Background";
-               cmd_list_data.trace_draw_calls_data.insert(cmd_list_data.trace_draw_calls_data.end() - 1, trace_draw_call_data);
-            }
-#endif
+            Trace::Marker(native_device_context, "Copy Fog Background", game_device_data.scene_texture.get());
 
             // Note: we could try to just set the original RTV as SRV as well, given that the same pixel is first being read and then written, there should be no conflicts and it should avoid copies, however that's illegal in DX
             ID3D11ShaderResourceView* const scene_texture_srv_const = game_device_data.scene_texture_srv.get();

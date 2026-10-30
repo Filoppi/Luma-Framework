@@ -317,24 +317,6 @@ class FinalFantasyXV final : public Game
 
             // Execute SR
             device_data.has_drawn_sr = implementation->second->Draw(sr_instance_data, native_device_context, draw_data);
-
-#if DEVELOPMENT
-            // Add trace info for DLSS/FSR execution
-            if (device_data.has_drawn_sr)
-            {
-               const std::shared_lock lock_trace(s_mutex_trace);
-               if (trace_running)
-               {
-                  const std::unique_lock lock_trace_2(cmd_list_data.mutex_trace);
-                  TraceDrawCallData trace_draw_call_data;
-                  trace_draw_call_data.type = TraceDrawCallData::TraceDrawCallType::Custom;
-                  trace_draw_call_data.command_list = native_device_context;
-                  trace_draw_call_data.custom_name = device_data.sr_type == SR::Type::DLSS ? "DLSS" : "FSR";
-                  GetResourceInfo(device_data.sr_output_color.get(), trace_draw_call_data.rt_size[0], trace_draw_call_data.rt_format[0], &trace_draw_call_data.rt_type_name[0], &trace_draw_call_data.rt_hash[0]);
-                  cmd_list_data.trace_draw_calls_data.insert(cmd_list_data.trace_draw_calls_data.end() - 1, trace_draw_call_data);
-               }
-            }
-#endif
          }
       }
       if (!device_data.has_drawn_sr)
@@ -690,23 +672,6 @@ public:
          DecodeMotionVectors(native_device_context, cmd_list_data, device_data, depth_srv, velocity_srv, game_device_data.sr_motion_vectors_uav.get());
          compute_state_stack.Restore(native_device_context);
          game_device_data.taa_state.Restore(native_device_context);
-#if DEVELOPMENT
-         // Add trace info for motion vector decode pass
-         {
-            const std::shared_lock lock_trace(s_mutex_trace);
-            if (trace_running)
-            {
-               const std::unique_lock lock_trace_2(cmd_list_data.mutex_trace);
-               TraceDrawCallData trace_draw_call_data;
-               trace_draw_call_data.type = TraceDrawCallData::TraceDrawCallType::Custom;
-               trace_draw_call_data.command_list = native_device_context;
-               trace_draw_call_data.custom_name = "SR Decode Motion Vectors";
-               // Get resource info for the motion vectors texture
-               GetResourceInfo(game_device_data.sr_motion_vectors.get(), trace_draw_call_data.rt_size[0], trace_draw_call_data.rt_format[0], &trace_draw_call_data.rt_type_name[0], &trace_draw_call_data.rt_hash[0]);
-               cmd_list_data.trace_draw_calls_data.insert(cmd_list_data.trace_draw_calls_data.end() - 1, trace_draw_call_data);
-            }
-         }
-#endif
          game_device_data.depth_buffer = nullptr;
          taa_state.shader_resource_views[3]->GetResource(game_device_data.depth_buffer.put());
          if (DrawAA(native_device, native_device_context, cmd_list_data, device_data, taa_state.shader_resource_views[0].get(), taa_state.render_target_views[0].get()))
@@ -734,6 +699,7 @@ public:
          {
             tracking.post_taa_upscale_active = false;
             ReplaceUpscaledInputs(native_device_context, tracking, is_compute, 1);
+            Trace::UpdateDraw(cmd_list_data, device_data, native_device_context);
             return DrawOrDispatchOverrideType::None;
          }
          if (is_tonemap)
@@ -763,6 +729,7 @@ public:
             ForgetNativeUpscaleOutputs(native_device_context, tracking);
          if (replaced_outputs > 0)
             ReplaceViewports(native_device_context, cmd_list_data, source_resolution, target_resolution);
+         Trace::UpdateDraw(cmd_list_data, device_data, native_device_context);
       }
 
       auto& rain = game_device_data.rain;

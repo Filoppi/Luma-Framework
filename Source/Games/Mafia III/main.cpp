@@ -619,21 +619,6 @@ public:
 
                if (device_data.has_drawn_sr)
                {
-#if DEVELOPMENT
-                  const std::shared_lock lock_trace(s_mutex_trace);
-                  if (trace_running)
-                  {
-                     const std::unique_lock lock_trace_2(cmd_list_data.mutex_trace);
-                     TraceDrawCallData trace_draw_call_data;
-                     trace_draw_call_data.type = TraceDrawCallData::TraceDrawCallType::Custom;
-                     trace_draw_call_data.command_list = native_device_context;
-                     trace_draw_call_data.custom_name = "DLSS";
-                     // Re-use the RTV data for simplicity
-                     GetResourceInfo(device_data.sr_output_color.get(), trace_draw_call_data.rt_size[0], trace_draw_call_data.rt_format[0], &trace_draw_call_data.rt_type_name[0], &trace_draw_call_data.rt_hash[0]);
-                     cmd_list_data.trace_draw_calls_data.insert(cmd_list_data.trace_draw_calls_data.end() - 1, trace_draw_call_data);
-                  }
-#endif
-
                   if (!dlss_output_supports_uav)
                   {
                      native_device_context->CopyResource(output_color.get(), device_data.sr_output_color.get()); // DX11 doesn't need barriers
@@ -865,21 +850,7 @@ public:
                      native_device_context->CSSetSamplers(0, 1, &sampler_state_linear);
 
                      native_device_context->Dispatch(8, 8, 8);
-
-#if DEVELOPMENT
-                     const std::shared_lock lock_trace(s_mutex_trace);
-                     if (trace_running)
-                     {
-                        const std::unique_lock lock_trace_2(cmd_list_data.mutex_trace);
-                        TraceDrawCallData trace_draw_call_data;
-                        trace_draw_call_data.type = TraceDrawCallData::TraceDrawCallType::Custom;
-                        trace_draw_call_data.command_list = native_device_context;
-                        trace_draw_call_data.custom_name = "Normalize 3D LUT";
-                        // Re-use the RTV data for simplicity
-                        GetResourceInfo(game_device_data.corrected_lut_texture_3d.get(), trace_draw_call_data.rt_size[0], trace_draw_call_data.rt_format[0], &trace_draw_call_data.rt_type_name[0], &trace_draw_call_data.rt_hash[0]);
-                        cmd_list_data.trace_draw_calls_data.insert(cmd_list_data.trace_draw_calls_data.end() - 1, trace_draw_call_data);
-                     }
-#endif
+                     Trace::Dispatch(native_device_context, "Normalize 3D LUT", 8, 8, 8);
 
                      draw_state_stack.Restore(native_device_context);
 
@@ -1811,20 +1782,6 @@ public:
                   draw_state_stack.Cache(device_data.primary_command_list.get(), device_data.uav_max_count);
 
                   CommandListData& cmd_list_data = *device_data.primary_command_list_data; // The game always uses the immediate device context (primary command list)
-#if DEVELOPMENT
-                  const std::shared_lock lock_trace(s_mutex_trace);
-                  if (trace_running)
-                  {
-                     const std::unique_lock lock_trace_2(cmd_list_data.mutex_trace);
-                     TraceDrawCallData trace_draw_call_data;
-                     trace_draw_call_data.type = TraceDrawCallData::TraceDrawCallType::Custom;
-                     trace_draw_call_data.command_list = device_data.primary_command_list.get();
-                     trace_draw_call_data.custom_name = "Draw Sky Motion Vectors";
-                     // Re-use the RTV data for simplicity
-                     GetResourceInfo(device_data.sr_output_color.get(), trace_draw_call_data.rt_size[0], trace_draw_call_data.rt_format[0], &trace_draw_call_data.rt_type_name[0], &trace_draw_call_data.rt_hash[0]);
-                     cmd_list_data.trace_draw_calls_data.insert(cmd_list_data.trace_draw_calls_data.end() - 1, trace_draw_call_data);
-                  }
-#endif
 
                   com_ptr<ID3D11GeometryShader> gs;
                   com_ptr<ID3D11ClassInstance> gs_i; // TODO: delete once we know it's nullptr (it seems to be)
@@ -1834,7 +1791,7 @@ public:
                   device_data.primary_command_list->GSSetShader(nullptr, nullptr, 0);
 
                   SetLumaConstantBuffers(device_data.primary_command_list.get(), cmd_list_data, device_data, reshade::api::shader_stage::pixel, LumaConstantBufferType::LumaData);
-                  DrawCustomPixelShader(device_data.primary_command_list.get(), nullptr, nullptr, device_data.sampler_state_linear.get(), device_data.native_vertex_shaders[CompileTimeStringHash("Copy VS")].get(), device_data.native_pixel_shaders[CompileTimeStringHash("Draw Sky Motion Vectors")].get(), nullptr, game_device_data.last_motion_vectors_rtv.get(), device_data.render_resolution.x, device_data.render_resolution.y, false);
+                  DrawCustomPixelShader(device_data.primary_command_list.get(), nullptr, nullptr, device_data.sampler_state_linear.get(), device_data.native_vertex_shaders[CompileTimeStringHash("Copy VS")].get(), device_data.native_pixel_shaders[CompileTimeStringHash("Draw Sky Motion Vectors")].get(), nullptr, game_device_data.last_motion_vectors_rtv.get(), device_data.render_resolution.x, device_data.render_resolution.y, false, "Draw Sky Motion Vectors");
 
                   device_data.primary_command_list->GSSetShader(gs.get(), nullptr, 0);
 

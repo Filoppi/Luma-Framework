@@ -837,11 +837,11 @@ static constexpr const char* debug_draw_mode_strings[] = {
     "Stencil",
 };
 
-bool CopyDebugDrawTexture(DebugDrawMode debug_draw_mode, int32_t debug_draw_view_index, reshade::api::command_list* cmd_list, bool is_dispatch /*= false*/)
+bool CopyDebugDrawTexture(DebugDrawMode debug_draw_mode, int32_t debug_draw_view_index, ID3D11DeviceContext* native_device_context, DeviceData& device_data, bool is_dispatch)
 {
-   ID3D11Device* native_device = (ID3D11Device*)(cmd_list->get_device()->get_native());
-   ID3D11DeviceContext* native_device_context = (ID3D11DeviceContext*)(cmd_list->get_native());
-   DeviceData& device_data = *cmd_list->get_device()->get_private_data<DeviceData>();
+   com_ptr<ID3D11Device> native_device_ptr;
+   native_device_context->GetDevice(&native_device_ptr);
+   ID3D11Device* native_device = native_device_ptr.get();
 
    com_ptr<ID3D11Resource> texture_resource;
    DXGI_FORMAT forced_texture_format = DXGI_FORMAT_UNKNOWN;
@@ -1016,6 +1016,11 @@ bool CopyDebugDrawTexture(DebugDrawMode debug_draw_mode, int32_t debug_draw_view
       }
    }
    return false;
+}
+
+bool CopyDebugDrawTexture(DebugDrawMode debug_draw_mode, int32_t debug_draw_view_index, reshade::api::command_list* cmd_list, bool is_dispatch /*= false*/)
+{
+   return CopyDebugDrawTexture(debug_draw_mode, debug_draw_view_index, (ID3D11DeviceContext*)(cmd_list->get_native()), *cmd_list->get_device()->get_private_data<DeviceData>(), is_dispatch);
 }
 
 bool MapBufferData(com_ptr<ID3D11Buffer>& cb, ID3D11DeviceContext* native_device_context, std::vector<float>& buffer_data, UINT byte_width)

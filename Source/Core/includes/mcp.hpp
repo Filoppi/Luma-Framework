@@ -5,9 +5,7 @@
 #include <functional>
 #include <initializer_list>
 #include <memory>
-#include <optional>
 #include <string>
-#include <string_view>
 #include <utility>
 
 #include <d3d11.h>
@@ -17,6 +15,7 @@ struct CommandListData; // instance_data.h
 struct DeviceData;      // instance_data.h
 namespace SR
 {
+   enum class Type;           // super_resolution.h
    class SuperResolutionImpl; // super_resolution.h
 } // namespace SR
 
@@ -63,13 +62,8 @@ namespace Mcp
    // Removes the values registered with "owner" (e.g. "&device_data")
    void Unregister(const void* owner);
 
-   // Attaches a note to the draw being processed in the current capture (e.g. the game's motion vector decision), shown by "luma_trace_list".
-   // Call it from "Game::OnDrawOrDispatch", where the shader entries of the current draw are the last ones of "cmd_list_data".
-   // "value" is appended as "text=value" (formatted only while capturing, so it can be called on every draw).
-   void Annotate(CommandListData& cmd_list_data, std::string_view text, std::optional<int64_t> value = std::nullopt);
-
-   // Wraps an SR implementation to record what games feed it ("luma_sr_state", "luma_sr_capture")
-   std::unique_ptr<SR::SuperResolutionImpl> TapSuperResolution(std::unique_ptr<SR::SuperResolutionImpl> implementation);
+   // Wraps an SR implementation to record what games feed it ("luma_sr_state", "luma_sr_capture") and trace its draws
+   std::unique_ptr<SR::SuperResolutionImpl> TapSuperResolution(SR::Type type, std::unique_ptr<SR::SuperResolutionImpl> implementation);
 
    // Called from "Init()": starts the pipe server and registers Core's knobs
    void Start();

@@ -245,6 +245,7 @@ static void DecodeMotionVectors(
    uint dispatch_x = (uav_desc.Width + 7) / 8;
    uint dispatch_y = (uav_desc.Height + 7) / 8;
    native_device_context->Dispatch(dispatch_x, dispatch_y, 1);
+   Trace::Dispatch(native_device_context, "SR Decode Motion Vectors", dispatch_x, dispatch_y, 1);
    ID3D11UnorderedAccessView* null_uav = nullptr;
    native_device_context->CSSetUnorderedAccessViews(0, 1, &null_uav, nullptr);
 }

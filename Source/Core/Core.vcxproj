@@ -607,7 +607,6 @@
     <ClCompile Include="hooks\FidelityFXHooks.cpp" />
     <ClCompile Include="hooks\SystemHooks.cpp" />
     <ClCompile Include="interop\D3D12Interop.cpp" />
-    <ClCompile Include="includes\instance_data.cpp" />
     <ClCompile Include="utils\system.cpp" />
   </ItemGroup>
   <ItemGroup>
@@ -632,6 +631,7 @@
     <ClInclude Include="includes\overlay_log.h" />
     <ClInclude Include="includes\patch.hpp" />
     <ClInclude Include="includes\mcp.hpp" />
+    <ClInclude Include="includes\trace.hpp" />
     <ClInclude Include="includes\math.h" />
     <ClInclude Include="includes\matrix.h" />
     <ClInclude Include="includes\recursive_shared_mutex.h" />
@@ -652,6 +652,7 @@
   <ItemGroup>
     <None Include="includes\resource_upgrades.inl" />
     <None Include="includes\mcp_server.inl" />
+    <None Include="includes\trace.inl" />
   </ItemGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
   <ImportGroup Label="ExtensionTargets">
