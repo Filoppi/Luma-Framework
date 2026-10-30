@@ -127,9 +127,9 @@ struct SystemCbScene
 
 struct BoneCacheElement
 {
-    ComPtr<ID3D11Buffer> buffer;
-    ComPtr<ID3D11ShaderResourceView> buffer_srv;
-    uint32_t time_to_live = 3;
+   ComPtr<ID3D11Buffer> buffer;
+   ComPtr<ID3D11ShaderResourceView> buffer_srv;
+   uint32_t time_to_live = 3;
 };
 
 namespace
@@ -150,6 +150,8 @@ struct GameDeviceDataNierReplicant final : public GameDeviceData
 #if ENABLE_SR
    // SR
    bool has_drawn_upscaling = false;
+
+   ComPtr<ID3D11Texture2D> linear_depth_texture;
 
    ComPtr<ID3D11Texture2D> depth_texture;
 
@@ -271,10 +273,10 @@ public:
    {
       if (type == reshade::api::pipeline_subobject_type::vertex_shader)
       {
-          if (System::ScanMemoryForPattern(shader_object, shader_object_size, (std::byte*)"SystemBuffPrevBones", 19, true).size() != 0)
-          {
-              shader_hashes_skinned.vertex_shaders.emplace((uint32_t)shader_hash);
-          }
+         if (System::ScanMemoryForPattern(shader_object, shader_object_size, (std::byte*)"SystemBuffPrevBones", 19, true).size() != 0)
+         {
+            shader_hashes_skinned.vertex_shaders.emplace((uint32_t)shader_hash);
+         }
          if (System::ScanMemoryForPattern(shader_object, shader_object_size, (std::byte*)"cbChangesEveryFrame", 16, true).size() != 0)
          {
             shader_hashes_particle.vertex_shaders.emplace((uint32_t)shader_hash);
@@ -291,6 +293,19 @@ public:
 
    DrawOrDispatchOverrideType OnDrawOrDispatch(ID3D11Device* native_device, ID3D11DeviceContext* native_device_context, CommandListData& cmd_list_data, DeviceData& device_data, reshade::api::shader_stage stages, const ShaderHashesList<OneShaderPerPipeline>& original_shader_hashes, bool is_custom_pass, bool& updated_cbuffers, std::function<void()>* original_draw_dispatch_func) override
    {
+      if ((stages & reshade::api::shader_stage::compute) != 0)
+      {
+         if (original_shader_hashes.compute_shaders.front() == 0xF31783A9)
+         {
+            auto& game_device_data = GetGameDeviceData(device_data);
+
+            ComPtr<ID3D11UnorderedAccessView> linear_depth_uav;
+            native_device_context->CSGetUnorderedAccessViews(0, 1, linear_depth_uav.put());
+            ComPtr<ID3D11Resource> linear_depth_resource;
+            linear_depth_uav->GetResource(linear_depth_resource.put());
+            linear_depth_resource->QueryInterface(game_device_data.linear_depth_texture.put());
+         }
+      }
       if ((stages & reshade::api::shader_stage::vertex) == 0 &&
           (stages & reshade::api::shader_stage::pixel) == 0)
       {
@@ -309,15 +324,14 @@ public:
          ComPtr<ID3D11Resource> rtv_resource;
          if (render_target_view)
          {
-             render_target_view->GetResource(rtv_resource.put());
-             ComPtr<ID3D11Texture2D> rtv_texture;
-             rtv_resource->QueryInterface(rtv_texture.put());
+            render_target_view->GetResource(rtv_resource.put());
+            ComPtr<ID3D11Texture2D> rtv_texture;
+            rtv_resource->QueryInterface(rtv_texture.put());
 
-             D3D11_TEXTURE2D_DESC rtv_desc;
-             rtv_texture->GetDesc(&rtv_desc);
-             device_data.output_resolution = { (float)rtv_desc.Width, (float)rtv_desc.Height };
+            D3D11_TEXTURE2D_DESC rtv_desc;
+            rtv_texture->GetDesc(&rtv_desc);
+            device_data.output_resolution = {(float)rtv_desc.Width, (float)rtv_desc.Height};
          }
-
 
          device_data.render_resolution = {viewport.Width, viewport.Height};
          cb_luma_global_settings.RenderSize = device_data.render_resolution;
@@ -524,26 +538,26 @@ public:
 
             if (shader_hashes_skinned.Contains(original_shader_hashes))
             {
-                ComPtr<ID3D11ShaderResourceView> srvs[2];
-                {
-                    ID3D11ShaderResourceView* srvs_raw[2];
-                    native_device_context->VSGetShaderResources(0, 2, &srvs_raw[0]);
-                    for (uint32_t i = 0; i < 2; ++i)
-                    {
-                        srvs[i].attach(srvs_raw[i]);
-                    }
-                }
+               ComPtr<ID3D11ShaderResourceView> srvs[2];
+               {
+                  ID3D11ShaderResourceView* srvs_raw[2];
+                  native_device_context->VSGetShaderResources(0, 2, &srvs_raw[0]);
+                  for (uint32_t i = 0; i < 2; ++i)
+                  {
+                     srvs[i].attach(srvs_raw[i]);
+                  }
+               }
 
-                auto bone_cache_it = game_device_data.bone_cache.find(srvs[1].get());
-                if (bone_cache_it != game_device_data.bone_cache.end())
-                {
-                    native_device_context->VSSetShaderResources(1, 1, bone_cache_it->second.buffer_srv.get_addressof());
-                }
+               auto bone_cache_it = game_device_data.bone_cache.find(srvs[1].get());
+               if (bone_cache_it != game_device_data.bone_cache.end())
+               {
+                  native_device_context->VSSetShaderResources(1, 1, bone_cache_it->second.buffer_srv.get_addressof());
+               }
 
-                if (game_device_data.pending_bone_cache.insert(srvs[0].get()).second)
-                {
-                    game_device_data.pending_bone_cache_com_ptrs.push_back(srvs[0]);
-                }
+               if (game_device_data.pending_bone_cache.insert(srvs[0].get()).second)
+               {
+                  game_device_data.pending_bone_cache_com_ptrs.push_back(srvs[0]);
+               }
             }
          }
          else if (shader_hashes_particle.Contains(original_shader_hashes))
@@ -564,52 +578,52 @@ public:
          }
          else if (shader_hashes_taa.Contains(original_shader_hashes) && game_device_data.depth_texture)
          {
-             for (auto buffer_srv: game_device_data.pending_bone_cache)
-             {
-                 ComPtr<ID3D11Resource> bone_buffer_resource;
-                 buffer_srv->GetResource(bone_buffer_resource.put());
-                 ComPtr<ID3D11Buffer> bone_buffer;
-                 bone_buffer_resource->QueryInterface(bone_buffer.put());
+            for (auto buffer_srv : game_device_data.pending_bone_cache)
+            {
+               ComPtr<ID3D11Resource> bone_buffer_resource;
+               buffer_srv->GetResource(bone_buffer_resource.put());
+               ComPtr<ID3D11Buffer> bone_buffer;
+               bone_buffer_resource->QueryInterface(bone_buffer.put());
 
-                 auto storage_it = game_device_data.bone_cache.find(buffer_srv);
-                 if (storage_it == game_device_data.bone_cache.end())
-                 {
-                     D3D11_BUFFER_DESC buffer_desc;
-                     bone_buffer->GetDesc(&buffer_desc);
+               auto storage_it = game_device_data.bone_cache.find(buffer_srv);
+               if (storage_it == game_device_data.bone_cache.end())
+               {
+                  D3D11_BUFFER_DESC buffer_desc;
+                  bone_buffer->GetDesc(&buffer_desc);
 
-                     ComPtr<ID3D11Buffer> cache_buffer;
-                     native_device->CreateBuffer(&buffer_desc, nullptr, cache_buffer.put());
+                  ComPtr<ID3D11Buffer> cache_buffer;
+                  native_device->CreateBuffer(&buffer_desc, nullptr, cache_buffer.put());
 
-                     D3D11_SHADER_RESOURCE_VIEW_DESC srv_desc;
-                     buffer_srv->GetDesc(&srv_desc);
+                  D3D11_SHADER_RESOURCE_VIEW_DESC srv_desc;
+                  buffer_srv->GetDesc(&srv_desc);
 
-                     ComPtr<ID3D11ShaderResourceView> cache_srv;
-                     native_device->CreateShaderResourceView(cache_buffer.get(), &srv_desc, cache_srv.put());
+                  ComPtr<ID3D11ShaderResourceView> cache_srv;
+                  native_device->CreateShaderResourceView(cache_buffer.get(), &srv_desc, cache_srv.put());
 
-                     game_device_data.bone_cache[buffer_srv] = { cache_buffer, cache_srv, 3 };
+                  game_device_data.bone_cache[buffer_srv] = {cache_buffer, cache_srv, 3};
 
-                     storage_it = game_device_data.bone_cache.find(buffer_srv);
-                 }
+                  storage_it = game_device_data.bone_cache.find(buffer_srv);
+               }
 
-                 native_device_context->CopyResource(storage_it->second.buffer.get(), bone_buffer.get());
-                 storage_it->second.time_to_live = 3;
-             }
+               native_device_context->CopyResource(storage_it->second.buffer.get(), bone_buffer.get());
+               storage_it->second.time_to_live = 3;
+            }
 
-             game_device_data.pending_bone_cache.clear();
-             game_device_data.pending_bone_cache_com_ptrs.clear();
+            game_device_data.pending_bone_cache.clear();
+            game_device_data.pending_bone_cache_com_ptrs.clear();
 
-             for (auto it = game_device_data.bone_cache.begin(); it != game_device_data.bone_cache.end();)
-             {
-                 if (it->second.time_to_live == 0)
-                 {
-                     it = game_device_data.bone_cache.erase(it);
-                 }
-                 else
-                 {
-                     it->second.time_to_live--;
-                     it++;
-                 }
-             }
+            for (auto it = game_device_data.bone_cache.begin(); it != game_device_data.bone_cache.end();)
+            {
+               if (it->second.time_to_live == 0)
+               {
+                  it = game_device_data.bone_cache.erase(it);
+               }
+               else
+               {
+                  it->second.time_to_live--;
+                  it++;
+               }
+            }
 
             auto* sr_instance_data = device_data.GetSRInstanceData();
 
@@ -775,6 +789,18 @@ public:
          native_device_context->Unmap(game_device_data.partial_update_constant_buffer_16.get(), 0);
 
          native_device_context->CopySubresourceRegion(sky_texture_fog_constant_buffer.get(), 0, 16, 0, 0, game_device_data.partial_update_constant_buffer_16.get(), 0, nullptr);
+      }
+      else if (original_shader_hashes.pixel_shaders.front() == 0x337BE35A) // apply ao
+      {
+         if (game_device_data.linear_depth_texture)
+         {
+            ComPtr<ID3D11ShaderResourceView> linear_depth_texture_srv;
+            native_device->CreateShaderResourceView(game_device_data.linear_depth_texture.get(),
+               nullptr,
+               linear_depth_texture_srv.put());
+
+            native_device_context->PSSetShaderResources(1, 1, linear_depth_texture_srv.get_addressof());
+         }
       }
 
       return DrawOrDispatchOverrideType::None;
