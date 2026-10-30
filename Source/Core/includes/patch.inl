@@ -582,28 +582,6 @@ namespace Patch
          }, value);
       }
 
-      // Parses a saved value with the type of the recipe's default value. Empty means no override.
-      std::optional<dxp::PrimitiveValue> RecipeEnvFromString(std::string_view text, const dxp::PrimitiveValue& type_of)
-      {
-         return std::visit([&](auto v) -> std::optional<dxp::PrimitiveValue>
-         {
-            using T = decltype(v);
-            if constexpr (std::is_same_v<T, bool>)
-            {
-               if (text == "1" || text == "true") return dxp::PrimitiveValue(true);
-               if (text == "0" || text == "false") return dxp::PrimitiveValue(false);
-               return std::nullopt;
-            }
-            else
-            {
-               T parsed{};
-               const auto [end, error] = std::from_chars(text.data(), text.data() + text.size(), parsed);
-               if (text.empty() || error != std::errc() || end != text.data() + text.size()) return std::nullopt;
-               return dxp::PrimitiveValue(parsed);
-            }
-         }, type_of);
-      }
-
       // Needs "s_recipe_settings_mutex" locked (unique).
       RecipeSettings& GetRecipeSettings(std::string_view identity)
       {
@@ -665,6 +643,27 @@ namespace Patch
       }
    }
 
+   std::optional<dxp::PrimitiveValue> RecipeEnvFromString(std::string_view text, const dxp::PrimitiveValue& type_of)
+   {
+      return std::visit([&](auto v) -> std::optional<dxp::PrimitiveValue>
+      {
+         using T = decltype(v);
+         if constexpr (std::is_same_v<T, bool>)
+         {
+            if (text == "1" || text == "true") return dxp::PrimitiveValue(true);
+            if (text == "0" || text == "false") return dxp::PrimitiveValue(false);
+            return std::nullopt;
+         }
+         else
+         {
+            T parsed{};
+            const auto [end, error] = std::from_chars(text.data(), text.data() + text.size(), parsed);
+            if (text.empty() || error != std::errc() || end != text.data() + text.size()) return std::nullopt;
+            return dxp::PrimitiveValue(parsed);
+         }
+      }, type_of);
+   }
+
    void RegisterRecipe(RecipeRegistration registration)
    {
       const std::unique_lock lock(s_recipe_settings_mutex);
@@ -717,6 +716,13 @@ namespace Patch
       if (settings.env_overrides.erase(env) == 0) return;
       reshade::set_config_value(nullptr, GetRecipeConfigSection(), (settings.identity + ":" + env).c_str(), ""); // Empty = no override
       ++s_recipe_settings_version;
+   }
+
+   std::optional<RecipeRegistration> GetRecipeRegistration(std::string_view identity)
+   {
+      const std::shared_lock lock(s_recipe_settings_mutex);
+      const auto settings = s_recipe_settings.find(Math::CompileTimeStringHash(identity));
+      return settings != s_recipe_settings.end() ? settings->second.registration : std::nullopt;
    }
 
    void SetOptions(DeviceData& device_data, uint32_t recipe_hash, dxp::PatchOptions options)

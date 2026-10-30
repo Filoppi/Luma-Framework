@@ -253,6 +253,8 @@ struct TraceDrawCallData
 
    // Free text game code attached to this entry during the capture (see "Mcp::Annotate")
    std::string note;
+   // What the shader that ran was built from ("None" for the original), after the draw callbacks picked the variant
+   Shader::CloneOrigin drawn_origin = Shader::CloneOrigin::None;
 
    // TODO: these might not always be filled up!
    bool any_input_resources_format_upgraded = false;

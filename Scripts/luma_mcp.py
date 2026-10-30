@@ -119,9 +119,11 @@ TOOLS = [
     tool(
         "luma_trace_list",
         "List entries of the last capture (compact). Hides VS entries, bindings and buffer writes by default (like the dev UI). "
-        "Fields: index, type, stage, hash, replaced (none/file/patch_*), upgrade_flags (^ input upgraded, v output upgraded, \\ / scaled), rt0, depth, "
+        "Fields: index, type, stage, hash, replaced (none/file/patch_*), variant (what ran for a cloned shader: original/file/patch, original when a "
+        "recipe resource was missing or the game picked it), upgrade_flags (^ input upgraded, v output upgraded, \\ / scaled), rt0, depth, "
         "copy_kind, note (the game's own per draw decision, e.g. mv / jitter / unpatched / mv_reject=N).",
         {"type": {"type": "string", "description": "shader, custom, copy, clear, present, cpu_read, cpu_write, ..."},
+         "variant": {"type": "string", "description": "Only shader entries that ran this variant: original, file, patch"},
          "hash": {"type": "string", "description": "Only entries of this shader (0x12345678)"}, "stage": {"type": "string", "description": "PS, VS, CS, GS"},
          "resource": {"type": "string", "description": "Resource id (the 'resource' field of luma_trace_get) read or written by the entry"},
          "replaced_only": {"type": "boolean", "description": "Only entries whose shader Luma replaced or patched"},
@@ -134,7 +136,8 @@ TOOLS = [
         "luma_trace_get",
         "Full state of one captured entry: RTV/SRV/UAV/DSV resource and view formats and sizes, blend per RT, depth/stencil (func, write, stencil ref/ops), "
         "rasterizer (cull, scissor enable, depth clip/bias), all viewports and scissor rects, samplers (filter, address, mip bias), bound cbuffers (with D3D11.1 ranges), "
-        "input layout, draw/dispatch arguments, copy kind/regions (copy, region, resolve, buffer), the source/target resources of copies, clears, CPU writes and Luma passes, clear values, custom shader file and compilation errors. "
+        "input layout, draw/dispatch arguments, copy kind/regions (copy, region, resolve, buffer), the source/target resources of copies, clears, CPU writes and Luma passes, clear values, custom shader file and compilation errors, "
+        "the recipes of the shader's current patch clone. "
         "The state is recorded before the game mod's draw hook runs: a viewport it scales, a blend or shader it swaps in are not shown "
         "(read the result with luma_read_resource instead).",
         {"index": {"type": "integer", "description": "Entry index from luma_trace_list"}}, ["index"],
@@ -230,6 +233,27 @@ TOOLS = [
     tool("luma_reload_shaders", "Recompile and reload Luma's custom shaders (like the dev UI button) and return the compilation error log.",
          {"unload": {"type": "boolean", "description": "Unload them instead. Shader objects a game mod keeps itself (e.g. XeGTAO's compute shaders) keep running: "
                                                        "test a missing-shader fallback with the feature's dev toggle"}}, annotations=LIVE_WRITE),
+    tool(
+        "luma_patch_state",
+        "Shader patching: the enabled providers, allow_patches (also the core.allow_patches dev value), patched clone count, the loaded DXP recipes "
+        "(identity, stage folder, enabled, the game's registration, env variables with their default/game/user/effective values) and the patched shaders "
+        "(method, size, recipes that modified them). With hash: that shader's per recipe reports (steps with rule matches, added resource bindings) and "
+        "its pipelines (clone origin, whether the recipe resources resolve now, else draws fall back to the original).",
+        {"hash": {"type": "string", "description": "Shader hash (0x12345678)"}},
+    ),
+    tool(
+        "luma_set_recipe",
+        "Enable/disable a DXP recipe or set/reset one of its env variables, like the Patch Settings tab (saved to the config). Waits for the recipes "
+        "to reload; pipelines re-patch on their next bind. Env variables the game sets are read only.",
+        {"identity": {"type": "string", "description": "Recipe identity from luma_patch_state, e.g. PS/dithering_fix.recipe.yml"},
+         "enabled": {"type": "boolean", "description": "Enable or disable the recipe"},
+         "env": {"type": "string", "description": "Env variable name"}, "value": {"type": "string", "description": "The env value (bool as 1/0, or a number)"},
+         "reset": {"type": "boolean", "description": "Drop the user value of env, back to the recipe's default"}},
+        ["identity"], annotations=ONE_SHOT,
+    ),
+    tool("luma_reload_patches", "Reload the recipes from disk and rebuild the patch clones (lazily, on each pipeline's next bind), like the dev UI's "
+         "Reload Patches. unload=true unloads the patch clones instead (files are untouched).",
+         {"unload": {"type": "boolean", "description": "Unload the patch clones instead"}}, annotations=LIVE_WRITE),
     tool("luma_get_settings", "Luma global settings (display mode, peak/paper white), the 10 dev settings with names/ranges, raw game settings slots, and shader defines."),
     tool(
         "luma_set_setting",
@@ -957,6 +981,7 @@ INSTRUCTIONS = (
     "Readbacks are files in %TEMP%\\luma-mcp (.bin + .json + a .png preview to open with Read) plus channel stats in the result; luma_compare diffs two .bin (metrics=[\"flip\"]: perceptual score), luma_golden checks one against a per-backend baseline.\n"
     "A/B: luma_ab name=<dev value> a=.. b=.. (one call, restores the value, gives the noise floor); manual: luma_dev_values -> luma_set_dev_value "
     "(live, not saved) -> read back; one-shot knobs report in luma_log.\n"
+    "Shader patches: luma_patch_state -> luma_set_recipe / luma_reload_patches; luma_trace_list variant=original finds clones that fell back.\n"
     "'ignored_args' in a result means a misspelt or unknown argument. A timeout usually means the game isn't presenting (minimized, paused, "
     "in a loading screen or a debugger): luma_status still answers then (presenting=false)."
 )

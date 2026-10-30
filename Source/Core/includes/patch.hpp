@@ -213,6 +213,9 @@ namespace Patch
    std::optional<dxp::PrimitiveValue> GetRecipeEnv(std::string_view identity, const std::string& env);
    void SetRecipeEnv(std::string_view identity, const std::string& env, dxp::PrimitiveValue value);
    void ResetRecipeEnv(std::string_view identity, const std::string& env);
+   std::optional<RecipeRegistration> GetRecipeRegistration(std::string_view identity);
+   // Parses an env value with the type of the recipe's default value. Empty means no override.
+   std::optional<dxp::PrimitiveValue> RecipeEnvFromString(std::string_view text, const dxp::PrimitiveValue& type_of);
 #endif
 
    struct ShaderPatchRequest;
