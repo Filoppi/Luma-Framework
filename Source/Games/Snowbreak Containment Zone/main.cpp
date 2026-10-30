@@ -283,7 +283,7 @@ class UnrealEngine final : public Game // ### Rename this to your game's name ##
       native_device_context->PSSetSamplers(0, 1, &sampler_state_point);
       native_device_context->OMSetRenderTargets(1, &dlss_motion_vectors_rtv_const, nullptr);
       native_device_context->Draw(4, 0);
-      Trace::Draw(native_device_context, "SR Decode Motion Vectors", 4);
+      Trace::CustomDraw(native_device_context, "SR Decode Motion Vectors", 4);
    }
 
    static void DecodeMotionVectorsCS(ID3D11DeviceContext* context, DeviceData& device_data, TAAShaderInfo& taa_shader_info)
@@ -321,7 +321,7 @@ class UnrealEngine final : public Game // ### Rename this to your game's name ##
       UINT groupsX = (width + 8 - 1) / 8;
       UINT groupsY = (height + 8 - 1) / 8;
       context->Dispatch(groupsX, groupsY, 1);
-      Trace::Dispatch(context, "SR Decode Motion Vectors", groupsX, groupsY, 1);
+      Trace::CustomDispatch(context, "SR Decode Motion Vectors", groupsX, groupsY, 1);
    }
 
    static void DecodeMotionVectors(bool is_compute_shader, ID3D11DeviceContext* context, DeviceData& device_data, TAAShaderInfo& taa_shader_info)
@@ -989,7 +989,7 @@ public:
                UINT groupsY = (height + tonemap_lut_thread_size - 1) / tonemap_lut_thread_size;
                UINT groupsZ = game_device_data.tonemap_lut_texture_is_3d ? ((depth + tonemap_lut_thread_size - 1) / tonemap_lut_thread_size) : 1;
                native_device_context->Dispatch(groupsX, groupsY, groupsZ);
-               Trace::Dispatch(native_device_context, "Upgrade Tonemap LUT", groupsX, groupsY, groupsZ);
+               Trace::CustomDispatch(native_device_context, "Upgrade Tonemap LUT", groupsX, groupsY, groupsZ);
 
                // Restore everything for extra safety (likely not needed!)
                compute_state_stack.Restore(native_device_context);

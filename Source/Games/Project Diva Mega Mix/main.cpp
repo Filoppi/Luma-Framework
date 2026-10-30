@@ -41,14 +41,14 @@ namespace
       device_data.debug_draw_texture_size = {};
 
       // set
-      if (debug_draw_shader_hash != hash)
+      if (Trace::debug_draw_shader_hash != hash)
       {
-         debug_draw_shader_hash = hash;
+         Trace::debug_draw_shader_hash = hash;
          return true;
       }
       else
       {
-         debug_draw_shader_hash = 0;
+         Trace::debug_draw_shader_hash = 0;
          return false;
       }
    }
@@ -3780,8 +3780,8 @@ public:
       default_luma_global_game_settings.FrameBlendRatio = cb_luma_global_settings.GameSettings.FrameBlendRatio = 0.33f;
 
 #if DEVELOPMENT
-      // debug_draw_options edit
-      debug_draw_options = debug_draw_options & ~(uint)DebugDrawTextureOptionsMask::Tonemap;
+      // Trace::debug_draw_options edit
+      Trace::debug_draw_options = Trace::debug_draw_options & ~(uint)Trace::DebugDrawTextureOptionsMask::Tonemap;
 #endif
    }
    

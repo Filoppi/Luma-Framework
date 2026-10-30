@@ -173,5 +173,8 @@
     <None Include="includes\trace.inl">
       <Filter>Includes</Filter>
     </None>
+    <None Include="includes\trace_ui.inl">
+      <Filter>Includes</Filter>
+    </None>
   </ItemGroup>
 </Project>

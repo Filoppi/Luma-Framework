@@ -1186,7 +1186,7 @@ BOOL APIENTRY DllMain(HMODULE hModule, DWORD ul_reason_for_call, LPVOID lpReserv
 
 #if DEVELOPMENT
       // These make things messy in this game, given it renders at lower resolutions and then upscales and adds black bars beyond 16:9
-      debug_draw_options &= ~(uint32_t)DebugDrawTextureOptionsMask::Fullscreen;
+      Trace::debug_draw_options &= ~(uint32_t)Trace::DebugDrawTextureOptionsMask::Fullscreen;
 
       forced_shader_names.emplace(std::stoul("0DF0A97D", nullptr, 16), "TAA");
       forced_shader_names.emplace(std::stoul("75DFE4B0", nullptr, 16), "Tonemap");

@@ -159,7 +159,7 @@ namespace Mcp
          uint32_t shader_hash;
          int32_t target_instance;
          std::thread::id target_thread;
-         DebugDrawMode mode;
+         Trace::DebugDrawMode mode;
          int32_t view_index;
          bool freeze_inputs;
          bool disable_blends;
@@ -168,20 +168,20 @@ namespace Mcp
 
          static DebugDrawSelection Current()
          {
-            return {debug_draw_pipeline, debug_draw_shader_hash, debug_draw_pipeline_target_instance, debug_draw_pipeline_target_thread, debug_draw_mode, debug_draw_view_index, debug_draw_freeze_inputs, debug_draw_disable_blends, debug_draw_replaced_pass, debug_draw_custom_pass};
+            return {Trace::debug_draw_pipeline, Trace::debug_draw_shader_hash, Trace::debug_draw_pipeline_target_instance, Trace::debug_draw_pipeline_target_thread, Trace::debug_draw_mode, Trace::debug_draw_view_index, Trace::debug_draw_freeze_inputs, Trace::debug_draw_disable_blends, Trace::debug_draw_replaced_pass, Trace::debug_draw_custom_pass};
          }
          void Apply() const
          {
-            debug_draw_pipeline = pipeline;
-            debug_draw_shader_hash = shader_hash;
-            debug_draw_custom_pass = custom_pass;
-            debug_draw_pipeline_target_instance = target_instance;
-            debug_draw_pipeline_target_thread = target_thread;
-            debug_draw_mode = mode;
-            debug_draw_view_index = view_index;
-            debug_draw_freeze_inputs = freeze_inputs;
-            debug_draw_disable_blends = disable_blends;
-            debug_draw_replaced_pass = replaced_pass;
+            Trace::debug_draw_pipeline = pipeline;
+            Trace::debug_draw_shader_hash = shader_hash;
+            Trace::debug_draw_custom_pass = custom_pass;
+            Trace::debug_draw_pipeline_target_instance = target_instance;
+            Trace::debug_draw_pipeline_target_thread = target_thread;
+            Trace::debug_draw_mode = mode;
+            Trace::debug_draw_view_index = view_index;
+            Trace::debug_draw_freeze_inputs = freeze_inputs;
+            Trace::debug_draw_disable_blends = disable_blends;
+            Trace::debug_draw_replaced_pass = replaced_pass;
          }
       };
 
@@ -194,13 +194,13 @@ namespace Mcp
 
          static TrackBufferSelection Current()
          {
-            return {track_buffer_pipeline, track_buffer_pipeline_target_instance, track_buffer_index};
+            return {Trace::track_buffer_pipeline, Trace::track_buffer_pipeline_target_instance, Trace::track_buffer_index};
          }
          void Apply() const
          {
-            track_buffer_pipeline = pipeline;
-            track_buffer_pipeline_target_instance = target_instance;
-            track_buffer_index = index;
+            Trace::track_buffer_pipeline = pipeline;
+            Trace::track_buffer_pipeline_target_instance = target_instance;
+            Trace::track_buffer_index = index;
          }
       };
 
@@ -222,7 +222,7 @@ namespace Mcp
          // The pass a readback targets (see "ResolveTarget")
          uint64_t pipeline_handle = 0;
          uint32_t shader_hash = 0;
-         uint32_t custom_pass = 0; // A Luma pass instead of a game pipeline, see "debug_draw_custom_pass"
+         uint32_t custom_pass = 0; // A Luma pass instead of a game pipeline, see "Trace::debug_draw_custom_pass"
          const char* stage = "";
          int32_t instance = 0;
          std::thread::id thread;
@@ -763,7 +763,7 @@ namespace Mcp
          {
             const std::shared_lock lock_trace(cmd_list_data.mutex_trace);
             const size_t index = size_t(job->IntArg("index", 0));
-            if (trace_running || index >= cmd_list_data.trace_draw_calls_data.size())
+            if (Trace::running || index >= cmd_list_data.trace_draw_calls_data.size())
             {
                job->error = std::format("Trace index {} is out of range (captured {}), run luma_trace_capture first", index, cmd_list_data.trace_draw_calls_data.size());
                return false;
@@ -1217,7 +1217,7 @@ namespace Mcp
             const std::shared_lock lock_loading(s_mutex_loading);
             w.Field("has_compilation_errors", !shaders_compilation_errors.empty());
          }
-         w.Field("trace_count", trace_count);
+         w.Field("Trace::captured_count", Trace::captured_count);
          w.Field("swapchain_upgrade_type", uint32_t(swapchain_upgrade_type));
          w.Field("swapchain_format_upgrade_type", uint32_t(swapchain_format_upgrade_type));
          w.Field("texture_format_upgrades_type", uint32_t(texture_format_upgrades_type));
@@ -1246,30 +1246,30 @@ namespace Mcp
       bool RunTraceCapture(Job* job, DeviceData& device_data, CommandListData& cmd_list_data)
       {
          {
-            const std::unique_lock lock_trace(s_mutex_trace);
+            const std::unique_lock lock_trace(Trace::s_mutex);
             if (job->phase == 0)
             {
-               if (trace_running || trace_scheduled)
+               if (Trace::running || Trace::scheduled)
                   return false; // Another capture is in flight
-               trace_scheduled = true;
+               Trace::scheduled = true;
                job->phase = 1;
                return false;
             }
             if (job->phase == 1)
             {
-               if (trace_running)
+               if (Trace::running)
                   job->phase = 2;
                return false;
             }
-            if (trace_running)
+            if (Trace::running)
                return false;
          }
          job->frames++;
          // Locked after reading the list, "OnReShadePresent" locks the global trace mutex first
          const auto capture_again = [&job]
          {
-            const std::unique_lock lock_trace(s_mutex_trace);
-            trace_scheduled = true;
+            const std::unique_lock lock_trace(Trace::s_mutex);
+            Trace::scheduled = true;
             job->phase = 1;
             return false;
          };
@@ -1292,7 +1292,7 @@ namespace Mcp
             // Keep capturing until the pass shows up
             if (job->frames < uint32_t(job->IntArg("max_frames", 120, 1, 3600)) && trigger_indices.empty()) // Read even when found right away
                return capture_again();
-            w.Field("count", trace_count).Field("frames_captured", job->frames).Field("trigger_found", !trigger_indices.empty()).Key("trigger_indices").BeginArray();
+            w.Field("count", Trace::captured_count).Field("frames_captured", job->frames).Field("trigger_found", !trigger_indices.empty()).Key("trigger_indices").BeginArray();
             for (const size_t index : trigger_indices)
                w.Value(index);
             w.EndArray();
@@ -1332,7 +1332,7 @@ namespace Mcp
             const size_t top = size_t(job->IntArg("top", 64, 1, 5000));
             // Long windows: per hash aggregates instead of a per frame array
             const bool summary = job->BoolArg("summary", false);
-            w.Field("count", trace_count).Field("frames_captured", job->frames).Field("distinct_shaders", totals.size()).Key("hash_counts").BeginArray();
+            w.Field("count", Trace::captured_count).Field("frames_captured", job->frames).Field("distinct_shaders", totals.size()).Key("hash_counts").BeginArray();
             for (size_t i = 0; i < (std::min)(top, totals.size()); i++)
             {
                const auto& counts = job->hash_counts[totals[i].first];
@@ -1356,7 +1356,7 @@ namespace Mcp
             return true;
          }
 
-         w.Field("count", trace_count).Field("frames_captured", job->frames);
+         w.Field("count", Trace::captured_count).Field("frames_captured", job->frames);
          return true;
       }
 
@@ -1364,8 +1364,8 @@ namespace Mcp
       {
          const size_t offset = size_t((std::max)(job->IntArg("offset", 0), int64_t(0)));
          const size_t limit = size_t(job->IntArg("limit", 300, 1, 5000));
-         const std::shared_lock lock_trace(s_mutex_trace);
-         if (trace_running)
+         const std::shared_lock lock_trace(Trace::s_mutex);
+         if (Trace::running)
          {
             job->error = "A capture is in progress";
             return true;
@@ -1407,12 +1407,12 @@ namespace Mcp
 
       bool RunTraceGet(Job* job, DeviceData& device_data, CommandListData& cmd_list_data)
       {
-         const std::shared_lock lock_trace(s_mutex_trace);
+         const std::shared_lock lock_trace(Trace::s_mutex);
          const std::shared_lock lock_generic(s_mutex_generic);
          const std::shared_lock lock_loading(s_mutex_loading);
          const std::shared_lock lock_trace_2(cmd_list_data.mutex_trace);
          const size_t index = size_t(job->IntArg("index", -1));
-         if (trace_running || index >= cmd_list_data.trace_draw_calls_data.size())
+         if (Trace::running || index >= cmd_list_data.trace_draw_calls_data.size())
          {
             job->error = std::format("Trace index {} is out of range (captured {})", index, cmd_list_data.trace_draw_calls_data.size());
             return true;
@@ -1465,8 +1465,8 @@ namespace Mcp
                return true;
             }
 
-            static const std::unordered_map<std::string, DebugDrawMode> modes = {
-               {"rtv", DebugDrawMode::RenderTarget}, {"srv", DebugDrawMode::ShaderResource}, {"uav", DebugDrawMode::UnorderedAccessView}, {"depth", DebugDrawMode::Depth}, {"stencil", DebugDrawMode::Stencil}};
+            static const std::unordered_map<std::string, Trace::DebugDrawMode> modes = {
+               {"rtv", Trace::DebugDrawMode::RenderTarget}, {"srv", Trace::DebugDrawMode::ShaderResource}, {"uav", Trace::DebugDrawMode::UnorderedAccessView}, {"depth", Trace::DebugDrawMode::Depth}, {"stencil", Trace::DebugDrawMode::Stencil}};
             const auto mode = modes.find(view ? *view : "rtv");
             if (mode == modes.end())
             {
@@ -1482,7 +1482,7 @@ namespace Mcp
                job->error = std::format("{} passes can't be read back, use the PS entry of the same draw", job->stage);
                return true;
             }
-            if (is_compute && mode->second != DebugDrawMode::ShaderResource && mode->second != DebugDrawMode::UnorderedAccessView)
+            if (is_compute && mode->second != Trace::DebugDrawMode::ShaderResource && mode->second != Trace::DebugDrawMode::UnorderedAccessView)
             {
                job->error = "Compute passes only have srv and uav views";
                return true;
@@ -1492,14 +1492,14 @@ namespace Mcp
             job->saved_debug_draw = DebugDrawSelection::Current();
             DebugDrawSelection{job->pipeline_handle, job->custom_pass ? 0 : job->shader_hash, job->instance, job->thread, mode->second, int32_t(job->IntArg("slot", 0)), false, false, job->BoolArg("replaced", true), job->custom_pass}.Apply();
             device_data.debug_draw_texture = nullptr;
-            job->result.Hash("hash", job->shader_hash).Field("instance", job->instance).Field("view", mode->first).Field("slot", debug_draw_view_index);
+            job->result.Hash("hash", job->shader_hash).Field("instance", job->instance).Field("view", mode->first).Field("slot", Trace::debug_draw_view_index);
             job->phase = 1;
             return false;
          }
 
          if (!device_data.debug_draw_texture)
             return !KeepWaiting(job, "view");
-         const auto path = ReadbackPath(*job, std::format("{}_{}_{}{}", Shader::Hash_NumToStr(job->shader_hash), job->instance, view ? *view : "rtv", debug_draw_view_index));
+         const auto path = ReadbackPath(*job, std::format("{}_{}_{}{}", Shader::Hash_NumToStr(job->shader_hash), job->instance, view ? *view : "rtv", Trace::debug_draw_view_index));
          ReadTexture(native_device_context, device_data.debug_draw_texture.get(), device_data.debug_draw_texture_format, uint32_t(job->IntArg("mip", 0)), path, job, &job->error);
          return true;
       }
@@ -1536,7 +1536,7 @@ namespace Mcp
          {
             D3D11_BUFFER_DESC desc = {};
             data.cb->GetDesc(&desc);
-            data.data_valid = MapBufferData(data.cb, native_device_context, data.data, desc.ByteWidth);
+            data.data_valid = Trace::MapBufferData(data.cb, native_device_context, data.data, desc.ByteWidth);
          }
          if (!data.data_valid)
             return !KeepWaiting(job, "constant buffer");
@@ -2680,7 +2680,7 @@ namespace Mcp
 
    void Start()
    {
-      // The live safe Core knobs. Not here: "debug_draw_*" (the readbacks drive them), "trace_ignore_*" ("luma_trace_list" filters
+      // The live safe Core knobs. Not here: "debug_draw_*" (the readbacks drive them), "Trace::ignore_*" ("luma_trace_list" filters
       // instead), and what needs shaders, resources or samplers recreated ("custom_sdr_gamma", "enable_ui_separation", the mip bias).
       RegisterToggles({{"core.hide_ui", &hide_ui}, {"core.force_disable_display_composition", &force_disable_display_composition}, {"core.ignore_upgraded_samplers", &ignore_upgraded_samplers},
          {"core.enable_upgraded_texture_resource_copy_redirection", &enable_upgraded_texture_resource_copy_redirection}});

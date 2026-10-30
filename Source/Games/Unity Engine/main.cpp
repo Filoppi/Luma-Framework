@@ -599,7 +599,7 @@ BOOL APIENTRY DllMain(HMODULE hModule, DWORD ul_reason_for_call, LPVOID lpReserv
 #endif
 
 #if DEVELOPMENT // Unity flips Y coordinates on all textures until the final swapchain draws
-      debug_draw_options |= (uint32_t)DebugDrawTextureOptionsMask::FlipY;
+      Trace::debug_draw_options |= (uint32_t)Trace::DebugDrawTextureOptionsMask::FlipY;
 #endif
 
       game = new UnityEngine();

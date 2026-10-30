@@ -388,7 +388,7 @@ void DrawCustomPixelShader(ID3D11DeviceContext* device_context, ID3D11DepthStenc
 
    // Finally draw:
    device_context->Draw(4, 0);
-   Trace::Draw(device_context, trace_name, 4);
+   Trace::CustomDraw(device_context, trace_name, 4);
 }
 
 // Sets the viewport to the full render target, useful to anticipate upscaling (before the game would have done it natively)
@@ -807,7 +807,7 @@ void SanitizeNaNs(ID3D11Device* device, ID3D11DeviceContext* device_context, ID3
             UINT x = (GetTextureMipSize(data.width, i) + 7) / 8;
             UINT y = (GetTextureMipSize(data.height, i) + 7) / 8;
             device_context->Dispatch(x, y, 1);
-            Trace::Dispatch(device_context, "Sanitize NaNs Mip", x, y, 1);
+            Trace::CustomDispatch(device_context, "Sanitize NaNs Mip", x, y, 1);
          }
 
          // Clear them up to avoid overlaps (warnings), this is probably unnecessary as below we use a pixel shader
@@ -974,7 +974,7 @@ void DrawSMAA(ID3D11Device* device, ID3D11DeviceContext* device_context, DeviceD
    device_context->ClearRenderTargetView(managed_resources.render_target_views["smaa_edge_detection"_h].get(), clear_color);
    device_context->ClearDepthStencilView(managed_resources.depth_stencil_views["smaa_dsv"_h].get(), D3D11_CLEAR_STENCIL, 1.0f, 0);
    device_context->Draw(3, 0);
-   Trace::Draw(device_context, "Luma SMAA Edge Detection", 3);
+   Trace::CustomDraw(device_context, "Luma SMAA Edge Detection", 3);
 
    //
 
@@ -1048,7 +1048,7 @@ void DrawSMAA(ID3D11Device* device, ID3D11DeviceContext* device_context, DeviceD
 
    device_context->ClearRenderTargetView(managed_resources.render_target_views["smaa_blending_weight_calculation"_h].get(), clear_color);
    device_context->Draw(3, 0);
-   Trace::Draw(device_context, "Luma SMAA Blending Weight Calculation", 3);
+   Trace::CustomDraw(device_context, "Luma SMAA Blending Weight Calculation", 3);
 
    //
 
@@ -1063,7 +1063,7 @@ void DrawSMAA(ID3D11Device* device, ID3D11DeviceContext* device_context, DeviceD
    device_context->PSSetShaderResources(0, ps_srvs_neighborhood_blending.size(), ps_srvs_neighborhood_blending.data());
 
    device_context->Draw(3, 0);
-   Trace::Draw(device_context, "Luma SMAA Neighborhood Blending", 3);
+   Trace::CustomDraw(device_context, "Luma SMAA Neighborhood Blending", 3);
 
    //
 
@@ -1177,7 +1177,7 @@ void DrawKarisAverage(ID3D11Device* device, ID3D11DeviceContext* device_context,
    device_context->CSSetShaderResources(0, 1, &srv_source);
 
    device_context->Dispatch((tex_desc.Width + 8 - 1) / 8, (tex_desc.Height + 8 - 1) / 8, 1);
-   Trace::Dispatch(device_context, "Luma Karis Average", (tex_desc.Width + 8 - 1) / 8, (tex_desc.Height + 8 - 1) / 8, 1);
+   Trace::CustomDispatch(device_context, "Luma Karis Average", (tex_desc.Width + 8 - 1) / 8, (tex_desc.Height + 8 - 1) / 8, 1);
 
    // Karis averaged out.
    *srv_out = managed_resources.shader_resource_views["luma_karis_average"_h].get();
@@ -1403,7 +1403,7 @@ void DrawBloom(ID3D11Device* device, ID3D11DeviceContext* device_context, Device
 
    // Draw X pass.
    device_context->Draw(3, 0);
-   Trace::Draw(device_context, "Luma Bloom Downsample X", 3);
+   Trace::CustomDraw(device_context, "Luma Bloom Downsample X", 3);
 
    std::vector<D3D11_VIEWPORT> viewports_y(nmips);
    viewports_y[0].Width = y_mip0_width;
@@ -1423,7 +1423,7 @@ void DrawBloom(ID3D11Device* device, ID3D11DeviceContext* device_context, Device
 
    // Draw Y pass.
    device_context->Draw(3, 0);
-   Trace::Draw(device_context, "Luma Bloom Prefilter Y", 3);
+   Trace::CustomDraw(device_context, "Luma Bloom Prefilter Y", 3);
 
    //
 
@@ -1452,7 +1452,7 @@ void DrawBloom(ID3D11Device* device, ID3D11DeviceContext* device_context, Device
 
       // Draw X pass.
       device_context->Draw(3, 0);
-      Trace::Draw(device_context, "Luma Bloom Downsample X", 3);
+      Trace::CustomDraw(device_context, "Luma Bloom Downsample X", 3);
 
       viewports_y[i].Width = max(1u, y_mip0_width >> i);
       viewports_y[i].Height = max(1u, y_mip0_height >> i);
@@ -1470,7 +1470,7 @@ void DrawBloom(ID3D11Device* device, ID3D11DeviceContext* device_context, Device
 
       // Draw Y pass.
       device_context->Draw(3, 0);
-      Trace::Draw(device_context, "Luma Bloom Downsample Y", 3);
+      Trace::CustomDraw(device_context, "Luma Bloom Downsample Y", 3);
    }
 
    //
@@ -1506,7 +1506,7 @@ void DrawBloom(ID3D11Device* device, ID3D11DeviceContext* device_context, Device
        device_context->OMSetBlendState(managed_resources.blends["luma_bloom_blend"_h].get(), blend_factor, UINT_MAX);
 
        device_context->Draw(3, 0);
-       Trace::Draw(device_context, "Luma Bloom Upsample", 3);
+       Trace::CustomDraw(device_context, "Luma Bloom Upsample", 3);
    }
 
    //

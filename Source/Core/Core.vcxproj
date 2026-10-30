@@ -653,6 +653,7 @@
     <None Include="includes\resource_upgrades.inl" />
     <None Include="includes\mcp_server.inl" />
     <None Include="includes\trace.inl" />
+    <None Include="includes\trace_ui.inl" />
   </ItemGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
   <ImportGroup Label="ExtensionTargets">

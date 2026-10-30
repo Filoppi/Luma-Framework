@@ -305,8 +305,8 @@ public:
    {
 #if DEVELOPMENT
       {
-         const std::unique_lock lock_trace(s_mutex_trace);
-         trace_count = 0;
+         const std::unique_lock lock_trace(Trace::s_mutex);
+         Trace::captured_count = 0;
       }
 #endif
    }
@@ -558,7 +558,7 @@ public:
             ID3D11RenderTargetView* render_target_view_const = game_device_data.exposure_buffer_rtv.get();
             native_device_context->OMSetRenderTargets(1, &render_target_view_const, nullptr);
             native_device_context->Draw(3, 0);
-            Trace::Draw(native_device_context, "Super Resolution Draw Exposure", 3);
+            Trace::CustomDraw(native_device_context, "Super Resolution Draw Exposure", 3);
 
             // Copy it back as CPU buffer and read+store it
             native_device_context->CopyResource(game_device_data.exposure_buffers_cpu[game_device_data.exposure_buffers_cpu_index].get(), game_device_data.exposure_buffer_gpu.get());

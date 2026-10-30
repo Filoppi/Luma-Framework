@@ -734,7 +734,7 @@ public:
          {
             if (game_device_data.pause_trace_delay_countdown == 0)
             {
-               trace_scheduled = true;
+               Trace::scheduled = true;
                game_device_data.pause_trace_delay_countdown = -1;
 
                uintptr_t settings_obj;

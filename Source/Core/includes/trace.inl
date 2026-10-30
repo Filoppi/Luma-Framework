@@ -581,6 +581,138 @@ namespace Trace
          return shader ? find(device_data.native_pixel_shaders, shader.get()) : 0;
       }
 
+      // A game draw's entry for one of its shaders. Expects "s_mutex_generic", "s_mutex_dumping" and "device_data.mutex" (shared) locked.
+      void AddDrawCall(std::vector<TraceDrawCallData>& trace_draw_calls_data, const DeviceData& device_data, ID3D11DeviceContext* native_device_context, uint64_t pipeline_handle, const DrawDispatchData& draw_dispatch_data)
+      {
+         TraceDrawCallData trace_draw_call_data;
+         trace_draw_call_data.pipeline_handle = pipeline_handle;
+         const CachedShader* cached_shader;
+         const reshade::api::shader_stage stage = FindStage(device_data, pipeline_handle, &cached_shader);
+         CaptureState(trace_draw_call_data, device_data, native_device_context, stage, cached_shader, draw_dispatch_data);
+
+         if (trace_draw_calls_data.capacity() - trace_draw_calls_data.size() <= 1)
+            trace_draw_calls_data.reserve(trace_draw_calls_data.size() + 1000); // Possible optimization
+         trace_draw_calls_data.push_back(std::move(trace_draw_call_data));
+      }
+
+      // Whether this is the instance of a pass the debug draw or the constant buffer tracking targets, counting it
+      bool IsTargetInstance(std::atomic<int32_t>& instance, int32_t target_instance)
+      {
+         const int32_t current_instance = instance.fetch_add(1);
+         return target_instance == -1 || current_instance == target_instance;
+      }
+
+      std::shared_ptr<void> CacheState(ID3D11DeviceContext* native_device_context, const DeviceData& device_data, bool is_dispatch)
+      {
+         if (is_dispatch)
+         {
+            auto state = std::make_shared<DrawStateStack<DrawStateStackType::Compute>>();
+            state->Cache(native_device_context, device_data.uav_max_count);
+            return state;
+         }
+         auto state = std::make_shared<DrawStateStack<DrawStateStackType::FullGraphics>>();
+         state->Cache(native_device_context, device_data.uav_max_count);
+         return state;
+      }
+      void RestoreState(ID3D11DeviceContext* native_device_context, const std::shared_ptr<void>& state, bool is_dispatch)
+      {
+         if (is_dispatch)
+            static_cast<DrawStateStack<DrawStateStackType::Compute>*>(state.get())->Restore(native_device_context);
+         else
+            static_cast<DrawStateStack<DrawStateStackType::FullGraphics>*>(state.get())->Restore(native_device_context);
+      }
+
+      // Restores the pass inputs cloned the first time it drew since they were frozen, so a shader can be edited live on them
+      template <DrawStateStackType type>
+      void FreezeInputs(ID3D11DeviceContext* native_device_context, DeviceData& device_data)
+      {
+         if (!device_data.debug_draw_frozen_draw_state_stack)
+         {
+            auto frozen_state = std::make_shared<DrawStateStack<type>>();
+            frozen_state->Cache(native_device_context, device_data.uav_max_count);
+            frozen_state->Clone(native_device_context, device_data.GetLumaCBuffers());
+            device_data.debug_draw_frozen_draw_state_stack = frozen_state;
+         }
+         // We keep the original RTVs, UAVs and shaders otherwise live editing of custom shaders won't work.
+         // Making the draw on a non frozen UAV could cause iterative passes to not 100% freeze, but if ever needed, we could add a flag for that too.
+         static_cast<DrawStateStack<type>*>(device_data.debug_draw_frozen_draw_state_stack.get())->Restore(native_device_context, false, false);
+      }
+
+      // Needs the pass's state still bound: copies the constant buffer the tracking selected, of "stage", and makes a copy of it in deferred contexts
+      void TrackConstantBuffer(ID3D11DeviceContext* native_device_context, DeviceData& device_data, reshade::api::shader_stage stage)
+      {
+         com_ptr<ID3D11Buffer> cb;
+         UINT cb_first = 0, cb_num = 0;
+         com_ptr<ID3D11DeviceContext1> native_device_context_1;
+         native_device_context->QueryInterface(&native_device_context_1);
+         switch (stage)
+         {
+         case reshade::api::shader_stage::vertex:
+            if (native_device_context_1)
+               native_device_context_1->VSGetConstantBuffers1(track_buffer_index, 1, &cb, &cb_first, &cb_num);
+            else
+               native_device_context->VSGetConstantBuffers(track_buffer_index, 1, &cb);
+            break;
+         case reshade::api::shader_stage::pixel:
+            if (native_device_context_1)
+               native_device_context_1->PSGetConstantBuffers1(track_buffer_index, 1, &cb, &cb_first, &cb_num);
+            else
+               native_device_context->PSGetConstantBuffers(track_buffer_index, 1, &cb);
+            break;
+         case reshade::api::shader_stage::compute:
+            if (native_device_context_1)
+               native_device_context_1->CSGetConstantBuffers1(track_buffer_index, 1, &cb, &cb_first, &cb_num);
+            else
+               native_device_context->CSGetConstantBuffers(track_buffer_index, 1, &cb);
+            break;
+         default:
+            return;
+         }
+         device_data.track_buffer_data.data_valid = CopyBuffer(cb, native_device_context, device_data.track_buffer_data.data, device_data.track_buffer_data.cb);
+         device_data.track_buffer_data.hash = std::to_string(std::hash<void*>{}(cb.get()));
+         device_data.track_buffer_data.first_constant = cb_first;
+         device_data.track_buffer_data.num_constants = cb_num;
+      }
+
+      // Moves the entries queued on this thread for "native_device_context" into its trace at "index" (the other contexts' are dropped), and returns how many.
+      // Expects the trace mutexes locked.
+      size_t MoveQueued(std::vector<TraceDrawCallData>& trace_draw_calls_data, ID3D11DeviceContext* native_device_context, size_t index = SIZE_MAX)
+      {
+         const size_t first_index = (std::min)(index, trace_draw_calls_data.size());
+         std::erase_if(queued_entries, [native_device_context](const TraceDrawCallData& entry)
+            { return entry.command_list.get() != native_device_context; });
+         trace_draw_calls_data.insert(trace_draw_calls_data.begin() + first_index, std::make_move_iterator(queued_entries.begin()), std::make_move_iterator(queued_entries.end()));
+         const size_t count = queued_entries.size();
+         queued_entries.clear();
+         return count;
+      }
+
+      // Builds an event entry with "setup" and adds it to the trace, while a capture runs
+      template <typename TSetup>
+      void AddEventEntry(CommandListData& cmd_list_data, ID3D11DeviceContext* command_list, TraceDrawCallData::TraceDrawCallType type, TSetup&& setup)
+      {
+         if (!running) // Unlocked early out, rechecked under the lock
+            return;
+         const std::shared_lock lock_trace(s_mutex);
+         if (!running)
+            return;
+         TraceDrawCallData trace_draw_call_data;
+         trace_draw_call_data.type = type;
+         trace_draw_call_data.command_list = command_list;
+         setup(trace_draw_call_data);
+         const std::unique_lock lock_trace_2(cmd_list_data.mutex_trace);
+         cmd_list_data.trace_draw_calls_data.push_back(std::move(trace_draw_call_data));
+      }
+
+      void SetEventResources(TraceDrawCallData& trace_draw_call_data, ID3D11Resource* source, ID3D11Resource* target)
+      {
+         // Re-use the SRV and RTV data for simplicity
+         if (source)
+            GetResourceInfo(source, trace_draw_call_data.sr_size[0], trace_draw_call_data.sr_format[0], &trace_draw_call_data.sr_type_name[0], &trace_draw_call_data.sr_hash[0]);
+         if (target)
+            GetResourceInfo(target, trace_draw_call_data.rt_size[0], trace_draw_call_data.rt_format[0], &trace_draw_call_data.rt_type_name[0], &trace_draw_call_data.rt_hash[0]);
+      }
+
       struct NativeShaderReflection
       {
          const void* code = nullptr; // Read again when the shader is recompiled
@@ -620,7 +752,7 @@ namespace Trace
 
       void RecordCustomPass(ID3D11DeviceContext* native_device_context, const char* name, reshade::api::shader_stage stage, const DrawDispatchData& draw_dispatch_data)
       {
-         if (debug_draw_custom_pass == 0 && !trace_running)
+         if (debug_draw_custom_pass == 0 && track_buffer_custom_pass == 0 && !running)
             return;
          DeviceData* device_data = FindDeviceData(native_device_context);
          if (!device_data)
@@ -638,13 +770,13 @@ namespace Trace
          }
 
          // The pass drew right before, its state is still bound
-         if (debug_draw_custom_pass != 0 && debug_draw_custom_pass == Math::CompileTimeStringHash(name) && (debug_draw_pipeline_target_thread == std::thread::id() || debug_draw_pipeline_target_thread == std::this_thread::get_id()))
-         {
-            const int32_t instance = debug_draw_custom_pass_instance.fetch_add(1);
-            if (debug_draw_pipeline_target_instance == -1 || instance == debug_draw_pipeline_target_instance)
-               CopyDebugDrawTexture(debug_draw_mode, debug_draw_view_index, native_device_context, *device_data, stage == reshade::api::shader_stage::compute);
-         }
-         if (!trace_running)
+         const uint32_t name_hash = Math::CompileTimeStringHash(name);
+         if (debug_draw_custom_pass == name_hash && (debug_draw_pipeline_target_thread == std::thread::id() || debug_draw_pipeline_target_thread == std::this_thread::get_id())
+             && IsTargetInstance(debug_draw_custom_pass_instance, debug_draw_pipeline_target_instance))
+            CopyDebugDrawTexture(debug_draw_mode, debug_draw_view_index, native_device_context, *device_data, stage == reshade::api::shader_stage::compute);
+         if (track_buffer_custom_pass == name_hash && IsTargetInstance(track_buffer_custom_pass_instance, track_buffer_pipeline_target_instance))
+            TrackConstantBuffer(native_device_context, *device_data, stage);
+         if (!running)
             return;
          TraceDrawCallData trace_draw_call_data;
          trace_draw_call_data.type = TraceDrawCallData::TraceDrawCallType::Custom;
@@ -718,7 +850,7 @@ namespace Trace
       }
    }
 
-   void Draw(ID3D11DeviceContext* native_device_context, const char* name, UINT vertex_count)
+   void CustomDraw(ID3D11DeviceContext* native_device_context, const char* name, UINT vertex_count)
    {
       DrawDispatchData draw_dispatch_data;
       draw_dispatch_data.vertex_count = vertex_count;
@@ -726,16 +858,59 @@ namespace Trace
       RecordCustomPass(native_device_context, name, reshade::api::shader_stage::pixel, draw_dispatch_data);
    }
 
-   void Dispatch(ID3D11DeviceContext* native_device_context, const char* name, UINT thread_group_count_x, UINT thread_group_count_y, UINT thread_group_count_z)
+   void CustomDispatch(ID3D11DeviceContext* native_device_context, const char* name, UINT thread_group_count_x, UINT thread_group_count_y, UINT thread_group_count_z)
    {
       DrawDispatchData draw_dispatch_data;
       draw_dispatch_data.dispatch_count = {thread_group_count_x, thread_group_count_y, thread_group_count_z};
       RecordCustomPass(native_device_context, name, reshade::api::shader_stage::compute, draw_dispatch_data);
    }
 
+   void AddEvent(CommandListData& cmd_list_data, ID3D11DeviceContext* command_list, TraceDrawCallData::TraceDrawCallType type, ID3D11Resource* source, ID3D11Resource* target)
+   {
+      AddEventEntry(cmd_list_data, command_list, type, [&](TraceDrawCallData& trace_draw_call_data)
+         { SetEventResources(trace_draw_call_data, source, target); });
+   }
+
+   void AddClear(reshade::api::command_list* cmd_list, reshade::api::resource_view view, std::initializer_list<float> values)
+   {
+      if (view.handle == 0)
+         return;
+      AddEventEntry(*cmd_list->get_private_data<CommandListData>(), (ID3D11DeviceContext*)(cmd_list->get_native()), TraceDrawCallData::TraceDrawCallType::ClearResource, [&](TraceDrawCallData& trace_draw_call_data)
+         {
+            SetEventResources(trace_draw_call_data, nullptr, reinterpret_cast<ID3D11Resource*>(cmd_list->get_device()->get_resource_from_view(view).handle));
+            std::copy_n(values.begin(), (std::min)(values.size(), std::size(trace_draw_call_data.blend_factor)), trace_draw_call_data.blend_factor);
+         });
+   }
+
+   void AddCopy(CommandListData& cmd_list_data, ID3D11DeviceContext* command_list, ID3D11Resource* source, ID3D11Resource* target, const TraceDrawCallData::CopyInfo& copy_info)
+   {
+      AddEventEntry(cmd_list_data, command_list, TraceDrawCallData::TraceDrawCallType::CopyResource, [&](TraceDrawCallData& trace_draw_call_data)
+         {
+            trace_draw_call_data.copy_info = copy_info;
+            SetEventResources(trace_draw_call_data, source, target);
+         });
+   }
+
+   void JoinCommandList(CommandListData& cmd_list_data, CommandListData& secondary_cmd_list_data, ID3D11DeviceContext* command_list, bool is_finish_command_list)
+   {
+      if (!running)
+         return;
+      const std::shared_lock lock_trace(s_mutex);
+      if (!running)
+         return;
+      TraceDrawCallData trace_draw_call_data;
+      trace_draw_call_data.type = is_finish_command_list ? TraceDrawCallData::TraceDrawCallType::CreateCommandList : TraceDrawCallData::TraceDrawCallType::AppendCommandList;
+      trace_draw_call_data.command_list = command_list;
+      const std::unique_lock lock_trace_2(cmd_list_data.mutex_trace);
+      cmd_list_data.trace_draw_calls_data.push_back(std::move(trace_draw_call_data));
+      const std::unique_lock lock_trace_3(secondary_cmd_list_data.mutex_trace);
+      cmd_list_data.trace_draw_calls_data.append_range(secondary_cmd_list_data.trace_draw_calls_data);
+      secondary_cmd_list_data.trace_draw_calls_data.clear(); // Clear the command list where the data was from (given it was moved to the other one)
+   }
+
    void Marker(ID3D11DeviceContext* native_device_context, const char* name, ID3D11DeviceChild* target)
    {
-      if (!trace_running)
+      if (!running)
          return;
       TraceDrawCallData trace_draw_call_data;
       trace_draw_call_data.type = TraceDrawCallData::TraceDrawCallType::Custom;
@@ -755,10 +930,10 @@ namespace Trace
 
    void Annotate(CommandListData& cmd_list_data, std::string_view text, std::optional<int64_t> value)
    {
-      if (!trace_running) // Cheap early out for the hot path, rechecked under the lock
+      if (!running) // Cheap early out for the hot path, rechecked under the lock
          return;
-      const std::shared_lock lock_trace(s_mutex_trace);
-      if (!trace_running)
+      const std::shared_lock lock_trace(s_mutex);
+      if (!running)
          return;
       const std::unique_lock lock_trace_2(cmd_list_data.mutex_trace);
       // Games can push their own custom entries after the shader ones
@@ -775,12 +950,468 @@ namespace Trace
       }
    }
 
+   void OnPresent(CommandListData& cmd_list_data)
+   {
+      // Some games fail to capture input on boot, so use a special key to force a graphics capture
+      static bool graphics_capture_key_down = false; // "static" is fine, games usually only have one present call per frame
+      bool was_graphics_capture_key_down = graphics_capture_key_down;
+      graphics_capture_key_down = GetAsyncKeyState(VK_SUBTRACT) & 0x8000; // Numpad - key
+      if (graphics_capture_key_down && !was_graphics_capture_key_down)
+      {
+         scheduled = true;
+      }
+      was_graphics_capture_key_down = graphics_capture_key_down;
+
+      const std::unique_lock lock_trace(s_mutex);
+      if (running)
+      {
+#if _DEBUG && LOG_VERBOSE
+         reshade::log::message(reshade::log::level::info, "--- Frame Graphics Capture Ended ---");
+#endif
+         running = false;
+         const std::shared_lock lock_trace_2(cmd_list_data.mutex_trace);
+         captured_count = cmd_list_data.trace_draw_calls_data.size();
+      }
+      else if (scheduled)
+      {
+#if _DEBUG && LOG_VERBOSE
+         reshade::log::message(reshade::log::level::info, "--- Frame Graphics Capture Started ---");
+#endif
+         // Split the trace logic over "two" frames, to make sure we capture everything in between two present calls
+         scheduled = false;
+         {
+            const std::unique_lock lock_trace_2(cmd_list_data.mutex_trace);
+            cmd_list_data.trace_draw_calls_data.clear(); // This leaves the reserved space allocated
+         }
+         captured_count = 0;
+         running = true;
+      }
+   }
+
+   bool CopyDebugDrawTexture(DebugDrawMode debug_draw_mode, int32_t debug_draw_view_index, ID3D11DeviceContext* native_device_context, DeviceData& device_data, bool is_dispatch)
+   {
+      com_ptr<ID3D11Device> native_device_ptr;
+      native_device_context->GetDevice(&native_device_ptr);
+      ID3D11Device* native_device = native_device_ptr.get();
+
+      com_ptr<ID3D11Resource> texture_resource;
+      DXGI_FORMAT forced_texture_format = DXGI_FORMAT_UNKNOWN;
+      if (debug_draw_mode == DebugDrawMode::RenderTarget || debug_draw_mode == DebugDrawMode::Depth || debug_draw_mode == DebugDrawMode::Stencil)
+      {
+         com_ptr<ID3D11RenderTargetView> rtvs[D3D11_SIMULTANEOUS_RENDER_TARGET_COUNT];
+         com_ptr<ID3D11DepthStencilView> dsv;
+         native_device_context->OMGetRenderTargets(D3D11_SIMULTANEOUS_RENDER_TARGET_COUNT, &rtvs[0], &dsv);
+
+         if (debug_draw_mode == DebugDrawMode::RenderTarget)
+         {
+            com_ptr<ID3D11RenderTargetView> rtv = rtvs[debug_draw_view_index];
+            if (rtv)
+            {
+               rtv->GetResource(&texture_resource);
+               GetResourceInfo(texture_resource.get(), device_data.debug_draw_texture_size, device_data.debug_draw_texture_format); // Note: this isn't synchronized with the conditions that update "debug_draw_texture" below but it should work anyway
+               D3D11_RENDER_TARGET_VIEW_DESC rtv_desc;
+               rtv->GetDesc(&rtv_desc);
+               device_data.debug_draw_texture_format = rtv_desc.Format;
+            }
+         }
+         else if (dsv) // DebugDrawMode::Depth || DebugDrawMode::Stencil
+         {
+            bool true_depth_false_stencil = debug_draw_mode == DebugDrawMode::Depth;
+            dsv->GetResource(&texture_resource);
+            GetResourceInfo(texture_resource.get(), device_data.debug_draw_texture_size, device_data.debug_draw_texture_format);
+            D3D11_DEPTH_STENCIL_VIEW_DESC dsv_desc;
+            dsv->GetDesc(&dsv_desc);
+            // Note: this format might be exclusive to DSVs and not work with SRVs, so we adjust it
+            device_data.debug_draw_texture_format = dsv_desc.Format;
+            switch (device_data.debug_draw_texture_format)
+            {
+            case DXGI_FORMAT_D16_UNORM:
+            {
+               device_data.debug_draw_texture_format = true_depth_false_stencil ? DXGI_FORMAT_R16_UNORM : DXGI_FORMAT_UNKNOWN;
+            }
+            break;
+            case DXGI_FORMAT_D24_UNORM_S8_UINT:
+            {
+               device_data.debug_draw_texture_format = true_depth_false_stencil ? DXGI_FORMAT_R24_UNORM_X8_TYPELESS : DXGI_FORMAT_X24_TYPELESS_G8_UINT;
+               forced_texture_format = DXGI_FORMAT_R24G8_TYPELESS;
+            }
+            break;
+            case DXGI_FORMAT_D32_FLOAT:
+            {
+               device_data.debug_draw_texture_format = true_depth_false_stencil ? DXGI_FORMAT_R32_FLOAT : DXGI_FORMAT_UNKNOWN;
+            }
+            break;
+            case DXGI_FORMAT_D32_FLOAT_S8X24_UINT:
+            {
+               device_data.debug_draw_texture_format = true_depth_false_stencil ? DXGI_FORMAT_R32_FLOAT_X8X24_TYPELESS : DXGI_FORMAT_X32_TYPELESS_G8X24_UINT;
+               forced_texture_format = DXGI_FORMAT_R32G8X24_TYPELESS;
+            }
+            break;
+            }
+         }
+      }
+      else if (debug_draw_mode == DebugDrawMode::UnorderedAccessView)
+      {
+         com_ptr<ID3D11UnorderedAccessView> unordered_access_view;
+
+         com_ptr<ID3D11UnorderedAccessView> uavs[D3D11_1_UAV_SLOT_COUNT];
+         // Not sure there's a difference between these two but probably the second one is just meant for pixel shader draw calls
+         if (is_dispatch)
+         {
+            native_device_context->CSGetUnorderedAccessViews(0, device_data.uav_max_count, &uavs[0]);
+         }
+         else
+         {
+            native_device_context->OMGetRenderTargetsAndUnorderedAccessViews(0, nullptr, nullptr, 0, device_data.uav_max_count, &uavs[0]);
+         }
+
+         unordered_access_view = uavs[debug_draw_view_index];
+
+         if (unordered_access_view)
+         {
+            unordered_access_view->GetResource(&texture_resource);
+            GetResourceInfo(texture_resource.get(), device_data.debug_draw_texture_size, device_data.debug_draw_texture_format);
+            D3D11_UNORDERED_ACCESS_VIEW_DESC uav_desc;
+            unordered_access_view->GetDesc(&uav_desc);
+            device_data.debug_draw_texture_format = uav_desc.Format; // Note: this isn't synchronized with the conditions that update "debug_draw_texture" below but it should work anyway
+         }
+      }
+      else /*if (debug_draw_mode == DebugDrawMode::ShaderResource)*/
+      {
+         com_ptr<ID3D11ShaderResourceView> shader_resource_view;
+         // Note: these might assert if you query an invalid index (there's no way of knowing it without tracking the previous sets)
+         if (is_dispatch)
+         {
+            native_device_context->CSGetShaderResources(debug_draw_view_index, 1, &shader_resource_view);
+         }
+         else
+         {
+            native_device_context->PSGetShaderResources(debug_draw_view_index, 1, &shader_resource_view);
+         }
+         if (shader_resource_view)
+         {
+            shader_resource_view->GetResource(&texture_resource);
+            GetResourceInfo(texture_resource.get(), device_data.debug_draw_texture_size, device_data.debug_draw_texture_format);
+            D3D11_SHADER_RESOURCE_VIEW_DESC srv_desc;
+            shader_resource_view->GetDesc(&srv_desc);
+            device_data.debug_draw_texture_format = srv_desc.Format;
+         }
+      }
+
+      // TODO: as optimization, we could skip re-creating the texture every frame if the new attempted texture is identical to the previous one.
+      device_data.debug_draw_texture = nullptr; // Always clear it, even if the new creation failed, because we shouldn't really keep the old one (even if "debug_draw_auto_clear_texture" is true)
+      if (texture_resource)
+      {
+         // Note: it's possible to use "ID3D11Resource::GetType()" instead of this
+         com_ptr<ID3D11Texture2D> texture_2d;
+         texture_resource->QueryInterface(&texture_2d);
+         com_ptr<ID3D11Texture3D> texture_3d;
+         texture_resource->QueryInterface(&texture_3d);
+         com_ptr<ID3D11Texture1D> texture_1d;
+         texture_resource->QueryInterface(&texture_1d);
+         // For now we re-create it every frame as we don't care for performance
+         HRESULT hr = E_FAIL;
+         if (texture_2d)
+         {
+            D3D11_TEXTURE2D_DESC texture_desc;
+            texture_2d->GetDesc(&texture_desc);
+            ASSERT_ONCE_MSG((texture_desc.MiscFlags & D3D11_RESOURCE_MISC_TEXTURECUBE) != 0 || texture_desc.ArraySize != 6, "Texture Cube Debug Drawing is likely not supported");
+            texture_desc.Usage = D3D11_USAGE_DEFAULT;
+            texture_desc.CPUAccessFlags = 0;
+            texture_desc.BindFlags = D3D11_BIND_SHADER_RESOURCE; // We don't need "D3D11_BIND_RENDER_TARGET" nor "D3D11_BIND_UNORDERED_ACCESS" nor "D3D11_BIND_DEPTH_STENCIL" for now
+            texture_desc.MiscFlags &= ~D3D11_RESOURCE_MISC_GENERATE_MIPS;
+            texture_desc.MiscFlags &= ~D3D11_RESOURCE_MISC_SHARED;
+            texture_desc.MiscFlags &= ~D3D11_RESOURCE_MISC_TEXTURECUBE; // Remove the cube flag in an attempt to support it anyway as a 2D Array
+            if (forced_texture_format != DXGI_FORMAT_UNKNOWN)
+               texture_desc.Format = forced_texture_format;
+            device_data.debug_draw_texture = nullptr;
+            hr = native_device->CreateTexture2D(&texture_desc, nullptr, reinterpret_cast<ID3D11Texture2D**>(&device_data.debug_draw_texture)); // TODO: figure out error, happens sometimes. And make thread safe!
+         }
+         else if (texture_3d)
+         {
+            D3D11_TEXTURE3D_DESC texture_desc;
+            texture_3d->GetDesc(&texture_desc);
+            texture_desc.Usage = D3D11_USAGE_DEFAULT;
+            texture_desc.CPUAccessFlags = 0;
+            texture_desc.BindFlags = D3D11_BIND_SHADER_RESOURCE;
+            texture_desc.MiscFlags &= ~D3D11_RESOURCE_MISC_GENERATE_MIPS;
+            texture_desc.MiscFlags &= ~D3D11_RESOURCE_MISC_SHARED;
+            if (forced_texture_format != DXGI_FORMAT_UNKNOWN)
+               texture_desc.Format = forced_texture_format;
+            device_data.debug_draw_texture = nullptr;
+            hr = native_device->CreateTexture3D(&texture_desc, nullptr, reinterpret_cast<ID3D11Texture3D**>(&device_data.debug_draw_texture));
+         }
+         else if (texture_1d)
+         {
+            D3D11_TEXTURE1D_DESC texture_desc;
+            texture_1d->GetDesc(&texture_desc);
+            texture_desc.Usage = D3D11_USAGE_DEFAULT;
+            texture_desc.CPUAccessFlags = 0;
+            texture_desc.BindFlags = D3D11_BIND_SHADER_RESOURCE;
+            texture_desc.MiscFlags &= ~D3D11_RESOURCE_MISC_GENERATE_MIPS;
+            texture_desc.MiscFlags &= ~D3D11_RESOURCE_MISC_SHARED;
+            if (forced_texture_format != DXGI_FORMAT_UNKNOWN)
+               texture_desc.Format = forced_texture_format;
+            device_data.debug_draw_texture = nullptr;
+            hr = native_device->CreateTexture1D(&texture_desc, nullptr, reinterpret_cast<ID3D11Texture1D**>(&device_data.debug_draw_texture));
+         }
+         // Back it up as it gets immediately overwritten or re-used later
+         if (SUCCEEDED(hr) && device_data.debug_draw_texture)
+         {
+            native_device_context->CopyResource(device_data.debug_draw_texture.get(), texture_resource.get());
+            return true;
+         }
+         else
+         {
+            ASSERT_ONCE("Draw Debug: Target Texture is not 1D/2D/3D (???), or its creation failed");
+         }
+      }
+      return false;
+   }
+
+   bool CopyDebugDrawTexture(DebugDrawMode debug_draw_mode, int32_t debug_draw_view_index, reshade::api::command_list* cmd_list, bool is_dispatch)
+   {
+      return CopyDebugDrawTexture(debug_draw_mode, debug_draw_view_index, (ID3D11DeviceContext*)(cmd_list->get_native()), *cmd_list->get_device()->get_private_data<DeviceData>(), is_dispatch);
+   }
+
+   bool MapBufferData(com_ptr<ID3D11Buffer>& cb, ID3D11DeviceContext* native_device_context, std::vector<float>& buffer_data, UINT byte_width)
+   {
+      D3D11_MAPPED_SUBRESOURCE mapped = {};
+      // Map in DX11 here can only be done on non deferred contexts; it will stall the CPU until the GPU has the latest values (no need to flush the command list)
+      HRESULT hr = native_device_context->Map(cb.get(), 0, D3D11_MAP_READ, 0, &mapped);
+      if (FAILED(hr))
+      {
+         buffer_data.clear();
+         ASSERT_ONCE(native_device_context->GetType() != D3D11_DEVICE_CONTEXT_IMMEDIATE);
+         return false;
+      }
+
+      bool remainder = byte_width % sizeof(float) != 0;
+      size_t num_floats = byte_width / sizeof(float);
+      buffer_data.resize(num_floats + (remainder ? 1 : 0)); // Add 1 for safety (the last value might be half trash)
+      if (remainder)
+      {
+         buffer_data[buffer_data.size() - 1] = 0.f; // Clear the last slot as it might not get fully copied
+      }
+      std::memcpy(buffer_data.data(), mapped.pData, byte_width);
+
+      native_device_context->Unmap(cb.get(), 0);
+      return true;
+   }
+
+   bool CopyBuffer(com_ptr<ID3D11Buffer> cb, ID3D11DeviceContext* native_device_context, std::vector<float>& buffer_data, com_ptr<ID3D11Buffer>& cb_copy)
+   {
+      // Always recreate it for now (we could skip doing so if the descs matched, but whatever)
+      cb_copy.reset();
+
+      if (cb.get() == nullptr)
+      {
+         buffer_data.clear();
+         return false;
+      }
+
+      D3D11_BUFFER_DESC desc = {};
+      cb->GetDesc(&desc);
+
+      // Clone it if it can't be read by the CPU, or if we are in a deferred context as we won't be able to map the buffer
+      if ((desc.CPUAccessFlags & D3D11_CPU_ACCESS_READ) == 0 || desc.Usage != D3D11_USAGE_STAGING || native_device_context->GetType() == D3D11_DEVICE_CONTEXT_DEFERRED)
+      {
+         desc.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
+         desc.Usage = D3D11_USAGE_STAGING;
+         desc.BindFlags = 0;
+         desc.MiscFlags = 0; // Some flags might be incompatible with staging
+         desc.StructureByteStride = 0; // Must be zero for safety, as we cleared "D3D11_RESOURCE_MISC_BUFFER_STRUCTURED"
+
+         com_ptr<ID3D11Device> native_device;
+         native_device_context->GetDevice(&native_device);
+         HRESULT hr = native_device->CreateBuffer(&desc, nullptr, &cb_copy);
+         if (FAILED(hr))
+         {
+            buffer_data.clear();
+            ASSERT_ONCE(false);
+            return false;
+         }
+         native_device_context->CopyResource(cb_copy.get(), cb.get());
+         cb = cb_copy;
+      }
+
+      // This will fail on deferred contexts, that's by design
+      return MapBufferData(cb, native_device_context, buffer_data, desc.ByteWidth);
+   }
+
+   void Draw(CommandListData& cmd_list_data, DeviceData& device_data, ID3D11DeviceContext* native_device_context, const DrawDispatchData& draw_dispatch_data)
+   {
+      // TODO: it's not safe to lock global mutexes that might have already been locked by other concurrent functions, while also calling functions in the device or primary device context (in DX11) (because they have their own locks inside that might cause deadlocks!). The solution here would be to cache the data upfront and then lock a mutex to add it to our array. This might be safe if the game threading was already safe though, I'm not 100% sure.
+      const std::shared_lock lock_trace(s_mutex);
+      if (!running)
+         return;
+      const std::shared_lock lock_generic(s_mutex_generic);
+      const std::unique_lock lock_trace_2(cmd_list_data.mutex_trace);
+      const std::lock_guard<std::recursive_mutex> lock_dumping(s_mutex_dumping);
+      const std::shared_lock lock_device(device_data.mutex);
+      ASSERT_ONCE(native_device_context);
+      const size_t first = cmd_list_data.trace_draw_calls_data.size();
+      AddDrawCall(cmd_list_data.trace_draw_calls_data, device_data, native_device_context, cmd_list_data.pipeline_state_original_vertex_shader.handle, draw_dispatch_data);
+      if (cmd_list_data.pipeline_state_original_pixel_shader.handle != 0) // Somehow this can happen (e.g. query tests don't require pixel shaders)
+         AddDrawCall(cmd_list_data.trace_draw_calls_data, device_data, native_device_context, cmd_list_data.pipeline_state_original_pixel_shader.handle, draw_dispatch_data);
+      cmd_list_data.trace_current_draw = {first, cmd_list_data.trace_draw_calls_data.size() - first};
+   }
+
+   void Dispatch(CommandListData& cmd_list_data, DeviceData& device_data, ID3D11DeviceContext* native_device_context, const DrawDispatchData& draw_dispatch_data)
+   {
+      const std::shared_lock lock_trace(s_mutex);
+      if (!running)
+         return;
+      const std::shared_lock lock_generic(s_mutex_generic);
+      const std::unique_lock lock_trace_2(cmd_list_data.mutex_trace);
+      const std::lock_guard<std::recursive_mutex> lock_dumping(s_mutex_dumping);
+      const std::shared_lock lock_device(device_data.mutex);
+      const size_t first = cmd_list_data.trace_draw_calls_data.size();
+      AddDrawCall(cmd_list_data.trace_draw_calls_data, device_data, native_device_context, cmd_list_data.pipeline_state_original_compute_shader.handle, draw_dispatch_data);
+      cmd_list_data.trace_current_draw = {first, cmd_list_data.trace_draw_calls_data.size() - first};
+   }
+
+   void FinishDrawCallbacks(CommandListData& cmd_list_data, ID3D11DeviceContext* native_device_context, bool draw_went_through)
+   {
+      const std::shared_lock lock_trace(s_mutex);
+      if (!running)
+      {
+         queued_entries.clear();
+         return;
+      }
+      const std::unique_lock lock_trace_2(cmd_list_data.mutex_trace);
+      auto& entries = cmd_list_data.trace_draw_calls_data;
+      auto& [first, count] = cmd_list_data.trace_current_draw;
+      if (first == SIZE_MAX)
+      {
+         MoveQueued(entries, native_device_context);
+         return;
+      }
+      for (size_t i = first; i < first + count && i < entries.size(); i++)
+      {
+         auto& entry = entries[i];
+         if (entry.type != TraceDrawCallData::TraceDrawCallType::Shader) continue;
+         if (entry.pipeline_handle == cmd_list_data.pipeline_state_original_compute_shader.handle) entry.drawn_origin = Shader::GetShaderOrigin(cmd_list_data, reshade::api::shader_stage::compute);
+         else if (entry.pipeline_handle == cmd_list_data.pipeline_state_original_vertex_shader.handle) entry.drawn_origin = Shader::GetShaderOrigin(cmd_list_data, reshade::api::shader_stage::vertex);
+         else if (entry.pipeline_handle == cmd_list_data.pipeline_state_original_pixel_shader.handle) entry.drawn_origin = Shader::GetShaderOrigin(cmd_list_data, reshade::api::shader_stage::pixel);
+      }
+      if (draw_went_through)
+         first += MoveQueued(entries, native_device_context, first);
+      else
+         MoveQueued(entries, native_device_context);
+   }
+
+   GameDraw BeginGameDraw(CommandListData& cmd_list_data, DeviceData& device_data, ID3D11DeviceContext* native_device_context, bool is_dispatch)
+   {
+      GameDraw game_draw;
+      game_draw.is_dispatch = is_dispatch;
+      const reshade::api::shader_stage stage = is_dispatch ? reshade::api::shader_stage::compute : reshade::api::shader_stage::pixel;
+      const uint64_t pipeline = is_dispatch ? cmd_list_data.pipeline_state_original_compute_shader.handle : cmd_list_data.pipeline_state_original_pixel_shader.handle;
+      const auto& shader_hashes = is_dispatch ? cmd_list_data.pipeline_state_original_compute_shader_hashes : cmd_list_data.pipeline_state_original_graphics_shader_hashes;
+      game_draw.debug_draw = (debug_draw_shader_hash != 0 || debug_draw_pipeline != 0) && (debug_draw_pipeline == 0 || debug_draw_pipeline == pipeline)
+         && (debug_draw_shader_hash == 0 || shader_hashes.Contains(debug_draw_shader_hash, stage))
+         && (debug_draw_pipeline_target_thread == std::thread::id() || debug_draw_pipeline_target_thread == std::this_thread::get_id());
+      if (!game_draw.debug_draw)
+         return game_draw;
+      if (debug_draw_freeze_inputs)
+      {
+         if (is_dispatch)
+            FreezeInputs<DrawStateStackType::Compute>(native_device_context, device_data);
+         else
+            FreezeInputs<DrawStateStackType::FullGraphics>(native_device_context, device_data);
+      }
+      game_draw.pre_draw_state = CacheState(native_device_context, device_data, is_dispatch);
+      if (!is_dispatch && debug_draw_disable_blends) // TODO: we never reset these after the draw call? Potentially polluting the game's state? It'd be fine if we are draw debugging!
+         native_device_context->OMSetBlendState(nullptr, nullptr, 0xFFFFFFFF);
+      return game_draw;
+   }
+
+   bool EndGameDraw(const GameDraw& game_draw, CommandListData& cmd_list_data, DeviceData& device_data, reshade::api::command_list* cmd_list, bool cancelled_or_replaced, const std::function<void()>& draw)
+   {
+      EndDraw(cmd_list_data, cancelled_or_replaced);
+      ID3D11DeviceContext* native_device_context = (ID3D11DeviceContext*)(cmd_list->get_native());
+
+      // Run the draw (instead of delegating it to ReShade) and copy its output. A replaced pass is read back as the game drew it, unless asked otherwise.
+      bool drawn = false;
+      if (game_draw.debug_draw && IsTargetInstance(debug_draw_pipeline_instance, debug_draw_pipeline_target_instance))
+      {
+         const bool read_original = cancelled_or_replaced && !debug_draw_replaced_pass;
+         std::shared_ptr<void> post_draw_state;
+         if (!cancelled_or_replaced)
+         {
+            draw();
+         }
+         else if (read_original)
+         {
+            post_draw_state = CacheState(native_device_context, device_data, game_draw.is_dispatch);
+            RestoreState(native_device_context, game_draw.pre_draw_state, game_draw.is_dispatch);
+         }
+         CopyDebugDrawTexture(debug_draw_mode, debug_draw_view_index, native_device_context, device_data, game_draw.is_dispatch);
+         if (read_original)
+            RestoreState(native_device_context, post_draw_state, game_draw.is_dispatch);
+         drawn = true;
+      }
+
+      reshade::api::shader_stage track_buffer_stage = reshade::api::shader_stage(0);
+      if (track_buffer_pipeline == 0)
+         track_buffer_stage = reshade::api::shader_stage(0);
+      else if (game_draw.is_dispatch)
+         track_buffer_stage = track_buffer_pipeline == cmd_list_data.pipeline_state_original_compute_shader.handle ? reshade::api::shader_stage::compute : reshade::api::shader_stage(0);
+      else if (track_buffer_pipeline == cmd_list_data.pipeline_state_original_pixel_shader.handle)
+         track_buffer_stage = reshade::api::shader_stage::pixel;
+      else if (track_buffer_pipeline == cmd_list_data.pipeline_state_original_vertex_shader.handle)
+         track_buffer_stage = reshade::api::shader_stage::vertex;
+      // TODO: make "track_buffer_pipeline_target_instance" by thread (like "debug_draw_pipeline_target_instance"), though it's rarely useful
+      if (track_buffer_stage != reshade::api::shader_stage(0) && IsTargetInstance(track_buffer_pipeline_instance, track_buffer_pipeline_target_instance))
+         TrackConstantBuffer(native_device_context, device_data, track_buffer_stage);
+      return drawn;
+   }
+
+   void FlushQueued(CommandListData* cmd_list_data, ID3D11DeviceContext* native_device_context)
+   {
+      const std::shared_lock lock_trace(s_mutex);
+      if (!running || !cmd_list_data)
+      {
+         queued_entries.clear();
+         return;
+      }
+      const std::unique_lock lock_trace_2(cmd_list_data->mutex_trace);
+      MoveQueued(cmd_list_data->trace_draw_calls_data, native_device_context);
+   }
+
+   void InitCommandList(CommandListData& cmd_list_data)
+   {
+      // Pre-allocate to make it faster (whether it's primary or not)
+      // Check for the memory as this can crash in x86 games that had little consecutive memory left (e.g. Burnout Paradise Remastered)
+#ifdef WIN32
+      constexpr size_t reserve_size = 2500;
+#else
+      constexpr size_t reserve_size = 5000;
+#endif
+      if (System::CanAllocate(sizeof(TraceDrawCallData) * reserve_size * 2)) // Check for double the space, just to be sure
+         cmd_list_data.trace_draw_calls_data.reserve(reserve_size);
+   }
+
+   void EndFrame(DeviceData& device_data)
+   {
+      // Clear at the end of every frame and re-capture it in the next frame if its still available
+      if (debug_draw_auto_clear_texture)
+      {
+         device_data.debug_draw_texture = nullptr;
+         // Leave "debug_draw_texture_format" and "debug_draw_texture_size", we need that in ImGUI (we'd need to clear it after ImGUI if necessary, but we skip drawing it if the texture isn't valid)
+      }
+      debug_draw_pipeline_instance = 0;
+      debug_draw_custom_pass_instance = 0;
+      track_buffer_pipeline_instance = 0;
+      track_buffer_custom_pass_instance = 0;
+   }
+
    void UpdateDraw(CommandListData& cmd_list_data, DeviceData& device_data, ID3D11DeviceContext* native_device_context)
    {
-      if (!trace_running) // Cheap early out for the hot path, rechecked under the lock
+      if (!running) // Cheap early out for the hot path, rechecked under the lock
          return;
-      const std::shared_lock lock_trace(s_mutex_trace);
-      if (!trace_running)
+      const std::shared_lock lock_trace(s_mutex);
+      if (!running)
          return;
       const std::shared_lock lock_generic(s_mutex_generic);
       const std::unique_lock lock_trace_2(cmd_list_data.mutex_trace);
@@ -818,43 +1449,15 @@ namespace Trace
       }
    }
 
-   void AddDrawCall(std::vector<TraceDrawCallData>& trace_draw_calls_data, const DeviceData& device_data, ID3D11DeviceContext* native_device_context, uint64_t pipeline_handle, const DrawDispatchData& draw_dispatch_data)
-   {
-      TraceDrawCallData trace_draw_call_data;
-      trace_draw_call_data.pipeline_handle = pipeline_handle;
-      const CachedShader* cached_shader;
-      const reshade::api::shader_stage stage = FindStage(device_data, pipeline_handle, &cached_shader);
-      CaptureState(trace_draw_call_data, device_data, native_device_context, stage, cached_shader, draw_dispatch_data);
-
-      if (trace_draw_calls_data.capacity() - trace_draw_calls_data.size() <= 1)
-         trace_draw_calls_data.reserve(trace_draw_calls_data.size() + 1000); // Possible optimization
-      trace_draw_calls_data.push_back(std::move(trace_draw_call_data));
-   }
-
-   size_t MoveQueued(std::vector<TraceDrawCallData>& trace_draw_calls_data, ID3D11DeviceContext* native_device_context, size_t index)
-   {
-      const size_t first_index = (std::min)(index, trace_draw_calls_data.size());
-      std::erase_if(queued_entries, [native_device_context](const TraceDrawCallData& entry)
-         { return entry.command_list.get() != native_device_context; });
-      trace_draw_calls_data.insert(trace_draw_calls_data.begin() + first_index, std::make_move_iterator(queued_entries.begin()), std::make_move_iterator(queued_entries.end()));
-      const size_t count = queued_entries.size();
-      queued_entries.clear();
-      return count;
-   }
-
    void EndDraw(CommandListData& cmd_list_data, bool cancelled_or_replaced)
    {
-      if (!trace_running)
+      if (!running)
          return;
-      const std::shared_lock lock_trace(s_mutex_trace);
+      const std::shared_lock lock_trace(s_mutex);
       const std::unique_lock lock_trace_2(cmd_list_data.mutex_trace);
-      const auto [first, count] = std::exchange(cmd_list_data.trace_current_draw, {});
+      const auto [first, count] = std::exchange(cmd_list_data.trace_current_draw, {SIZE_MAX, 0});
       for (size_t i = first; cancelled_or_replaced && i < first + count && i < cmd_list_data.trace_draw_calls_data.size(); i++)
          cmd_list_data.trace_draw_calls_data[i].cancelled_or_replaced = true;
    }
 
-   void ClearQueued()
-   {
-      queued_entries.clear();
-   }
 } // namespace Trace

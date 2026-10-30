@@ -1169,7 +1169,7 @@ public:
          {
             native_device_context->DrawIndexed(3, 6, 0);
          }
-         Trace::Draw(native_device_context, "Output HDR Tonemap", 3);
+         Trace::CustomDraw(native_device_context, "Output HDR Tonemap", 3);
 
          // ===== Pass 2: UI Composition to final RT =====
          // Restore original RTV
@@ -1192,7 +1192,7 @@ public:
 
          // Draw fullscreen quad
          native_device_context->Draw(4, 0);
-         Trace::Draw(native_device_context, "Output HDR UI Composition", 4);
+         Trace::CustomDraw(native_device_context, "Output HDR UI Composition", 4);
 
          // Restore VS, PS, topology
          native_device_context->VSSetShader(prev_vs.get(), nullptr, 0);
@@ -1317,7 +1317,7 @@ public:
          {
             native_device_context->DrawIndexed(3, 6, 0);
          }
-         Trace::Draw(native_device_context, "Output SDR Tonemap", 3);
+         Trace::CustomDraw(native_device_context, "Output SDR Tonemap", 3);
 
          // ===== Pass 2: UI Composition to final RT =====
          ID3D11RenderTargetView* const* restored_rtvs = (ID3D11RenderTargetView**)std::addressof(original_rtvs[0]);
@@ -1339,7 +1339,7 @@ public:
 
          // Draw fullscreen quad
          native_device_context->Draw(4, 0);
-         Trace::Draw(native_device_context, "Output SDR UI Composition", 4);
+         Trace::CustomDraw(native_device_context, "Output SDR UI Composition", 4);
 
          // Restore VS, PS, topology
          native_device_context->VSSetShader(prev_vs.get(), nullptr, 0);
@@ -1564,7 +1564,7 @@ public:
 
                   // Finally draw:
                   native_device_context->Draw(4, 0);
-                  Trace::Draw(native_device_context, "DLSS Decode Motion Vectors", 4);
+                  Trace::CustomDraw(native_device_context, "DLSS Decode Motion Vectors", 4);
                   // native_device_context->DrawIndexed(3, 6, 0); // Original call would have been this, but we swap the pixel and vertex shaders
 
                   // Restore the state
@@ -2056,7 +2056,7 @@ BOOL APIENTRY DllMain(HMODULE hModule, DWORD ul_reason_for_call, LPVOID lpReserv
 
 #if DEVELOPMENT
       // These make things messy in this game, given it renders at lower resolutions and then upscales and adds black bars beyond 16:9
-      debug_draw_options &= ~(uint32_t)DebugDrawTextureOptionsMask::Fullscreen;
+      Trace::debug_draw_options &= ~(uint32_t)Trace::DebugDrawTextureOptionsMask::Fullscreen;
 
       forced_shader_names.emplace(std::stoul("4729683B", nullptr, 16), "TAA");
       forced_shader_names.emplace(std::stoul("B400FAF6", nullptr, 16), "DoF");

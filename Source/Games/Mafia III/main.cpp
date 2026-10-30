@@ -850,7 +850,7 @@ public:
                      native_device_context->CSSetSamplers(0, 1, &sampler_state_linear);
 
                      native_device_context->Dispatch(8, 8, 8);
-                     Trace::Dispatch(native_device_context, "Normalize 3D LUT", 8, 8, 8);
+                     Trace::CustomDispatch(native_device_context, "Normalize 3D LUT", 8, 8, 8);
 
                      draw_state_stack.Restore(native_device_context);
 
