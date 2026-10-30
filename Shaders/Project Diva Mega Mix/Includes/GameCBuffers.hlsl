@@ -91,7 +91,12 @@ namespace CB
       float XeGTAOFinalPower;
       float SSSRadius;
       float ProgressBarRatio;
-      int   ProgressBarColorPacked; 
+      int   ProgressBarColorPacked;
+
+      float NPRContourStrength;
+      float NPRContourRadius;
+      float SSSEyeDodge;
+      float p0;
    };
    
    struct LumaGameData
