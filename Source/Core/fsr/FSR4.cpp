@@ -74,9 +74,6 @@ namespace FidelityFX
 
          D3D12Interop::Context interop;
          D3D12Interop::SharedTexture textures[TexturesCount];
-         ComPtr<ID3D11Resource> depth_source; // Kept alive to make sure the pointer can't be reused by another resource while we cache its view
-         ComPtr<ID3D11ShaderResourceView> depth_source_srv;
-         std::function<ID3D11ComputeShader*()> get_depth_copy_shader;
 
          unsigned int logged_errors = 0;
       };
@@ -176,62 +173,12 @@ namespace FidelityFX
          Log(reshade::log::level::info, std::format("Initialized FSR {}{}", fsr4_version, data.spoof_amd ? std::format(" (spoofing an AMD GPU, the real vendor id is {:#06x})", data.interop.adapter_desc.VendorId) : ""));
          return true;
       }
-
-      // (Re)creates the shared texture if the source changed size or format
-      bool UpdateSharedTexture(FSR4InstanceData& data, FSR4InstanceData::TextureIndex index, ID3D11Resource* source)
-      {
-         ComPtr<ID3D11Texture2D> source_texture;
-         if (FAILED(source->QueryInterface(IID_PPV_ARGS(&source_texture))))
-         {
-            LogError(data, "An input/output resource is not a 2D texture");
-            return false;
-         }
-         D3D11_TEXTURE2D_DESC source_desc;
-         source_texture->GetDesc(&source_desc);
-         // The shared textures are copied to and from with whole resource copies.
-         // sRGB isn't supported (it would need to be known on context creation), Luma generally feeds SR with linear colors anyway.
-         const auto source_format = reshade::api::format(source_desc.Format);
-         const bool is_srgb = reshade::api::format_to_default_typed(source_format, 1) == source_format && reshade::api::format_to_default_typed(source_format, 0) != source_format;
-         const bool is_depth = index == FSR4InstanceData::Depth;
-         if (!is_depth && (source_desc.MipLevels != 1 || source_desc.ArraySize != 1 || source_desc.SampleDesc.Count != 1 || is_srgb))
-         {
-            LogError(data, std::format("Unsupported input/output texture (mips {}, array size {}, samples {}, format {})", source_desc.MipLevels, source_desc.ArraySize, source_desc.SampleDesc.Count, int(source_desc.Format)));
-            return false;
-         }
-         // FSR needs typed formats to create views. The depth is converted to R32F by a shader, as FSR can't read DX11 depth stencil textures.
-         const DXGI_FORMAT format = is_depth ? DXGI_FORMAT_R32_FLOAT : DXGI_FORMAT(reshade::api::format_to_default_typed(source_format));
-         const bool unordered_access = is_depth || index == FSR4InstanceData::Output;
-         return D3D12Interop::UpdateSharedTexture(data.interop, data.textures[index], source_desc.Width, source_desc.Height, format, unordered_access);
-      }
-
-      bool UpdateDepthSourceSRV(FSR4InstanceData& data, ID3D11Resource* source)
-      {
-         if (data.depth_source_srv && data.depth_source.Get() == source)
-            return true;
-         data.depth_source_srv = nullptr;
-         data.depth_source = source;
-         D3D11_TEXTURE2D_DESC desc;
-         static_cast<ID3D11Texture2D*>(source)->GetDesc(&desc); // Already verified to be a 2D texture
-         // The depth (not stencil) view of the typeless depth formats ("format_to_default_typed()" would pick float for 16 bit)
-         D3D11_SHADER_RESOURCE_VIEW_DESC srv_desc = {};
-         srv_desc.Format = desc.Format == DXGI_FORMAT_R16_TYPELESS ? DXGI_FORMAT_R16_UNORM : DXGI_FORMAT(reshade::api::format_to_default_typed(reshade::api::format(desc.Format)));
-         srv_desc.ViewDimension = D3D11_SRV_DIMENSION_TEXTURE2D;
-         srv_desc.Texture2D.MipLevels = 1;
-         const HRESULT hr = desc.SampleDesc.Count > 1 ? E_INVALIDARG : data.interop.device_11->CreateShaderResourceView(source, &srv_desc, &data.depth_source_srv);
-         if (FAILED(hr))
-         {
-            LogError(data, std::format("Failed to create the depth SRV (format {}, samples {}), hr = {:#010x}", int(desc.Format), desc.SampleDesc.Count, unsigned(hr)));
-            data.depth_source = nullptr;
-            return false;
-         }
-         return true;
-      }
    }
 
    void FidelityFX::FSR4::SetDepthCopyShader(SR::InstanceData* data, std::function<ID3D11ComputeShader*()> get_depth_copy_shader)
    {
       if (data)
-         static_cast<FSR4InstanceData*>(data)->get_depth_copy_shader = std::move(get_depth_copy_shader);
+         static_cast<FSR4InstanceData*>(data)->interop.get_depth_copy_shader = std::move(get_depth_copy_shader);
    }
 
    bool FidelityFX::FSR4::Init(SR::InstanceData*& data, ID3D11Device* device, IDXGIAdapter* adapter)
@@ -387,35 +334,25 @@ namespace FidelityFX
       // We need to update our sync state and resources even if this is "const"
       auto* custom_data = const_cast<T*>(static_cast<const T*>(data));
 
-      ComPtr<ID3D11ComputeShader> depth_copy_cs;
-      if (custom_data && custom_data->get_depth_copy_shader)
-         depth_copy_cs.Attach(custom_data->get_depth_copy_shader());
-      if (!custom_data || !custom_data->is_supported || !custom_data->context || !depth_copy_cs || !draw_data.source_color || !draw_data.output_color || !draw_data.depth_buffer || !draw_data.motion_vectors)
+      if (!custom_data || !custom_data->is_supported || !custom_data->context || !draw_data.source_color || !draw_data.output_color || !draw_data.depth_buffer || !draw_data.motion_vectors)
          return false;
 
       // Make sure all the shared textures are up to date with the game ones (the optional ones are skipped)
       ID3D11Resource* const sources[T::TexturesCount] = {draw_data.source_color, draw_data.depth_buffer, draw_data.motion_vectors, draw_data.exposure, draw_data.bias_mask, draw_data.transparency_alpha, draw_data.output_color};
       for (size_t i = 0; i < T::TexturesCount; i++)
       {
-         if (sources[i] && !UpdateSharedTexture(*custom_data, T::TextureIndex(i), sources[i]))
+         if (sources[i] && !D3D12Interop::UpdateSharedTextureFrom(custom_data->interop, custom_data->textures[i], sources[i], i == T::Depth, i == T::Depth || i == T::Output))
             return false;
       }
-      if (!UpdateDepthSourceSRV(*custom_data, draw_data.depth_buffer))
-         return false;
 
-      // DX11: copy the inputs into the shared textures, and convert the depth (the pipeline state is restored by the caller)
+      // DX11: convert the depth and copy the other inputs into the shared textures (the pipeline state is restored by the caller)
+      if (!D3D12Interop::CopyDepth(custom_data->interop, custom_data->textures[T::Depth], command_list, draw_data.depth_buffer))
+         return false;
       for (size_t i : {T::Color, T::MotionVectors, T::Exposure, T::Reactive, T::Transparency})
       {
          if (sources[i])
             command_list->CopyResource(custom_data->textures[i].resource_11.Get(), sources[i]);
       }
-      command_list->OMSetRenderTargets(0, nullptr, nullptr); // The depth might still be bound as depth stencil, which would null its SRV
-      ID3D11ShaderResourceView* const depth_srv = custom_data->depth_source_srv.Get();
-      ID3D11UnorderedAccessView* const depth_uav = custom_data->textures[T::Depth].uav_11.Get();
-      command_list->CSSetShader(depth_copy_cs.Get(), nullptr, 0);
-      command_list->CSSetShaderResources(0, 1, &depth_srv);
-      command_list->CSSetUnorderedAccessViews(0, 1, &depth_uav, nullptr);
-      command_list->Dispatch((custom_data->textures[T::Depth].width + 7) / 8, (custom_data->textures[T::Depth].height + 7) / 8, 1);
 
       ID3D12GraphicsCommandList* const command_list_12 = D3D12Interop::BeginCommandList(custom_data->interop, command_list);
       if (!command_list_12)

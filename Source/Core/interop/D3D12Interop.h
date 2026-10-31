@@ -14,6 +14,8 @@
 #include <d3d12.h>
 #include <wrl/client.h>
 
+#include <functional>
+
 namespace D3D12Interop
 {
    constexpr size_t command_allocators_count = 4; // Max number of DX12 command lists in flight
@@ -47,6 +49,11 @@ namespace D3D12Interop
       UINT64 fence_value = 0; // The last signaled one
       HANDLE fence_event = nullptr; // For the rare CPU waits (e.g. on resources destruction)
 
+      // See "CopyDepth()". The getter returns a new reference (or nullptr), as native shaders can be recompiled.
+      std::function<ID3D11ComputeShader*()> get_depth_copy_shader;
+      Microsoft::WRL::ComPtr<ID3D11Resource> depth_source; // Kept alive to make sure the pointer can't be reused by another resource while we cache its view
+      Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> depth_source_srv;
+
       unsigned int logged_errors = 0;
       bool poisoned = false; // The GPU sync broke, so we can't know when the DX12 work completes, the resources can't be used or released anymore
    };
@@ -59,6 +66,12 @@ namespace D3D12Interop
 
    // (Re)creates the texture if it doesn't match the size and format (waiting for the GPU to be done with the previous one)
    bool UpdateSharedTexture(Context& context, SharedTexture& texture, UINT width, UINT height, DXGI_FORMAT format, bool unordered_access);
+   // Same, but mirroring a DX11 2D texture, copied to and from with whole resource copies. Mips, arrays, MSAA and sRGB aren't supported (the latter would need sRGB views).
+   // A depth texture is mirrored as R32_FLOAT, filled by "CopyDepth()", as DX12 libraries can't read DX11 depth stencil textures.
+   bool UpdateSharedTextureFrom(Context& context, SharedTexture& texture, ID3D11Resource* source, bool is_depth, bool unordered_access);
+   // Converts the depth into its shared texture (mirrored with "is_depth" and unordered access) with "get_depth_copy_shader" (Luma's "Copy Depth CS").
+   // This unbinds the render targets and changes the compute shader state, the caller is expected to restore the pipeline state.
+   bool CopyDepth(Context& context, SharedTexture& texture, ID3D11DeviceContext* device_context, ID3D11Resource* source);
 
    // Makes DX12 wait for the DX11 work submitted until now, and returns a DX12 command list to record into (or null if it failed)
    ID3D12GraphicsCommandList* BeginCommandList(Context& context, ID3D11DeviceContext* device_context);
