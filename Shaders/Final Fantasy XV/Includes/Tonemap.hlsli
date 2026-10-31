@@ -47,31 +47,6 @@ float3 FFXV_Inverse(float3 y, float ZeroSlope, float InvLog, float Param_n37, fl
     );
 }
 
-// --- Recover the game's SDR curve tuning from the HDR-mode uploads ---
-// The game computes the HDR tuning from the SDR tuning by a fixed rule (verified
-// bit-identical across multiple scene captures, SDR vs HDR display mode):
-//   (K_hdr + 1) = 3.988391 * (K_sdr + 1)
-//   10^D_hdr    = 2 * 10^D_sdr          (D = Disposition, inside InvLog)
-//   p_hdr       = p_sdr + 0.34526
-//   n46_hdr     = 0.507594 * n46_sdr
-//   n49_hdr     = 0.606713 * n49_sdr
-//   ZeroSlope, HighRange: identical in both modes
-// Inverting gives the SDR curve from whatever HDR params the game uploads, so the
-// SDR look is preserved even if the game ever changes its constants.
-void RecoverSDRParams(
-    float Contrast_hdr, float InvLog_hdr, float ZeroSlope_hdr, float Param_n37_hdr,
-    float Param_n46_hdr, float Param_n49_hdr,
-    out float Contrast, out float InvLog, out float ZeroSlope,
-    out float Param_n37, out float Param_n46, out float Param_n49)
-{
-    Contrast  = (Contrast_hdr + 1.0) / 3.988391 - 1.0;
-    InvLog    = 1.0 / log((exp(1.0 / InvLog_hdr) - 1.0) / 2.0 + 1.0);
-    ZeroSlope = ZeroSlope_hdr;
-    Param_n37 = Param_n37_hdr - 0.34526;
-    Param_n46 = Param_n46_hdr / 0.507594;
-    Param_n49 = Param_n49_hdr / 0.606713;
-}
-
 // ============================== Derivatives ==============================
 // Analytic derivatives of the FFXV curve, optimized for GPU execution.
 // Let q = inv * a / (a*x + b) (the inner derivative, shared by all orders):

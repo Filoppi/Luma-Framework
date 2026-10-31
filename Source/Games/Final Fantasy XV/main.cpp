@@ -408,6 +408,7 @@ public:
       shader_defines_data.append_range(game_shader_defines_data);
 
       use_os_reference_white_level = false;
+      force_sdr_display_capability = true; // The game has no HDR toggle, make it use its SDR path
 
       native_shaders_definitions.emplace(CompileTimeStringHash("Decode MVs CS"), ShaderDefinition{"Luma_FFXV_MotionVec_Decode", reshade::api::pipeline_subobject_type::compute_shader});
       native_shaders_definitions.emplace(CompileTimeStringHash("Rain Composite PS"), ShaderDefinition{"Luma_RainComposite", reshade::api::pipeline_subobject_type::pixel_shader});
@@ -417,7 +418,6 @@ public:
 
       default_luma_global_game_settings.BloomStrength = 1.f;
       default_luma_global_game_settings.Sharpness = 0.3f;
-      default_luma_global_game_settings.UseSDROverHDR = 1;
       default_luma_global_game_settings.UseVanillaGamutRatio = 0;
       default_luma_global_game_settings.VignetteStrength = 1.f;
       default_luma_global_game_settings.EnableDoF = 1;
@@ -472,10 +472,6 @@ public:
       cb_luma_global_settings.GameSettings.VBAOThicknessScale = std::clamp(cb_luma_global_settings.GameSettings.VBAOThicknessScale, 0.f, 1.f);
 #endif
 
-      bool use_sdr_over_hdr = true;
-      reshade::get_config_value(runtime, NAME, "UseSDROverHDR", use_sdr_over_hdr);
-      cb_luma_global_settings.GameSettings.UseSDROverHDR = use_sdr_over_hdr ? 1 : 0;
-      
       enable_directional_shadows = false;
       reshade::get_config_value(runtime, NAME, "DirectionalShadows", enable_directional_shadows);
 
@@ -545,18 +541,6 @@ public:
             ImGui::SetTooltip("After TAA / DLSS: rain receives game DoF and motion blur.\nAfter DoF: rain bypasses DoF and still receives motion blur when enabled.\nRequires active SR.");
          if (cb_luma_global_settings.DisplayMode == DisplayModeType::HDR)
          {
-            bool use_sdr_over_hdr = cb_luma_global_settings.GameSettings.UseSDROverHDR == 1;
-            if (ImGui::Checkbox("Use SDR Tonemap Curve", &use_sdr_over_hdr))
-            {
-               cb_luma_global_settings.GameSettings.UseSDROverHDR = use_sdr_over_hdr ? 1 : 0;
-               reshade::set_config_value(runtime, NAME, "UseSDROverHDR", use_sdr_over_hdr);
-            }
-            if (DrawResetButton(use_sdr_over_hdr, true, "UseSDROverHDR", runtime))
-            {
-               cb_luma_global_settings.GameSettings.UseSDROverHDR = 1;
-               reshade::set_config_value(runtime, NAME, "UseSDROverHDR", use_sdr_over_hdr);
-            }
-
             bool use_vanilla_gamut_ratio = cb_luma_global_settings.GameSettings.UseVanillaGamutRatio == 1;
             if (ImGui::Checkbox("Use Vanilla Gamut Ratio", &use_vanilla_gamut_ratio))
             {
@@ -1270,10 +1254,12 @@ BOOL APIENTRY DllMain(HMODULE hModule, DWORD ul_reason_for_call, LPVOID lpReserv
       forced_shader_names.emplace(0xB6934A17u, "Bloom GlareVignette Spark");
 #endif
 
-      // texture_upgrade_formats = {
-      //   reshade::api::format::r11g11b10_float
-      // };
-      enable_chain_indirect_texture_format_upgrades = ChainTextureFormatUpgradesType::DirectAndIndirectDependencies;
+      // In the SDR path (forced by the display capability spoofing) the game tonemaps into an R10G10B10A2 target, which would clip the HDR output.
+      // That's the only texture of this format the game uses, so upgrade it directly.
+      texture_upgrade_formats = {
+         reshade::api::format::r10g10b10a2_unorm
+      };
+      enable_chain_indirect_texture_format_upgrades = ChainTextureFormatUpgradesType::DirectDependencies;
 
       // auto_texture_format_upgrade_shader_hashes[std::stoul("75DFE4B0", nullptr, 16)] = {{0}, {}}; // Main game tonemapping
       // auto_texture_format_upgrade_shader_hashes[std::stoul("18EF8C72", nullptr, 16)] = {{0}, {}}; // Title screen tonemapping
