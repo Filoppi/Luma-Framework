@@ -27,11 +27,9 @@ void main(
 	r0.xy = dr_downscale.xy * v1.xy;
 	
 	uint2 screenPos = v0.xy;
-	float4 aoSamples = ssaoTex.GatherRed(ssaoTex_s_s, v1, 0);
-	float4 halfResDepths = ssaoTex.GatherGreen(ssaoTex_s_s, v1, 0);
+	float4 aoSamples = ssaoTex.GatherRed(ssaoTex_s_s, r0.xy, 0);
+	float4 halfResDepths = ssaoTex.GatherGreen(ssaoTex_s_s, r0.xy, 0);
 	float fullResDepth = depthTex[screenPos];
-	
-	float4 depthDifferences = abs(fullResDepth - halfResDepths);
 
 	float aoSum = 0.0f;
 	float totalWeigth = 0.0f;
