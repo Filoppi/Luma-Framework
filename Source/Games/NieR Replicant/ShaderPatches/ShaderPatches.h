@@ -296,6 +296,8 @@ bool PatchPixelShaderMotionVectors(std::vector<std::byte>& shader_code)
          uint32_t pos = 16;
 
          bool alpha_written = false;
+         bool coord_input_defined = false;
+         bool prev_coord_input_defined = false;
 
          D3D10_SB_OPCODE_TYPE prev_opcode_type = D3D10_SB_NUM_OPCODES;
          for (;;)
@@ -310,7 +312,63 @@ bool PatchPixelShaderMotionVectors(std::vector<std::byte>& shader_code)
                    reg == prev_coord_input_register)
                {
                   *(uint32_t*)(shex + pos + 4) |= ENCODE_D3D10_SB_OPERAND_4_COMPONENT_MASK(D3D10_SB_OPERAND_4_COMPONENT_MASK_X | D3D10_SB_OPERAND_4_COMPONENT_MASK_Y | D3D10_SB_OPERAND_4_COMPONENT_MASK_W);
+                  coord_input_defined |= (reg == coord_input_register);
+                  prev_coord_input_defined |= (reg == prev_coord_input_register);
                }
+            }
+
+            if (prev_opcode_type == D3D10_SB_OPCODE_DCL_INPUT_PS &&
+                opcode_type != D3D10_SB_OPCODE_DCL_INPUT_PS)
+            {
+                std::vector<uint32_t> shader_patch;
+                if (!coord_input_defined)
+                {
+                    uint32_t opcode_token =
+                        ENCODE_D3D10_SB_OPCODE_TYPE(D3D10_SB_OPCODE_DCL_INPUT_PS) |
+                        ENCODE_D3D10_SB_TOKENIZED_INSTRUCTION_LENGTH(3) |
+                        ENCODE_D3D10_SB_INPUT_INTERPOLATION_MODE(D3D10_SB_INTERPOLATION_LINEAR);
+                    uint32_t operand_token =
+                        ENCODE_D3D10_SB_OPERAND_NUM_COMPONENTS(D3D10_SB_OPERAND_4_COMPONENT) |
+                        ENCODE_D3D10_SB_OPERAND_4_COMPONENT_SELECTION_MODE(D3D10_SB_OPERAND_4_COMPONENT_MASK_MODE) |
+                        ENCODE_D3D10_SB_OPERAND_4_COMPONENT_MASK(D3D10_SB_OPERAND_4_COMPONENT_MASK_X | D3D10_SB_OPERAND_4_COMPONENT_MASK_Y | D3D10_SB_OPERAND_4_COMPONENT_MASK_W) |
+                        ENCODE_D3D10_SB_OPERAND_TYPE(D3D10_SB_OPERAND_TYPE_INPUT) |
+                        ENCODE_D3D10_SB_INPUT_INTERPOLATION_MODE(D3D10_SB_INTERPOLATION_LINEAR) |
+                        ENCODE_D3D10_SB_OPERAND_INDEX_DIMENSION(D3D10_SB_OPERAND_INDEX_1D) |
+                        ENCODE_D3D10_SB_OPERAND_INDEX_REPRESENTATION(0, D3D10_SB_OPERAND_INDEX_IMMEDIATE32);
+                    shader_patch.insert(shader_patch.end(), {
+                       opcode_token,
+                       operand_token, coord_input_register });
+                }
+                if (!prev_coord_input_defined)
+                {
+                    uint32_t opcode_token =
+                        ENCODE_D3D10_SB_OPCODE_TYPE(D3D10_SB_OPCODE_DCL_INPUT_PS) |
+                        ENCODE_D3D10_SB_TOKENIZED_INSTRUCTION_LENGTH(3) |
+                        ENCODE_D3D10_SB_INPUT_INTERPOLATION_MODE(D3D10_SB_INTERPOLATION_LINEAR);
+                    uint32_t operand_token =
+                        ENCODE_D3D10_SB_OPERAND_NUM_COMPONENTS(D3D10_SB_OPERAND_4_COMPONENT) |
+                        ENCODE_D3D10_SB_OPERAND_4_COMPONENT_SELECTION_MODE(D3D10_SB_OPERAND_4_COMPONENT_MASK_MODE) |
+                        ENCODE_D3D10_SB_OPERAND_4_COMPONENT_MASK(D3D10_SB_OPERAND_4_COMPONENT_MASK_X | D3D10_SB_OPERAND_4_COMPONENT_MASK_Y | D3D10_SB_OPERAND_4_COMPONENT_MASK_W) |
+                        ENCODE_D3D10_SB_OPERAND_TYPE(D3D10_SB_OPERAND_TYPE_INPUT) |
+                        ENCODE_D3D10_SB_OPERAND_INDEX_DIMENSION(D3D10_SB_OPERAND_INDEX_1D) |
+                        ENCODE_D3D10_SB_OPERAND_INDEX_REPRESENTATION(0, D3D10_SB_OPERAND_INDEX_IMMEDIATE32);
+                    shader_patch.insert(shader_patch.end(), {
+                       opcode_token,
+                       operand_token, prev_coord_input_register });
+                }
+                shader_code.insert(shader_code.begin() + dxbc_header->chunk_offsets[i] + pos, (std::byte*)&shader_patch[0], (std::byte*)(&shader_patch[0] + shader_patch.size()));
+                dxbc_header = (DXBCHeader*)&shader_code[0];
+                shex = &shader_code[dxbc_header->chunk_offsets[i]];
+                shex_header = (SHEXHeader*)shex;
+                shex_header->chunk_size += shader_patch.size() * sizeof(uint32_t);
+                shex_header->dword_count += shader_patch.size();
+                for (uint32_t j = i + 1; j < dxbc_header->chunk_count; ++j)
+                {
+                    dxbc_header->chunk_offsets[j] += shader_patch.size() * sizeof(uint32_t);
+                }
+                prev_opcode_type = D3D10_SB_NUM_OPCODES;
+                pos += shader_patch.size() * sizeof(uint32_t);
+                continue;
             }
 
             if (prev_opcode_type == D3D10_SB_OPCODE_DCL_OUTPUT &&
