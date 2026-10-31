@@ -192,6 +192,72 @@ namespace D3D12Interop
       return WaitForFence(context, context.fence_value) && CreateSharedTexture(context, texture, width, height, format, unordered_access);
    }
 
+   bool UpdateSharedTextureFrom(Context& context, SharedTexture& texture, ID3D11Resource* source, bool is_depth, bool unordered_access)
+   {
+      ComPtr<ID3D11Texture2D> source_texture;
+      if (FAILED(source->QueryInterface(IID_PPV_ARGS(&source_texture))))
+      {
+         LogError(context, "An input/output resource is not a 2D texture");
+         return false;
+      }
+      D3D11_TEXTURE2D_DESC source_desc;
+      source_texture->GetDesc(&source_desc);
+      const auto source_format = reshade::api::format(source_desc.Format);
+      const bool is_srgb = reshade::api::format_to_default_typed(source_format, 1) == source_format && reshade::api::format_to_default_typed(source_format, 0) != source_format;
+      if (!is_depth && (source_desc.MipLevels != 1 || source_desc.ArraySize != 1 || source_desc.SampleDesc.Count != 1 || is_srgb))
+      {
+         LogError(context, std::format("Unsupported input/output texture (mips {}, array size {}, samples {}, format {})", source_desc.MipLevels, source_desc.ArraySize, source_desc.SampleDesc.Count, int(source_desc.Format)));
+         return false;
+      }
+      // DX12 libraries need typed formats to create views
+      const DXGI_FORMAT format = (is_depth ? DXGI_FORMAT_R32_FLOAT : DXGI_FORMAT(reshade::api::format_to_default_typed(source_format)));
+      return UpdateSharedTexture(context, texture, source_desc.Width, source_desc.Height, format, unordered_access);
+   }
+
+   bool CopyDepth(Context& context, SharedTexture& texture, ID3D11DeviceContext* device_context, ID3D11Resource* source)
+   {
+      ComPtr<ID3D11ComputeShader> depth_copy_cs;
+      if (context.get_depth_copy_shader)
+      {
+         depth_copy_cs.Attach(context.get_depth_copy_shader());
+      }
+      if (!depth_copy_cs)
+         return false;
+
+      if (!context.depth_source_srv || context.depth_source.Get() != source)
+      {
+         context.depth_source_srv = nullptr;
+         context.depth_source = source;
+         D3D11_TEXTURE2D_DESC desc;
+         static_cast<ID3D11Texture2D*>(source)->GetDesc(&desc); // Already verified to be a 2D texture by "UpdateSharedTextureFrom()"
+         // The depth (not stencil) view of the typeless depth formats ("format_to_default_typed()" would pick float for 16 bit)
+         D3D11_SHADER_RESOURCE_VIEW_DESC srv_desc = {};
+         srv_desc.Format = (desc.Format == DXGI_FORMAT_R16_TYPELESS ? DXGI_FORMAT_R16_UNORM : DXGI_FORMAT(reshade::api::format_to_default_typed(reshade::api::format(desc.Format))));
+         srv_desc.ViewDimension = D3D11_SRV_DIMENSION_TEXTURE2D;
+         srv_desc.Texture2D.MipLevels = 1;
+         HRESULT hr = E_INVALIDARG; // MSAA depth isn't supported
+         if (desc.SampleDesc.Count == 1)
+         {
+            hr = context.device_11->CreateShaderResourceView(source, &srv_desc, &context.depth_source_srv);
+         }
+         if (FAILED(hr))
+         {
+            LogError(context, std::format("Failed to create the depth SRV (format {}, samples {}), hr = {:#010x}", int(desc.Format), desc.SampleDesc.Count, unsigned(hr)));
+            context.depth_source = nullptr;
+            return false;
+         }
+      }
+
+      device_context->OMSetRenderTargets(0, nullptr, nullptr); // The depth might still be bound as depth stencil, which would null its SRV
+      ID3D11ShaderResourceView* const depth_srv = context.depth_source_srv.Get();
+      ID3D11UnorderedAccessView* const depth_uav = texture.uav_11.Get();
+      device_context->CSSetShader(depth_copy_cs.Get(), nullptr, 0);
+      device_context->CSSetShaderResources(0, 1, &depth_srv);
+      device_context->CSSetUnorderedAccessViews(0, 1, &depth_uav, nullptr);
+      device_context->Dispatch((texture.width + 7) / 8, (texture.height + 7) / 8, 1);
+      return true;
+   }
+
    ID3D12GraphicsCommandList* BeginCommandList(Context& context, ID3D11DeviceContext* device_context)
    {
       ComPtr<ID3D11DeviceContext4> device_context_4;
