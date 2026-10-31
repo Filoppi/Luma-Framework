@@ -14,6 +14,9 @@
     <ClCompile Include="fsr\FSR4.cpp">
       <Filter>FSR</Filter>
     </ClCompile>
+    <ClCompile Include="xess\XeSS.cpp">
+      <Filter>XeSS</Filter>
+    </ClCompile>
     <ClCompile Include="hooks\DXGIHooks.cpp">
       <Filter>Hooks</Filter>
     </ClCompile>
@@ -48,6 +51,9 @@
     </Filter>
     <Filter Include="Interop">
       <UniqueIdentifier>{a2c94e17-6b3d-4d58-8f1a-0e7b9c3d2f65}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="XeSS">
+      <UniqueIdentifier>{5d8e1b3a-2f47-4c69-9a0e-7c3b6d1f8e24}</UniqueIdentifier>
     </Filter>
   </ItemGroup>
   <ItemGroup>
@@ -116,6 +122,9 @@
     </ClInclude>
     <ClInclude Include="fsr\FSR4.h">
       <Filter>FSR</Filter>
+    </ClInclude>
+    <ClInclude Include="xess\XeSS.h">
+      <Filter>XeSS</Filter>
     </ClInclude>
     <ClInclude Include="hooks\DXGIHooks.h">
       <Filter>Hooks</Filter>

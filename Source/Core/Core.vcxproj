@@ -603,6 +603,7 @@
     <ClCompile Include="core.hpp" />
     <ClCompile Include="fsr\FSR.cpp" />
     <ClCompile Include="fsr\FSR4.cpp" />
+    <ClCompile Include="xess\XeSS.cpp" />
     <ClCompile Include="hooks\DXGIHooks.cpp" />
     <ClCompile Include="hooks\FidelityFXHooks.cpp" />
     <ClCompile Include="hooks\SystemHooks.cpp" />
@@ -613,6 +614,7 @@
     <ClInclude Include="dlss\DLSS.h" />
     <ClInclude Include="fsr\FSR.h" />
     <ClInclude Include="fsr\FSR4.h" />
+    <ClInclude Include="xess\XeSS.h" />
     <ClInclude Include="hooks\DXGIHooks.h" />
     <ClInclude Include="hooks\FidelityFXHooks.h" />
     <ClInclude Include="hooks\Hooks.h" />

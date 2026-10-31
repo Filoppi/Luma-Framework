@@ -6,8 +6,11 @@
     <UseLumaFSR Condition="'$(UseLumaFSR)'==''">false</UseLumaFSR>
     <!-- FSR 4 through DX11->DX12 interop (needs UseLumaFSR, x64 only). The FidelityFX API DX12 dlls are shipped next to the addon. -->
     <UseLumaFSR4 Condition="'$(UseLumaFSR4)'==''">false</UseLumaFSR4>
+    <!-- XeSS through DX11->DX12 interop (x64 only). Intel's signed libxess.dll is shipped next to the addon. -->
+    <UseLumaXeSS Condition="'$(UseLumaXeSS)'==''">false</UseLumaXeSS>
     <!-- DX11->DX12 interop (see "D3D12Interop.h"), enabled automatically by the features that need it -->
     <UseLumaD3D12Interop Condition="'$(UseLumaD3D12Interop)'=='' and '$(UseLumaFSR)'=='true' and '$(UseLumaFSR4)'=='true'">true</UseLumaD3D12Interop>
+    <UseLumaD3D12Interop Condition="'$(UseLumaD3D12Interop)'=='' and '$(UseLumaXeSS)'=='true'">true</UseLumaD3D12Interop>
     <UseLumaD3D12Interop Condition="'$(UseLumaD3D12Interop)'==''">false</UseLumaD3D12Interop>
     <!-- Shared hooking library (SafetyHook and Zydis submodules), enabled automatically by the features that need it -->
     <UseLumaSafetyHook Condition="'$(UseLumaSafetyHook)'=='' and '$(UseLumaFSR)'=='true' and '$(UseLumaFSR4)'=='true'">true</UseLumaSafetyHook>
@@ -107,6 +110,10 @@
     <ClCompile Condition="'$(UseLumaFSR)'=='true' and '$(UseLumaFSR4)'=='true'">
       <PreprocessorDefinitions>UNICODE;_UNICODE;ENABLE_FSR4=1;%(PreprocessorDefinitions)</PreprocessorDefinitions>
     </ClCompile>
+    <ClCompile Condition="'$(UseLumaXeSS)'=='true'">
+      <AdditionalIncludeDirectories>$(MSBuildThisFileDirectory)..\External\XeSS\inc;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+      <PreprocessorDefinitions>UNICODE;_UNICODE;ENABLE_XESS=1;%(PreprocessorDefinitions)</PreprocessorDefinitions>
+    </ClCompile>
     <ClCompile Condition="'$(UseLumaD3D12Interop)'=='true'">
       <PreprocessorDefinitions>UNICODE;_UNICODE;ENABLE_D3D12_INTEROP=1;%(PreprocessorDefinitions)</PreprocessorDefinitions>
     </ClCompile>
@@ -147,6 +154,10 @@
       <_LumaFfxRuntimeFiles Include="$(MSBuildThisFileDirectory)..\External\FidelityFX\bin\*.dll" />
     </ItemGroup>
     <Copy SourceFiles="@(_LumaFfxRuntimeFiles)" DestinationFolder="$(TargetDir)" SkipUnchangedFiles="true" />
+  </Target>
+
+  <Target Name="LumaCopyXeSSRuntime" AfterTargets="Build" Condition="'$(UseLumaXeSS)'=='true' and '$(Platform)'!='Win32' and Exists('$(TargetDir)')">
+    <Copy SourceFiles="$(MSBuildThisFileDirectory)..\External\XeSS\bin\libxess.dll" DestinationFolder="$(TargetDir)" SkipUnchangedFiles="true" />
   </Target>
 
   <Target Name="LumaCopyDxpRuntime" AfterTargets="Build" Condition="false" />

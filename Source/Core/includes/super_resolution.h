@@ -20,6 +20,7 @@ namespace SR
 		DLSS,
 		FSR_3,
 		FSR_4,
+		XeSS,
 	};
 
 	// Put these in order of preference (most preferred first). For automatic selection.
@@ -27,9 +28,13 @@ namespace SR
 	{
 		DLSS,
 		FSR,
-		FSR_4, // Least preferred, as it runs through DX11->DX12 interop, so it's only used if manually selected
+		FSR_4, // Runs through DX11->DX12 interop, so it's only used if manually selected (see "IsAutoSelectable()")
+		XeSS, // Same as FSR 4
 		None = -1
 	};
+
+	// The DX11->DX12 interop ones are only used if manually selected
+	constexpr bool IsAutoSelectable(Type type) { return type != Type::FSR_4 && type != Type::XeSS; }
 
 	__forceinline bool AreTypesEqual(UserType user_type, Type type)
 	{
@@ -38,13 +43,15 @@ namespace SR
 		case SR::UserType::None:
 			return type == Type::None;
 		case SR::UserType::Auto:
-			return type != Type::FSR_4; // Always accept it for now, given that it's the first one we find compatible (except FSR 4, see "GetAutoType()")
+			return IsAutoSelectable(type); // Always accept it for now, given that it's the first one we find compatible (see "GetAutoType()")
 		case SR::UserType::DLSS:
 			return type == Type::DLSS;
 		case SR::UserType::FSR_3:
 			return type == Type::FSR;
 		case SR::UserType::FSR_4:
 			return type == Type::FSR_4;
+		case SR::UserType::XeSS:
+			return type == Type::XeSS;
 		}
 		return false;
 	}
@@ -60,6 +67,8 @@ namespace SR
 			return "FSR";
 		case Type::FSR_4:
 			return "FSR 4";
+		case Type::XeSS:
+			return "XeSS";
 		case Type::None:
 			break;
 		}
@@ -95,6 +104,12 @@ namespace SR
 	static float GetMipLODBias(unsigned int render_height, unsigned int output_height)
 	{
 		return GetMipLODBias(float(render_height), float(output_height));
+	}
+	// The XeSS guide asks for log2(render / output), without DLSS and FSR's extra -1 (so 0 at native resolution)
+	static float GetMipLODBias(Type type, float render_height, float output_height)
+	{
+		const float bias = GetMipLODBias(render_height, output_height);
+		return (type == Type::XeSS ? (bias + 1.f) : bias);
 	}
 
 	struct SettingsData
@@ -165,13 +180,13 @@ namespace SR
 		virtual ~InstanceData() {}
 	};
 
-	// The first supported type in order of preference (FSR 4 is never picked automatically)
+	// The first supported type in order of preference (see "IsAutoSelectable()")
 	inline Type GetAutoType(const std::map<Type, InstanceData*>& instances)
 	{
-		for (const auto& instance : instances)
+		for (const auto& [type, instance] : instances)
 		{
-			if (instance.first != Type::FSR_4 && instance.second && instance.second->is_supported)
-				return instance.first;
+			if (IsAutoSelectable(type) && instance && instance->is_supported)
+				return type;
 		}
 		return Type::None;
 	}

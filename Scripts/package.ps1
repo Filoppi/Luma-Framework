@@ -88,7 +88,8 @@ $useLumaFastNoise = Test-PropEnabled $vcxproj "UseLumaFastNoise"
 $useLumaDXP = Test-PropEnabled $vcxproj "UseLumaDXP"
 $useLumaNGX = Test-PropEnabled $vcxproj "UseLumaNGX"
 $useLumaFSR4 = (Test-PropEnabled $vcxproj "UseLumaFSR") -and (Test-PropEnabled $vcxproj "UseLumaFSR4")
-Write-Host "Opt-ins: UseLumaFastNoise=$useLumaFastNoise UseLumaDXP=$useLumaDXP UseLumaNGX=$useLumaNGX UseLumaFSR4=$useLumaFSR4"
+$useLumaXeSS = Test-PropEnabled $vcxproj "UseLumaXeSS"
+Write-Host "Opt-ins: UseLumaFastNoise=$useLumaFastNoise UseLumaDXP=$useLumaDXP UseLumaNGX=$useLumaNGX UseLumaFSR4=$useLumaFSR4 UseLumaXeSS=$useLumaXeSS"
 
 # Locate the addon. When packaging runs from the LumaPackage build target the
 # exact build output is passed in (-AddonPath = $(TargetPath)); standalone runs
@@ -157,6 +158,14 @@ try {
         Copy-Item (Join-Path $ffxDir "*.dll") -Destination $tempDir -Force
         New-Item -ItemType Directory -Path "$tempDir\Licenses" -Force | Out-Null
         Copy-Item (Join-Path $ffxDir "FidelityFX_LICENSE.md") -Destination "$tempDir\Licenses" -Force
+    }
+    # XeSS loads it from next to the addon (x64 only)
+    if ($useLumaXeSS -and $Platform -ne "Win32") {
+        $xessDir = Join-Path $repoRoot "Source\External\XeSS"
+        Copy-Item (Join-Path $xessDir "bin\libxess.dll") -Destination $tempDir -Force
+        New-Item -ItemType Directory -Path "$tempDir\Licenses" -Force | Out-Null
+        Copy-Item (Join-Path $xessDir "LICENSE.txt") -Destination "$tempDir\Licenses\XeSS_LICENSE.txt" -Force
+        Copy-Item (Join-Path $xessDir "third-party-programs.txt") -Destination "$tempDir\Licenses\XeSS_third-party-programs.txt" -Force
     }
 
     # Addon at the zip root, under the canonical Luma-<Project>.addon name

@@ -14,3 +14,4 @@
 #include "dlss/DLSS.cpp"
 #include "fsr/FSR.cpp"
 #include "fsr/FSR4.cpp"
+#include "xess/XeSS.cpp"
