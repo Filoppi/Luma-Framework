@@ -8,6 +8,7 @@
 #define DISABLE_AUTO_DEBUGGER 1
 #define DISABLE_FOCUS_LOSS_SUPPRESSION 1
 #define AVOID_INPUT_LOSS 1
+#define CHECK_GRAPHICS_API_COMPATIBILITY 1
 
 // FSR 3 Native AA as a vendor-neutral alternative to DLAA (selectable in core's "Super Resolution" combo)
 #define GEOMETRY_SHADER_SUPPORT 0
@@ -971,7 +972,7 @@ public: // OnMapBufferRegion is referenced from DllMain (DLL_PROCESS_DETACH unre
          std::unique_lock lock_samplers(s_mutex_samplers);
          const bool dlaa_ran = gd.dlss_ran_this_frame && !device_data.sr_suppressed; // precise: DLSS actually drew this frame
          device_data.texture_mip_lod_bias_offset = dlaa_ran
-                                                      ? SR::GetMipLODBias(device_data.render_resolution.y, device_data.output_resolution.y) // -1 at native, more negative when upscaling
+                                                      ? SR::GetMipLODBias(device_data.sr_type, device_data.render_resolution.y, device_data.output_resolution.y) // -1 at native (0 with XeSS), more negative when upscaling
                                                       : (gd.taa_hits_this_frame > 0 ? -1.f : 0.f);                                          // game TAA w/o DLSS -> -1; FXAA/SMAA -> 0
       }
 
