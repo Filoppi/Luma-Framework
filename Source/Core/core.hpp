@@ -105,7 +105,7 @@
 #ifdef ENABLE_SR
 #undef ENABLE_SR
 #endif // ENABLE_SR
-#if (defined(ENABLE_NGX) && ENABLE_NGX) || (defined(ENABLE_FIDELITY_SK) && ENABLE_FIDELITY_SK)
+#if (defined(ENABLE_NGX) && ENABLE_NGX) || (defined(ENABLE_FIDELITY_SK) && ENABLE_FIDELITY_SK) || (defined(_WIN64) && defined(ENABLE_XESS) && ENABLE_XESS && defined(ENABLE_D3D12_INTEROP) && ENABLE_D3D12_INTEROP && __has_include("xess/xess_d3d12.h")) // Same as "XeSS.h"
 #define ENABLE_SR 1
 #else
 #define ENABLE_SR 0
@@ -184,6 +184,7 @@
 #include "dlss/DLSS.h" // see "ENABLE_NGX"
 #include "fsr/FSR.h" // see "ENABLE_FIDELITY_SK"
 #include "fsr/FSR4.h" // see "ENABLE_FSR4"
+#include "xess/XeSS.h" // see "ENABLE_XESS"
 
 #include "includes/containers.h"
 #include "includes/globals.h"
@@ -513,7 +514,7 @@ namespace
       { CompileTimeStringHash("Sanitize RGBA PS"), { "Luma_SanitizeRGBA", reshade::api::pipeline_subobject_type::pixel_shader } },
       { CompileTimeStringHash("Sanitize RGBA Mipped"), { "Luma_SanitizeRGBAMipped", reshade::api::pipeline_subobject_type::pixel_shader } },
       { CompileTimeStringHash("Gen Sanitized Mip"), { "Luma_GenerateSanitizedMip_CS", reshade::api::pipeline_subobject_type::compute_shader } },
-#if ENABLE_FSR4
+#if ENABLE_FSR4 || ENABLE_XESS
       { CompileTimeStringHash("Copy Depth CS"), { "Luma_CopyDepth_CS", reshade::api::pipeline_subobject_type::compute_shader } },
 #endif
 
@@ -2548,18 +2549,27 @@ namespace
             device_data.sr_type = SR::GetAutoType(device_data.sr_implementations_instances);
          }
       }
+#if ENABLE_FSR4 || ENABLE_XESS
+      const auto get_depth_copy_shader = [&device_data]() -> ID3D11ComputeShader*
+         {
+            const std::shared_lock lock(s_mutex_shader_objects); // They could be getting recompiled
+            const auto cs = device_data.native_compute_shaders.find(CompileTimeStringHash("Copy Depth CS"));
+            if (cs == device_data.native_compute_shaders.end() || !cs->second.get())
+               return nullptr;
+            cs->second->AddRef();
+            return cs->second.get();
+         };
+#endif
 #if ENABLE_FSR4
       if (const auto fsr4_instance = device_data.sr_implementations_instances.find(SR::Type::FSR_4); fsr4_instance != device_data.sr_implementations_instances.end())
       {
-         FidelityFX::FSR4::SetDepthCopyShader(fsr4_instance->second, [&device_data]() -> ID3D11ComputeShader*
-            {
-               const std::shared_lock lock(s_mutex_shader_objects); // They could be getting recompiled
-               const auto cs = device_data.native_compute_shaders.find(CompileTimeStringHash("Copy Depth CS"));
-               if (cs == device_data.native_compute_shaders.end() || !cs->second.get())
-                  return nullptr;
-               cs->second->AddRef();
-               return cs->second.get();
-            });
+         FidelityFX::FSR4::SetDepthCopyShader(fsr4_instance->second, get_depth_copy_shader);
+      }
+#endif
+#if ENABLE_XESS
+      if (const auto xess_instance = device_data.sr_implementations_instances.find(SR::Type::XeSS); xess_instance != device_data.sr_implementations_instances.end())
+      {
+         Intel::XeSS::SetDepthCopyShader(xess_instance->second, get_depth_copy_shader);
       }
 #endif
       if (device_data.sr_type == SR::Type::None)
@@ -10364,6 +10374,13 @@ namespace
             const std::unique_lock lock_reshade(s_mutex_reshade); // Lock the entire scope for extra safety, though we are mainly only interested in keeping "cb_luma_global_settings" safe
 
 #if ENABLE_SR
+            const char* xess_name = "XeSS";
+#if ENABLE_XESS
+            if (const auto xess_instance = device_data.sr_implementations_instances.find(SR::Type::XeSS); xess_instance != device_data.sr_implementations_instances.end())
+            {
+               xess_name = (Intel::XeSS::IsNativeDX11(xess_instance->second) ? "XeSS (Native DX11)" : "XeSS (DX12 Interop)");
+            }
+#endif
             const char* selected_sr_user_type = nullptr;
             switch (sr_user_type)
             {
@@ -10377,6 +10394,8 @@ namespace
                selected_sr_user_type = "FSR 3"; break;
             case SR::UserType::FSR_4:
                selected_sr_user_type = "FSR 4 (DX12 Interop)"; break;
+            case SR::UserType::XeSS:
+               selected_sr_user_type = xess_name; break;
             }
 
             SR::Type sr_type = device_data.sr_type;
@@ -10419,6 +10438,9 @@ namespace
                AddComboItem("FSR 3", SR::UserType::FSR_3, SR::Type::FSR, device_data.sr_implementations_instances.contains(SR::Type::FSR));
 #if ENABLE_FSR4
                AddComboItem("FSR 4 (DX12 Interop)", SR::UserType::FSR_4, SR::Type::FSR_4, device_data.sr_implementations_instances.contains(SR::Type::FSR_4));
+#endif
+#if ENABLE_XESS
+               AddComboItem(xess_name, SR::UserType::XeSS, SR::Type::XeSS, device_data.sr_implementations_instances.contains(SR::Type::XeSS));
 #endif
                ImGui::EndCombo();
             }
@@ -11997,6 +12019,9 @@ void Init(bool async)
 #endif
 #if ENABLE_FSR4
    sr_implementations[SR::Type::FSR_4] = std::make_unique<FidelityFX::FSR4>();
+#endif
+#if ENABLE_XESS
+   sr_implementations[SR::Type::XeSS] = std::make_unique<Intel::XeSS>();
 #endif
 #if DEVELOPMENT
    Mcp::Start();

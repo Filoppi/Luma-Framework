@@ -840,7 +840,7 @@ public:
          std::shared_lock shared_lock_samplers(s_mutex_samplers);
          if (device_data.sr_type != SR::Type::None && !device_data.sr_suppressed)
          {
-            device_data.texture_mip_lod_bias_offset = SR::GetMipLODBias(device_data.render_resolution.y, device_data.output_resolution.y); // This results in -1 at output res
+            device_data.texture_mip_lod_bias_offset = SR::GetMipLODBias(device_data.sr_type, device_data.render_resolution.y, device_data.output_resolution.y); // This results in -1 at output res (0 with XeSS)
          }
          else
          {

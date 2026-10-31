@@ -30,6 +30,10 @@
                   DisplayName="FSR 4 (FidelityFX API DX12 interop)"
                   Description="Enables FSR 4 through DX11->DX12 interop (requires FSR, x64 only). Also enables SafetyHook, and ships the FidelityFX API DX12 dlls next to the addon."
                   Category="Features" />
+    <BoolProperty Name="UseLumaXeSS"
+                  DisplayName="XeSS"
+                  Description="Enables Intel XeSS (x64 only), natively on DX11 on Intel GPUs and through DX11->DX12 interop on the others. Ships Intel's signed libxess_dx11.dll and libxess.dll next to the addon."
+                  Category="Features" />
     <BoolProperty Name="UseLumaSafetyHook"
                   DisplayName="SafetyHook"
                   Description="Compiles the shared SafetyHook (and Zydis) hooking library. Automatically enabled by FSR 4."
