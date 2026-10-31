@@ -40,6 +40,7 @@ namespace
    ShaderHashesList shader_hashes_bloom_glare_vignette;
    ShaderHashesList shader_hashes_rain;
    ShaderHashesList shader_hashes_directional_light;
+   ShaderHashesList shader_hashes_attach_fast_noise;
    const uint32_t CBTemporalAA_buffer_size = 256;
    const uint32_t CBView_buffer_size = 768;
 
@@ -402,6 +403,7 @@ public:
       // Quality level of the per-pixel extended tonemap pivot computation (see "Includes/Tonemap.hlsli")
       std::vector<ShaderDefineData> game_shader_defines_data = {
          { "FFXV_TONEMAP_PRECISION", '0', true, false, "Precision of the HDR tone curve extension pivot computation (cost is only paid in HDR)\n0 - Simple (fixed pivot, cheapest)\n1 - High (curve inflection)\n2 - Very High (max curvature, most accurate)", 2 },
+         { "FFXV_AO_TEMPORAL", '1', true, false, "Temporal accumulation of the ambient occlusion\n0 - Off\n1 - On", 1 },
       };
       shader_defines_data.append_range(game_shader_defines_data);
 
@@ -419,6 +421,8 @@ public:
       default_luma_global_game_settings.UseVanillaGamutRatio = 0;
       default_luma_global_game_settings.VignetteStrength = 1.f;
       default_luma_global_game_settings.EnableDoF = 1;
+      default_luma_global_game_settings.EnableVBAO = 1;
+      default_luma_global_game_settings.VBAOThicknessScale = 0.15f;
 
       cb_luma_global_settings.GameSettings = default_luma_global_game_settings;
 
@@ -460,6 +464,14 @@ public:
       reshade::get_config_value(runtime, NAME, "EnableDoF", enable_dof);
       cb_luma_global_settings.GameSettings.EnableDoF = enable_dof ? 1 : 0;
 
+      bool enable_vbao = true;
+      reshade::get_config_value(runtime, NAME, "EnableVBAO", enable_vbao);
+      cb_luma_global_settings.GameSettings.EnableVBAO = enable_vbao ? 1 : 0;
+#if DEVELOPMENT || TEST // Only a tuning setting, fixed in the published builds
+      reshade::get_config_value(runtime, NAME, "VBAOThicknessScale", cb_luma_global_settings.GameSettings.VBAOThicknessScale);
+      cb_luma_global_settings.GameSettings.VBAOThicknessScale = std::clamp(cb_luma_global_settings.GameSettings.VBAOThicknessScale, 0.f, 1.f);
+#endif
+
       bool use_sdr_over_hdr = true;
       reshade::get_config_value(runtime, NAME, "UseSDROverHDR", use_sdr_over_hdr);
       cb_luma_global_settings.GameSettings.UseSDROverHDR = use_sdr_over_hdr ? 1 : 0;
@@ -493,6 +505,39 @@ public:
             device_data.force_reset_sr = true;
             reshade::set_config_value(runtime, NAME, "EnableDoF", enable_dof);
          }
+         bool enable_vbao = cb_luma_global_settings.GameSettings.EnableVBAO != 0;
+         if (ImGui::Checkbox("Enable VBAO", &enable_vbao))
+         {
+            cb_luma_global_settings.GameSettings.EnableVBAO = enable_vbao ? 1 : 0;
+            reshade::set_config_value(runtime, NAME, "EnableVBAO", enable_vbao);
+         }
+         if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
+         {
+            ImGui::SetTooltip("Replaces the game's ambient occlusion (SAO) with a visibility bitmask AO (ported from the FF7 Remake mod).");
+         }
+         if (DrawResetButton(enable_vbao, true, "EnableVBAO", runtime))
+         {
+            cb_luma_global_settings.GameSettings.EnableVBAO = 1;
+            reshade::set_config_value(runtime, NAME, "EnableVBAO", true);
+         }
+#if DEVELOPMENT || TEST
+         if (cb_luma_global_settings.GameSettings.EnableVBAO != 0)
+         {
+            if (ImGui::SliderFloat("VBAO Thickness Scale", &cb_luma_global_settings.GameSettings.VBAOThicknessScale, 0.f, 1.f, "%.2f", ImGuiSliderFlags_AlwaysClamp))
+            {
+               reshade::set_config_value(runtime, NAME, "VBAOThicknessScale", cb_luma_global_settings.GameSettings.VBAOThicknessScale);
+            }
+            if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
+            {
+               ImGui::SetTooltip("The thickness of the depth buffer surfaces for VBAO (min 20 cm) grows linearly with the depth, as this fraction of the ray reach (which is about 21% of the depth).\n0 keeps it constant (thin, no halos around objects but weak occlusion at a distance).");
+            }
+            if (DrawResetButton(cb_luma_global_settings.GameSettings.VBAOThicknessScale, 0.15f, "VBAOThicknessScale", runtime))
+            {
+               cb_luma_global_settings.GameSettings.VBAOThicknessScale = 0.15f;
+               reshade::set_config_value(runtime, NAME, "VBAOThicknessScale", cb_luma_global_settings.GameSettings.VBAOThicknessScale);
+            }
+         }
+#endif
          const char* rain_timings[] = {"After TAA / DLSS", "After DoF"};
          if (ImGui::Combo("Rain Composition", &rain_composition, rain_timings, IM_ARRAYSIZE(rain_timings)))
             reshade::set_config_value(runtime, NAME, "RainComposition", rain_composition);
@@ -570,6 +615,21 @@ public:
    DrawOrDispatchOverrideType OnDrawOrDispatch(ID3D11Device* native_device, ID3D11DeviceContext* native_device_context, CommandListData& cmd_list_data, DeviceData& device_data, reshade::api::shader_stage stages, const ShaderHashesList<OneShaderPerPipeline>& original_shader_hashes, bool is_custom_pass, bool& updated_cbuffers, std::function<void()>* original_draw_dispatch_func) override
    {
       auto& game_device_data = GetGameDeviceData(device_data);
+
+#if ENABLE_FAST_NOISE_TEXTURES
+      // The replaced AO pass (Shaders/Final Fantasy XV/AO_SAO_GTVBAO_0xC86DCBDA) reads the FAST noise for its sampling pattern, t0-t5 are the game's bindings and t6 is free in the original signature
+      if ((stages & reshade::api::shader_stage::pixel) != 0 && original_shader_hashes.Contains(shader_hashes_attach_fast_noise))
+      {
+         ID3D11ShaderResourceView* fast_noise_srv = GetFastNoiseSrv(device_data);
+         if (fast_noise_srv)
+         {
+            native_device_context->PSSetShaderResources(6, 1, &fast_noise_srv);
+#if DEVELOPMENT
+            VerifyFastNoiseBinding(native_device_context, 6, fast_noise_srv, "AO");
+#endif
+         }
+      }
+#endif
 
       if (original_shader_hashes.Contains(shader_hashes_rain) &&
           device_data.sr_type != SR::Type::None && !device_data.sr_suppressed && !device_data.has_drawn_sr &&
@@ -1173,6 +1233,7 @@ BOOL APIENTRY DllMain(HMODULE hModule, DWORD ul_reason_for_call, LPVOID lpReserv
       shader_hashes_bloom_glare_vignette.pixel_shaders.emplace(0xBBC1036Cu); // Glare/vignette
       shader_hashes_bloom_glare_vignette.pixel_shaders.emplace(0xB6934A17u); // Glare/vignette with sparks
       shader_hashes_rain.pixel_shaders.emplace(0x047D130Bu); // VFXRain_Material, both captured rain draws
+      shader_hashes_attach_fast_noise.pixel_shaders.emplace(0xC86DCBDAu); // SAO ambient occlusion (replaced with GTVBAO)
       shader_hashes_directional_light.pixel_shaders.emplace(std::stoul("2100CE9B", nullptr, 16)); // Directional Light
       shader_hashes_directional_light.pixel_shaders.emplace(std::stoul("A315F1E7", nullptr, 16)); // CSM
       shader_hashes_directional_light.pixel_shaders.emplace(std::stoul("4B8E0FF8", nullptr, 16)); // CSM_AO
