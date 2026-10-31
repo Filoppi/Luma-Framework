@@ -10374,6 +10374,13 @@ namespace
             const std::unique_lock lock_reshade(s_mutex_reshade); // Lock the entire scope for extra safety, though we are mainly only interested in keeping "cb_luma_global_settings" safe
 
 #if ENABLE_SR
+            const char* xess_name = "XeSS";
+#if ENABLE_XESS
+            if (const auto xess_instance = device_data.sr_implementations_instances.find(SR::Type::XeSS); xess_instance != device_data.sr_implementations_instances.end())
+            {
+               xess_name = (Intel::XeSS::IsNativeDX11(xess_instance->second) ? "XeSS (Native DX11)" : "XeSS (DX12 Interop)");
+            }
+#endif
             const char* selected_sr_user_type = nullptr;
             switch (sr_user_type)
             {
@@ -10388,7 +10395,7 @@ namespace
             case SR::UserType::FSR_4:
                selected_sr_user_type = "FSR 4 (DX12 Interop)"; break;
             case SR::UserType::XeSS:
-               selected_sr_user_type = "XeSS (DX12 Interop)"; break;
+               selected_sr_user_type = xess_name; break;
             }
 
             SR::Type sr_type = device_data.sr_type;
@@ -10433,7 +10440,7 @@ namespace
                AddComboItem("FSR 4 (DX12 Interop)", SR::UserType::FSR_4, SR::Type::FSR_4, device_data.sr_implementations_instances.contains(SR::Type::FSR_4));
 #endif
 #if ENABLE_XESS
-               AddComboItem("XeSS (DX12 Interop)", SR::UserType::XeSS, SR::Type::XeSS, device_data.sr_implementations_instances.contains(SR::Type::XeSS));
+               AddComboItem(xess_name, SR::UserType::XeSS, SR::Type::XeSS, device_data.sr_implementations_instances.contains(SR::Type::XeSS));
 #endif
                ImGui::EndCombo();
             }

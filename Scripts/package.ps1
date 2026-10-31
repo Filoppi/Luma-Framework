@@ -159,10 +159,10 @@ try {
         New-Item -ItemType Directory -Path "$tempDir\Licenses" -Force | Out-Null
         Copy-Item (Join-Path $ffxDir "FidelityFX_LICENSE.md") -Destination "$tempDir\Licenses" -Force
     }
-    # XeSS loads it from next to the addon (x64 only)
+    # XeSS loads them from next to the addon (x64 only)
     if ($useLumaXeSS -and $Platform -ne "Win32") {
         $xessDir = Join-Path $repoRoot "Source\External\XeSS"
-        Copy-Item (Join-Path $xessDir "bin\libxess.dll") -Destination $tempDir -Force
+        Copy-Item (Join-Path $xessDir "bin\libxess.dll"), (Join-Path $xessDir "bin\libxess_dx11.dll") -Destination $tempDir -Force
         New-Item -ItemType Directory -Path "$tempDir\Licenses" -Force | Out-Null
         Copy-Item (Join-Path $xessDir "LICENSE.txt") -Destination "$tempDir\Licenses\XeSS_LICENSE.txt" -Force
         Copy-Item (Join-Path $xessDir "third-party-programs.txt") -Destination "$tempDir\Licenses\XeSS_third-party-programs.txt" -Force
