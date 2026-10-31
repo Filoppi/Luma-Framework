@@ -206,10 +206,12 @@
 #include "includes/ui/ui.hpp"
 #endif
 
+#include "hooks/DXGIHooks.h"
 #include "utils/format.hpp"
 #include "utils/pipeline.hpp"
 #include "utils/shader_compiler.hpp"
 #include "utils/display.hpp"
+#include "utils/display.inl"
 #include "utils/resource.hpp"
 #include "utils/draw.hpp"
 #include "utils/system.h"
@@ -304,6 +306,9 @@ namespace
 
    bool hdr_enabled_display = false;
    bool hdr_supported_display = false;
+   // Makes the game see an SDR display (while Luma still sees the real one), so games with no HDR toggle pick their SDR path (needs the SafetyHook feature).
+   // Games set this statically from "OnInit()" (not user configurable).
+   bool force_sdr_display_capability = false;
    constexpr bool prevent_shader_cache_loading = false;
    bool prevent_shader_cache_saving = false;
 #if DEVELOPMENT
@@ -2504,6 +2509,18 @@ namespace
       HRESULT hr2 = native_dxgi_device->SetMaximumFrameLatency(1);
       assert(SUCCEEDED(hr2));
 
+#if ENABLE_SAFETYHOOK
+      // The hooks are created disabled, so they can be toggled at runtime. They are shared by all the outputs and swapchains, so any instance does.
+      {
+         com_ptr<IDXGIAdapter> display_adapter;
+         com_ptr<IDXGIOutput> display_output;
+         if (SUCCEEDED(native_dxgi_device->GetAdapter(&display_adapter)) && SUCCEEDED(display_adapter->EnumOutputs(0, &display_output)))
+         {
+            DXGIHooks::InitDisplayCapability(display_output.get());
+         }
+      }
+#endif
+
 #if ENABLE_SR
       com_ptr<IDXGIAdapter> native_adapter;
       if (SUCCEEDED(hr))
@@ -2969,6 +2986,15 @@ namespace
       // This is basically where we verify and update the user display settings
       if (native_swapchain3 != nullptr)
       {
+#if ENABLE_SAFETYHOOK
+         // Also try to hook the output here, in case it couldn't be done on device creation
+         DXGIHooks::InitDisplayCapability(native_swapchain3);
+         com_ptr<IDXGIOutput> display_output;
+         if (SUCCEEDED(native_swapchain3->GetContainingOutput(&display_output)))
+         {
+            DXGIHooks::InitDisplayCapability(display_output.get());
+         }
+#endif
          const std::unique_lock lock_reshade(s_mutex_reshade);
          Display::GetHDRMaxLuminance(native_swapchain3, device_data.default_user_peak_white, srgb_white_level); // TODO: detect when the display changes and update peak brightness calibration, and set HDR10+ on the new display too etc
          Display::IsHDRSupportedAndEnabled(swapchain_desc.OutputWindow, hdr_supported_display, hdr_enabled_display, native_swapchain3);
@@ -11997,6 +12023,10 @@ void Init(bool async)
    Shader::InitShaderCompiler();
 
    game->OnInit(async);
+
+#if ENABLE_SAFETYHOOK
+   DXGIHooks::SetSDRDisplaySpoof(force_sdr_display_capability); // The hooks will be created and enabled when the device and swapchain are
+#endif
 
    assert(luma_settings_cbuffer_index < D3D11_COMMONSHADER_CONSTANT_BUFFER_API_SLOT_COUNT);
    assert(luma_data_cbuffer_index < D3D11_COMMONSHADER_CONSTANT_BUFFER_API_SLOT_COUNT); // Not necessary for custom shaders unless used, but necessary for the final luma display composition shader (unless we forced that one to use cb0 or something for the buffer)
