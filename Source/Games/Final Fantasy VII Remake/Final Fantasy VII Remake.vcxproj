@@ -65,6 +65,7 @@
     <UseLumaNGX>true</UseLumaNGX>
     <UseLumaFSR>true</UseLumaFSR>
     <UseLumaFSR4>true</UseLumaFSR4>
+    <UseLumaXeSS>true</UseLumaXeSS>
     <UseLumaFastNoise>true</UseLumaFastNoise>
     <UseLumaDXP>true</UseLumaDXP>
     <LumaPackage>false</LumaPackage>
