@@ -172,6 +172,9 @@ namespace Intel
       GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT, reinterpret_cast<LPCWSTR>(&Log), &luma_module);
       const std::filesystem::path luma_folder = System::GetModulePath(luma_module).parent_path();
 
+      DXGI_ADAPTER_DESC adapter_desc = {};
+      const bool is_intel_gpu = adapter && SUCCEEDED(adapter->GetDesc(&adapter_desc)) && adapter_desc.VendorId == vendor_id_intel;
+
       auto& custom_data = reinterpret_cast<XeSSInstanceData*&>(data);
       const auto init_instance = [&](HMODULE module, bool native_dx11)
       {
@@ -180,13 +183,13 @@ namespace Intel
          custom_data->min_resolution = 32;
          custom_data->module = module;
          custom_data->native_dx11 = native_dx11;
+         custom_data->auto_selectable = is_intel_gpu;
          custom_data->is_supported = InitInstance(*custom_data, device, adapter);
          return custom_data->is_supported;
       };
 
       // Prefer the native DX11 XeSS on Intel GPUs, falling back on the DX12 one (see "XeSS.h")
-      DXGI_ADAPTER_DESC adapter_desc = {};
-      if (adapter && SUCCEEDED(adapter->GetDesc(&adapter_desc)) && adapter_desc.VendorId == vendor_id_intel)
+      if (is_intel_gpu)
       {
          if (HMODULE module = LoadLibraryExW((luma_folder / xess_dx11_dll_name).c_str(), nullptr, LOAD_WITH_ALTERED_SEARCH_PATH))
          {

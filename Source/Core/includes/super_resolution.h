@@ -23,18 +23,15 @@ namespace SR
 		XeSS,
 	};
 
-	// Put these in order of preference (most preferred first). For automatic selection.
+	// Don't reorder these, shaders read them through "LumaSettings.SRType". The automatic selection order is in "GetAutoType()".
 	enum class Type
 	{
 		DLSS,
 		FSR,
-		FSR_4, // Runs through DX11->DX12 interop, so it's only used if manually selected (see "IsAutoSelectable()")
-		XeSS, // Same as FSR 4
+		FSR_4,
+		XeSS,
 		None = -1
 	};
-
-	// The DX11->DX12 interop ones are only used if manually selected
-	constexpr bool IsAutoSelectable(Type type) { return type != Type::FSR_4 && type != Type::XeSS; }
 
 	__forceinline bool AreTypesEqual(UserType user_type, Type type)
 	{
@@ -43,7 +40,7 @@ namespace SR
 		case SR::UserType::None:
 			return type == Type::None;
 		case SR::UserType::Auto:
-			return IsAutoSelectable(type); // Always accept it for now, given that it's the first one we find compatible (see "GetAutoType()")
+			return false; // Picked once all of them are initialized (see "GetAutoType()")
 		case SR::UserType::DLSS:
 			return type == Type::DLSS;
 		case SR::UserType::FSR_3:
@@ -56,7 +53,6 @@ namespace SR
 		return false;
 	}
 
-#if DEVELOPMENT
 	constexpr const char* GetTypeName(Type type)
 	{
 		switch (type)
@@ -64,7 +60,7 @@ namespace SR
 		case Type::DLSS:
 			return "DLSS";
 		case Type::FSR:
-			return "FSR";
+			return "FSR 3";
 		case Type::FSR_4:
 			return "FSR 4";
 		case Type::XeSS:
@@ -74,7 +70,6 @@ namespace SR
 		}
 		return "None";
 	}
-#endif
 	
 	// E.g. use base 2 for x and base 3 for y.
 	// Index should go from 0 to phases-1.
@@ -157,6 +152,8 @@ namespace SR
 	struct InstanceData
 	{
 		bool							is_supported = false;
+		// Whether "Auto" can pick it. FSR 4 and XeSS turn this off on other vendors' GPUs, where they run a fallback model.
+		bool							auto_selectable = true;
 
 		bool							supports_dynamic_resolution = true;
 		// Whether it supports an input resolution lower than an output one. As opposite to matching resolutions (AA only). None of them support downscaling as of now.
@@ -180,12 +177,16 @@ namespace SR
 		virtual ~InstanceData() {}
 	};
 
-	// The first supported type in order of preference (see "IsAutoSelectable()")
+	// The first supported type in order of preference. FSR 4 and XeSS go before FSR 3 given they are only auto selectable on their vendor's GPUs.
 	inline Type GetAutoType(const std::map<Type, InstanceData*>& instances)
 	{
-		for (const auto& [type, instance] : instances)
+		for (const Type type : {Type::DLSS, Type::FSR_4, Type::XeSS, Type::FSR})
 		{
-			if (IsAutoSelectable(type) && instance && instance->is_supported)
+			const auto it = instances.find(type);
+			if (it == instances.end())
+				continue;
+			const InstanceData* instance = it->second;
+			if (instance && instance->is_supported && instance->auto_selectable)
 				return type;
 		}
 		return Type::None;

@@ -160,7 +160,8 @@ namespace FidelityFX
             return false;
 
          // The FFX dlls only offer FSR 4 on AMD GPUs, on the others they get to offer the INT8 model if they see an AMD RDNA 3 GPU
-         if (data.interop.adapter_desc.VendorId != vendor_id_amd)
+         data.auto_selectable = data.interop.adapter_desc.VendorId == vendor_id_amd;
+         if (!data.auto_selectable)
          {
             data.spoof_amd = FidelityFXHooks::Init(data.interop.adapter.Get());
             if (!data.spoof_amd)

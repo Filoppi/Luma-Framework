@@ -10381,13 +10381,16 @@ namespace
                xess_name = (Intel::XeSS::IsNativeDX11(xess_instance->second) ? "XeSS (Native DX11)" : "XeSS (DX12 Interop)");
             }
 #endif
+            const SR::Type sr_auto_type = SR::GetAutoType(device_data.sr_implementations_instances);
+            const std::string auto_name = (sr_auto_type != SR::Type::None ? std::format("Auto ({})", SR::GetTypeName(sr_auto_type)) : "Auto");
+
             const char* selected_sr_user_type = nullptr;
             switch (sr_user_type)
             {
             case SR::UserType::None:
                selected_sr_user_type = "None"; break;
             case SR::UserType::Auto:
-               selected_sr_user_type = "Auto"; break;
+               selected_sr_user_type = auto_name.c_str(); break;
             case SR::UserType::DLSS:
                selected_sr_user_type = "DLSS"; break;
             case SR::UserType::FSR_3:
@@ -10399,8 +10402,6 @@ namespace
             }
 
             SR::Type sr_type = device_data.sr_type;
-
-            const SR::Type sr_auto_type = SR::GetAutoType(device_data.sr_implementations_instances);
 
             // Note: if we reached here, it's guaranteed that the selected SR type is supported
             if (ImGui::BeginCombo("Super Resolution", selected_sr_user_type))
@@ -10433,7 +10434,7 @@ namespace
                AddComboItem("None", SR::UserType::None, SR::Type::None, true);
                constexpr bool always_show_auto_sr = true; // It's the default value, so just always show it
                if (always_show_auto_sr || sr_auto_type != SR::Type::None)
-                  AddComboItem("Auto", SR::UserType::Auto, sr_auto_type, !device_data.sr_implementations_instances.empty());
+                  AddComboItem(auto_name.c_str(), SR::UserType::Auto, sr_auto_type, sr_auto_type != SR::Type::None);
                AddComboItem("DLSS", SR::UserType::DLSS, SR::Type::DLSS, device_data.sr_implementations_instances.contains(SR::Type::DLSS));
                AddComboItem("FSR 3", SR::UserType::FSR_3, SR::Type::FSR, device_data.sr_implementations_instances.contains(SR::Type::FSR));
 #if ENABLE_FSR4
