@@ -1,6 +1,9 @@
 #define GAME_FINALFANTASYXV 1
+
 #define ENABLE_DRAW_STATE_VERTEX_BUFFER_CACHE 1
 #define ENABLE_POST_DRAW_DISPATCH_CALLBACK 1
+#define ENABLE_DRAW_DISPATCH_DATA_CACHE 1
+#define ENABLE_GAME_PIPELINE_STATE_READBACK 1
 
 #ifdef _DEBUG
 #define ALLOW_SHADERS_DUMPING 1
@@ -36,6 +39,7 @@ namespace
    ShaderHashesList shader_hashes_lens_distortion;
    ShaderHashesList shader_hashes_scene_tonemap;
    ShaderHashesList shader_hashes_OutputScaled;
+   ShaderHashesList shader_hashes_screen_blur;
    ShaderHashesList shader_hashes_bloom_highpass;
    ShaderHashesList shader_hashes_bloom_glare_vignette;
    ShaderHashesList shader_hashes_rain;
@@ -596,9 +600,49 @@ public:
       }
    }
 
+   void DispatchScreenBlur(ID3D11Device* native_device, ID3D11DeviceContext* native_device_context, CommandListData& cmd_list_data, DeviceData& device_data, GameDeviceDataFFXV& game_device_data, bool horizontal)
+   {
+      // Outputs per thread group along the blur axis. The game's layout has a border for the gaussian taps
+      // (horizontal: 128 threads, 16 border, vertical: 64 threads, 8 border), ours has none
+      constexpr double horizontal_original_outputs_per_group = 96.0;
+      constexpr double vertical_original_outputs_per_group = 48.0;
+      constexpr double outputs_per_group = 64.0;
+
+      float2 scale = {1.f, 1.f};
+      auto& tracking = game_device_data.upscale_tracking;
+      if (tracking.post_taa_upscale_active)
+      {
+         scale = {device_data.output_resolution.x / device_data.render_resolution.x, device_data.output_resolution.y / device_data.render_resolution.y};
+         ReplaceUpscaledInputs(native_device_context, tracking, true, 1);
+         ReplaceUpscaledUAVOutput(native_device, native_device_context, tracking, device_data.render_resolution, device_data.output_resolution,
+            [&](ID3D11Texture2D* source, DXGI_FORMAT format, ID3D11RenderTargetView* target)
+            {
+               return InitializeUpscaledTarget(native_device, native_device_context, device_data, source, format, target);
+            });
+      }
+
+      const uint3 groups = last_draw_dispatch_data.dispatch_count;
+      auto ScaledGroups = [](uint32_t count, double factor) { return static_cast<UINT>(std::ceil(count * factor - 1e-4)); };
+      const UINT group_count_x = horizontal ? ScaledGroups(groups.x, horizontal_original_outputs_per_group * scale.x / outputs_per_group) : ScaledGroups(groups.x, scale.x);
+      const UINT group_count_y = horizontal ? ScaledGroups(groups.y, scale.y) : ScaledGroups(groups.y, vertical_original_outputs_per_group * scale.y / outputs_per_group);
+
+      SetLumaConstantBuffers(native_device_context, cmd_list_data, device_data, reshade::api::shader_stage::compute, LumaConstantBufferType::LumaSettings);
+      SetLumaConstantBuffers(native_device_context, cmd_list_data, device_data, reshade::api::shader_stage::compute, LumaConstantBufferType::LumaData);
+      Trace::UpdateDraw(cmd_list_data, device_data, native_device_context);
+      native_device_context->Dispatch(group_count_x, group_count_y, 1);
+   }
+
    DrawOrDispatchOverrideType OnDrawOrDispatch(ID3D11Device* native_device, ID3D11DeviceContext* native_device_context, CommandListData& cmd_list_data, DeviceData& device_data, reshade::api::shader_stage stages, const ShaderHashesList<OneShaderPerPipeline>& original_shader_hashes, bool is_custom_pass, bool& updated_cbuffers, std::function<void()>* original_draw_dispatch_func) override
    {
       auto& game_device_data = GetGameDeviceData(device_data);
+
+      // Only with our replacement bound, the game shader has a different thread layout
+      if (is_custom_pass && stages == reshade::api::shader_stage::compute && original_shader_hashes.Contains(shader_hashes_screen_blur))
+      {
+         DispatchScreenBlur(native_device, native_device_context, cmd_list_data, device_data, game_device_data, original_shader_hashes.compute_shaders[0] == 0x4F4B7B50u);
+         updated_cbuffers = true;
+         return DrawOrDispatchOverrideType::Replaced;
+      }
 
 #if ENABLE_FAST_NOISE_TEXTURES
       // The replaced AO pass (Shaders/Final Fantasy XV/AO_SAO_GTVBAO_0xC86DCBDA) reads the FAST noise for its sampling pattern, t0-t5 are the game's bindings and t6 is free in the original signature
@@ -1206,6 +1250,10 @@ BOOL APIENTRY DllMain(HMODULE hModule, DWORD ul_reason_for_call, LPVOID lpReserv
       shader_hashes_tonemap.pixel_shaders.emplace(std::stoul("DD4C5B74", nullptr, 16)); // Post-processing / swapchain
 
       shader_hashes_OutputScaled.pixel_shaders.emplace(std::stoul("1B6C8C68", nullptr, 16));
+      // Blurs a rectangle of the tonemapped scene (2x downsample + horizontal gaussian, then the next level) for a UI backdrop,
+      // composited by 0xCE19992A, and copied back into the scene by Output Scaled through a stencil mask
+      shader_hashes_screen_blur.compute_shaders.emplace(0x4F4B7B50u);
+      shader_hashes_screen_blur.compute_shaders.emplace(0xDF1C6BD2u);
       shader_hashes_TAA.pixel_shaders.emplace(std::stoul("0DF0A97D", nullptr, 16));
       shader_hashes_dof_coc.pixel_shaders.emplace(std::stoul("F6FD9C57", nullptr, 16));
       shader_hashes_dof_composite.pixel_shaders.emplace(std::stoul("982A3A44", nullptr, 16));

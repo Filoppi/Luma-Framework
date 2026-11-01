@@ -22,6 +22,16 @@ struct UpscaledResource
    bool in_use_this_frame = false;
 };
 
+// Output-resolution stencil buffer standing in for a render-sized one, for passes that mask with stencil only.
+struct UpscaledStencil
+{
+   ComPtr<ID3D11Texture2D> texture;
+   ComPtr<ID3D11DepthStencilView> dsv;
+   D3D11_TEXTURE2D_DESC original_desc{};
+   D3D11_DEPTH_STENCIL_VIEW_DESC view_desc{};
+   bool cleared_this_frame = false;
+};
+
 // Persistent output-resolution allocations + per-frame source links.
 // Pool entries persist across frames; source links are cleared every frame.
 // Keys are ID3D11Resource* pointers for stable identity across interface
@@ -30,6 +40,7 @@ struct UpscaleTrackingState
 {
    std::deque<UpscaledResource> pool;
    std::unordered_map<uintptr_t, uint32_t> frame_links; // source resource ptr -> pool index (frame-local)
+   std::unordered_map<uintptr_t, UpscaledStencil> stencil_pool; // source DSV resource ptr -> output-resolution stencil
    bool post_taa_upscale_active = false;                // gate: true until the scene reaches an output-sized target
    UINT pool_output_width = 0;
    UINT pool_output_height = 0;
@@ -43,6 +54,8 @@ struct UpscaleTrackingState
       frame_links.clear();
       for (auto& entry : pool)
          entry.in_use_this_frame = false;
+      for (auto& [key, stencil] : stencil_pool)
+         stencil.cleared_this_frame = false;
       post_taa_upscale_active = false;
    }
 
@@ -50,6 +63,7 @@ struct UpscaleTrackingState
    {
       std::lock_guard<std::recursive_mutex> lock(mutex);
       pool.clear();
+      stencil_pool.clear();
       frame_links.clear();
       post_taa_upscale_active = false;
       pool_output_width = 0;
@@ -462,6 +476,66 @@ static bool OutputScaledWritesOutputResolution(
       desc.Height >= static_cast<UINT>(output_resolution.y);
 }
 
+static ID3D11DepthStencilView* AcquireUpscaledStencil(
+   ID3D11Device* device,
+   ID3D11DeviceContext* context,
+   UpscaleTrackingState& tracking,
+   ID3D11DepthStencilView* original_dsv,
+   UINT target_w,
+   UINT target_h)
+{
+   std::lock_guard<std::recursive_mutex> lock(tracking.mutex);
+   ComPtr<ID3D11Resource> resource;
+   ComPtr<ID3D11Texture2D> texture;
+   original_dsv->GetResource(resource.put());
+   if (!resource || FAILED(resource->QueryInterface(texture.put())))
+      return nullptr;
+   D3D11_TEXTURE2D_DESC desc{};
+   texture->GetDesc(&desc);
+   D3D11_DEPTH_STENCIL_VIEW_DESC view_desc{};
+   original_dsv->GetDesc(&view_desc);
+   if (view_desc.ViewDimension != D3D11_DSV_DIMENSION_TEXTURE2D || view_desc.Texture2D.MipSlice != 0 ||
+       desc.ArraySize != 1 || desc.SampleDesc.Count != 1 ||
+       (view_desc.Format != DXGI_FORMAT_D32_FLOAT_S8X24_UINT && view_desc.Format != DXGI_FORMAT_D24_UNORM_S8_UINT))
+      return nullptr;
+   view_desc.Flags = 0; // Never read only, the stencil is written by the passes using it
+
+   UpscaledStencil& entry = tracking.stencil_pool[reinterpret_cast<uintptr_t>(resource.get())];
+   if (entry.texture)
+   {
+      D3D11_TEXTURE2D_DESC existing{};
+      entry.texture->GetDesc(&existing);
+      if (existing.Width != target_w || existing.Height != target_h || existing.Format != desc.Format ||
+          entry.view_desc.Format != view_desc.Format)
+         entry = {};
+   }
+   if (!entry.texture)
+   {
+      D3D11_TEXTURE2D_DESC new_desc = desc;
+      new_desc.Width = target_w;
+      new_desc.Height = target_h;
+      new_desc.MipLevels = 1;
+      new_desc.Usage = D3D11_USAGE_DEFAULT;
+      new_desc.CPUAccessFlags = 0;
+      new_desc.BindFlags = D3D11_BIND_DEPTH_STENCIL;
+      new_desc.MiscFlags = 0;
+      if (FAILED(device->CreateTexture2D(&new_desc, nullptr, entry.texture.put())) ||
+          FAILED(device->CreateDepthStencilView(entry.texture.get(), &view_desc, entry.dsv.put())))
+      {
+         entry = {};
+         return nullptr;
+      }
+      entry.original_desc = desc;
+      entry.view_desc = view_desc;
+   }
+   if (!entry.cleared_this_frame)
+   {
+      context->ClearDepthStencilView(entry.dsv.get(), D3D11_CLEAR_DEPTH | D3D11_CLEAR_STENCIL, 1.f, 0);
+      entry.cleared_this_frame = true;
+   }
+   return entry.dsv.get();
+}
+
 // Replace bound RTVs in the upscaled post-process chain.
 // Linked effect targets are scaled proportionally, including rounded bloom levels.
 // Returns count of bound RTVs using upscaled replacements (including already-bound pool views).
@@ -617,7 +691,19 @@ static uint32_t ReplaceUpscaledOutputs(
       if (SUCCEEDED(resource->QueryInterface(texture.put())))
          texture->GetDesc(&desc);
       if (desc.Width != target_w || desc.Height != target_h || desc.SampleDesc.Count != 1 || desc.ArraySize != 1)
-         dsv.reset();
+      {
+         // Passes masking with stencil only (no depth test) need that stencil on the new grid, otherwise the
+         // test would silently turn off. Everything else keeps running without a DSV.
+         ComPtr<ID3D11DepthStencilState> depth_stencil_state;
+         context->OMGetDepthStencilState(depth_stencil_state.put(), nullptr);
+         D3D11_DEPTH_STENCIL_DESC depth_stencil_desc{};
+         if (depth_stencil_state)
+            depth_stencil_state->GetDesc(&depth_stencil_desc);
+         ID3D11DepthStencilView* upscaled_stencil = depth_stencil_state && depth_stencil_desc.StencilEnable && !depth_stencil_desc.DepthEnable
+            ? AcquireUpscaledStencil(device, context, tracking, dsv.get(), target_w, target_h)
+            : nullptr;
+         dsv = upscaled_stencil;
+      }
    }
    // Native-content fallback handles targets promoted later than their clear.
    // Active-chain full clears are linked and mirrored immediately, so no clear
@@ -642,6 +728,79 @@ static uint32_t ReplaceUpscaledOutputs(
    rtv_source_resolution = {float(first.desc.Width), float(first.desc.Height)};
    rtv_target_resolution = target_resolution;
    return replacements;
+}
+
+static void ReplaceUpscaledUAVOutput(
+   ID3D11Device* device,
+   ID3D11DeviceContext* context,
+   UpscaleTrackingState& tracking,
+   const float2& render_resolution,
+   const float2& output_resolution,
+   const std::function<bool(ID3D11Texture2D*, DXGI_FORMAT, ID3D11RenderTargetView*)>& initialize_from_native)
+{
+   if (render_resolution.x <= 0.f || render_resolution.y <= 0.f || output_resolution.x <= 0.f || output_resolution.y <= 0.f)
+      return;
+   ComPtr<ID3D11UnorderedAccessView> uav;
+   context->CSGetUnorderedAccessViews(0, 1, uav.put());
+   if (!uav)
+      return;
+   D3D11_UNORDERED_ACCESS_VIEW_DESC view_desc{};
+   uav->GetDesc(&view_desc);
+   ComPtr<ID3D11Resource> resource;
+   ComPtr<ID3D11Texture2D> texture;
+   uav->GetResource(resource.put());
+   if (!resource || FAILED(resource->QueryInterface(texture.put())))
+      return;
+   D3D11_TEXTURE2D_DESC desc{};
+   texture->GetDesc(&desc);
+   if (view_desc.ViewDimension != D3D11_UAV_DIMENSION_TEXTURE2D || view_desc.Texture2D.MipSlice != 0 ||
+       desc.ArraySize != 1 || desc.SampleDesc.Count != 1)
+      return;
+   if (desc.Width >= static_cast<UINT>(output_resolution.x) || desc.Height >= static_cast<UINT>(output_resolution.y))
+      return;
+
+   std::lock_guard<std::recursive_mutex> lock(tracking.mutex);
+   const uintptr_t source_key = reinterpret_cast<uintptr_t>(resource.get());
+   const DXGI_FORMAT view_format = view_desc.Format != DXGI_FORMAT_UNKNOWN && view_desc.Format != desc.Format ? view_desc.Format : DXGI_FORMAT_UNKNOWN;
+   UpscaledResource* entry = GetLinkedUpscaled(tracking, source_key);
+   if (!entry)
+   {
+      const double render_ar = double(render_resolution.x) / render_resolution.y;
+      const double target_ar = double(desc.Width) / desc.Height;
+      if (std::abs(target_ar / render_ar - 1.0) > kAspectRatioEpsilon)
+         return;
+   }
+   const UINT target_w = (std::min)(static_cast<UINT>(std::round(desc.Width * double(output_resolution.x) / render_resolution.x)), static_cast<UINT>(output_resolution.x));
+   const UINT target_h = (std::min)(static_cast<UINT>(std::round(desc.Height * double(output_resolution.y) / render_resolution.y)), static_cast<UINT>(output_resolution.y));
+   if (target_w == 0 || target_h == 0)
+      return;
+   if (entry && entry->texture && entry->uav)
+   {
+      D3D11_TEXTURE2D_DESC entry_desc;
+      entry->texture->GetDesc(&entry_desc);
+      if (entry_desc.Width != target_w || entry_desc.Height != target_h || entry->view_format != view_format)
+         entry = nullptr;
+   }
+   else
+      entry = nullptr;
+   if (!entry)
+   {
+      // Not written by an earlier draw of the chain (or its link doesn't fit): start from the native contents,
+      // given a dispatch usually only writes part of its target
+      entry = AcquireUpscaledFromPool(device, context, tracking, desc, float2{float(target_w), float(target_h)}, true, view_format);
+      if (!entry)
+         return;
+      const uint32_t pool_index = FindPoolIndexByPtr(tracking, entry);
+      if (pool_index == kInvalidPoolIndex || !entry->uav ||
+          !initialize_from_native(texture.get(), view_desc.Format, entry->rtv.get()))
+      {
+         entry->in_use_this_frame = false;
+         return;
+      }
+      tracking.frame_links[source_key] = pool_index;
+   }
+   ID3D11UnorderedAccessView* replacement = entry->uav.get();
+   context->CSSetUnorderedAccessViews(0, 1, &replacement, nullptr);
 }
 
 // Scale viewport/scissor edges with the bound target's replacement dimensions.

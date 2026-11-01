@@ -1,6 +1,12 @@
 #include "neutwo.hlsl"
 #include "Common.hlsl"
 #include "../../Includes/ColorGradingLUT.hlsl"
+#include "../../Includes/CInfinityRolloff.hlsl"
+
+// 0 - Neutwo, 1 - C-infinity rolloff
+#ifndef FFXV_ROLLOFF_TYPE
+#define FFXV_ROLLOFF_TYPE 1
+#endif
 
 // Internal helper for log safety
 float SafeLog(float x) { return log(max(x, 1e-6)); }
@@ -239,7 +245,12 @@ float3 FFXV_TonemapExtended(float3 untonemapped,
 
 float3 ApplyTonemapAndGrading(float3 color, bool title)
 {
+#if FFXV_ROLLOFF_TYPE == 1
+    // Identity below the anchor, C-infinity shoulder asymptotic to peak above it
+    float3 tonemapped_color = Tonemap::CInfinityRollOff::Apply(color, PEAK_NITS/GAME_NITS);
+#else
     float3 tonemapped_color = renodx::tonemap::neutwo::PerChannel(color, PEAK_NITS/GAME_NITS);
+#endif
     // tonemapped_color = max(0, tonemapped_color);
     return tonemapped_color;
 }
