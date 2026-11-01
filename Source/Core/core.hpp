@@ -2891,7 +2891,7 @@ namespace
 #endif
 
       swapchain_data.vanilla_was_linear_space = last_swapchain_linear_space || force_vanilla_swapchain_linear;
-#if !GAME_MAFIA_III && !GAME_DISHONORED_2 // We don't care for this case, it's dev only, if we didn't do this, when we unload shaders the game would be washed out (the UI still is)
+#if !GAME_MAFIA_III && !GAME_DISHONORED_2 && !GAME_METAL_GEAR_SOLID_V // We don't care for this case, it's dev only, if we didn't do this, when we unload shaders the game would be washed out (the UI still is)
       // We expect this define to be set to linear if the swapchain was already linear in Vanilla SDR (there might be code that makes such assumption)
       ASSERT_ONCE(!swapchain_data.vanilla_was_linear_space || (GetShaderDefineCompiledNumericalValue(POST_PROCESS_SPACE_TYPE_HASH) == 1));
 #endif
