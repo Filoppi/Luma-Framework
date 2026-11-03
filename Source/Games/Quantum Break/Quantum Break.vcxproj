@@ -326,6 +326,22 @@
   <ItemGroup>
     <ClCompile Include="..\..\Core\unity_build.cpp" />
     <ClCompile Include="main.cpp" />
+    <ClCompile Include="Fixes\MouseFix.c">
+      <PrecompiledHeader>NotUsing</PrecompiledHeader>
+      <TreatWarningAsError>false</TreatWarningAsError>
+    </ClCompile>
+    <ClCompile Include="Fixes\MouseFix_Settings.c">
+      <PrecompiledHeader>NotUsing</PrecompiledHeader>
+      <TreatWarningAsError>false</TreatWarningAsError>
+    </ClCompile>
+    <ClCompile Include="Fixes\ParticleFix.c">
+      <PrecompiledHeader>NotUsing</PrecompiledHeader>
+      <TreatWarningAsError>false</TreatWarningAsError>
+    </ClCompile>
+    <ClCompile Include="Fixes\CutsceneFix.cpp">
+      <PrecompiledHeader>NotUsing</PrecompiledHeader>
+      <TreatWarningAsError>false</TreatWarningAsError>
+    </ClCompile>
     <ClCompile Include="NativeHooks.cpp">
       <ExcludedFromBuild Condition="'$(UseLumaNGX)' != 'true' and '$(UseLumaFSR)' != 'true'">true</ExcludedFromBuild>
     </ClCompile>
@@ -334,11 +350,13 @@
       <ExcludedFromBuild>true</ExcludedFromBuild>
     </ClCompile>
     <ClCompile Include="..\..\External\reshade\deps\minhook\src\buffer.c;..\..\External\reshade\deps\minhook\src\hook.c;..\..\External\reshade\deps\minhook\src\trampoline.c;..\..\External\reshade\deps\minhook\src\hde\hde64.c">
-      <ExcludedFromBuild Condition="'$(UseLumaNGX)' != 'true' and '$(UseLumaFSR)' != 'true'">true</ExcludedFromBuild>
       <CompileAs>CompileAsC</CompileAs>
       <TreatWarningAsError>false</TreatWarningAsError>
       <PrecompiledHeader>NotUsing</PrecompiledHeader>
     </ClCompile>
+    <ClInclude Include="Fixes\Integration.hpp" />
+    <ClInclude Include="Fixes\MouseFix_Settings.h" />
+    <ClInclude Include="Fixes\ParticleFix.h" />
     <ClInclude Include="NativeInputs.hpp" />
     <ClInclude Include="NativeHooks.hpp" />
     <ClInclude Include="shared.h" />
