@@ -37,8 +37,8 @@ float3 ExpandGamut(float3 c, float amount)
   float skin = 1.0 - 0.75 * saturate(1.0 - abs(dh) / (25.0 * PI_ / 180.0));
 
   float t = saturate(C / max(c709, 1e-6));
-  float w = amount * smoothstep(0.1, 0.7, t) * skin;
-  float Cn = min(C * lerp(1.0, c2020 / max(c709, 1e-6), w), c2020);
+  float w = amount * smoothstep(0.5, 0.95, t) * skin;
+  float Cn = min(C * (1.0 + 0.25 * w), c2020);
 
   float3 out2020 = Oklab::oklch_to_linear_bt2020(float3(L, Cn, h));
   return BT2020_To_BT709(max(out2020, 0.0));
@@ -140,6 +140,7 @@ float4 main(
   float3 byLum = Y2 > 0.0 ? lin2 * (pow(Y2, 1.1) / Y2) : lin2;
   float3 lin = lerp(perChannel, byLum, LumaSettings.GameSettings.GammaCorrectionByLuminance);
   lin += pow(b, 2.2);
+  float3 hueRef = lin;
   lin = ExpandGamut(lin, LumaSettings.GameSettings.GamutExpansion);
   float peak = LumaSettings.PeakWhiteNits / LumaSettings.GamePaperWhiteNits;
   if (LumaSettings.GameSettings.DisplayMapping == 0u)
@@ -163,6 +164,8 @@ float4 main(
   float Yl = GetLuminance(lin);
   if (m > peak && m > Yl)
     lin = Yl + (lin - Yl) * saturate((peak - Yl) / (m - Yl));
+  if (LumaSettings.GameSettings.GamutExpansion > 0.0 && LumaSettings.GameSettings.GamutExpansionHueLock > 0.0)
+    lin = RestoreHueAndChrominance(lin, hueRef, LumaSettings.GameSettings.GamutExpansionHueLock, 0.0, 0.0, FLT_MAX, 0.0, CS_DEFAULT);
   lin = ClampToBT2020(lin);
 #if UI_DRAW_TYPE == 2 // The UI draws on top in gamma space; display composition scales everything by UI/game paper white, so pre-divide the scene
   lin *= LumaSettings.GamePaperWhiteNits / LumaSettings.UIPaperWhiteNits;

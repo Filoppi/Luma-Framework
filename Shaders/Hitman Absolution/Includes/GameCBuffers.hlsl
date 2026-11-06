@@ -13,7 +13,7 @@ namespace CB
 	struct LumaGameSettings
 	{
 		float HighlightSaturation;
-		float VanillaHueShift;
+		float GamutExpansionHueLock;
 		float BloomStrength;
 		uint LumaBloom;
 		float LumaBloomStrength;

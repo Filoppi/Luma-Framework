@@ -11,6 +11,7 @@
 // we need these defines to be upper case and space free.
 #define GAME_TEMPLATE 1
 #define ENABLE_BLOOM 1 // core registers the Bloom VS/Prefilter/Downsample/Upsample passes used by DrawBloom (Luma Bloom setting)
+#define ENABLE_SMAA 1 // core registers the SMAA passes used by DrawSMAA (AntiAliasingMode setting, replaces the game's FXAA)
 
 //// Define all the global "core" defines before including its files: ////
 
@@ -65,6 +66,176 @@ static constexpr uint32_t kLumaBloomSlot = 4;
 static constexpr uint32_t kTonemapHash = 0x46C50FC2;
 static constexpr float g_bloom_sigmas[] = {1.5f, 2.f, 2.f, 2.f, 1.f, 0.5f};
 constexpr uint32_t TONEMAP_TYPE_HASH = char_ptr_crc32("TONEMAP_TYPE");
+
+// Setting "TonemappedResolve": replaces the hardware MSAA resolve of the 4x fp16 scene targets with a tonemapped (weighted) resolve.
+static uint32_t g_tonemapped_resolve = 0u; // Off: shader Load of HMA's MSAA targets reads 2x zoomed (likely non-zero SampleDesc.Quality), see HANDOFF step 5
+
+// Setting "AntiAliasingMode": 0 = vanilla FXAA, 1 = Luma SMAA (replaces the game's FXAA pixel shader draw).
+static uint32_t g_anti_aliasing_mode = 1u;
+static constexpr uint32_t kFXAAHash = 0x1B00C911;
+
+static bool HMA_OnResolveTextureRegion(
+   reshade::api::command_list* cmd_list,
+   reshade::api::resource source,
+   uint32_t source_subresource,
+   const reshade::api::subresource_box* source_box,
+   reshade::api::resource dest,
+   uint32_t dest_subresource,
+   uint32_t dest_x,
+   uint32_t dest_y,
+   uint32_t dest_z,
+   reshade::api::format format)
+{
+   if (g_tonemapped_resolve == 0u || source.handle == 0 || dest.handle == 0)
+      return false;
+   if (source_box != nullptr || source_subresource != 0 || dest_subresource != 0 || dest_x != 0 || dest_y != 0 || dest_z != 0)
+      return false;
+
+   ComPtr<ID3D11Texture2D> src_tex;
+   ComPtr<ID3D11Texture2D> dst_tex;
+   if (FAILED(reinterpret_cast<ID3D11Resource*>(source.handle)->QueryInterface(src_tex.put())))
+      return false;
+   if (FAILED(reinterpret_cast<ID3D11Resource*>(dest.handle)->QueryInterface(dst_tex.put())))
+      return false;
+
+   D3D11_TEXTURE2D_DESC src_desc = {};
+   D3D11_TEXTURE2D_DESC dst_desc = {};
+   src_tex->GetDesc(&src_desc);
+   dst_tex->GetDesc(&dst_desc);
+   if (src_desc.SampleDesc.Count != 4 || dst_desc.SampleDesc.Count != 1)
+      return false;
+   if (src_desc.Format != DXGI_FORMAT_R16G16B16A16_FLOAT || dst_desc.Format != DXGI_FORMAT_R16G16B16A16_FLOAT)
+      return false;
+   if (src_desc.Width != dst_desc.Width || src_desc.Height != dst_desc.Height)
+      return false;
+   if (!(src_desc.BindFlags & D3D11_BIND_SHADER_RESOURCE) || !(dst_desc.BindFlags & D3D11_BIND_RENDER_TARGET))
+      return false;
+
+   if (cmd_list == nullptr)
+      return false;
+   auto* device = cmd_list->get_device();
+   if (device == nullptr)
+      return false;
+   auto* device_data_ptr = device->get_private_data<DeviceData>();
+   if (device_data_ptr == nullptr)
+      return false;
+   auto& device_data = *device_data_ptr;
+
+   ID3D11Device* native_device = reinterpret_cast<ID3D11Device*>(device->get_native());
+   if (native_device == nullptr)
+      return false;
+
+   ComPtr<ID3D11DeviceContext> native_device_context;
+   if (FAILED(reinterpret_cast<ID3D11DeviceChild*>(cmd_list->get_native())->QueryInterface(native_device_context.put())))
+      return false;
+
+   auto vs_it = device_data.native_vertex_shaders.find(CompileTimeStringHash("Copy VS"));
+   auto ps_it = device_data.native_pixel_shaders.find(CompileTimeStringHash("HMA Tonemapped Resolve"));
+   if (vs_it == device_data.native_vertex_shaders.end() || !vs_it->second.get()
+      || ps_it == device_data.native_pixel_shaders.end() || !ps_it->second.get())
+      return false;
+
+   ComPtr<ID3D11ShaderResourceView> srv_ms;
+   if (FAILED(native_device->CreateShaderResourceView(src_tex.get(), nullptr, srv_ms.put())))
+      return false;
+   ComPtr<ID3D11RenderTargetView> rtv;
+   if (FAILED(native_device->CreateRenderTargetView(dst_tex.get(), nullptr, rtv.put())))
+      return false;
+
+   DrawStateStack<DrawStateStackType::FullGraphics> draw_state_stack;
+   draw_state_stack.Cache(native_device_context.get(), device_data.uav_max_count);
+
+   // Full-screen draw into the (non-MS) destination, reading the MS source with Load()
+   DrawCustomPixelShader(native_device_context.get(), device_data.default_depth_stencil_state.get(), device_data.default_blend_state.get(), nullptr,
+      vs_it->second.get(), ps_it->second.get(), srv_ms.get(), rtv.get(), dst_desc.Width, dst_desc.Height, false, "HMA Tonemapped Resolve");
+
+   draw_state_stack.Restore(native_device_context.get());
+   return true;
+}
+
+// Replaces the game's FXAA draw (the scene in SRV0, output in RTV0) with Luma SMAA. Returns false on any failure, so the original draw runs.
+static bool HMA_DrawSMAAForFXAA(ID3D11Device* native_device, ID3D11DeviceContext* native_device_context, DeviceData& device_data)
+{
+   // SRV0 is the scene in linear HDR.
+   ComPtr<ID3D11ShaderResourceView> srv_scene;
+   native_device_context->PSGetShaderResources(0, 1, srv_scene.put());
+   if (!srv_scene)
+      return false;
+
+   // RTV0 is the FXAA output.
+   ComPtr<ID3D11RenderTargetView> rtv_output;
+   native_device_context->OMGetRenderTargets(1, rtv_output.put(), nullptr);
+   if (!rtv_output)
+      return false;
+
+   auto cs_it = device_data.native_compute_shaders.find(CompileTimeStringHash("SMAA Linear To sRGB CS"));
+   if (cs_it == device_data.native_compute_shaders.end() || !cs_it->second.get())
+      return false;
+
+   ComPtr<ID3D11Resource> scene_resource;
+   srv_scene->GetResource(scene_resource.put());
+   if (!scene_resource)
+      return false;
+   ComPtr<ID3D11Texture2D> scene_tex;
+   if (FAILED(scene_resource->QueryInterface(scene_tex.put())))
+      return false;
+   D3D11_TEXTURE2D_DESC tex_desc = {};
+   scene_tex->GetDesc(&tex_desc);
+   if (tex_desc.Width == 0 || tex_desc.Height == 0 || tex_desc.SampleDesc.Count != 1)
+      return false;
+
+   // Create all resources before binding anything, so early failures leave the state untouched.
+   tex_desc.BindFlags = D3D11_BIND_SHADER_RESOURCE | D3D11_BIND_UNORDERED_ACCESS;
+   ComPtr<ID3D11Texture2D> tex_copy;
+   ComPtr<ID3D11Texture2D> tex_gamma;
+   if (FAILED(native_device->CreateTexture2D(&tex_desc, nullptr, tex_copy.put())) || FAILED(native_device->CreateTexture2D(&tex_desc, nullptr, tex_gamma.put())))
+      return false;
+   ComPtr<ID3D11UnorderedAccessView> uav_copy;
+   ComPtr<ID3D11UnorderedAccessView> uav_gamma;
+   ComPtr<ID3D11ShaderResourceView> srv_copy;
+   ComPtr<ID3D11ShaderResourceView> srv_gamma;
+   if (FAILED(native_device->CreateUnorderedAccessView(tex_copy.get(), nullptr, uav_copy.put()))
+      || FAILED(native_device->CreateUnorderedAccessView(tex_gamma.get(), nullptr, uav_gamma.put()))
+      || FAILED(native_device->CreateShaderResourceView(tex_copy.get(), nullptr, srv_copy.put()))
+      || FAILED(native_device->CreateShaderResourceView(tex_gamma.get(), nullptr, srv_gamma.put())))
+      return false;
+
+   // SMAA metrics (1/size, size) for DrawSMAA's b1 cbuffer.
+   const float smaa_metrics[4] = { 1.f / (float)tex_desc.Width, 1.f / (float)tex_desc.Height, (float)tex_desc.Width, (float)tex_desc.Height };
+   D3D11_BUFFER_DESC cb_desc = {};
+   cb_desc.ByteWidth = sizeof(smaa_metrics);
+   cb_desc.Usage = D3D11_USAGE_IMMUTABLE;
+   cb_desc.BindFlags = D3D11_BIND_CONSTANT_BUFFER;
+   D3D11_SUBRESOURCE_DATA cb_data = {};
+   cb_data.pSysMem = smaa_metrics;
+   ComPtr<ID3D11Buffer> cb_smaa_metrics;
+   if (FAILED(native_device->CreateBuffer(&cb_desc, &cb_data, cb_smaa_metrics.put())))
+      return false;
+
+   DrawStateStack<DrawStateStackType::FullGraphics> draw_state_stack;
+   draw_state_stack.Cache(native_device_context, device_data.uav_max_count);
+
+   // Linear to sRGB pass: reads the scene, writes a linear copy (uav0) and an sRGB copy (uav1).
+   ID3D11ShaderResourceView* srv_null = nullptr;
+   native_device_context->PSSetShaderResources(0, 1, &srv_null); // The scene can't stay bound as SRV while it's read by the CS.
+   ID3D11ShaderResourceView* cs_srv = srv_scene.get();
+   native_device_context->CSSetShaderResources(0, 1, &cs_srv);
+   const std::array<ID3D11UnorderedAccessView*, 2> cs_uavs = { uav_copy.get(), uav_gamma.get() };
+   native_device_context->CSSetUnorderedAccessViews(0, cs_uavs.size(), cs_uavs.data(), nullptr);
+   native_device_context->CSSetShader(cs_it->second.get(), nullptr, 0);
+   native_device_context->Dispatch((tex_desc.Width + 8 - 1) / 8, (tex_desc.Height + 8 - 1) / 8, 1);
+
+   // Unbind UAVs and SRVs.
+   const std::array<ID3D11UnorderedAccessView*, 2> uav_nulls = {};
+   native_device_context->CSSetUnorderedAccessViews(0, uav_nulls.size(), uav_nulls.data(), nullptr);
+   native_device_context->CSSetShaderResources(0, 1, &srv_null);
+   native_device_context->CSSetShader(nullptr, nullptr, 0);
+
+   DrawSMAA(native_device, native_device_context, device_data, rtv_output.get(), srv_copy.get(), srv_gamma.get(), nullptr, cb_smaa_metrics.get());
+
+   draw_state_stack.Restore(native_device_context);
+   return true;
+}
 
 struct TemplateGameDeviceData final : public GameDeviceData
 {
@@ -142,7 +313,7 @@ public:
       //
       // Set "device_data.cb_luma_global_settings_dirty" to true if you changed values and need a re-upload to the GPU before OnPresent() (i.e. during OnDrawOrDispatch()).
       default_luma_global_game_settings.HighlightSaturation = cb_luma_global_settings.GameSettings.HighlightSaturation = 1.f;
-      default_luma_global_game_settings.VanillaHueShift = cb_luma_global_settings.GameSettings.VanillaHueShift = 0.5f;
+      default_luma_global_game_settings.GamutExpansionHueLock = cb_luma_global_settings.GameSettings.GamutExpansionHueLock = 1.0f;
       default_luma_global_game_settings.BloomStrength = cb_luma_global_settings.GameSettings.BloomStrength = 0.75f;
       default_luma_global_game_settings.LumaBloom = cb_luma_global_settings.GameSettings.LumaBloom = 0u;
       default_luma_global_game_settings.LumaBloomStrength = cb_luma_global_settings.GameSettings.LumaBloomStrength = 1.f;
@@ -170,6 +341,10 @@ public:
       default_luma_global_game_settings.HighlightPurity = cb_luma_global_settings.GameSettings.HighlightPurity = 1.f;
       default_luma_global_game_settings.EmissiveHDRBoost = cb_luma_global_settings.GameSettings.EmissiveHDRBoost = 0.5f;
       default_luma_global_game_settings.SunShaftHDRBoost = cb_luma_global_settings.GameSettings.SunShaftHDRBoost = 1.f;
+
+      native_shaders_definitions.emplace(CompileTimeStringHash("HMA Tonemapped Resolve"), ShaderDefinition{ "Luma_HMA_TonemappedResolve", reshade::api::pipeline_subobject_type::pixel_shader });
+      native_shaders_definitions.emplace(CompileTimeStringHash("SMAA Linear To sRGB CS"), ShaderDefinition{ "Luma_SMAA_LinearTosRGB_CS", reshade::api::pipeline_subobject_type::compute_shader });
+      reshade::register_event<reshade::addon_event::resolve_texture_region>(HMA_OnResolveTextureRegion);
    }
 
    // This needs to be overridden with your own "GameDeviceData" sub-class (destruction is automatically handled)
@@ -200,6 +375,13 @@ public:
          ComPtr<ID3D11ShaderResourceView> srv_scene;
          native_device_context->PSGetShaderResources(1, 1, srv_scene.put());
          BindLumaBloom(native_device, native_device_context, device_data, srv_scene.get());
+      }
+
+      // FXAA replacement: the game's FXAA pixel shader draw becomes Luma SMAA when "AntiAliasingMode" is 1. On failure the original draw runs.
+      if (g_anti_aliasing_mode == 1u && native_device_context->GetType() == D3D11_DEVICE_CONTEXT_IMMEDIATE && original_shader_hashes.Contains(kFXAAHash, reshade::api::shader_stage::pixel))
+      {
+         if (HMA_DrawSMAAForFXAA(native_device, native_device_context, device_data))
+            return DrawOrDispatchOverrideType::Skip;
       }
 
       return DrawOrDispatchOverrideType::None; // Don't cancel the original draw call
@@ -238,7 +420,7 @@ public:
 
       // ReShade.ini is ready here, so load its values.
       reshade::get_config_value(runtime, NAME, "HighlightSaturation", cb_luma_global_settings.GameSettings.HighlightSaturation);
-      reshade::get_config_value(runtime, NAME, "VanillaHueShift", cb_luma_global_settings.GameSettings.VanillaHueShift);
+      reshade::get_config_value(runtime, NAME, "GamutExpansionHueLock", cb_luma_global_settings.GameSettings.GamutExpansionHueLock);
       reshade::get_config_value(runtime, NAME, "BloomStrength", cb_luma_global_settings.GameSettings.BloomStrength);
       reshade::get_config_value(runtime, NAME, "LumaBloom", cb_luma_global_settings.GameSettings.LumaBloom);
       reshade::get_config_value(runtime, NAME, "LumaBloomStrength", cb_luma_global_settings.GameSettings.LumaBloomStrength);
@@ -266,6 +448,8 @@ public:
       reshade::get_config_value(runtime, NAME, "HighlightPurity", cb_luma_global_settings.GameSettings.HighlightPurity);
       reshade::get_config_value(runtime, NAME, "EmissiveHDRBoost", cb_luma_global_settings.GameSettings.EmissiveHDRBoost);
       reshade::get_config_value(runtime, NAME, "SunShaftHDRBoost", cb_luma_global_settings.GameSettings.SunShaftHDRBoost);
+      reshade::get_config_value(runtime, NAME, "TonemappedResolve", g_tonemapped_resolve);
+      reshade::get_config_value(runtime, NAME, "AntiAliasingMode", g_anti_aliasing_mode);
    }
 
    void DrawImGuiSettings(DeviceData& device_data) override
@@ -408,6 +592,12 @@ public:
          ImGui::SetTooltip("Expands already saturated colors beyond BT.709 into wide gamut, keeping hue and brightness. Neutrals and skin tones are protected. 0 = vanilla");
       DrawResetButton(cb_luma_global_settings.GameSettings.GamutExpansion, default_luma_global_game_settings.GamutExpansion, "GamutExpansion", runtime);
 
+      if (ImGui::SliderFloat("Gamut Expansion Hue Lock", &cb_luma_global_settings.GameSettings.GamutExpansionHueLock, 0.f, 1.f, "%.3f"))
+         reshade::set_config_value(runtime, NAME, "GamutExpansionHueLock", cb_luma_global_settings.GameSettings.GamutExpansionHueLock);
+      if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
+         ImGui::SetTooltip("Keeps the game's original hues when expanding the gamut (1 = fully locked)");
+      DrawResetButton(cb_luma_global_settings.GameSettings.GamutExpansionHueLock, default_luma_global_game_settings.GamutExpansionHueLock, "GamutExpansionHueLock", runtime);
+
       int display_mapping = (int)cb_luma_global_settings.GameSettings.DisplayMapping;
       if (ImGui::Combo("Display Mapping", &display_mapping, "DICE (per channel)\0Reinhard Piecewise\0"))
       {
@@ -432,6 +622,24 @@ public:
             ImGui::SetTooltip("Saturation of compressed highlights taken from a per-channel pass. 0 = pure luminance mapping (keeps saturation, may look neon), 1 = natural highlight desaturation");
          DrawResetButton(cb_luma_global_settings.GameSettings.HighlightPurity, default_luma_global_game_settings.HighlightPurity, "HighlightPurity", runtime);
       }
+
+      bool tonemapped_resolve = g_tonemapped_resolve != 0u;
+      if (ImGui::Checkbox("Tonemapped MSAA Resolve", &tonemapped_resolve))
+      {
+         g_tonemapped_resolve = tonemapped_resolve ? 1u : 0u;
+         reshade::set_config_value(runtime, NAME, "TonemappedResolve", g_tonemapped_resolve);
+      }
+      if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
+         ImGui::SetTooltip("Resolves the 4x MSAA HDR scene with a tonemapped weighted average instead of the hardware resolve. 0 = native resolve");
+
+      int anti_aliasing_mode = (int)g_anti_aliasing_mode;
+      if (ImGui::Combo("Anti Aliasing", &anti_aliasing_mode, "FXAA (vanilla)\0SMAA\0"))
+      {
+         g_anti_aliasing_mode = (uint32_t)anti_aliasing_mode;
+         reshade::set_config_value(runtime, NAME, "AntiAliasingMode", g_anti_aliasing_mode);
+      }
+      if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
+         ImGui::SetTooltip("Replaces the game's FXAA with SMAA. 0 = vanilla FXAA");
    }
 
    void PrintImGuiAbout() override
@@ -501,6 +709,10 @@ BOOL APIENTRY DllMain(HMODULE hModule, DWORD ul_reason_for_call, LPVOID lpReserv
       // Create your game sub-class instance (it will be automatically destroyed on exit).
       // You do not need to do this if you have no custom data to store.
       game = new TemplateGame();
+   }
+   else if (ul_reason_for_call == DLL_PROCESS_DETACH)
+   {
+      reshade::unregister_event<reshade::addon_event::resolve_texture_region>(HMA_OnResolveTextureRegion);
    }
 
    CoreMain(hModule, ul_reason_for_call, lpReserved);
