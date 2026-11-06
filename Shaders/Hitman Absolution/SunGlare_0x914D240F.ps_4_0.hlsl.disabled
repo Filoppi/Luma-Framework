@@ -1,0 +1,70 @@
+// Luma: faithful HLSL translation of Hitman Absolution sun glare additive pixel shader 0x914D240F.
+// Under TONEMAP_TYPE >= 1 only the sun sprite (t0 width >= 512) is boosted by SunShaftHDRBoost (cubic in luminance) to add HDR headroom; small glow cards are untouched.
+// TONEMAP_TYPE 0 keeps the exact vanilla math.
+
+#include "Includes/Common.hlsl"
+
+cbuffer SharedPerViewData_cb1 : register(b1)
+{
+  float4 cb1[21];
+};
+
+cbuffer Globals_cb4 : register(b4)
+{
+  float4 cb4[6];
+};
+
+Texture2D<float4> mapTexture_01 : register(t0);
+
+SamplerState samplerTexture_01 : register(s0);
+
+// Vanilla: sign(x) * frac(|x|)
+float SignedFrac(float x)
+{
+  float f = frac(abs(x));
+  return (x >= 0.0) ? f : -f;
+}
+
+void main(
+  float4 v0 : SV_POSITION,
+  float4 v1 : TEXCOORD0,
+  float4 v2 : TEXCOORD2,
+  float4 v3 : TEXCOORD3,
+  float4 v4 : TEXCOORD4,
+  float4 v5 : TEXCOORD5,
+  float4 v6 : TEXCOORD6,
+  float4 v7 : TEXCOORD7,
+  out float4 o0 : SV_TARGET0)
+{
+  float ox = SignedFrac(cb4[3].x * cb1[20].x);
+  float oy = SignedFrac(cb4[4].x * cb1[20].x);
+
+  float4 tex = mapTexture_01.Sample(samplerTexture_01, v2.xy + float2(ox, oy));
+#if TONEMAP_TYPE >= 1 // Deband the sun sprite: its BC2 (565 endpoint) gradient steps showed as rings once expanded to HDR. A blurrier mip keeps the soft shape.
+  { uint w0, h0; mapTexture_01.GetDimensions(w0, h0); if (w0 >= 512) tex = mapTexture_01.SampleBias(samplerTexture_01, v2.xy + float2(ox, oy), 2.5); }
+#endif
+  float3 s = tex.rgb * cb4[2].rgb;
+
+  float dist = length(v1.xyz);
+  float angle = abs(v3.z);
+  float fadeDist = saturate((dist - cb4[5].y) / (cb4[5].x - cb4[5].y));
+  float fadeAngle = saturate((angle - cb4[5].w) / (cb4[5].z - cb4[5].w));
+  float fade = fadeDist * fadeAngle;
+
+  float3 o = s * fade * cb4[1].rgb;
+  o = o * v6.xyz;
+
+#if TONEMAP_TYPE >= 1
+  uint texW, texH;
+  mapTexture_01.GetDimensions(texW, texH);
+  if (texW >= 512)
+  {
+    float Y = saturate(dot(s, float3(0.2126, 0.7152, 0.0722)));
+    float B = LumaSettings.GameSettings.SunShaftHDRBoost;
+    o *= 1.0 + B * 4.0 * Y * Y * Y;
+  }
+#endif
+
+  o0.xyz = o;
+  o0.w = 1.0;
+}

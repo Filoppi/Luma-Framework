@@ -1,0 +1,109 @@
+// Luma: faithful HLSL translation of Hitman Absolution emissive pixel shader 0x4FF00542 (with dither-mask discard).
+// Under TONEMAP_TYPE >= 1 the mapEmissive_01 sample is boosted by EmissiveHDRBoost (cubic in luminance) to add HDR headroom.
+// TONEMAP_TYPE 0 keeps the exact vanilla math.
+
+#include "Includes/Common.hlsl"
+
+cbuffer Globals_cb4 : register(b4)
+{
+  float4 cb4[10];
+};
+
+cbuffer PerObject_cb0 : register(b0)
+{
+  float4 cb0[8];
+};
+
+cbuffer SharedPerViewData_cb1 : register(b1)
+{
+  float4 cb1[20];
+};
+
+Texture3D<float4> mapDitherMask : register(t0);
+Texture2D<float4> mapDetail_01 : register(t1);
+Texture2D<float4> mapTextureNormal_01 : register(t2);
+Texture2D<float4> mapDiffuse_01 : register(t3);
+TextureCube<float4> mapTextureCube_01 : register(t4);
+Texture2D<float4> mapEmissive_01 : register(t5);
+
+SamplerState samplerDitherMask : register(s0);
+SamplerState samplerDetail_01 : register(s1);
+SamplerState samplerTextureNormal_01 : register(s2);
+SamplerState samplerDiffuse_01 : register(s3);
+SamplerState samplerTextureCube_01 : register(s4);
+SamplerState samplerEmissive_01 : register(s5);
+
+void main(
+  float4 v0 : SV_POSITION,
+  float4 v1 : TEXCOORD0,
+  float4 v2 : TEXCOORD2,
+  float4 v3 : TEXCOORD3,
+  float4 v4 : TEXCOORD4,
+  float4 v5 : TEXCOORD5,
+  float4 v6 : TEXCOORD6,
+  float4 v7 : TEXCOORD7,
+  out float4 o0 : SV_TARGET0)
+{
+  float4 r0 = 0.0, r1 = 0.0;
+  float3 t;
+
+  r0.xyz = v1.y * float3(cb1[5].x, cb1[5].y, cb1[5].w);
+  r0.xyz = v1.x * float3(cb1[4].x, cb1[4].y, cb1[4].w) + r0.xyz;
+  r0.xyz = v1.z * float3(cb1[6].x, cb1[6].y, cb1[6].w) + r0.xyz;
+  r0.xyz = v1.w * float3(cb1[7].x, cb1[7].y, cb1[7].w) + r0.xyz;
+  r0.xy = r0.xy / r0.z;
+  r0.xy = r0.xy * float2(cb1[19].z, cb1[19].w);
+  r0.xy = r0.xy * 0.25;
+  r0.z = cb0[7].y;
+  r0 = mapDitherMask.Sample(samplerDitherMask, r0.xyz);
+  if (r0.x + -0.999 < 0.0)
+    discard;
+
+  r0.xy = v2.xy;
+  r0.z = 1.0;
+  r1.x = dot(cb4[2].xyz, r0.xyz);
+  r1.y = dot(cb4[3].xyz, r0.xyz);
+  r0 = mapDetail_01.Sample(samplerDetail_01, r1.xy);
+  r0.xy = r0.xy + float2(-0.5, -0.5);
+  r0.xy = saturate(r0.xy * cb4[1].z + float2(0.5, 0.5));
+  r0.z = -r0.x * 2.0 + 1.0;
+  r0.w = -r0.y * 2.0 + 1.0;
+  r1 = mapTextureNormal_01.Sample(samplerTextureNormal_01, v2.xy);
+  r1.xy = r1.xy + float2(-0.5, -0.5);
+  r1.xy = saturate(r1.xy * cb4[4].x + float2(0.5, 0.5));
+  r1.xy = r1.xy + float2(-0.5, -0.5);
+  r0.xy = r0.zw * abs(r1.xy) + r0.xy;
+  r0.xy = r1.xy + r0.xy;
+  r0.xy = r0.xy + float2(-0.5, -0.5);
+  r0.xy = r0.xy + r0.xy;
+  r1.xyz = r0.y * v5.xyz;
+  r1.xyz = v4.xyz * r0.x + r1.xyz;
+  r0.x = dot(r0.xy, r0.xy);
+  r0.x = min(r0.x, 1.0);
+  r0.x = -r0.x + 1.0;
+  r0.x = sqrt(r0.x);
+  r0.xyz = v3.xyz * r0.x + r1.xyz;
+  r0.w = dot(v1.xyz, r0.xyz);
+  r0.w = r0.w + r0.w;
+  r0.xyz = r0.xyz * -r0.w + v1.xyz;
+  r1.xyz = r0.y * float3(cb1[9].x, cb1[9].z, cb1[9].y);
+  t = r0.x * float3(cb1[8].x, cb1[8].z, cb1[8].y) + r1.xyz;
+  r0.x = t.x;
+  r0.y = t.y;
+  r0.w = t.z;
+  r0.xyz = r0.z * float3(cb1[10].x, cb1[10].z, cb1[10].y) + float3(r0.x, r0.y, r0.w);
+  r0 = mapTextureCube_01.Sample(samplerTextureCube_01, r0.xyz);
+  r1 = mapDiffuse_01.Sample(samplerDiffuse_01, v2.xy);
+  r0.xyz = r0.xyz * r1.w;
+  r0.xyz = r0.xyz * cb4[7].xyz;
+  r0.xyz = r0.xyz * cb1[18].xyz;
+  r1 = mapEmissive_01.Sample(samplerEmissive_01, v2.xy);
+#if TONEMAP_TYPE >= 1
+  float eY = GetLuminance(saturate(r1.rgb));
+  r1.rgb *= 1.0 + LumaSettings.GameSettings.EmissiveHDRBoost * 3.0 * eY * eY * eY;
+#endif
+  r1.xyz = r1.xyz * cb4[9].xyz;
+  r1.xyz = r1.xyz * cb4[8].xyz;
+  o0.xyz = r1.xyz * v6.w + r0.xyz;
+  o0.w = 1.0;
+}
