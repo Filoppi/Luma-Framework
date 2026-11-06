@@ -34,6 +34,14 @@
                   DisplayName="XeSS"
                   Description="Enables Intel XeSS (x64 only), natively on DX11 on Intel GPUs and through DX11->DX12 interop on the others. Ships Intel's signed libxess_dx11.dll and libxess.dll next to the addon."
                   Category="Features" />
+    <BoolProperty Name="UseLumaDLSSG"
+                  DisplayName="DLSS Frame Generation (Streamline)"
+                  Description="Enables DLSS-G (x64 only), presenting the game through a DX12 swapchain (needs the game to provide the frame generation inputs). Also enables the DX11->DX12 interop and SafetyHook, and ships the Streamline dlls (External\Streamline\bin\x64) next to the addon."
+                  Category="Features" />
+    <BoolProperty Name="UseLumaXeSSFG"
+                  DisplayName="XeSS Frame Generation"
+                  Description="Enables XeSS-FG with XeLL (x64 only), presenting the game through a DX12 swapchain (needs the game to provide the frame generation inputs). Also enables the DX11->DX12 interop and SafetyHook, and ships Intel's signed libxess_fg.dll and libxell.dll next to the addon."
+                  Category="Features" />
     <BoolProperty Name="UseLumaSafetyHook"
                   DisplayName="SafetyHook"
                   Description="Compiles the shared SafetyHook (and Zydis) hooking library. Automatically enabled by FSR 4."

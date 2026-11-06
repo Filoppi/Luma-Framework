@@ -185,6 +185,15 @@
 #include "fsr/FSR.h" // see "ENABLE_FIDELITY_SK"
 #include "fsr/FSR4.h" // see "ENABLE_FSR4"
 #include "xess/XeSS.h" // see "ENABLE_XESS"
+#include "dlss/DLSSG.h" // see "ENABLE_DLSSG"
+#include "xess/XeSSFG.h" // see "ENABLE_XESS_FG"
+#include "interop/D3D12SwapChainProxy.h" // see "ENABLE_D3D12_SWAPCHAIN_PROXY"
+// Automatically defined if any Frame Generation tech is enabled (they all present through the DX12 swapchain proxy)
+#if ENABLE_D3D12_SWAPCHAIN_PROXY && (ENABLE_DLSSG || ENABLE_XESS_FG)
+#define ENABLE_FG 1
+#else
+#define ENABLE_FG 0
+#endif
 
 #include "includes/containers.h"
 #include "includes/globals.h"
@@ -210,6 +219,7 @@
 #include "utils/pipeline.hpp"
 #include "utils/shader_compiler.hpp"
 #include "utils/display.hpp"
+#include "utils/display_events.hpp"
 #include "utils/resource.hpp"
 #include "utils/draw.hpp"
 #include "utils/system.h"
@@ -301,6 +311,15 @@ namespace
 
    const char* sr_game_tooltip = "";
 #endif // ENABLE_SR
+
+#if ENABLE_FG
+   // The type is applied on device creation (so it needs a restart), as the swapchain needs to be created through DX12 (see "D3D12SwapChainProxy.h").
+   // Off by default, as games need to provide the inputs (see "SetFrameGenerationInput()").
+   FG::UserType fg_user_type = FG::UserType::None;
+   bool fg_user_enabled = true; // Live toggle
+   unsigned int fg_generated_frames = 1; // 1 is 2x
+   std::map<FG::Type, std::unique_ptr<FG::FrameGenerationImpl>> fg_implementations; // All the FG implementations class objects (in order of preference)
+#endif // ENABLE_FG
 
    bool hdr_enabled_display = false;
    bool hdr_supported_display = false;
@@ -515,7 +534,7 @@ namespace
       { CompileTimeStringHash("Sanitize RGBA PS"), { "Luma_SanitizeRGBA", reshade::api::pipeline_subobject_type::pixel_shader } },
       { CompileTimeStringHash("Sanitize RGBA Mipped"), { "Luma_SanitizeRGBAMipped", reshade::api::pipeline_subobject_type::pixel_shader } },
       { CompileTimeStringHash("Gen Sanitized Mip"), { "Luma_GenerateSanitizedMip_CS", reshade::api::pipeline_subobject_type::compute_shader } },
-#if ENABLE_FSR4 || ENABLE_XESS
+#if ENABLE_FSR4 || ENABLE_XESS || ENABLE_FG
       { CompileTimeStringHash("Copy Depth CS"), { "Luma_CopyDepth_CS", reshade::api::pipeline_subobject_type::compute_shader } },
 #endif
 
@@ -2580,6 +2599,56 @@ namespace
 		}
 #endif // ENABLE_SR
 
+#if ENABLE_FG
+      // Frame Generation runs on DX12, so the swapchain (created after the device) is proxied through a DX12 one (see "D3D12SwapChainProxy.h").
+      // We only do it if the user enabled it, given that it has some overhead and side effects (e.g. no exclusive fullscreen).
+      FG::UserType local_fg_user_type;
+      {
+         const std::shared_lock lock_reshade(s_mutex_reshade);
+         local_fg_user_type = fg_user_type;
+      }
+      if (local_fg_user_type != FG::UserType::None && !fg_implementations.empty())
+      {
+         const auto get_fg_depth_copy_shader = [&device_data]() -> ID3D11ComputeShader*
+            {
+               const std::shared_lock lock(s_mutex_shader_objects); // They could be getting recompiled
+               const auto cs = device_data.native_compute_shaders.find(CompileTimeStringHash("Copy Depth CS"));
+               if (cs == device_data.native_compute_shaders.end() || !cs->second.get())
+                  return nullptr;
+               cs->second->AddRef();
+               return cs->second.get();
+            };
+         device_data.fg_proxy_device = D3D12SwapChainProxy::Device::Create(native_device, get_fg_depth_copy_shader);
+         if (device_data.fg_proxy_device)
+         {
+            // Take the first supported selected one (they are in order of preference)
+            for (auto& fg_implementation : fg_implementations)
+            {
+               if (!FG::AreTypesEqual(local_fg_user_type, fg_implementation.first))
+                  continue;
+               FG::InstanceData* fg_instance_data = nullptr;
+               fg_implementation.second->Init(fg_instance_data, device_data.fg_proxy_device->GetAdapter(), device_data.fg_proxy_device->GetD3D12Device());
+               if (fg_instance_data && fg_instance_data->is_supported && device_data.fg_proxy_device->SetFrameGeneration(fg_implementation.second.get(), fg_instance_data))
+               {
+                  device_data.fg_type = fg_implementation.first;
+                  device_data.fg_instance_data = fg_instance_data;
+                  break;
+               }
+               fg_implementation.second->Deinit(fg_instance_data);
+            }
+         }
+         if (device_data.fg_type != FG::Type::None)
+         {
+            device_data.fg_proxy_device->SetProxyEnabled(true);
+         }
+         else
+         {
+            device_data.fg_proxy_device = nullptr;
+            reshade::log::message(reshade::log::level::warning, "Luma: Frame Generation isn't supported on this system");
+         }
+      }
+#endif // ENABLE_FG
+
       game->OnInitDevice(native_device, device_data);
 
       LoadTexture2DArrays(native_device, device_data);
@@ -2724,6 +2793,22 @@ namespace
       }
 #endif // ENABLE_SR
 
+#if ENABLE_FG
+      if (device_data.fg_proxy_device)
+      {
+         device_data.fg_proxy_device->SetProxyEnabled(false);
+         // The proxied swapchains own a reference to the proxy device and use the FG instance (they should have been destroyed before the device, and the GPU work is done once they are),
+         // if not, leak the FG instance, as releasing it could crash
+         if (!device_data.fg_proxy_device->GetSwapChain())
+         {
+            fg_implementations[device_data.fg_type]->Deinit(device_data.fg_instance_data); // Before the DX12 device is destroyed (by the proxy device)
+         }
+         device_data.fg_instance_data = nullptr;
+         device_data.fg_proxy_device = nullptr;
+         device_data.fg_type = FG::Type::None;
+      }
+#endif // ENABLE_FG
+
       // Execute all Luma callbacks.
       for (const auto& callback : LumaCallbacks::on_destroy_device)
       {
@@ -2782,6 +2867,9 @@ namespace
    bool OnCreateSwapchain(reshade::api::device_api api, reshade::api::swapchain_desc& desc, void* hwnd)
    {
       SKIP_UNSUPPORTED_DEVICE_API(api, false);
+#if ENABLE_FG
+      if (D3D12SwapChainProxy::IsCreatingInternalObjects()) return false; // Our DX12 swapchain (it mirrors the game one)
+#endif
 
       // There's only one swapchain so it's fine if this is global ("OnInitSwapchain()" will always be called later anyway)
       bool changed = false;
@@ -2934,6 +3022,13 @@ namespace
       DXGI_SWAP_CHAIN_DESC swapchain_desc;
       HRESULT hr = native_swapchain->GetDesc(&swapchain_desc);
       ASSERT_ONCE(SUCCEEDED(hr));
+#if ENABLE_FG
+      // If proxied, the swapchain ReShade sees is on a hidden child window of the game one
+      if (SUCCEEDED(hr))
+      {
+         swapchain_desc.OutputWindow = D3D12SwapChainProxy::GetGameWindow(swapchain_desc.OutputWindow);
+      }
+#endif
       if (SUCCEEDED(hr))
       {
          ASSERT_ONCE_MSG(swapchain_desc.SampleDesc.Count == 1, "MSAA is unexpectedly enabled on the Swapchain, Luma might not be compatible with it");
@@ -2970,6 +3065,7 @@ namespace
       if (native_swapchain3 != nullptr)
       {
          const std::unique_lock lock_reshade(s_mutex_reshade);
+         const bool follow_display_peak = cb_luma_global_settings.ScenePeakWhite == device_data.default_user_peak_white;
          Display::GetHDRMaxLuminance(native_swapchain3, device_data.default_user_peak_white, srgb_white_level); // TODO: detect when the display changes and update peak brightness calibration, and set HDR10+ on the new display too etc
          Display::IsHDRSupportedAndEnabled(swapchain_desc.OutputWindow, hdr_supported_display, hdr_enabled_display, native_swapchain3);
 #if ENABLE_NVAPI
@@ -2979,6 +3075,8 @@ namespace
             Display::NVAPI::SetDisplayOutputMode(game_window, NV_DISPLAY_OUTPUT_MODE_HDR10PLUS_GAMING, false, false);
          }
 #endif
+         if (follow_display_peak && hdr_enabled_display && cb_luma_global_settings.DisplayMode == DisplayModeType::HDR)
+            cb_luma_global_settings.ScenePeakWhite = device_data.default_user_peak_white;
          const bool window_changed = game_window != swapchain_desc.OutputWindow;
          if (window_changed)
          {
@@ -3265,6 +3363,17 @@ namespace
       {
          CenterWindowAndRemoveBorders();
       }
+#if ENABLE_FG
+      // Exclusive fullscreen can't work on the hidden window of the proxied swapchains (nor with frame generation)
+      if (const DeviceData* device_data = swapchain->get_device()->get_private_data<DeviceData>(); device_data && device_data->fg_proxy_device && device_data->fg_proxy_device->FindSwapChain((IDXGISwapChain*)swapchain->get_native()))
+      {
+         if (!prevent_fullscreen_state && fullscreen)
+         {
+            CenterWindowAndRemoveBorders();
+         }
+         return true;
+      }
+#endif
       // TODO: keep track of FS state and send warnings to users in games where it doesn't work
       return prevent_fullscreen_state;
    }
@@ -5131,6 +5240,28 @@ namespace
       DeviceData& device_data = *queue->get_device()->get_private_data<DeviceData>();
       SwapchainData& swapchain_data = *swapchain->get_private_data<SwapchainData>();
       CommandListData& cmd_list_data = *queue->get_immediate_command_list()->get_private_data<CommandListData>();
+
+      Display::change_notifications.Watch(game_window);
+      const HMONITOR monitor = MonitorFromWindow(game_window, MONITOR_DEFAULTTONULL);
+      const uint64_t display_revision = Display::ChangeNotifications::revision.load(std::memory_order_relaxed);
+      if (monitor && (monitor != swapchain_data.hdr_monitor || display_revision != swapchain_data.hdr_display_revision))
+      {
+         // Coalesce notifications; monitor lookup is cheap, DXGI enumeration only runs on a change.
+         swapchain_data.hdr_monitor = monitor;
+         swapchain_data.hdr_display_revision = display_revision;
+         float peak = 0.f;
+         if (Display::GetHDRMaxLuminance(reinterpret_cast<IDXGISwapChain*>(swapchain->get_native()), peak) && peak > 0.f)
+         {
+            const std::unique_lock lock_reshade(s_mutex_reshade);
+            const bool follow_display = cb_luma_global_settings.ScenePeakWhite == device_data.default_user_peak_white;
+            device_data.default_user_peak_white = peak;
+            if (follow_display && cb_luma_global_settings.DisplayMode == DisplayModeType::HDR)
+            {
+               cb_luma_global_settings.ScenePeakWhite = peak;
+               device_data.cb_luma_global_settings_dirty = true;
+            }
+         }
+      }
 
 #if DEVELOPMENT
       // Allow to tank performance to test auto rendering resolution scaling etc
@@ -9117,6 +9248,55 @@ namespace
       return false;
    }
 
+#if ENABLE_FG
+   // Frame Generation (see "D3D12SwapChainProxy.h").
+   // Games provide the inputs with the functions below, every frame, from the immediate context, anytime before the present.
+   // Frames are only generated if the depth, the motion vectors and the constants were provided for the frame (the HUD-less color and UI are optional, but improve the UI quality).
+
+   // Whether Frame Generation is enabled and running (the inputs are needed)
+   bool IsFrameGenerationActive(const DeviceData& device_data)
+   {
+      return device_data.fg_proxy_device != nullptr;
+   }
+
+   // Copies the resource into the frame generation input (the game can re-use it after this).
+   // The depth needs to be a 2D depth texture (or one of its typeless formats), it's converted to R32_FLOAT. The others need to be 2D textures without mips or MSAA.
+   // The region can be used if only part of the texture is valid (zero sizes mean the whole texture).
+   bool SetFrameGenerationInput(ID3D11DeviceContext* native_device_context, const DeviceData& device_data, FG::InputType type, ID3D11Resource* resource, uint32_t left = 0, uint32_t top = 0, uint32_t width = 0, uint32_t height = 0)
+   {
+      if (!device_data.fg_proxy_device || !resource)
+         return false;
+      if (type == FG::InputType::Depth)
+      {
+         // The depth conversion changes the render targets and the compute shader state
+         DrawStateStack<DrawStateStackType::FullGraphics> draw_state_stack;
+         DrawStateStack<DrawStateStackType::Compute> compute_state_stack;
+         draw_state_stack.Cache(native_device_context, device_data.uav_max_count);
+         compute_state_stack.Cache(native_device_context, device_data.uav_max_count);
+         const bool succeeded = device_data.fg_proxy_device->SetFrameInput(native_device_context, type, resource, left, top, width, height);
+         compute_state_stack.Restore(native_device_context);
+         draw_state_stack.Restore(native_device_context);
+         return succeeded;
+      }
+      return device_data.fg_proxy_device->SetFrameInput(native_device_context, type, resource, left, top, width, height);
+   }
+
+   void SetFrameGenerationConstants(const DeviceData& device_data, const FG::FrameConstants& constants)
+   {
+      if (device_data.fg_proxy_device)
+         device_data.fg_proxy_device->SetFrameConstants(constants);
+   }
+
+   // The game specific settings (inverted depth, render resolution, etc). The number of generated frames is set by the user.
+   // "enable" can be used to stop generating frames when the game isn't rendering the scene (e.g. in menus or loading screens).
+   void SetFrameGenerationSettings(DeviceData& device_data, const FG::SettingsData& settings_data, bool enable)
+   {
+      const std::unique_lock lock_reshade(s_mutex_reshade);
+      device_data.fg_game_settings = settings_data;
+      device_data.fg_game_enabled = enable;
+   }
+#endif // ENABLE_FG
+
    void OnReShadePresent(reshade::api::effect_runtime* runtime)
    {
       SKIP_UNSUPPORTED_DEVICE_API(runtime->get_device()->get_api());
@@ -9223,6 +9403,26 @@ namespace
       {
          if (!block_draw_until_device_custom_shaders_creation) s_mutex_shader_objects.unlock_shared();
       }
+
+#if ENABLE_FG
+      // ReShade (and Luma) finished drawing on the back buffer, present it through the DX12 swapchain (it happens before the original present, which goes to a hidden window)
+      if (device_data.fg_proxy_device)
+      {
+         if (D3D12SwapChainProxy::SwapChain* proxy_swapchain = device_data.fg_proxy_device->FindSwapChain((IDXGISwapChain*)runtime->get_native()))
+         {
+            FG::SettingsData fg_settings;
+            bool fg_enabled;
+            {
+               const std::shared_lock lock_reshade(s_mutex_reshade);
+               fg_settings = device_data.fg_game_settings;
+               fg_settings.generated_frames = fg_generated_frames;
+               fg_enabled = fg_user_enabled && device_data.fg_game_enabled;
+            }
+            device_data.fg_proxy_device->SetFrameGenerationSettings(fg_settings, fg_enabled);
+            proxy_swapchain->PresentBackBuffer((ID3D11Resource*)runtime->get_current_back_buffer().handle);
+         }
+      }
+#endif // ENABLE_FG
    }
 
    void ForceToggleShaders(reshade::api::effect_runtime* runtime, bool enabled)
@@ -10582,7 +10782,78 @@ namespace
             }
 #endif // ENABLE_SR
 
-            auto ChangeDisplayMode = [&](DisplayModeType display_mode, bool enable_hdr_on_display = true, IDXGISwapChain3* swapchain = nullptr)
+#if ENABLE_FG
+            {
+               auto GetFGUserTypeName = [](FG::UserType type)
+                  {
+                     switch (type)
+                     {
+                     case FG::UserType::Auto: return "Auto";
+                     case FG::UserType::DLSS_G: return "DLSS-G";
+                     case FG::UserType::XeSS_FG: return "XeSS-FG";
+                     default: return "None";
+                     }
+                  };
+               if (ImGui::BeginCombo("Frame Generation", GetFGUserTypeName(fg_user_type)))
+               {
+                  auto AddComboItem = [&](FG::UserType local_fg_user_type, bool enabled)
+                     {
+                        if (!enabled)
+                           return;
+                        const bool selected = fg_user_type == local_fg_user_type;
+                        if (ImGui::Selectable(GetFGUserTypeName(local_fg_user_type), selected))
+                        {
+                           fg_user_type = local_fg_user_type;
+                           reshade::set_config_value(runtime, NAME, "FGUserType", int(fg_user_type));
+                        }
+                        if (selected)
+                           ImGui::SetItemDefaultFocus();
+                     };
+                  AddComboItem(FG::UserType::None, true);
+                  AddComboItem(FG::UserType::Auto, true);
+                  AddComboItem(FG::UserType::DLSS_G, fg_implementations.contains(FG::Type::DLSS_G));
+                  AddComboItem(FG::UserType::XeSS_FG, fg_implementations.contains(FG::Type::XeSS_FG));
+                  ImGui::EndCombo();
+               }
+               if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
+               {
+                  ImGui::SetTooltip("Generates frames in between the rendered ones (presenting the game through DirectX 12).\nChanging this requires restarting the game.\nDLSS-G needs an NVIDIA RTX 40 series GPU or newer, XeSS-FG runs on most GPUs.\nIt doesn't support scRGB HDR (the game needs to output HDR10).");
+               }
+
+               const bool fg_type_changed = device_data.fg_type == FG::Type::None ? fg_user_type != FG::UserType::None : !FG::AreTypesEqual(fg_user_type, device_data.fg_type);
+               D3D12SwapChainProxy::SwapChain* const fg_swapchain = device_data.fg_proxy_device ? device_data.fg_proxy_device->GetSwapChain() : nullptr;
+               if (fg_type_changed)
+               {
+                  ImGui::SameLine();
+                  ImGui::TextUnformatted("(restart required)");
+               }
+               else if (fg_swapchain)
+               {
+                  ImGui::SameLine();
+                  ImGui::Text("(%s)", fg_swapchain->IsGeneratingFrames() ? "active" : (fg_swapchain->IsFormatUnsupported() ? "unsupported swapchain format" : "inactive"));
+               }
+
+               if (device_data.fg_type != FG::Type::None && device_data.fg_instance_data)
+               {
+                  if (ImGui::Checkbox("Frame Generation Enabled", &fg_user_enabled))
+                  {
+                     reshade::set_config_value(runtime, NAME, "FGEnabled", fg_user_enabled);
+                  }
+                  const unsigned int max_generated_frames = (std::max)(device_data.fg_instance_data->max_generated_frames, 1u);
+                  if (max_generated_frames > 1)
+                  {
+                     int multiplier = int((std::min)(fg_generated_frames, max_generated_frames)) + 1;
+                     if (ImGui::SliderInt("Frame Generation Multiplier", &multiplier, 2, int(max_generated_frames) + 1, "%dx", ImGuiSliderFlags_AlwaysClamp))
+                     {
+                        fg_generated_frames = unsigned(multiplier - 1);
+                        reshade::set_config_value(runtime, NAME, "FGGeneratedFrames", int(fg_generated_frames));
+                     }
+                  }
+               }
+            }
+#endif // ENABLE_FG
+
+            auto ChangeDisplayMode =[&](DisplayModeType display_mode, bool enable_hdr_on_display = true, IDXGISwapChain3* swapchain = nullptr)
                {
                   int display_mode_i = int(display_mode);
                   reshade::set_config_value(runtime, NAME, "DisplayMode", display_mode_i);
@@ -12025,6 +12296,14 @@ void Init(bool async)
 #if ENABLE_XESS
    sr_implementations[SR::Type::XeSS] = std::make_unique<Intel::XeSS>();
 #endif
+#if ENABLE_FG
+#if ENABLE_DLSSG
+   fg_implementations[FG::Type::DLSS_G] = std::make_unique<Streamline::DLSSG>();
+#endif
+#if ENABLE_XESS_FG
+   fg_implementations[FG::Type::XeSS_FG] = std::make_unique<Intel::XeSSFG>();
+#endif
+#endif // ENABLE_FG
 #if DEVELOPMENT
    Mcp::Start();
 #if ENABLE_SR
@@ -12086,6 +12365,15 @@ void Init(bool async)
       int dlss_render_preset_i = static_cast<int>(dlss_render_preset);
       reshade::get_config_value(runtime, NAME, "DLSSRenderPreset", dlss_render_preset_i);
       dlss_render_preset = static_cast<unsigned int>(dlss_render_preset_i);
+#endif
+#if ENABLE_FG
+      int fg_user_type_i = int(fg_user_type);
+      reshade::get_config_value(runtime, NAME, "FGUserType", fg_user_type_i);
+      fg_user_type = FG::UserType(fg_user_type_i);
+      reshade::get_config_value(runtime, NAME, "FGEnabled", fg_user_enabled);
+      int fg_generated_frames_i = int(fg_generated_frames);
+      reshade::get_config_value(runtime, NAME, "FGGeneratedFrames", fg_generated_frames_i);
+      fg_generated_frames = unsigned((std::max)(fg_generated_frames_i, 1));
 #endif
       int display_mode_i = int(cb_luma_global_settings.DisplayMode);
       reshade::get_config_value(runtime, NAME, "DisplayMode", display_mode_i);
@@ -12555,6 +12843,7 @@ BOOL APIENTRY CoreMain(HMODULE h_module, DWORD fdw_reason, LPVOID lpv_reserved)
    }
    case DLL_PROCESS_DETACH:
    {
+      Display::change_notifications.Stop();
 #if DEVELOPMENT
       Mcp::Shutdown();
       if (game_window_original_proc && game_window != NULL && IsWindow(game_window))

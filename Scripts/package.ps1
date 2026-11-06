@@ -89,7 +89,9 @@ $useLumaDXP = Test-PropEnabled $vcxproj "UseLumaDXP"
 $useLumaNGX = Test-PropEnabled $vcxproj "UseLumaNGX"
 $useLumaFSR4 = (Test-PropEnabled $vcxproj "UseLumaFSR") -and (Test-PropEnabled $vcxproj "UseLumaFSR4")
 $useLumaXeSS = Test-PropEnabled $vcxproj "UseLumaXeSS"
-Write-Host "Opt-ins: UseLumaFastNoise=$useLumaFastNoise UseLumaDXP=$useLumaDXP UseLumaNGX=$useLumaNGX UseLumaFSR4=$useLumaFSR4 UseLumaXeSS=$useLumaXeSS"
+$useLumaDLSSG = Test-PropEnabled $vcxproj "UseLumaDLSSG"
+$useLumaXeSSFG = Test-PropEnabled $vcxproj "UseLumaXeSSFG"
+Write-Host "Opt-ins: UseLumaFastNoise=$useLumaFastNoise UseLumaDXP=$useLumaDXP UseLumaNGX=$useLumaNGX UseLumaFSR4=$useLumaFSR4 UseLumaXeSS=$useLumaXeSS UseLumaDLSSG=$useLumaDLSSG UseLumaXeSSFG=$useLumaXeSSFG"
 
 # Locate the addon. When packaging runs from the LumaPackage build target the
 # exact build output is passed in (-AddonPath = $(TargetPath)); standalone runs
@@ -166,6 +168,25 @@ try {
         New-Item -ItemType Directory -Path "$tempDir\Licenses" -Force | Out-Null
         Copy-Item (Join-Path $xessDir "LICENSE.txt") -Destination "$tempDir\Licenses\XeSS_LICENSE.txt" -Force
         Copy-Item (Join-Path $xessDir "third-party-programs.txt") -Destination "$tempDir\Licenses\XeSS_third-party-programs.txt" -Force
+    }
+    # Frame Generation loads them from next to the addon (x64 only)
+    if ($useLumaXeSSFG -and $Platform -ne "Win32") {
+        $xessDir = Join-Path $repoRoot "Source\External\XeSS"
+        Copy-Item (Join-Path $xessDir "bin\libxess_fg.dll"), (Join-Path $xessDir "bin\libxell.dll") -Destination $tempDir -Force
+        New-Item -ItemType Directory -Path "$tempDir\Licenses" -Force | Out-Null
+        Copy-Item (Join-Path $xessDir "LICENSE.txt") -Destination "$tempDir\Licenses\XeSS_LICENSE.txt" -Force
+        Copy-Item (Join-Path $xessDir "third-party-programs.txt") -Destination "$tempDir\Licenses\XeSS_third-party-programs.txt" -Force
+    }
+    if ($useLumaDLSSG -and $Platform -ne "Win32") {
+        $streamlineDir = Join-Path $repoRoot "Source\External\Streamline"
+        $streamlineDlls = Get-ChildItem (Join-Path $streamlineDir "bin\x64") -Filter "*.dll" -ErrorAction SilentlyContinue
+        if ($streamlineDlls) {
+            $streamlineDlls | Copy-Item -Destination $tempDir -Force
+        } else {
+            Write-Warning "UseLumaDLSSG is set but Source\External\Streamline\bin\x64 has no dlls, DLSS-G won't be available"
+        }
+        New-Item -ItemType Directory -Path "$tempDir\Licenses" -Force | Out-Null
+        Copy-Item (Join-Path $streamlineDir "license.txt") -Destination "$tempDir\Licenses\Streamline_LICENSE.txt" -Force
     }
 
     # Addon at the zip root, under the canonical Luma-<Project>.addon name

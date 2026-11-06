@@ -7,6 +7,7 @@
 #include "utils/system.cpp"
 
 #include "interop/D3D12Interop.cpp"
+#include "interop/D3D12SwapChainProxy.cpp"
 #include "hooks/DXGIHooks.cpp"
 #include "hooks/SystemHooks.cpp"
 #include "hooks/FidelityFXHooks.cpp"
@@ -15,3 +16,5 @@
 #include "fsr/FSR.cpp"
 #include "fsr/FSR4.cpp"
 #include "xess/XeSS.cpp"
+#include "dlss/DLSSG.cpp"
+#include "xess/XeSSFG.cpp"

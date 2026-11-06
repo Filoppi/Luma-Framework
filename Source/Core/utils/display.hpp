@@ -1,5 +1,7 @@
 #pragma once
 
+#include <algorithm>
+#include <cmath>
 #include <icm.h> // Color profiles (see "HasUserHDRColorProfile()")
 
 #if ENABLE_NVAPI
@@ -244,6 +246,7 @@ namespace Display
 		}
 	
 		// Returns the absolute peak brightness of the display the window is contained in.
+		// This is raw HDR10+ metadata, without the Windows brightness adjustment for built-in panels.
 		// Note that the accuracy of these values is limited, relying on the user calibration from DXGI might be better.
 		// Returns <= 0 if HDR10+ is not supported by the display.
 		float GetHDR10PlusDisplayPeakBrightness(HWND hWnd, HMONITOR hMonitor = 0)
@@ -641,11 +644,19 @@ namespace Display
 		return false;
 	}
 
+	static bool IsInternalDisplay(const DISPLAYCONFIG_PATH_INFO& pathInfo)
+	{
+		const auto technology = pathInfo.targetInfo.outputTechnology;
+		return technology == DISPLAYCONFIG_OUTPUT_TECHNOLOGY_INTERNAL || technology == DISPLAYCONFIG_OUTPUT_TECHNOLOGY_LVDS ||
+			technology == DISPLAYCONFIG_OUTPUT_TECHNOLOGY_DISPLAYPORT_EMBEDDED || technology == DISPLAYCONFIG_OUTPUT_TECHNOLOGY_UDI_EMBEDDED;
+	}
+
+	// Built-in panel SDR white is not an absolute game paper white; keep the caller value on failure.
 	// TODO: update every frame
 	bool GetSDRWhiteLevel(HWND hwnd, float& nits, HMONITOR fallbackMonitor = 0)
 	{
 		DISPLAYCONFIG_PATH_INFO pathInfo{};
-		if (GetDisplayConfigPathInfo(hwnd, fallbackMonitor, pathInfo))
+		if (GetDisplayConfigPathInfo(hwnd, fallbackMonitor, pathInfo) && !IsInternalDisplay(pathInfo))
 		{
 			DISPLAYCONFIG_SDR_WHITE_LEVEL sdrWhiteLevel = {};
 			sdrWhiteLevel.header.type = DISPLAYCONFIG_DEVICE_INFO_GET_SDR_WHITE_LEVEL;
@@ -681,10 +692,16 @@ namespace Display
 			setSdrWhiteLevel.header.size = sizeof(DISPLAYCONFIG_SET_SDR_WHITE_LEVEL);
 			setSdrWhiteLevel.header.adapterId = colorInfo.header.adapterId;
 			setSdrWhiteLevel.header.id = colorInfo.header.id;
-			setSdrWhiteLevel.SDRWhiteLevel = static_cast <ULONG>((1000.0f * nits) / 80.0f);
+			setSdrWhiteLevel.SDRWhiteLevel = static_cast<ULONG>(std::round((1000.f * nits) / 80.f));
 			setSdrWhiteLevel.finalValue = TRUE;
 			// This will return error for any range beyond 80-480 nits
 			bool succeeded = (ERROR_SUCCESS == DisplayConfigSetDeviceInfo((DISPLAYCONFIG_DEVICE_INFO_HEADER*)&setSdrWhiteLevel));
+			if (!succeeded && (nits < 80.f || nits > 480.f))
+			{
+				const float clampedNits = std::clamp(nits, 80.f, 480.f);
+				setSdrWhiteLevel.SDRWhiteLevel = static_cast<ULONG>(std::round((1000.f * clampedNits) / 80.f));
+				succeeded = (ERROR_SUCCESS == DisplayConfigSetDeviceInfo((DISPLAYCONFIG_DEVICE_INFO_HEADER*)&setSdrWhiteLevel));
+			}
 			return succeeded;
 		}
 		return false;
@@ -737,6 +754,55 @@ namespace Display
 		return hasProfile;
 	}
 
+	// Output descriptions belong to a DXGI factory snapshot. Brightness changes can leave that
+	// snapshot stale even when IsCurrent() is true, so retrieve the same monitor from a new factory.
+	static bool GetCurrentOutputDesc(HMONITOR monitor, DXGI_OUTPUT_DESC1& outputDesc)
+	{
+		// DXGI is already loaded for the swapchain. Resolve this dynamically to avoid a DXGI.lib dependency.
+		const HMODULE dxgiModule = GetModuleHandleW(L"dxgi.dll");
+		#pragma warning(suppress: 4191)
+		const auto createFactory = dxgiModule ? reinterpret_cast<decltype(&CreateDXGIFactory1)>(GetProcAddress(dxgiModule, "CreateDXGIFactory1")) : nullptr;
+		com_ptr<IDXGIFactory1> factory;
+		if (!createFactory || FAILED(createFactory(IID_PPV_ARGS(&factory))))
+			return false;
+
+		// The panel can be connected to a different GPU from the one rendering the game.
+		for (UINT adapterIndex = 0; ; ++adapterIndex)
+		{
+			com_ptr<IDXGIAdapter1> adapter;
+			if (FAILED(factory->EnumAdapters1(adapterIndex, &adapter)))
+				break;
+
+			for (UINT outputIndex = 0; ; ++outputIndex)
+			{
+				com_ptr<IDXGIOutput> output;
+				if (FAILED(adapter->EnumOutputs(outputIndex, &output)))
+					break;
+
+				DXGI_OUTPUT_DESC desc{};
+				if (FAILED(output->GetDesc(&desc)) || desc.Monitor != monitor)
+					continue;
+
+				com_ptr<IDXGIOutput6> output6;
+				DXGI_OUTPUT_DESC1 desc1{};
+				if (SUCCEEDED(output->QueryInterface(&output6)) && SUCCEEDED(output6->GetDesc1(&desc1)))
+				{
+					outputDesc = desc1;
+					return true;
+				}
+			}
+		}
+		return false;
+	}
+
+#if ENABLE_NVAPI
+	static bool IsInternalDisplay(HMONITOR monitor)
+	{
+		DISPLAYCONFIG_PATH_INFO pathInfo{};
+		return GetDisplayConfigPathInfo(0, monitor, pathInfo) && IsInternalDisplay(pathInfo);
+	}
+#endif
+
 	// Returns false if failed or if HDR is not engaged (but the white luminance can still be used).
 	bool GetHDRMaxLuminance(IDXGISwapChain* swapChain, float& maxLuminance, float defaultMaxLuminance = 80.f /*Windows sRGB standard luminance*/)
 	{
@@ -760,8 +826,10 @@ namespace Display
 			return false;
 		}
 
-		// Note: this might end up being outdated if a new display is added/removed,
-		// or if HDR is toggled on them after swapchain creation (though it seems to be consistent between SDR and HDR).
+		// Keep the swapchain description as a fallback if refreshing the output fails.
+		GetCurrentOutputDesc(outputDesc1.Monitor, outputDesc1);
+		// Windows already adjusts this application-facing peak for built-in panel brightness.
+		// Do not apply another brightness multiplier: that would scale the headroom twice.
 		maxLuminance = outputDesc1.MaxLuminance;
 
 #if ENABLE_NVAPI
@@ -770,7 +838,8 @@ namespace Display
 		// The HDR10+ peak brightness is limited to one of 16 values, however the HDR10+ GAMING mode might assume a signal with a peak matching it, so using it might be safer.
 		// If the user has an HDR color profile (e.g. from the Windows HDR Calibration app), we follow that instead, as they might prefer a dimmer presentation.
 		// Note: we check "NVAPI::hasInit" instead of calling "NVAPI::Init()" again, to avoid spamming init failures on non Nvidia GPUs.
-		if (NVAPI::hasInit && !HasUserHDRColorProfile(0, outputDesc1.Monitor))
+		// Built-in panels need the OS-adjusted headroom; raw HDR10+ panel metadata does not track brightness changes.
+		if (NVAPI::hasInit && !IsInternalDisplay(outputDesc1.Monitor) && !HasUserHDRColorProfile(0, outputDesc1.Monitor))
 		{
 			const float hdr10PlusPeakBrightness = NVAPI::GetHDR10PlusDisplayPeakBrightness(0, outputDesc1.Monitor);
 			if (hdr10PlusPeakBrightness > 0.f)

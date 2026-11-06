@@ -604,10 +604,13 @@
     <ClCompile Include="fsr\FSR.cpp" />
     <ClCompile Include="fsr\FSR4.cpp" />
     <ClCompile Include="xess\XeSS.cpp" />
+    <ClCompile Include="xess\XeSSFG.cpp" />
+    <ClCompile Include="dlss\DLSSG.cpp" />
     <ClCompile Include="hooks\DXGIHooks.cpp" />
     <ClCompile Include="hooks\FidelityFXHooks.cpp" />
     <ClCompile Include="hooks\SystemHooks.cpp" />
     <ClCompile Include="interop\D3D12Interop.cpp" />
+    <ClCompile Include="interop\D3D12SwapChainProxy.cpp" />
     <ClCompile Include="utils\system.cpp" />
   </ItemGroup>
   <ItemGroup>
@@ -615,11 +618,15 @@
     <ClInclude Include="fsr\FSR.h" />
     <ClInclude Include="fsr\FSR4.h" />
     <ClInclude Include="xess\XeSS.h" />
+    <ClInclude Include="xess\XeSSFG.h" />
+    <ClInclude Include="dlss\DLSSG.h" />
+    <ClInclude Include="includes\frame_generation.h" />
     <ClInclude Include="hooks\DXGIHooks.h" />
     <ClInclude Include="hooks\FidelityFXHooks.h" />
     <ClInclude Include="hooks\Hooks.h" />
     <ClInclude Include="hooks\SystemHooks.h" />
     <ClInclude Include="interop\D3D12Interop.h" />
+    <ClInclude Include="interop\D3D12SwapChainProxy.h" />
     <ClInclude Include="includes\callbacks.h" />
     <ClInclude Include="includes\cbuffers.h" />
     <ClInclude Include="includes\com_ptr.h" />

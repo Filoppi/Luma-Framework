@@ -17,6 +17,12 @@
     <ClCompile Include="xess\XeSS.cpp">
       <Filter>XeSS</Filter>
     </ClCompile>
+    <ClCompile Include="xess\XeSSFG.cpp">
+      <Filter>XeSS</Filter>
+    </ClCompile>
+    <ClCompile Include="dlss\DLSSG.cpp">
+      <Filter>DLSS</Filter>
+    </ClCompile>
     <ClCompile Include="hooks\DXGIHooks.cpp">
       <Filter>Hooks</Filter>
     </ClCompile>
@@ -27,6 +33,9 @@
       <Filter>Hooks</Filter>
     </ClCompile>
     <ClCompile Include="interop\D3D12Interop.cpp">
+      <Filter>Interop</Filter>
+    </ClCompile>
+    <ClCompile Include="interop\D3D12SwapChainProxy.cpp">
       <Filter>Interop</Filter>
     </ClCompile>
   </ItemGroup>
@@ -125,6 +134,18 @@
     </ClInclude>
     <ClInclude Include="xess\XeSS.h">
       <Filter>XeSS</Filter>
+    </ClInclude>
+    <ClInclude Include="xess\XeSSFG.h">
+      <Filter>XeSS</Filter>
+    </ClInclude>
+    <ClInclude Include="dlss\DLSSG.h">
+      <Filter>DLSS</Filter>
+    </ClInclude>
+    <ClInclude Include="interop\D3D12SwapChainProxy.h">
+      <Filter>Interop</Filter>
+    </ClInclude>
+    <ClInclude Include="includes\frame_generation.h">
+      <Filter>Includes</Filter>
     </ClInclude>
     <ClInclude Include="hooks\DXGIHooks.h">
       <Filter>Hooks</Filter>

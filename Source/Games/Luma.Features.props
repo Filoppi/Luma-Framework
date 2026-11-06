@@ -8,12 +8,21 @@
     <UseLumaFSR4 Condition="'$(UseLumaFSR4)'==''">false</UseLumaFSR4>
     <!-- XeSS (x64 only), natively on DX11 on Intel GPUs, and through DX11->DX12 interop on the others. Intel's signed libxess_dx11.dll and libxess.dll are shipped next to the addon. -->
     <UseLumaXeSS Condition="'$(UseLumaXeSS)'==''">false</UseLumaXeSS>
+    <!-- Frame Generation (x64 only), presenting the game through a DX12 swapchain (see "D3D12SwapChainProxy.h"). Games need to provide the inputs (see "SetFrameGenerationInput()").
+         DLSS-G goes through Streamline, its signed dlls (sl.interposer.dll, sl.common.dll, sl.dlss_g.dll, sl.reflex.dll, sl.pcl.dll, nvngx_dlssg.dll) are shipped next to the addon (from External\Streamline\bin\x64).
+         XeSS-FG (with XeLL) uses Intel's signed libxess_fg.dll and libxell.dll, shipped next to the addon. -->
+    <UseLumaDLSSG Condition="'$(UseLumaDLSSG)'==''">false</UseLumaDLSSG>
+    <UseLumaXeSSFG Condition="'$(UseLumaXeSSFG)'==''">false</UseLumaXeSSFG>
+    <UseLumaFrameGeneration Condition="'$(UseLumaDLSSG)'=='true' or '$(UseLumaXeSSFG)'=='true'">true</UseLumaFrameGeneration>
+    <UseLumaFrameGeneration Condition="'$(UseLumaFrameGeneration)'==''">false</UseLumaFrameGeneration>
     <!-- DX11->DX12 interop (see "D3D12Interop.h"), enabled automatically by the features that need it -->
     <UseLumaD3D12Interop Condition="'$(UseLumaD3D12Interop)'=='' and '$(UseLumaFSR)'=='true' and '$(UseLumaFSR4)'=='true'">true</UseLumaD3D12Interop>
     <UseLumaD3D12Interop Condition="'$(UseLumaD3D12Interop)'=='' and '$(UseLumaXeSS)'=='true'">true</UseLumaD3D12Interop>
+    <UseLumaD3D12Interop Condition="'$(UseLumaD3D12Interop)'=='' and '$(UseLumaFrameGeneration)'=='true'">true</UseLumaD3D12Interop>
     <UseLumaD3D12Interop Condition="'$(UseLumaD3D12Interop)'==''">false</UseLumaD3D12Interop>
     <!-- Shared hooking library (SafetyHook and Zydis submodules), enabled automatically by the features that need it -->
     <UseLumaSafetyHook Condition="'$(UseLumaSafetyHook)'=='' and '$(UseLumaFSR)'=='true' and '$(UseLumaFSR4)'=='true'">true</UseLumaSafetyHook>
+    <UseLumaSafetyHook Condition="'$(UseLumaSafetyHook)'=='' and '$(UseLumaFrameGeneration)'=='true'">true</UseLumaSafetyHook>
     <UseLumaSafetyHook Condition="'$(UseLumaSafetyHook)'==''">false</UseLumaSafetyHook>
     <UseLumaFastNoise Condition="'$(UseLumaFastNoise)'==''">false</UseLumaFastNoise>
     <!-- On by default: NVAPI is a static lib that loads the driver's DLL at runtime, so it's harmless on non NVIDIA GPUs (init just fails). -->
@@ -117,6 +126,17 @@
     <ClCompile Condition="'$(UseLumaD3D12Interop)'=='true'">
       <PreprocessorDefinitions>UNICODE;_UNICODE;ENABLE_D3D12_INTEROP=1;%(PreprocessorDefinitions)</PreprocessorDefinitions>
     </ClCompile>
+    <ClCompile Condition="'$(UseLumaFrameGeneration)'=='true'">
+      <PreprocessorDefinitions>UNICODE;_UNICODE;ENABLE_FRAME_GENERATION=1;%(PreprocessorDefinitions)</PreprocessorDefinitions>
+    </ClCompile>
+    <ClCompile Condition="'$(UseLumaDLSSG)'=='true'">
+      <AdditionalIncludeDirectories>$(MSBuildThisFileDirectory)..\External\Streamline\include;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+      <PreprocessorDefinitions>UNICODE;_UNICODE;ENABLE_DLSSG=1;%(PreprocessorDefinitions)</PreprocessorDefinitions>
+    </ClCompile>
+    <ClCompile Condition="'$(UseLumaXeSSFG)'=='true'">
+      <AdditionalIncludeDirectories>$(MSBuildThisFileDirectory)..\External\XeSS\inc;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+      <PreprocessorDefinitions>UNICODE;_UNICODE;ENABLE_XESS_FG=1;%(PreprocessorDefinitions)</PreprocessorDefinitions>
+    </ClCompile>
     <ClCompile Condition="'$(UseLumaSafetyHook)'=='true'">
       <AdditionalIncludeDirectories>$(LumaSafetyHookRoot)\include;$(LumaZydisRoot)\include;$(LumaZydisRoot)\dependencies\zycore\include;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
       <PreprocessorDefinitions>UNICODE;_UNICODE;ZYDIS_STATIC_BUILD;ZYCORE_STATIC_BUILD;ENABLE_SAFETYHOOK=1;%(PreprocessorDefinitions)</PreprocessorDefinitions>
@@ -158,6 +178,17 @@
 
   <Target Name="LumaCopyXeSSRuntime" AfterTargets="Build" Condition="'$(UseLumaXeSS)'=='true' and '$(Platform)'!='Win32' and Exists('$(TargetDir)')">
     <Copy SourceFiles="$(MSBuildThisFileDirectory)..\External\XeSS\bin\libxess.dll;$(MSBuildThisFileDirectory)..\External\XeSS\bin\libxess_dx11.dll" DestinationFolder="$(TargetDir)" SkipUnchangedFiles="true" />
+  </Target>
+
+  <Target Name="LumaCopyStreamlineRuntime" AfterTargets="Build" Condition="'$(UseLumaDLSSG)'=='true' and '$(Platform)'!='Win32' and Exists('$(TargetDir)')">
+    <ItemGroup>
+      <_LumaStreamlineRuntimeFiles Include="$(MSBuildThisFileDirectory)..\External\Streamline\bin\x64\*.dll" />
+    </ItemGroup>
+    <Copy SourceFiles="@(_LumaStreamlineRuntimeFiles)" DestinationFolder="$(TargetDir)" SkipUnchangedFiles="true" />
+  </Target>
+
+  <Target Name="LumaCopyXeSSFGRuntime" AfterTargets="Build" Condition="'$(UseLumaXeSSFG)'=='true' and '$(Platform)'!='Win32' and Exists('$(TargetDir)')">
+    <Copy SourceFiles="$(MSBuildThisFileDirectory)..\External\XeSS\bin\libxess_fg.dll;$(MSBuildThisFileDirectory)..\External\XeSS\bin\libxell.dll" DestinationFolder="$(TargetDir)" SkipUnchangedFiles="true" />
   </Target>
 
   <Target Name="LumaCopyDxpRuntime" AfterTargets="Build" Condition="false" />

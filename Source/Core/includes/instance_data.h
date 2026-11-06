@@ -375,6 +375,16 @@ struct __declspec(uuid("cfebf6d4-d184-4e1a-ac14-09d088e560ca")) DeviceData
    }
 #endif
 
+#if ENABLE_FG
+   // Only set if frame generation is enabled by the user and supported on this device (the swapchain is then presented through DX12)
+   std::shared_ptr<D3D12SwapChainProxy::Device> fg_proxy_device;
+   FG::Type fg_type = FG::Type::None;
+   FG::InstanceData* fg_instance_data = nullptr;
+   // Set by the game (see "SetFrameGenerationSettings()"), protected by "s_mutex_reshade"
+   FG::SettingsData fg_game_settings = {};
+   bool fg_game_enabled = true;
+#endif
+
    // Resources:
 
 #if ENABLE_SR
@@ -533,6 +543,9 @@ struct __declspec(uuid("c5805458-2c02-4ebf-b139-38b85118d971")) SwapchainData
    std::unordered_set<uint64_t> back_buffers;
 
    std::vector<com_ptr<ID3D11RenderTargetView>> display_composition_rtvs;
+
+   HMONITOR hdr_monitor = nullptr;
+   uint64_t hdr_display_revision = 0;
 
    // Whether the original SDR (vanilla) swapchain was linear space (e.g. sRGB formats)
     bool vanilla_was_linear_space = false;
