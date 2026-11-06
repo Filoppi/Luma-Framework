@@ -2,6 +2,7 @@
 
 #include <atomic>
 #include <memory>
+#include <mutex>
 #include <numbers>
 #include <unordered_map>
 #include "native_cbuffers.hpp"
@@ -52,8 +53,26 @@ struct GameDeviceDataFFXV final : public GameDeviceData
 
    FFXVRainLayer rain;
 
+   // VBAO foliage mask: the G-buffer depth stencil (found at the linear depth pass, valid for this frame), its stencil view (cached while the resource stays the same),
+   // and the mask texture at the AO resolution (R8_UINT, 1 = foliage)
+   ComPtr<ID3D11Resource> gbuffer_depth_stencil;
+   ComPtr<ID3D11ShaderResourceView> stencil_srv;
+   const ID3D11Resource* stencil_srv_source = nullptr; // The stencil view keeps its resource alive, so the address can't be reused while it's cached
+   ComPtr<ID3D11Texture2D> foliage_mask;
+   ComPtr<ID3D11ShaderResourceView> foliage_mask_srv;
+   ComPtr<ID3D11UnorderedAccessView> foliage_mask_uav;
+   bool foliage_mask_failed_logged = false;
+
+   // Foliage mip bias: per depth stencil state (immutable, kept alive so its address can't be reused) whether it's a G-buffer stencil write,
+   // and per sampler Luma bound (anisotropic, with the SR mip bias) its copy with the foliage bias correction.
+   std::mutex foliage_mip_bias_mutex;
+   std::unordered_map<const ID3D11DepthStencilState*, std::pair<ComPtr<ID3D11DepthStencilState>, bool>> gbuffer_stencil_write_states;
+   std::unordered_map<const ID3D11SamplerState*, std::pair<ComPtr<ID3D11SamplerState>, ComPtr<ID3D11SamplerState>>> foliage_samplers; // Source (kept alive), biased copy
+   float foliage_samplers_mip_lod_bias_offset = 0.f; // The SR mip bias the sampler copies were built with
+
    void ResetPerFrameData()
    {
+      gbuffer_depth_stencil = nullptr;
 
       // Clear per-frame source links while keeping persistent pooled allocations.
       upscale_tracking.ResetFrame();

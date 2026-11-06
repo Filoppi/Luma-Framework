@@ -45,10 +45,13 @@ namespace
    ShaderHashesList shader_hashes_rain;
    ShaderHashesList shader_hashes_directional_light;
    ShaderHashesList shader_hashes_attach_fast_noise;
+   ShaderHashesList shader_hashes_linear_depth;
+   ShaderHashesList shader_hashes_ao;
    const uint32_t CBTemporalAA_buffer_size = 256;
    const uint32_t CBView_buffer_size = 768;
 
    bool enable_directional_shadows = false;
+   bool foliage_mip_bias_correction = true; // Foliage textures are alpha tested: sharper mips make them shimmer, see "GetFoliageSampler"
 
    int rain_composition = 0; // 0 = after AA, 1 = after game DoF
 
@@ -398,6 +401,11 @@ public:
          .visibility = Patch::RecipeVisibility::Always,
       });
 #endif
+#if DEVELOPMENT
+      // For the MCP "luma_read_resource" tool (view=registered:<name>)
+      Mcp::RegisterTextures({MCP_GAME_TEXTURE("vbao.foliage_mask", foliage_mask)});
+      Mcp::RegisterToggles({{"foliage_mip_bias_correction", &foliage_mip_bias_correction}});
+#endif
       GetShaderDefineData(POST_PROCESS_SPACE_TYPE_HASH).SetDefaultValue('1');
       GetShaderDefineData(EARLY_DISPLAY_ENCODING_HASH).SetDefaultValue('0');
       GetShaderDefineData(VANILLA_ENCODING_TYPE_HASH).SetDefaultValue('0');
@@ -415,6 +423,7 @@ public:
       force_sdr_display_capability = true; // The game has no HDR toggle, make it use its SDR path
 
       native_shaders_definitions.emplace(CompileTimeStringHash("Decode MVs CS"), ShaderDefinition{"Luma_FFXV_MotionVec_Decode", reshade::api::pipeline_subobject_type::compute_shader});
+      native_shaders_definitions.emplace(CompileTimeStringHash("Foliage Mask CS"), ShaderDefinition{"Luma_FFXV_FoliageMask", reshade::api::pipeline_subobject_type::compute_shader});
       native_shaders_definitions.emplace(CompileTimeStringHash("Rain Composite PS"), ShaderDefinition{"Luma_RainComposite", reshade::api::pipeline_subobject_type::pixel_shader});
       native_shaders_definitions.emplace(0x2100CE9BU, ShaderDefinition{"Luma_Directional_Light", reshade::api::pipeline_subobject_type::pixel_shader});
       native_shaders_definitions.emplace(0xA315F1E7U, ShaderDefinition{"Luma_Directional_Light_CSM", reshade::api::pipeline_subobject_type::pixel_shader});
@@ -427,6 +436,8 @@ public:
       default_luma_global_game_settings.EnableDoF = 1;
       default_luma_global_game_settings.EnableVBAO = 1;
       default_luma_global_game_settings.VBAOThicknessScale = 0.15f;
+      default_luma_global_game_settings.EnableVBAOFoliageMask = 1;
+      default_luma_global_game_settings.VBAOFoliageBlend = 0.75f;
 
       cb_luma_global_settings.GameSettings = default_luma_global_game_settings;
 
@@ -475,13 +486,23 @@ public:
       reshade::get_config_value(runtime, NAME, "VBAOThicknessScale", cb_luma_global_settings.GameSettings.VBAOThicknessScale);
       cb_luma_global_settings.GameSettings.VBAOThicknessScale = std::clamp(cb_luma_global_settings.GameSettings.VBAOThicknessScale, 0.f, 1.f);
 #endif
+#if DEVELOPMENT || TEST // Only tuning settings, fixed in the published builds
+      reshade::get_config_value(runtime, NAME, "FoliageMipBiasCorrection", foliage_mip_bias_correction);
+      bool enable_vbao_foliage_mask = true;
+      reshade::get_config_value(runtime, NAME, "EnableVBAOFoliageMask", enable_vbao_foliage_mask);
+      cb_luma_global_settings.GameSettings.EnableVBAOFoliageMask = enable_vbao_foliage_mask ? 1 : 0;
+      reshade::get_config_value(runtime, NAME, "VBAOFoliageBlend", cb_luma_global_settings.GameSettings.VBAOFoliageBlend);
+      cb_luma_global_settings.GameSettings.VBAOFoliageBlend = std::clamp(cb_luma_global_settings.GameSettings.VBAOFoliageBlend, 0.f, 1.f);
+#endif
 
       enable_directional_shadows = false;
       reshade::get_config_value(runtime, NAME, "DirectionalShadows", enable_directional_shadows);
 
+#if DEVELOPMENT || TEST // Only a tuning setting, fixed in the published builds
       bool use_vanilla_gamut_ratio = false;
       reshade::get_config_value(runtime, NAME, "UseVanillaGamutRatio", use_vanilla_gamut_ratio);
       cb_luma_global_settings.GameSettings.UseVanillaGamutRatio = use_vanilla_gamut_ratio ? 1 : 0;
+#endif
       reshade::get_config_value(runtime, NAME, "RainComposition", rain_composition);
       rain_composition = std::clamp(rain_composition, 0, 1);
    }
@@ -523,6 +544,37 @@ public:
 #if DEVELOPMENT || TEST
          if (cb_luma_global_settings.GameSettings.EnableVBAO != 0)
          {
+            bool enable_foliage_mask = cb_luma_global_settings.GameSettings.EnableVBAOFoliageMask != 0;
+            if (ImGui::Checkbox("VBAO Foliage Mask", &enable_foliage_mask))
+            {
+               cb_luma_global_settings.GameSettings.EnableVBAOFoliageMask = enable_foliage_mask ? 1 : 0;
+               reshade::set_config_value(runtime, NAME, "EnableVBAOFoliageMask", enable_foliage_mask);
+            }
+            if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
+            {
+               ImGui::SetTooltip("Plants (bushes, trees, grass) don't occlude their surroundings, and darken less themselves.\nThe game marks them in the stencil buffer.");
+            }
+            if (DrawResetButton(enable_foliage_mask, true, "EnableVBAOFoliageMask", runtime))
+            {
+               cb_luma_global_settings.GameSettings.EnableVBAOFoliageMask = 1;
+               reshade::set_config_value(runtime, NAME, "EnableVBAOFoliageMask", true);
+            }
+            if (cb_luma_global_settings.GameSettings.EnableVBAOFoliageMask != 0)
+            {
+               if (ImGui::SliderFloat("VBAO Foliage Blend", &cb_luma_global_settings.GameSettings.VBAOFoliageBlend, 0.f, 1.f, "%.2f", ImGuiSliderFlags_AlwaysClamp))
+               {
+                  reshade::set_config_value(runtime, NAME, "VBAOFoliageBlend", cb_luma_global_settings.GameSettings.VBAOFoliageBlend);
+               }
+               if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
+               {
+                  ImGui::SetTooltip("How much the AO of the foliage pixels is blended toward unoccluded.");
+               }
+               if (DrawResetButton(cb_luma_global_settings.GameSettings.VBAOFoliageBlend, 0.75f, "VBAOFoliageBlend", runtime))
+               {
+                  cb_luma_global_settings.GameSettings.VBAOFoliageBlend = 0.75f;
+                  reshade::set_config_value(runtime, NAME, "VBAOFoliageBlend", cb_luma_global_settings.GameSettings.VBAOFoliageBlend);
+               }
+            }
             if (ImGui::SliderFloat("VBAO Thickness Scale", &cb_luma_global_settings.GameSettings.VBAOThicknessScale, 0.f, 1.f, "%.2f", ImGuiSliderFlags_AlwaysClamp))
             {
                reshade::set_config_value(runtime, NAME, "VBAOThicknessScale", cb_luma_global_settings.GameSettings.VBAOThicknessScale);
@@ -538,11 +590,27 @@ public:
             }
          }
 #endif
+#if DEVELOPMENT || TEST
+         if (ImGui::Checkbox("Foliage Mip Bias Correction", &foliage_mip_bias_correction))
+         {
+            reshade::set_config_value(runtime, NAME, "FoliageMipBiasCorrection", foliage_mip_bias_correction);
+         }
+         if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
+         {
+            ImGui::SetTooltip("Gives the plants (stencil class 0xB0, alpha tested, they shimmer with sharp mips) +1 of the SR texture mip bias back (never softer than the game's own).\nRequires active SR.");
+         }
+         if (DrawResetButton(foliage_mip_bias_correction, true, "FoliageMipBiasCorrection", runtime))
+         {
+            foliage_mip_bias_correction = true;
+            reshade::set_config_value(runtime, NAME, "FoliageMipBiasCorrection", foliage_mip_bias_correction);
+         }
+#endif
          const char* rain_timings[] = {"After TAA / DLSS", "After DoF"};
          if (ImGui::Combo("Rain Composition", &rain_composition, rain_timings, IM_ARRAYSIZE(rain_timings)))
             reshade::set_config_value(runtime, NAME, "RainComposition", rain_composition);
          if (ImGui::IsItemHovered())
             ImGui::SetTooltip("After TAA / DLSS: rain receives game DoF and motion blur.\nAfter DoF: rain bypasses DoF and still receives motion blur when enabled.\nRequires active SR.");
+#if DEVELOPMENT || TEST
          if (cb_luma_global_settings.DisplayMode == DisplayModeType::HDR)
          {
             bool use_vanilla_gamut_ratio = cb_luma_global_settings.GameSettings.UseVanillaGamutRatio == 1;
@@ -557,6 +625,7 @@ public:
                reshade::set_config_value(runtime, NAME, "UseVanillaGamutRatio", use_vanilla_gamut_ratio);
             }
          }
+#endif
          if (ImGui::Checkbox("Directional Shadows", &enable_directional_shadows))
          {
             reshade::set_config_value(runtime, NAME, "DirectionalShadows", enable_directional_shadows);
@@ -632,6 +701,170 @@ public:
       native_device_context->Dispatch(group_count_x, group_count_y, 1);
    }
 
+   // Builds the foliage mask of this frame for the VBAO pass, from the stencil of the G-buffer depth stencil (class 0xB is vegetation, see "Luma_FFXV_FoliageMask").
+   // Called right before the AO draw (its render target gives the mask resolution). Returns the mask view, or nullptr (the AO then sees no foliage) if anything is missing.
+   ID3D11ShaderResourceView* BuildFoliageMask(ID3D11Device* native_device, ID3D11DeviceContext* native_device_context, DeviceData& device_data, GameDeviceDataFFXV& game_device_data)
+   {
+      auto fail = [&](const char* reason) -> ID3D11ShaderResourceView*
+      {
+         if (!game_device_data.foliage_mask_failed_logged)
+         {
+            game_device_data.foliage_mask_failed_logged = true;
+            const std::string message = std::string("FFXV: VBAO foliage mask disabled: ") + reason;
+            reshade::log::message(reshade::log::level::warning, message.c_str());
+         }
+         return nullptr;
+      };
+
+      const auto cs_it = device_data.native_compute_shaders.find(CompileTimeStringHash("Foliage Mask CS"));
+      if (cs_it == device_data.native_compute_shaders.end() || !cs_it->second.get())
+         return fail("the compute shader is missing");
+
+      ID3D11Resource* depth_resource = game_device_data.gbuffer_depth_stencil.get();
+      if (!depth_resource)
+         return fail("the depth stencil was not found");
+      ComPtr<ID3D11Texture2D> depth_texture;
+      if (FAILED(depth_resource->QueryInterface(depth_texture.put())))
+         return fail("the depth stencil is not a 2D texture");
+      D3D11_TEXTURE2D_DESC depth_desc;
+      depth_texture->GetDesc(&depth_desc);
+      if (depth_desc.Format != DXGI_FORMAT_R32G8X24_TYPELESS || depth_desc.SampleDesc.Count != 1)
+         return fail("the depth stencil has an unexpected format");
+
+      // The AO target is half of the render resolution
+      ComPtr<ID3D11RenderTargetView> ao_rtv;
+      native_device_context->OMGetRenderTargets(1, ao_rtv.put(), nullptr);
+      if (!ao_rtv)
+         return fail("the AO target was not found");
+      ComPtr<ID3D11Resource> ao_resource;
+      ao_rtv->GetResource(ao_resource.put());
+      ComPtr<ID3D11Texture2D> ao_texture;
+      if (!ao_resource || FAILED(ao_resource->QueryInterface(ao_texture.put())))
+         return fail("the AO target is not a 2D texture");
+      D3D11_TEXTURE2D_DESC ao_desc;
+      ao_texture->GetDesc(&ao_desc);
+      if (depth_desc.Width / 2 != ao_desc.Width && (depth_desc.Width + 1) / 2 != ao_desc.Width)
+         return fail("the AO target is not half of the depth stencil resolution");
+
+      if (!game_device_data.stencil_srv || game_device_data.stencil_srv_source != depth_resource)
+      {
+         game_device_data.stencil_srv = nullptr;
+         D3D11_SHADER_RESOURCE_VIEW_DESC srv_desc = {};
+         srv_desc.Format = DXGI_FORMAT_X32_TYPELESS_G8X24_UINT;
+         srv_desc.ViewDimension = D3D11_SRV_DIMENSION_TEXTURE2D;
+         srv_desc.Texture2D.MostDetailedMip = 0;
+         srv_desc.Texture2D.MipLevels = 1;
+         if (FAILED(native_device->CreateShaderResourceView(depth_resource, &srv_desc, game_device_data.stencil_srv.put())))
+            return fail("the stencil view could not be created");
+         game_device_data.stencil_srv_source = depth_resource;
+      }
+
+      bool recreate_mask = !game_device_data.foliage_mask;
+      if (!recreate_mask)
+      {
+         D3D11_TEXTURE2D_DESC mask_desc;
+         game_device_data.foliage_mask->GetDesc(&mask_desc);
+         recreate_mask = mask_desc.Width != ao_desc.Width || mask_desc.Height != ao_desc.Height;
+      }
+      if (recreate_mask)
+      {
+         game_device_data.foliage_mask_uav = nullptr;
+         game_device_data.foliage_mask_srv = nullptr;
+         game_device_data.foliage_mask = nullptr;
+         D3D11_TEXTURE2D_DESC mask_desc = {};
+         mask_desc.Width = ao_desc.Width;
+         mask_desc.Height = ao_desc.Height;
+         mask_desc.MipLevels = 1;
+         mask_desc.ArraySize = 1;
+         mask_desc.Format = DXGI_FORMAT_R8_UINT;
+         mask_desc.SampleDesc.Count = 1;
+         mask_desc.Usage = D3D11_USAGE_DEFAULT;
+         mask_desc.BindFlags = D3D11_BIND_SHADER_RESOURCE | D3D11_BIND_UNORDERED_ACCESS;
+         if (FAILED(native_device->CreateTexture2D(&mask_desc, nullptr, game_device_data.foliage_mask.put())) ||
+             FAILED(native_device->CreateShaderResourceView(game_device_data.foliage_mask.get(), nullptr, game_device_data.foliage_mask_srv.put())) ||
+             FAILED(native_device->CreateUnorderedAccessView(game_device_data.foliage_mask.get(), nullptr, game_device_data.foliage_mask_uav.put())))
+         {
+            game_device_data.foliage_mask_uav = nullptr;
+            game_device_data.foliage_mask_srv = nullptr;
+            game_device_data.foliage_mask = nullptr;
+            return fail("the mask texture could not be created");
+         }
+      }
+
+      DrawStateStack<DrawStateStackType::Compute> compute_state_stack;
+      compute_state_stack.Cache(native_device_context, device_data.uav_max_count);
+      ID3D11ShaderResourceView* stencil_srv = game_device_data.stencil_srv.get();
+      ID3D11UnorderedAccessView* mask_uav = game_device_data.foliage_mask_uav.get();
+      native_device_context->CSSetShader(cs_it->second.get(), nullptr, 0);
+      native_device_context->CSSetShaderResources(0, 1, &stencil_srv);
+      native_device_context->CSSetUnorderedAccessViews(0, 1, &mask_uav, nullptr);
+      const UINT group_count_x = (ao_desc.Width + 7) / 8;
+      const UINT group_count_y = (ao_desc.Height + 7) / 8;
+      native_device_context->Dispatch(group_count_x, group_count_y, 1);
+      Trace::CustomDispatch(native_device_context, "VBAO Foliage Mask", group_count_x, group_count_y, 1);
+      // The mask is read as a shader resource right after
+      ID3D11UnorderedAccessView* null_uav = nullptr;
+      ID3D11ShaderResourceView* null_srv = nullptr;
+      native_device_context->CSSetUnorderedAccessViews(0, 1, &null_uav, nullptr);
+      native_device_context->CSSetShaderResources(0, 1, &null_srv);
+      compute_state_stack.Restore(native_device_context);
+
+      return game_device_data.foliage_mask_srv.get();
+   }
+
+   // The plants (ENV_Grass* / ENV_Leaf* G-buffer shaders, dithered or not) alpha test the alpha of the first texture they sample, which flickers with sharp mips.
+   // Luma's SR mip bias (log2(render / output) - 1) is more negative than the one recommended for SR (without the - 1), so give the plants +1 of it back (never softer than the game's own bias).
+   // No shader patch: nothing in their assembly tells them apart from the other alpha tested materials (only 66 of the 95 plant shaders share a dither fade window, which the wood materials also have,
+   // and the plain alpha test of the others is the same as everywhere), while the G-buffer stencil class 0xB0 marks exactly the plants.
+   // Returns the sampler to bind at s0 for this draw (nullptr if it isn't a plant draw) and the one it replaces.
+   ID3D11SamplerState* GetFoliageSampler(ID3D11Device* native_device, ID3D11DeviceContext* native_device_context, DeviceData& device_data, GameDeviceDataFFXV& game_device_data, ComPtr<ID3D11SamplerState>& out_original_sampler)
+   {
+      const float mip_lod_bias_offset = device_data.texture_mip_lod_bias_offset;
+      if (!foliage_mip_bias_correction || mip_lod_bias_offset >= 0.f)
+         return nullptr;
+
+      ComPtr<ID3D11DepthStencilState> depth_stencil_state;
+      UINT stencil_ref = 0;
+      native_device_context->OMGetDepthStencilState(depth_stencil_state.put(), &stencil_ref);
+      if (!depth_stencil_state || (stencil_ref >> 4) != 0xB)
+         return nullptr;
+
+      const std::lock_guard lock(game_device_data.foliage_mip_bias_mutex);
+      auto& state_entry = game_device_data.gbuffer_stencil_write_states[depth_stencil_state.get()];
+      if (!state_entry.first)
+      {
+         D3D11_DEPTH_STENCIL_DESC depth_stencil_desc;
+         depth_stencil_state->GetDesc(&depth_stencil_desc);
+         state_entry.first = depth_stencil_state;
+         state_entry.second = depth_stencil_desc.StencilEnable && depth_stencil_desc.FrontFace.StencilPassOp == D3D11_STENCIL_OP_REPLACE;
+      }
+      if (!state_entry.second)
+         return nullptr;
+
+      native_device_context->PSGetSamplers(0, 1, out_original_sampler.put());
+      if (!out_original_sampler)
+         return nullptr;
+      if (game_device_data.foliage_samplers_mip_lod_bias_offset != mip_lod_bias_offset)
+      {
+         game_device_data.foliage_samplers.clear();
+         game_device_data.foliage_samplers_mip_lod_bias_offset = mip_lod_bias_offset;
+      }
+      auto& sampler_entry = game_device_data.foliage_samplers[out_original_sampler.get()];
+      if (!sampler_entry.first)
+      {
+         sampler_entry.first = out_original_sampler;
+         D3D11_SAMPLER_DESC sampler_desc;
+         out_original_sampler->GetDesc(&sampler_desc);
+         if (sampler_desc.Filter == D3D11_FILTER_ANISOTROPIC || sampler_desc.Filter == D3D11_FILTER_COMPARISON_ANISOTROPIC)
+         {
+            // At most the part of the bias Luma added (the game's own sampler could have had a smaller one)
+            sampler_desc.MipLODBias = std::clamp(sampler_desc.MipLODBias + (std::min)(1.f, -mip_lod_bias_offset), D3D11_MIP_LOD_BIAS_MIN, D3D11_MIP_LOD_BIAS_MAX);
+            native_device->CreateSamplerState(&sampler_desc, sampler_entry.second.put());
+         }
+      }
+      return sampler_entry.second.get();
+   }
+
    DrawOrDispatchOverrideType OnDrawOrDispatch(ID3D11Device* native_device, ID3D11DeviceContext* native_device_context, CommandListData& cmd_list_data, DeviceData& device_data, reshade::api::shader_stage stages, const ShaderHashesList<OneShaderPerPipeline>& original_shader_hashes, bool is_custom_pass, bool& updated_cbuffers, std::function<void()>* original_draw_dispatch_func) override
    {
       auto& game_device_data = GetGameDeviceData(device_data);
@@ -658,6 +891,47 @@ public:
          }
       }
 #endif
+
+      // The G-buffer depth stencil (its stencil marks the foliage), as read by the linear depth pass which runs before the AO
+      if ((stages & reshade::api::shader_stage::pixel) != 0 && original_shader_hashes.Contains(shader_hashes_linear_depth))
+      {
+         ComPtr<ID3D11ShaderResourceView> depth_srv;
+         native_device_context->PSGetShaderResources(0, 1, depth_srv.put());
+         if (depth_srv)
+         {
+            game_device_data.gbuffer_depth_stencil = nullptr;
+            depth_srv->GetResource(game_device_data.gbuffer_depth_stencil.put());
+         }
+      }
+
+      // The replaced AO pass reads the foliage mask at t7 (unbound, which reads as no foliage, when the mask is off or can't be built)
+      if ((stages & reshade::api::shader_stage::pixel) != 0 && original_shader_hashes.Contains(shader_hashes_ao))
+      {
+         const bool use_foliage_mask = cb_luma_global_settings.GameSettings.EnableVBAO != 0 && cb_luma_global_settings.GameSettings.EnableVBAOFoliageMask != 0;
+         ID3D11ShaderResourceView* foliage_mask_srv = use_foliage_mask ? BuildFoliageMask(native_device, native_device_context, device_data, game_device_data) : nullptr;
+         native_device_context->PSSetShaderResources(7, 1, &foliage_mask_srv);
+      }
+
+      // Plants draw with a softer sampler, and the game's one is put back right after (it doesn't necessarily re-bind its samplers between draws).
+      // Doing the draw here means setting the Luma cbuffers ourselves, as the other draws that replace the original one do.
+      if ((stages & reshade::api::shader_stage::pixel) != 0 && original_draw_dispatch_func)
+      {
+         ComPtr<ID3D11SamplerState> original_sampler;
+         if (ID3D11SamplerState* foliage_sampler = GetFoliageSampler(native_device, native_device_context, device_data, game_device_data, original_sampler))
+         {
+            native_device_context->PSSetSamplers(0, 1, &foliage_sampler);
+            if (is_custom_pass)
+            {
+               SetLumaConstantBuffers(native_device_context, cmd_list_data, device_data, stages, LumaConstantBufferType::LumaSettings);
+               SetLumaConstantBuffers(native_device_context, cmd_list_data, device_data, stages, LumaConstantBufferType::LumaData);
+            }
+            (*original_draw_dispatch_func)();
+            ID3D11SamplerState* original_sampler_ptr = original_sampler.get();
+            native_device_context->PSSetSamplers(0, 1, &original_sampler_ptr);
+            updated_cbuffers = true;
+            return DrawOrDispatchOverrideType::Replaced;
+         }
+      }
 
       if (original_shader_hashes.Contains(shader_hashes_rain) &&
           device_data.sr_type != SR::Type::None && !device_data.sr_suppressed && !device_data.has_drawn_sr &&
@@ -1266,6 +1540,8 @@ BOOL APIENTRY DllMain(HMODULE hModule, DWORD ul_reason_for_call, LPVOID lpReserv
       shader_hashes_bloom_glare_vignette.pixel_shaders.emplace(0xB6934A17u); // Glare/vignette with sparks
       shader_hashes_rain.pixel_shaders.emplace(0x047D130Bu); // VFXRain_Material, both captured rain draws
       shader_hashes_attach_fast_noise.pixel_shaders.emplace(0xC86DCBDAu); // SAO ambient occlusion (replaced with GTVBAO)
+      shader_hashes_ao.pixel_shaders.emplace(0xC86DCBDAu);
+      shader_hashes_linear_depth.pixel_shaders.emplace(0x2A2468D3u); // Linear depth, reads the G-buffer depth stencil
       shader_hashes_directional_light.pixel_shaders.emplace(std::stoul("2100CE9B", nullptr, 16)); // Directional Light
       shader_hashes_directional_light.pixel_shaders.emplace(std::stoul("A315F1E7", nullptr, 16)); // CSM
       shader_hashes_directional_light.pixel_shaders.emplace(std::stoul("4B8E0FF8", nullptr, 16)); // CSM_AO

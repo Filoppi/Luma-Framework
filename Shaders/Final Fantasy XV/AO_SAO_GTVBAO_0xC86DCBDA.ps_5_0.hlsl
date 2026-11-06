@@ -4,7 +4,7 @@
 // (the previous output of this pass, like the game did), with a depth aware reprojection that drops the history where the surroundings changed.
 // This pass outputs the temporally accumulated AO in .x, and the view normal and the history length like the game's AO pass did (its two bilateral blur passes, which are left as they are, read the normal).
 
-// The previous depth (t4), the velocity (t3) and the previous output (t5) are the game's own bindings of the original pass, t6 (FAST noise) is bound by the mod.
+// The previous depth (t4), the velocity (t3) and the previous output (t5) are the game's own bindings of the original pass, t6 (FAST noise) and t7 (foliage mask) are bound by the mod.
 // The game inputs (linear depth + mips, g-buffer normals, cbuffer) are reused as they are.
 
 #include "Includes/Common.hlsl"
@@ -92,6 +92,16 @@ Texture2D<float4> g_PrevAOTex : register(t5); // This pass' previous output (hal
 // Bound by the mod (t6 is free in the game's signature for this pass), see "shader_hashes_attach_fast_noise".
 Texture2DArray<float4> FastNoise : register(t6);
 
+// Foliage mask (AO resolution, 1 = foliage), built from the stencil of the G-buffer by Luma_FFXV_FoliageMask and bound by the mod, see "shader_hashes_attach_fast_noise".
+// Unbound (mask disabled, or the stencil wasn't found) it reads 0: no foliage.
+Texture2D<uint> FoliageMask : register(t7);
+
+bool IsFoliage(float2 uv)
+{
+  const int2 targetSize = int2(g_ProjParams.zw * 0.5f); // The AO target is half of the render resolution
+  return FoliageMask.Load(int3(clamp(int2(uv * float2(targetSize)), int2(0, 0), targetSize - 1), 0)) != 0u;
+}
+
 // 4 random values per pixel and frame: x = slice rotation, y and w = the step offset of the two sides, z = the arc offset
 float4 VBAORandom(uint2 pixel, uint frameIndex)
 {
@@ -134,7 +144,8 @@ void AddOccludedInterval(inout uint occupiedBits, float2 horizonCosines, float h
 }
 
 // uv: of the pixel, viewPosition: of the pixel (before the normal offset), rayWidthPixels in AO target pixels, thickness in world units.
-float CalculateVBAO(float2 uv, float3 centerPosition, float3 viewNormal, float4 random, float rayWidthPixels, float thickness)
+// skipFoliage: the samples flagged as foliage in the mask don't occlude (plants are not solid occluders, unless the pixel is foliage itself).
+float CalculateVBAO(float2 uv, float3 centerPosition, float3 viewNormal, float4 random, float rayWidthPixels, float thickness, bool skipFoliage)
 {
   const float inverseStepCount = 1.0f / float(VBAO_STEP_COUNT);
   const float inverseSliceCount = 1.0f / float(VBAO_SLICE_COUNT);
@@ -190,6 +201,8 @@ float CalculateVBAO(float2 uv, float3 centerPosition, float3 viewNormal, float4 
         float2 sampleUV = uv + screenDirection * sampleDistance * pixelToUV;
         if (any(sampleUV < 0.0f) || any(sampleUV > 1.0f))
           break;
+        if (skipFoliage && IsFoliage(sampleUV))
+          continue;
         // The full res depth, no mips: like the FF7R one. The depth mips (min filtered) would grow the silhouettes of the thin objects (legs) and darken the ground around them.
         float sampleDepth = g_DepthTex.SampleLevel(g_SamplePoint, sampleUV, 0).x;
         float sampleZ = sampleDepth * g_FarPlane;
@@ -414,8 +427,13 @@ void main(
   {
     // The thickness grows linearly with the depth (the paper: "increase t linearly over the distance"): a fixed fraction of the size of the ray reach in world units, which is ~0.21 * the depth here (the radius of the game's SAO is ~0.1 * the depth, up to ~100 m)
     float thickness = max(VBAO_THICKNESS_WORLD, worldReach * LumaSettings.GameSettings.VBAOThicknessScale);
-    float vbao = CalculateVBAO(uv, position, normal, random, rayWidthPixels, thickness);
+    bool useFoliageMask = LumaSettings.GameSettings.EnableVBAOFoliageMask != 0;
+    bool centerIsFoliage = useFoliageMask && IsFoliage(uv);
+    float vbao = CalculateVBAO(uv, position, normal, random, rayWidthPixels, thickness, useFoliageMask && !centerIsFoliage);
     ao = pow(vbao, VBAO_POWER);
+    // The foliage darkens itself too much (the leaves occlude each other at every scale): blend it toward unoccluded
+    if (centerIsFoliage)
+      ao = lerp(ao, 1.0f, LumaSettings.GameSettings.VBAOFoliageBlend);
   }
   else
   {
