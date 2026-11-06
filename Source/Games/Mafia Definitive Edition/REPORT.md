@@ -9,7 +9,7 @@ Everything below was measured on the machine this mod was developed on:
 - Windows 11, RTX 5090, 3840x2160, DLAA at native resolution
 - ReShade 6.8.0.2155, loaded from `d3d11.dll`
 - `nvngx_dlss.dll` **310.9.1.0**
-- Game runs in borderless windowed; exclusive fullscreen is prevented (see §3.5)
+- Keeps the game's output format, colour pipeline and fullscreen choice (see §3.6)
 
 ---
 
@@ -50,7 +50,7 @@ It does not touch the game's rendering, its tonemapper, or its colour pipeline.
 
 1. Copy `Luma-Mafia Definitive Edition.addon` next to `mafiadefinitiveedition.exe`.
 2. Copy the `Luma` **shader** folder (from Luma-Framework's `Shaders/`) next to the executable too.
-   This mod uses Luma's global shaders (`Luma/Luma_DisplayComposition`, `Luma/Luma_Scale_VS/PS`,
+   This mod uses Luma's global shaders (`Luma/Luma_Scale_VS/PS`,
    `Luma/Luma_Copy_PS`, ...) as well as its own `Luma_MafiaDE_Sharpen`.
 3. Start the game and press **Home** to open the panel. The mod's section is at the bottom of
    Luma's panel, and it reports whether DLSS came up ("`DLSS: active`").
@@ -120,8 +120,9 @@ quality, which is the point of the mod in the first place.
 
 ### 3.6 Fullscreen
 
-Exclusive fullscreen is prevented (`prevent_fullscreen_state`). The game deadlocks on an exclusive
-fullscreen transition with a hooked swapchain, and nothing here needs it.
+The mod leaves fullscreen selection to the game and disables Luma's forced flip-model upgrade.
+The earlier fullscreen and HDR experiments changed the output path; they do not establish how
+exclusive fullscreen behaves with the DLAA-only configuration.
 
 ---
 
@@ -265,10 +266,9 @@ Notes:
 
 ### 6.3 The tonemapper (`0x916B1D65`)
 
-Reverse engineered to settle whether it owns any usable control. The full SM5 disassembly this is
-based on is bundled as **`docs/disasm-916B1D65.txt`** (and the frame tail's other candidate,
-`docs/disasm-DFE68AFF.txt`, which turns out to be a deferred lighting pass rather than a post
-process). The essentials:
+Reverse engineered to settle whether it owns any usable control. These findings came from SM5
+disassemblies of `0x916B1D65` and `0xDFE68AFF` (a deferred lighting pass rather than a post process).
+The raw disassembly dumps are not needed to build or run the mod. The essentials:
 
 - It is a full post chain in one shader: chromatic aberration, bloom, an additive detail layer, a
   hue-preserving contrast curve, a **3D colour grading LUT** (16³, bound at t9, blended at 0.8), a
@@ -312,21 +312,19 @@ and, when `prevent_fullscreen_state` is set, `DXGI_SWAP_CHAIN_FLAG_FRAME_LATENCY
 One of those is what this game rejects. That is the open question, and it is a tractable one because
 a working reference exists.
 
-The content side is already free should anyone pick this up: switching the tonemapper's operator to
-`-2` (see §6.3) makes the game emit linear unclamped HDR, which is one constant buffer float, and
-Luma's display composition parameters are already wired for it.
-
-The mod forces the container off and ignores the ini key, because a published build must not ship a
-switch that produces a black screen.
+The current mod only replaces AA. It sets `swapchain_upgrade_type` to `None` and disables Luma's
+display composition, following the existing DLSS-only mods. It does not force SDR, rewrite the
+DisplayMode setting, or convert the game's final image. The shared `SDR_OUTPUT_TRANSFORM` changes
+are unnecessary and have been removed. Native HDR integration would need separate implementation
+and testing.
 
 **One caveat on those three measurements.** They were taken with RenoDX's HDR10 channel and
 OptiScaler's XeFG/NR both live on the same swapchain: `ReShade.log` from that session shows both
 add-ons loading and RenoDX upgrading resources `b8g8r8a8 -> r16g16b16a16`. So "this game rejects
 Luma's in-place upgrade" was never fully separated from "three tools reached for one swapchain at
-once". A single-variable retest with RenoDX and OptiScaler disabled would settle it, and the
-`NativeHDRContainer` ini key is deliberately left in the code as the switch for exactly that test -
-the key is read, validated and logged, it just is not honoured. Do not record the black screen as a
-property of the game until that retest has been run.
+once". A single-variable retest with RenoDX and OptiScaler disabled is still needed before
+attributing the failure to the game or any one swapchain mechanism. The DLAA-only mod does not
+expose or read a `NativeHDRContainer` setting.
 
 ### 6.5 AA quality: only Low runs the resolve
 
@@ -419,6 +417,4 @@ the signal is available at the exact frame the cutscene starts.
   Licence: Custom MIT, see the repository root.
 - The DLSS preset measurements, the tonemapper anatomy and the HDR container verdict were measured
   on this machine and are recorded with their raw logs; they are not theory.
-- `docs/disasm-916B1D65.txt` and `docs/disasm-DFE68AFF.txt` are SM5 disassemblies of the game's own
-  shaders, produced from Luma's own shader dumps. The tool that produced them is a small
-  `D3DDisassemble` wrapper; it lives outside this mod's folder in the development tree.
+- The tonemapper findings above were obtained with `D3DDisassemble` on Luma shader dumps.
