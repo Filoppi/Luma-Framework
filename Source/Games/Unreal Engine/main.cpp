@@ -28,6 +28,7 @@ namespace
    {
       bool enable_dithering_fix = false; // Master switch for dithering fix
       bool sr_auto_exposure = true;
+      bool fsr_zero_velocity_factor = false; // FSR 3 only
 
       bool first_boot = true; // Automatic setting
       bool enable_hdr = true;
@@ -1102,6 +1103,7 @@ public:
                draw_data.motion_vectors = game_device_data.sr_motion_vectors.get();
                draw_data.depth_buffer = game_device_data.depth_buffer.get();
                draw_data.pre_exposure = 0.0f; // automatic exposure
+               draw_data.fsr_velocity_factor = fsr_zero_velocity_factor ? 0.f : 1.f;
                draw_data.jitter_x = game_device_data.jitter.x * game_device_data.render_resolution.x * 0.5f;
                draw_data.jitter_y = game_device_data.jitter.y * game_device_data.render_resolution.y * -0.5f;
                draw_data.reset = reset_sr;
@@ -1352,6 +1354,16 @@ public:
       if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
       {
          ImGui::SetTooltip("Enable Super Resolution (DLSS/FSR) to change this setting.");
+      }
+
+      // FSR 4 doesn't use the velocity factor
+      if (device_data.sr_type == SR::Type::FSR)
+      {
+         ImGui::Checkbox("FSR Zero Velocity Factor", &fsr_zero_velocity_factor);
+         if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
+         {
+            ImGui::SetTooltip("Sets the FSR \"velocity factor\" to 0, which can improve the temporal stability of bright pixels.\nMight increase ghosting.");
+         }
       }
 
       if (ImGui::TreeNode("Experimental Features"))

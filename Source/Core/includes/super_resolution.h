@@ -246,6 +246,7 @@ namespace SR
 			float time_delta = -1.f; // Seconds. Ignored if < 0 (not always needed)
 			unsigned long long frame_index = 0;
 			float user_sharpness = -1.f; // Ignored/default if < 0. Neutral at 0 (at least in FSR).
+			float fsr_velocity_factor = 1.f; // FSR 3 only. 0 can improve the temporal stability of bright pixels, 1 is the default. Clamped to [0, 1].
 		};
 
 		// Returns true if drawing didn't fail.

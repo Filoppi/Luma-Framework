@@ -338,6 +338,14 @@ namespace FidelityFX
       dispatch_upscale.frameTimeDelta = static_cast<float>(time_delta * 1000.f); // FSR expects milliseconds. Unused by upscaling.
       dispatch_upscale.frameID = draw_data.frame_index; // This is ignored so it doesn't matter (it's for FG)
 
+      // This is a context constant (not part of the dispatch description), so it's set every frame, which also covers newly created contexts
+      float velocity_factor = draw_data.fsr_velocity_factor;
+      const FfxErrorCode constant_err_code = ffxFsr3SetUpscalerConstant(const_cast<FfxFsr3Context*>(&custom_data->context), FFX_FSR3UPSCALER_CONFIGURE_UPSCALE_KEY_FVELOCITYFACTOR, &velocity_factor);
+      if (constant_err_code != FFX_OK)
+      {
+         printf_s("FSR3: ffxFsr3SetUpscalerConstant failed, error = %d\n", static_cast<int>(constant_err_code));
+      }
+
       dispatch_upscale.flags = 0;
 #if DEVELOPMENT
       if (SR::debug_view)
