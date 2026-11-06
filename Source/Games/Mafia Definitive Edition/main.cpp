@@ -57,10 +57,7 @@
 //     resolves the scene's stochastic lighting noise with real temporal samples, and DLAA cannot
 //     beat that without giving the sharpness back. RCAS on top is the accepted trade-off.
 //
-// Not done: HDR. Luma's HDR10 path is an upstream TODO, and scRGB is mutually exclusive with
-// OptiScaler's XeFG (which only accepts 10 bit HDR10). The texture format upgrades HDR would
-// need (R11G11B10 -> FP16) are what produced the black/silver blocks on car paint and floors,
-// so they stay off: see TextureFormatUpgrades in ReShade.ini.
+// DLAA only: keep the game's output format and colour pipeline. Luma does not add HDR output.
 //
 // Safety: if DLSS refuses the input set, or the AA pass' inputs do not look like what we
 // expect, the hook returns without replacing anything and the game runs its own AA that frame.
@@ -104,24 +101,7 @@
 // which is extremely hard to trace back to what looks like an unrelated dialog.
 #define DISABLE_AUTO_DEBUGGER 1
 
-// Do not force the flip model on the swapchain, even when the format is upgraded for HDR.
-//
-// Why: with the upgrade enabled, core.hpp:3097-3107 rewrites two things the game never
-// asked for - "desc.present_mode = DXGI_SWAP_EFFECT_FLIP_DISCARD" (the game asks for
-// DXGI_SWAP_EFFECT_DISCARD, windowed, 2 buffers) and, because "prevent_fullscreen_state" is on,
-// "DXGI_SWAP_CHAIN_FLAG_FRAME_LATENCY_WAITABLE_OBJECT". With either container (scRGB's
-// R16G16B16A16_FLOAT or HDR10's R10G10B10A2_UNORM) the swapchain is created successfully - the
-// format really does come back upgraded, and Luma logs no error - but the game then renders
-// almost nothing: 8 draws per frame instead of ~1300, the TAA resolve never runs, DLSS never
-// draws, and the screen stays black. Frames keep being presented, so this is the renderer going
-// idle, not a crash. Since the failure is identical for a 16 bit float and a 10 bit UNORM
-// container, it is not the format, it is one of those two flags.
-//
-// Seven other Luma games define this (Watch Dogs 2, Far Cry 5, Sekiro, Heaven Burns Red,
-// Blue Reflection Second Light, ...), so it is the intended escape hatch rather than a hack.
-// What it costs us: without the flip model an scRGB/HDR10 swapchain is a legacy bitflip one,
-// which is exactly the combination Windows is least happy about, so this may well end up being
-// "no native HDR container for this game". Test it before believing it.
+// Keep the game's swap effect; this mod does not need an HDR swapchain upgrade.
 #define DISABLE_SWAPCHAIN_FLIP_MODEL 1
 
 // UseLumaNGX is enabled in the .vcxproj, so the DLSS/DLAA code paths are compiled in.
@@ -149,12 +129,6 @@ ShaderHashesList shader_hashes_GameSharpen;
 // Reference points, not replaced.
 ShaderHashesList shader_hashes_Tonemap;
 ShaderHashesList shader_hashes_DepthOfField;
-
-// The HDR output container, read from the ini at startup: 0 = SDR, 1 = scRGB, 2 = HDR10. It has to
-// be a file scope global rather than a field of the per device data because the swapchain is created
-// before any device data exists, and the swapchain format cannot be changed afterwards. See the
-// "hdr_container" comment on the device struct for why scRGB is the first one to try.
-static int g_hdr_container = 0;
 
 // This module's own HMODULE, kept so OnLoad can report it. ReShade's "invalid module handle" error
 // means the handle that reached ReShadeRegisterAddon was null or already taken, and the only way to
@@ -680,23 +654,6 @@ struct MafiaDefinitiveEditionGameDeviceData final : public GameDeviceData
    int tm_sqrt_gate_seen = 0;
    float tm_exposure_seen = 0.0f;
    float tm_white_point_seen = 0.0f;
-   // --- The HDR output container, the one thing that was actually missing ------------------------
-   // The game's tonemapper can already emit linear, unclamped values: operator -2 in
-   // 0x916B1D65 is literally "exposure * colour, max(0), done", with no curve and no clamp (see
-   // docs/disasm-916B1D65.txt lines 131-137). Switching to it is the content half of HDR and
-   // it costs one float. The other half is the container: with an R8G8B8A8_UNORM swapchain every
-   // value above 1.0 is clipped, so the extra range is thrown away before it reaches the display.
-   //
-   // scRGB is the right first container to try: it is the app side format Windows itself uses for
-   // HDR (absolute luminance, 1.0 = 80 nits, RGB_FULL_G10_NONE_P709), so it works on an HDR10
-   // monitor without the mod having to write a PQ encoder, and it is what core.hpp:3137 already
-   // supports. HDR10 (R10G10B10A2_UNORM + PQ) is the shipping target, and is the only format XeFG
-   // accepts, but it needs the PQ encoding that the core does not have yet.
-   //
-   // 0 = off (SDR, the shipping default), 1 = scRGB, 2 = HDR10. Persisted in the ini because the
-   // swapchain format is fixed when it is created, so changing it needs a restart. The live value
-   // is the file scope "g_hdr_container"; this copy only exists so the draw hook can read it cheaply.
-   int hdr_container = 0;
 #endif
 #if DEVELOPMENT
    // MV sniffer. Mafia III's mod does not feed DLSS the TAA's own t2, it hooks a separate
@@ -907,25 +864,11 @@ public:
       native_shaders_definitions.emplace(CompileTimeStringHash("MafiaDE Sharpen PS"),
          ShaderDefinition{"Luma_MafiaDE_Sharpen", reshade::api::pipeline_subobject_type::pixel_shader, nullptr, "sharpen_ps"});
 
-      std::vector<ShaderDefineData> game_shader_defines_data = {
-         {"TONEMAP_TYPE", /*default value*/ '1', true, false, /*tooltip*/ "0 - Vanilla SDR\n1 - Luma HDR (Vanilla+)", /*max value*/ 1},
-      };
-      shader_defines_data.append_range(game_shader_defines_data);
-      assert(shader_defines_data.size() < MAX_SHADER_DEFINES);
-
       GetShaderDefineData(POST_PROCESS_SPACE_TYPE_HASH).SetDefaultValue('0');
       GetShaderDefineData(EARLY_DISPLAY_ENCODING_HASH).SetDefaultValue('0');
       GetShaderDefineData(VANILLA_ENCODING_TYPE_HASH).SetDefaultValue('0');
       GetShaderDefineData(GAMMA_CORRECTION_TYPE_HASH).SetDefaultValue('1');
       GetShaderDefineData(UI_DRAW_TYPE_HASH).SetDefaultValue('0');
-      // Measured, see the "[swapchain]" line of the probe log: the game's back buffer is a plain
-      // "R8G8B8A8_UNORM" (not "_SRGB"), so the OS applies the sRGB transfer function to whatever it
-      // finds and the display composition has to hand the stored bytes back untouched. Its legacy
-      // sRGB -> linear decode therefore displayed the SDR image one decode too dark, which read as
-      // over contrasted and over saturated ("richer") compared to vanilla. Verified by A/B: with "1"
-      // the image matches the composition disabled (game raw) exactly.
-      GetShaderDefineData(SDR_OUTPUT_TRANSFORM_HASH).SetDefaultValue('1');
-
       luma_settings_cbuffer_index = 13;
       luma_data_cbuffer_index = 12;
       luma_ui_cbuffer_index = -1;
@@ -2196,51 +2139,17 @@ public:
 #endif // ENABLE_SR
    }
 
-   // One shot, every build: the back buffer format decides how Luma reads the game's final image.
-   // core.hpp treats an "_SRGB" format as "the game writes linear" (the sRGB view encodes on write)
-   // and a plain UNORM as "the game writes gamma/sRGB" ("last_swapchain_linear_space"). That in
-   // turn decides whether the display composition re-encodes what it samples, so this is the first
-   // thing to look at when the SDR tonality looks off. It is logged in the release build too
-   // because the probe log is the only place a user can read it.
+   // Log the game's output format without changing it.
    void OnInitSwapchain(reshade::api::swapchain* swapchain) override
    {
-      const reshade::api::resource_desc desc = swapchain->get_device()->get_resource_desc(swapchain->get_back_buffer(0));
-      const bool treated_as_linear = desc.texture.format == reshade::api::format::r8g8b8a8_unorm_srgb
-                                  || desc.texture.format == reshade::api::format::b8g8r8a8_unorm_srgb
-                                  || desc.texture.format == reshade::api::format::r16g16b16a16_float;
-      std::ostringstream ss;
-      ss << "[swapchain] back buffer format: " << desc.texture.format
-         << "  (" << desc.texture.width << "x" << desc.texture.height << ")"
-         << "  requested container: "
-         << (g_hdr_container == 0 ? "off/SDR" : g_hdr_container == 1 ? "scRGB" : "HDR10")
-         << (treated_as_linear ? "  -> Luma reads it as LINEAR" : "  -> Luma reads it as GAMMA")
-         << "  Luma reads the game's final image as: "
-         << (treated_as_linear ? "LINEAR (sRGB view encodes on write)" : "GAMMA (sRGB encoded by the game)");
-      Probe::Line(ss.str());
+      const auto desc = swapchain->get_device()->get_resource_desc(swapchain->get_back_buffer(0));
+      Probe::Line(std::format("[swapchain] game back buffer format: {} ({}x{}); Luma HDR upgrade and display composition disabled",
+                              static_cast<int>(desc.texture.format), desc.texture.width, desc.texture.height));
    }
 
    void OnPresent(ID3D11Device* native_device, DeviceData& device_data) override
    {
       auto& game_device_data = GetGameDeviceData(device_data);
-
-      // Luma's core "Display Mode" slider becomes enabled as soon as Windows HDR is on the display.
-      // It is only safe to let it leave SDR when there is a real container for the extra range: on a
-      // plain R8G8B8A8_UNORM swapchain, HDR mode makes the display composition multiply the image by
-      // "ScenePaperWhite / 80" (up to ~2.5x) and write the result into 8 bits, i.e. a blown out image
-      // with the wrong gamma. So the pin is now conditional on the container being off - with scRGB
-      // or HDR10 selected there is somewhere for the highlights to go, and the slider is exactly the
-      // control a published HDR switch should expose.
-      // The core saves the slider value to the ini as soon as it changes ("ChangeDisplayMode" in
-      // core.hpp), so write it back too, otherwise the ini would keep claiming HDR across restarts.
-      if (g_hdr_container == 0 && cb_luma_global_settings.DisplayMode != DisplayModeType::SDR)
-      {
-         cb_luma_global_settings.DisplayMode = DisplayModeType::SDR;
-         cb_luma_global_settings.ScenePaperWhite = srgb_white_level;
-         cb_luma_global_settings.ScenePeakWhite = srgb_white_level;
-         cb_luma_global_settings.UIPaperWhite = srgb_white_level;
-         device_data.cb_luma_global_settings_dirty = true;
-         reshade::set_config_value(nullptr, NAME, "DisplayMode", int(DisplayModeType::SDR));
-      }
 
       ++Probe::s_frame;
 
@@ -2354,42 +2263,6 @@ public:
       int mvs_jittered_cfg = 0;   // shipping default is OFF, so an absent key means OFF too
       reshade::get_config_value(runtime, NAME, "MVsJittered", mvs_jittered_cfg);
       g_mvs_jittered_ini = mvs_jittered_cfg != 0 ? 1 : 0;
-      // The HDR output container is FORCED OFF, and the ini value is ignored on purpose.
-      //
-      // The content half of native HDR turned out to be free: the game's tonemapper
-      // (0x916B1D65) already has an operator -2 that is literally "exposure * colour, max(0)" with
-      // no curve and no clamp, so a single constant buffer float switches it from display referred
-      // gamma to linear unclamped HDR. The container half is what fails, and three configurations
-      // were measured with Luma's own swapchain upgrade:
-      //   scRGB   R16G16B16A16_FLOAT   flip forced   -> 8 draws/frame, black
-      //   HDR10   R10G10B10A2_UNORM    flip forced   -> 8 draws/frame, black
-      //   scRGB   R16G16B16A16_FLOAT   flip disabled -> 8 draws/frame, black
-      // In every case the upgraded swapchain is really created and Luma logs no error at all; the
-      // TAA resolve never runs and DLSS never draws, so the renderer goes idle instead of drawing
-      // the world, while frames keep being presented.
-      //
-      // What this does NOT mean: it is not that "this game cannot render into a non 8 bit UNORM
-      // backbuffer". That was this comment's first reading and it was wrong, so do not repeat it.
-      // RenoDX's mafiade add-on runs the same game at r10g10b10a2_unorm (HDR10) and at
-      // r16g16b16a16_float (scRGB) with clean gradients and no errors, verified over 30-60 s runs -
-      // see REPORT.md §6.4. The difference is the mechanism: RenoDX
-      // proxies the swapchain (its own proxy vertex/pixel shaders plus resource cloning, see
-      // renodx::mods::swapchain) while Luma changes the game's own swapchain in place and forces
-      // FLIP_DISCARD and, with prevent_fullscreen_state, FRAME_LATENCY_WAITABLE_OBJECT. One of those
-      // two is what the game chokes on, and that is still an open question rather than a verdict.
-      //
-      // So: leave this off anyway, because a published build must not ship a switch that produces a
-      // black screen, but do not record it as a property of the game. If you want HDR output here,
-      // the working route today is to keep RenoDX's HDR10 channel; the alternative is to find out
-      // which half of Luma's upgrade this game rejects.
-      g_hdr_container = 0;
-      swapchain_format_upgrade_type = TextureFormatUpgradesType::None;
-      swapchain_upgrade_type = SwapchainUpgradeType::scRGB;
-      Probe::Line("[container] forced off: Luma's swapchain upgrade path stops this game from rendering "
-                  "(scRGB/HDR10, flip forced or not: 8 draws per frame, black). NOT a game limitation - "
-                  "RenoDX drives the same game at r10g10b10a2_unorm/r16g16b16a16_float. See "
-                  "REPORT.md §6.4.");
-
       // DLSS render preset. "Default" is an unknown by design and is the worst place to be with
       // DLSS 310.9.x: it resolved to a model that mishandles reflective and transparent content in
       // this game. Measured on this title, over a rainy night scene and sunlit ground at noon:
@@ -2562,16 +2435,7 @@ public:
       // ---------------------------------------------------------------------------------------
       ImGui::Separator();
       ImGui::Text("Dev switches:");
-      // A/B the SDR tonality. Luma's display composition is the only thing between the game's final
-      // image and the swapchain, and in SDR it decodes sRGB -> linear *without* re-encoding (that
-      // path is written for the scRGB container, where writing linear is correct). Turning it off
-      // shows the game raw, which is how we tell "the game looks like that" from "Luma made it
-      // richer". Note the core also hides its whole "Display Mode" block while this is on, so the
-      // absence of the SDR/Display Mode line confirms the toggle took effect.
-      if (ImGui::Button(force_disable_display_composition ? "Display composition: DISABLED (A/B, game raw)" : "Display composition: enabled"))
-      {
-         force_disable_display_composition = !force_disable_display_composition;
-      }
+      ImGui::TextUnformatted("Output: game controlled (Luma HDR upgrade and display composition disabled)");
       if (ImGui::Button(game_device_data.cancel_second_taa ? "Second resolve in a frame: CANCELLED" : "Second resolve in a frame: allowed"))
       {
          game_device_data.cancel_second_taa = !game_device_data.cancel_second_taa;
@@ -2639,32 +2503,6 @@ public:
       ImGui::SameLine();
       ImGui::TextUnformatted("(needs Luma set to read the image as LINEAR to look right)");
 
-      // The HDR output container: measured, and it does not work on this game, so it is not offered
-      // as a switch. See the long comment in LoadConfigs(). The button is gone on purpose - a
-      // published build must not ship a setting that produces a black screen.
-      ImGui::TextUnformatted("HDR container: off - Luma's swapchain upgrade stops this game from rendering");
-      ImGui::SameLine();
-      ImGui::TextUnformatted("(scRGB / HDR10, flip forced or not: 8 draws per frame, black. Not a game limitation)");
-
-      // The numbers that answer "is the HDR path actually on". Without these the user has nothing
-      // but their eyes, and the whole point of scRGB is that it has an absolute, checkable scale.
-      ImGui::Text("  Windows HDR on this display: %s   Luma SDR white level: %.0f nits",
-                  hdr_enabled_display ? "yes" : "NO (HDR output is impossible right now)",
-                  static_cast<double>(srgb_white_level));
-      ImGui::Text("  tonemapper: operator %d  (%s)   dither %s   exposure %.6f   white point %.2f",
-                  game_device_data.tm_operator_seen,
-                  game_device_data.tm_operator_seen == 1 ? "Uncharted2, clamped, display referred"
-                  : game_device_data.tm_operator_seen == -2 ? "linear, no clamp  <= HDR OUT"
-                  : game_device_data.tm_operator_seen == -3 ? "filmic fit, no clamp"
-                  : game_device_data.tm_operator_seen == -4 ? "filmic fit 0.6x, no clamp" : "other",
-                  game_device_data.tm_sqrt_gate_seen ? "on" : "off",
-                  static_cast<double>(game_device_data.tm_exposure_seen),
-                  static_cast<double>(game_device_data.tm_white_point_seen));
-      ImGui::Text("  Luma: DisplayMode=%d  ScenePaperWhite=%.0f  ScenePeakWhite=%.0f  (%.2fx over 80 nits)",
-                  static_cast<int>(cb_luma_global_settings.DisplayMode),
-                  static_cast<double>(cb_luma_global_settings.ScenePaperWhite),
-                  static_cast<double>(cb_luma_global_settings.ScenePeakWhite),
-                  static_cast<double>(cb_luma_global_settings.ScenePaperWhite / srgb_white_level));
       if (ImGui::Button(game_device_data.aa_auto_slots ? "Slots: AUTO by format (shipping default)" : "Slots: manual"))
       {
          game_device_data.aa_auto_slots = !game_device_data.aa_auto_slots;
@@ -2776,13 +2614,11 @@ BOOL APIENTRY DllMain(HMODULE hModule, DWORD ul_reason_for_call, LPVOID lpReserv
                              "https://github.com/Filoppi/Luma-Framework/", mod_version);
          Probe::Line("[DllMain] step 1/5 SetGlobals OK");
 
-         // The swapchain upgrade is what deadlocked this game on the first exclusive fullscreen
-         // transition (core.hpp:3102-3137 vs the TODO at 3550), so it stays off here. It is applied
-         // from LoadConfigs() instead, which is where the ini can safely be read - see the long
-         // comment there about why reading it from *here* silently breaks the whole add-on.
+         // DLAA only: leave output to the game, as in the other DLSS-only mods.
          swapchain_format_upgrade_type = TextureFormatUpgradesType::None;
-         swapchain_upgrade_type = SwapchainUpgradeType::scRGB;
-         prevent_fullscreen_state = true;
+         swapchain_upgrade_type = SwapchainUpgradeType::None;
+         force_disable_display_composition = true;
+         prevent_fullscreen_state = false;
 
          // Texture format upgrades stay OFF, even though DLSS nominally wants FP16 (the game keeps
          // its HDR buffers in R11G11B10_FLOAT) and Luma's own template enables them by default.
