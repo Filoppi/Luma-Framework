@@ -1,8 +1,10 @@
 // Luma: Hitman Absolution pause-menu composite pixel shader 0xAB9D887F.
-// Faithful translation of the vanilla DXBC (ps_4_0). Only change: the sqrt input is clamped to >= 0.
+// Faithful translation of the vanilla DXBC (ps_4_0). Vanilla body (TONEMAP_TYPE 0) only change: the sqrt input is clamped to >= 0.
 // Blurred HDR inputs carry small negatives; sqrt of them was NaN (black blocks in the pause menu).
+// TONEMAP_TYPE >= 1: the scene stays linear and goes through the shared HMA output path (same as FinalPost).
 
 #include "Includes/Common.hlsl"
+#include "Includes/HMAOutput.hlsl"
 
 cbuffer cb4 : register(b4)
 {
@@ -23,6 +25,7 @@ SamplerState s4 : register(s4);
 
 float4 main(float4 v0 : SV_POSITION, float4 v1 : TEXCOORD0, float3 v2 : COLOR0, float3 v3 : COLOR1) : SV_TARGET
 {
+#if TONEMAP_TYPE < 1
   float4 o0;
   float4 r0, r1, r2, r3;
 
@@ -55,4 +58,47 @@ float4 main(float4 v0 : SV_POSITION, float4 v1 : TEXCOORD0, float3 v2 : COLOR0, 
   o0.xyz = r0.xyz * r1.xyz + r2.xyz;
   o0.w = 0.0;
   return o0;
+#else
+  // Scene (distortion, blur blend, tint) kept linear, same math as vanilla lines 29-44.
+  float4 r0, r1, r2, r3;
+  r0 = t1.Sample(s1, v1.xy);
+  r0.xy = r0.xy + cb4[114].y;
+  r0.xy = r0.xy + float2(-0.5, -0.5);
+  r0.xy = r0.xy * r0.w;
+  r0.z = saturate(r0.w * cb4[114].z);
+  r0.w = saturate(r0.w * cb4[114].x);
+  r0.xy = r0.xy * cb4[113].w;
+  r0.xy = r0.xy * 2.0 + v1.xy;
+  r1 = t4.Sample(s4, r0.xy);
+  r2 = t2.Sample(s2, r0.xy);
+  r3 = t0.Sample(s0, v1.xy);
+  r1.xyz = r1.xyz - r3.xyz;
+  r0.xyz = r0.z * r1.xyz + r3.xyz;
+  r1.xyz = cb4[113].xyz - 1.0;
+  r1.xyz = r0.w * r1.xyz + 1.0;
+  float3 sceneLin = r0.xyz * r1.xyz;
+
+  // Grain mask as in FinalPost, noise from t3 (vanilla pause reads t3 at v1.zw).
+  float grainIntensity = cb4[98].w;
+  float grainMaskVanilla = saturate(1.0 - t3.Sample(s3, v1.zw).x * grainIntensity);
+  float grainMaskMean = saturate(1.0 - 0.5 * grainIntensity);
+  float grainMask = grainMaskMean + (grainMaskVanilla - grainMaskMean) * LumaSettings.GameSettings.FilmGrainStrength;
+  float3 vig = lerp(0.5, v2, LumaSettings.GameSettings.VignetteStrength);
+  float3 grain = grainMask * vig;
+
+  float3 c = sqrt(max(sceneLin, 0.0));
+  float3 cS = min(c, 1.0);
+  float3 excess = c - cS;
+  float gradientFade = smoothstep(0.0, 0.25, max(cS.r, max(cS.g, cS.b)));
+  float3 x = max(GrainLevels(cS, grain, v3 * LumaSettings.GameSettings.TopGradientStrength * gradientFade), 0.0) + excess;
+
+  // Overlay (t2) blended over the composite, as vanilla.
+  float3 ov = saturate(r2.xyz);
+  x = x * (1.0 - ov) + ov;
+
+  float4 o0;
+  o0.xyz = HMA_DisplayOutput(HMA_GammaToLinear(x));
+  o0.w = 0.0;
+  return o0;
+#endif
 }

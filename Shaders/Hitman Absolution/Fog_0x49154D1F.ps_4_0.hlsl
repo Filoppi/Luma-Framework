@@ -73,13 +73,14 @@ float4 main(float4 v0 : SV_POSITION, float4 v1 : TEXCOORD1) : SV_TARGET
 
 #if TONEMAP_TYPE >= 1
   // Scene copy: fade the fog alpha toward black where the scene is black.
+  // Only for thin fog: in dense smoke (Burning Hotel) the fade made dark objects show through as outlines.
   uint w, h;
   t2.GetDimensions(w, h);
   if (w > 0)
   {
     float3 scene = t2.Load(int3(v0.xy, 0)).rgb;
     float m = max(scene.r, max(scene.g, scene.b));
-    o0.w *= smoothstep(0.0, 0.0625, m);
+    o0.w *= lerp(smoothstep(0.0, 0.0625, m), 1.0, smoothstep(0.2, 0.5, o0.w));
   }
 #endif
 

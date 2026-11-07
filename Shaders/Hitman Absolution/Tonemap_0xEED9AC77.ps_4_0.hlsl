@@ -24,6 +24,9 @@ SamplerState s0 : register(s0);
 SamplerState s1 : register(s1);
 SamplerState s2 : register(s2);
 SamplerState s3 : register(s3);
+#if TONEMAP_TYPE >= 1
+#include "Includes/ModernLensFlare.hlsl"
+#endif
 
 // Vanilla grading on an SDR-range scene color. depthCoord is the linearized depth remapped to [0,1].
 float3 LUTGrade(float3 scene, float4 fade, float depthCoord)
