@@ -1,15 +1,11 @@
-// Bloom
-//
-
 #include "./common1.hlsl"
 
-cbuffer LumaBloom : register(b11)
+cbuffer CBMegaMixBloom : register(b11)
 {
   float2 src_size;
   float2 inv_src_size;
   float2 axis;
   float sigma;
-  float tex_noise_index;
 }
 #define SUGMA sigma
 
@@ -57,7 +53,8 @@ float3 almost_max_lerp(float3 a, float3 b, float r, bool isDisardLessB = false)
 
 ///////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
 
-float3 bloom_downsample_almost_max(float4 pos, float2 texcoord, float sigmaBoost = 0)
+// TODO: since this is fixed/specialized, remove sigmaBoost
+float3 bloom_downsample_almost_max(float4 pos, float2 texcoord, float sigmaBoost = 0, bool isMax0 = false)
 {
   // texcoord
   const float f = dot(frac(texcoord * src_size - 0.5), axis);
@@ -70,20 +67,21 @@ float3 bloom_downsample_almost_max(float4 pos, float2 texcoord, float sigmaBoost
   float ymax = 0.0;
 
   // loop
-  float sigma1 = /* SUGMA */0.1 + sigmaBoost;
-  const float radius = ceil(sigma1 * 3.0);
+  float sigma1 = 0.44 + sigmaBoost;
+  const float radius = 1;
   [unroll] for (float i = 1.0 - radius; i <= radius; i++)
   {
     const float weight = get_gaussian_weight(i - f, sigma1);
-    float3 b = tex.SampleLevel(smp, tc + i * inv_src_size * axis, 0.0).rgb;
+    float3 c = tex.SampleLevel(smp, tc + i * inv_src_size * axis, 0.0).rgb;
+    if (isMax0) c = max(0, c);
     
-    csum += b * weight;
+    csum += c * weight;
     wsum += weight;
 
-    // cmax = almost_max_lerp(cmax, b, 0.777);
+    // cmax = almost_max_lerp(cmax, c, 0.777);
 
-    float ynew = GetLuminance(b);
-    ymax = almost_max_lerp(ymax, ynew, 0.850, true);
+    float ynew = GetLuminance(c);
+    ymax = almost_max_lerp(ymax, ynew, 0.90, true);
   }
 
   // normalize
@@ -119,26 +117,26 @@ float3 bloom_downsample_almost_max(float4 pos, float2 texcoord, float sigmaBoost
   return csum;
 }
 
-float3 bloom_downsample_all_within(float4 pos, float2 texcoord)
-{
-  // texcoord
-  const float f = dot(frac(texcoord * src_size - 0.5), axis);
-  const float2 tc = texcoord - f * inv_src_size * axis;
+// float3 bloom_downsample_all_within(float4 pos, float2 texcoord)
+// {
+//   // texcoord
+//   const float f = dot(frac(texcoord * src_size - 0.5), axis);
+//   const float2 tc = texcoord - f * inv_src_size * axis;
+// 
+//   float3 b0 = tex.SampleLevel(smp, tc, 0.0).rgb;
+//   float3 b1 = tex.SampleLevel(smp, tc + inv_src_size * axis, 0.0).rgb;
+//   // float3 csum = (b0 + b1) * 0.5; // box avg
+//   // float3 csum = max(b0, b1); // per channel max
+// 
+//   float3 b2 = tex.SampleLevel(smp, tc + 2.0 * inv_src_size * axis, 0.0).rgb;
+//   float3 b3 = tex.SampleLevel(smp, tc - 1.0 * inv_src_size * axis, 0.0).rgb;
+// 
+//   float3 csum = (b0 + b1 + b2 + b3) * 0.25; // box avg 4
+// 
+//   return csum;
+// }
 
-  float3 b0 = tex.SampleLevel(smp, tc, 0.0).rgb;
-  float3 b1 = tex.SampleLevel(smp, tc + inv_src_size * axis, 0.0).rgb;
-  // float3 csum = (b0 + b1) * 0.5; // box avg
-  // float3 csum = max(b0, b1); // per channel max
-
-  float3 b2 = tex.SampleLevel(smp, tc + 2.0 * inv_src_size * axis, 0.0).rgb;
-  float3 b3 = tex.SampleLevel(smp, tc - 1.0 * inv_src_size * axis, 0.0).rgb;
-
-  float3 csum = (b0 + b1 + b2 + b3) * 0.25; // box avg 4
-
-  return csum;
-}
-
-float3 bloom_downsample_guassian(float4 pos, float2 texcoord, float sigmaBoost = 0)
+float3 bloom_downsample_guassian(float4 pos, float2 texcoord, float sigmaBoost = 0, bool isMax0 = false)
 {
   // texcoord
   const float f = dot(frac(texcoord * src_size - 0.5), axis);
@@ -154,7 +152,9 @@ float3 bloom_downsample_guassian(float4 pos, float2 texcoord, float sigmaBoost =
   for (float i = 1.0 - radius; i <= radius; i++)
   {
     const float weight = get_gaussian_weight(i - f, sigma1);
-    csum += tex.SampleLevel(smp, tc + i * inv_src_size * axis, 0.0).rgb * weight;
+    float3 c = tex.SampleLevel(smp, tc + i * inv_src_size * axis, 0.0).rgb;
+    if (isMax0) c = max(0, c);
+    csum += c * weight;
     wsum += weight;
   }
   
@@ -164,10 +164,10 @@ float3 bloom_downsample_guassian(float4 pos, float2 texcoord, float sigmaBoost =
   return csum;
 }
 
-float4 bloom_downsample_and_prefilter(float4 pos, float2 texcoord, bool isPrefilter)
+float4 bloom_downsample_and_prefilter(float4 pos, float2 texcoord, bool isPrefilter, bool isMax0 = false)
 {
   // float3 csum = bloom_downsample_all_within(pos, texcoord);
-  float3 csum = bloom_downsample_almost_max(pos, texcoord, 0.5);
+  float3 csum = bloom_downsample_almost_max(pos, texcoord, 0, isMax0);
   // float3 csum = bloom_downsample_guassian(pos, texcoord, 4);
 
   if (isPrefilter)
@@ -206,9 +206,9 @@ float4 bloom_downsample_and_prefilter(float4 pos, float2 texcoord, bool isPrefil
 ///////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
 
 // full to mip0, right before prefilter
-float4 bloom_downsample1_ps(float4 pos: SV_Position, float2 texcoord: TEXCOORD) : SV_Target
+float4 bloom_downsamplebeforeprefilter_ps(float4 pos: SV_Position, float2 texcoord: TEXCOORD) : SV_Target
 {
-  return bloom_downsample_and_prefilter(pos, texcoord, false);
+  return bloom_downsample_and_prefilter(pos, texcoord, false, true);
 }
 
 // full to mip0, w/ prefilter
@@ -412,10 +412,10 @@ void bloom_combine_ps(
   float3 b3 = BloomUpsample2(g_textures_3_, g_sampler_s, v3.xy, texSize3, pixSize3).xyz;
   
   o0.w = b0.w;
-  o0.xyz = b0.xyz  * (g_color.x * GS.BloomStrengths.x * 1.466 /* * DVS1 */);
-  o0.xyz += b1.xyz * (g_color.y * GS.BloomStrengths.y * 0.976 /* * DVS2 */);
-  o0.xyz += b2.xyz * (g_color.z * GS.BloomStrengths.z * 0.970 /* * DVS3 */);
-  o0.xyz += b3.xyz * (g_color.w * GS.BloomStrengths.w * 0.836 /* * DVS4 */);
+  o0.xyz = b0.xyz  * (g_color.x * GS.BloomStrengths.x * (1.466 * 1.1) /* * DVS1 */);
+  o0.xyz += b1.xyz * (g_color.y * GS.BloomStrengths.y * (0.976 * 1.1) /* * DVS2 */);
+  o0.xyz += b2.xyz * (g_color.z * GS.BloomStrengths.z * (0.970 * 1.1) /* * DVS3 */);
+  o0.xyz += b3.xyz * (g_color.w * GS.BloomStrengths.w * (0.836 * 1.1) /* * DVS4 */);
   
   //   o0 = b0; //debug
   

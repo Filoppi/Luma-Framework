@@ -65,13 +65,6 @@ void frag_main()
         float Param_n37 = cb0_m2.w;
         float Param_n46 = cb0_m3.x;
         float Param_n49 = cb0_m3.y;
-        // Derive the game's SDR curve tuning from the HDR-mode uploads (closed form).
-        // Only applies when the game itself is in HDR mode (cb0_m15) and the toggle is on.
-        if (cb0_m15 != 0u && LumaSettings.GameSettings.UseSDROverHDR != 0u)
-        {
-            RecoverSDRParams(cb0_m2.x, cb0_m2.y, cb0_m2.z, cb0_m2.w, cb0_m3.x, cb0_m3.y,
-                             TenPowLogHighRangePlusContrastMinusOne, TenPowDispositionTimesTwoPowHighRange_PlusOne_Log_Inverse, ZeroSlopeByTenPowDispositionPlusOne, Param_n37, Param_n46, Param_n49);
-        }
         float3 untonemapped = float3(_212, _213, _214);
         float3 tonemapped = FFXV_TonemapExtended(untonemapped, ZeroSlopeByTenPowDispositionPlusOne, TenPowDispositionTimesTwoPowHighRange_PlusOne_Log_Inverse, Param_n37, TenPowLogHighRangePlusContrastMinusOne, Param_n46, Param_n49);
         _275 = EnabledToneCurve ? tonemapped : untonemapped;
@@ -104,26 +97,11 @@ void frag_main()
     float _436 = dp3_f32(_435, float3(1.914248943328857421875f, -0.8911859989166259765625f, -0.02306200005114078521728515625f));
     float _437 = dp3_f32(_435, float3(-0.086308002471923828125f, 1.104712009429931640625f, -0.018403999507427215576171875f));
     float _438 = dp3_f32(_435, float3(-0.02810700051486492156982421875f, -0.100798003375530242919921875f, 1.1289050579071044921875f));
-    float _464;
-    float _465;
-    float _466;
-    if (cb0_m15 != 0u)
-    {
-        
-        float3 color = float3(_436, _437, _438);
-        float3 color_bt2020 = BT709_To_BT2020(color);
-        color_bt2020 = LumaSettings.GameSettings.UseVanillaGamutRatio == 1 ? mad(cb0_m18.y, color - color_bt2020, color_bt2020) : color_bt2020;
-        color = (color_bt2020);
-        _464 = color.z;
-        _465 = color.y;
-        _466 = color.x;
-    }
-    else
-    {
-        _464 = _438;
-        _465 = _437;
-        _466 = _436;
-    }
+    // The game is forced to its SDR path (display capability spoofing, cb0_m15 is always 0), so there's no BT.2020 output branch.
+    // We stay in BT.709 in HDR too, as the UI blends over this and it expects SDR BT.709.
+    float _464 = _438;
+    float _465 = _437;
+    float _466 = _436;
 
     float _467 = max(_466, 0.0f);
     float _468 = max(_465, 0.0f);
@@ -141,7 +119,15 @@ void frag_main()
         _468 *= gamePaperWhite / UIPaperWhite;
         _469 *= gamePaperWhite / UIPaperWhite;
     }
+    else
+    {
+        // The output target is now float, clamp to restore the vanilla SDR output (it was UNORM)
+        _467 = saturate(_467);
+        _468 = saturate(_468);
+        _469 = saturate(_469);
+    }
 
+    // The game is forced to its SDR path, so it encodes its output to gamma space (the rest of the game post processing expects it, and core linearizes it later), HDR included
     bool _493 = cb0_m16.x != 0u;
     SV_TARGET.x = _493 ? ((_467 <= 0.003130800090730190277099609375f) ? (_467 * 12.9200000762939453125f) : mad(exp2(log2(_467) * 0.4166666567325592041015625f), 1.05499994754791259765625f, -0.054999999701976776123046875f)) : _467;
     SV_TARGET.y = _493 ? ((_468 <= 0.003130800090730190277099609375f) ? (_468 * 12.9200000762939453125f) : mad(exp2(log2(_468) * 0.4166666567325592041015625f), 1.05499994754791259765625f, -0.054999999701976776123046875f)) : _468;

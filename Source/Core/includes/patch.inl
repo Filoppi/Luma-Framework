@@ -1501,7 +1501,9 @@ namespace Patch
                   const uint32_t shader_hash = Shader::BinToHash(static_cast<const uint8_t*>(orig_desc->code), orig_desc->code_size);
 
                   // Custom shader files first (same lookup order as LoadCustomShaders).
-                  if (auto custom_it = custom_shaders_cache.find(shader_hash); custom_it != custom_shaders_cache.end())
+                  // Not after "Unload Shaders" (or the global effects toggle): the cache still holds the files, and re-patching a pipeline
+                  // (e.g. when a recipe is toggled, see "ReloadRecipes") would otherwise bring back the shaders the user unloaded.
+                  if (auto custom_it = custom_shaders_cache.find(shader_hash); !last_pressed_unload && custom_it != custom_shaders_cache.end())
                   {
                      const CachedCustomShader* custom_shader = custom_it->second;
                      if (custom_shader != nullptr && !custom_shader->is_luma_native && !custom_shader->code.empty())

@@ -9,12 +9,15 @@ namespace CB
 {
 struct LumaGameSettings
 {
-   uint UseSDROverHDR;        // 1: derive and use the game's SDR curve tuning even when the game runs in HDR mode (default)
    uint UseVanillaGamutRatio; // gates the game's HDR gamut-ratio blend (was "FakeHDR")
    float BloomStrength;
    float Sharpness;
    float VignetteStrength;
    uint EnableDoF;
+   uint EnableVBAO; // 1: the ambient occlusion pass uses GTVBAO (visibility bitmask), 0: the game's SAO
+   float VBAOThicknessScale; // GTVBAO: the thickness of the depth buffer surfaces grows linearly with the depth, as this fraction of the ray reach in world units (0: constant thickness)
+   uint EnableVBAOFoliageMask; // GTVBAO: foliage (stencil material class) is skipped as an occluder, and its own AO is blended toward unoccluded
+   float VBAOFoliageBlend; // GTVBAO: how much the AO of the foliage pixels is blended toward 1 (unoccluded)
 };
 
 struct LumaGameData

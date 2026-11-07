@@ -44,26 +44,24 @@ void main(
   r1 = g_texture.SampleLevel(g_sampler_s, v2.zw, g_texture_lod.x);
   r0 += r1;
 
-  // o0 = r0 * g_color_scale + g_color_offset;
-  // return;
-
-  // r0 = 0;
-
-  // 8
-  r1 = g_texture.SampleLevel(g_sampler_s, v3.xy, g_texture_lod.x);
-  r0 += r1 /* * 0.5 */;
-  r1 = g_texture.SampleLevel(g_sampler_s, v3.zw, g_texture_lod.x);
-  r0 += r1 /* * 0.5 */;
-  r1 = g_texture.SampleLevel(g_sampler_s, v4.xy, g_texture_lod.x);
-  r0 += r1 /* * 0.5 */;
-  r1 = g_texture.SampleLevel(g_sampler_s, v4.zw, g_texture_lod.x);
-  r0 += r1 /* * 0.5 */;
-
-  float4 scaleFor1Sample = g_color_scale * 4;
-  float4 scaleFor4Samples = scaleFor1Sample / 4;
-  float4 scaleFor6Samples = scaleFor1Sample / 6;
-  float4 scaleFor8Samples = scaleFor1Sample / 8;
-
-  o0 = r0 * scaleFor8Samples + g_color_offset;
+  o0 = r0 * g_color_scale + g_color_offset;
   return;
+
+//   // 8
+//   r1 = g_texture.SampleLevel(g_sampler_s, v3.xy, g_texture_lod.x);
+//   r0 += r1 /* * 0.5 */;
+//   r1 = g_texture.SampleLevel(g_sampler_s, v3.zw, g_texture_lod.x);
+//   r0 += r1 /* * 0.5 */;
+//   r1 = g_texture.SampleLevel(g_sampler_s, v4.xy, g_texture_lod.x);
+//   r0 += r1 /* * 0.5 */;
+//   r1 = g_texture.SampleLevel(g_sampler_s, v4.zw, g_texture_lod.x);
+//   r0 += r1 /* * 0.5 */;
+// 
+//   float4 scaleFor1Sample = g_color_scale * 4;
+//   float4 scaleFor4Samples = scaleFor1Sample / 4;
+//   float4 scaleFor6Samples = scaleFor1Sample / 6;
+//   float4 scaleFor8Samples = scaleFor1Sample / 8;
+// 
+//   o0 = r0 * scaleFor8Samples + g_color_offset;
+//   return;
 }

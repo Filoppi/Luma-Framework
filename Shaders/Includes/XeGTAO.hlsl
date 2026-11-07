@@ -1,4 +1,4 @@
-// XeGTAO (https://github.com/GameTechDev/XeGTAO), shared by the games that replace their native AO with it.
+// XeGTAO (https://github.com/GameTechDev/XeGTAO) and VB-GTAO (https://cdrinmatane.github.io/posts/ssaovb-code/), shared by the games that replace their native AO with it.
 // Each game has its own "Luma_<Game>_XeGTAO.hlsl", which declares the game's cbuffers and textures,
 // defines the stuff below and then includes this.
 //
@@ -14,6 +14,13 @@
 #ifndef LUMA_XEGTAO_HLSL
 #define LUMA_XEGTAO_HLSL
 
+// Use VB-GTAO or XeGTAO.
+#ifndef VISIBILITY_BITMASK
+#define VISIBILITY_BITMASK 0
+#endif
+
+// TODO: Implement this per game. Games with TAA will require much less samples to achive a good quality (less noisy).
+// VB-GTAO may benefit from increased STEPS_PER_SLICE.
 #if XE_GTAO_QUALITY == 0 // Low
 #define SLICE_COUNT 4.0
 #elif XE_GTAO_QUALITY == 1 // Medium
@@ -37,14 +44,21 @@
 #define RADIUS_MULTIPLIER 1.457 // Default 1.457
 #endif
 
+// XeGTAO only.
 #ifndef EFFECT_FALLOFF_RANGE
 #define EFFECT_FALLOFF_RANGE 0.615 // Default 0.615
+#endif
+
+// VB-GTAO only.
+#ifndef THICKNESS
+#define THICKNESS 0.2
 #endif
 
 #ifndef SAMPLE_DISTRIBUTION_POWER
 #define SAMPLE_DISTRIBUTION_POWER 2.0 // Default 2.0
 #endif
 
+// XeGTAO only.
 #ifndef THIN_OCCLUDER_COMPENSATION
 #define THIN_OCCLUDER_COMPENSATION 0.0 // Default 0.0; > 0 causes more mistakes than it fixes on big geometry
 #endif
@@ -71,6 +85,9 @@
 
 #define XE_GTAO_DEPTH_MIP_LEVELS     5.0
 #define XE_GTAO_OCCLUSION_TERM_SCALE 1.5
+
+// VB-GTAO only.
+#define SECTOR_COUNT 32u
 
 #define XE_GTAO_PI                   3.1415926535897932384626433832795
 #define XE_GTAO_PI_HALF              1.5707963267948966192313216916398
@@ -150,6 +167,9 @@ float XeGTAO_DepthMIPFilter(float depth0, float depth1, float depth2, float dept
 {
    float maxDepth = max(max(depth0, depth1), max(depth2, depth3));
 
+#if VISIBILITY_BITMASK
+   return maxDepth;
+#else
    const float depthRangeScaleFactor = 0.75; // found empirically :)
    const float effectRadius = depthRangeScaleFactor * XE_GTAO_EFFECT_RADIUS(maxDepth);
    const float falloffRange = EFFECT_FALLOFF_RANGE * effectRadius;
@@ -166,6 +186,7 @@ float XeGTAO_DepthMIPFilter(float depth0, float depth1, float depth2, float dept
 
    float weightSum = weight0 + weight1 + weight2 + weight3;
    return (weight0 * depth0 + weight1 * depth1 + weight2 * depth2 + weight3 * depth3) * rcp(weightSum);
+#endif
 }
 
 groupshared float g_scratchDepths[8][8];
@@ -260,7 +281,6 @@ float XeGTAO_PackEdges(float4 edgesLRTB)
 }
 
 // Define "XE_GTAO_CUSTOM_VIEWSPACE_POSITION" to replace this with the game's own reconstruction, with the same signature.
-// "NDC_TO_VIEW_MUL" is still needed for the screen space radius.
 #if !XE_GTAO_CUSTOM_VIEWSPACE_POSITION
 // Inputs are screen XY and viewspace depth, output is viewspace position
 float3 XeGTAO_ComputeViewspacePosition(float2 screenPos, float viewspaceDepth)
@@ -304,6 +324,33 @@ float XeGTAO_FastACos(float inX)
    return inX >= 0 ? res : 3.141593 - res;
 }
 
+uint UpdateSectors(float minHorizon, float maxHorizon, uint globalOccludedBitfield)
+{
+   uint startHorizonInt = minHorizon * float(SECTOR_COUNT);
+   uint angleHorizonInt = round((maxHorizon - minHorizon) * float(SECTOR_COUNT));
+   uint angleHorizonBitfield = angleHorizonInt > 0u ? (0xFFFFFFFFu >> (SECTOR_COUNT - angleHorizonInt)) : 0u;
+   uint currentOccludedBitfield = angleHorizonBitfield << startHorizonInt;
+   return globalOccludedBitfield | currentOccludedBitfield;
+}
+
+void ProcessSample(float3 deltaPos, float3 V, float N, float samplingDirection, inout uint globalOccludedBitfield)
+{
+   float2 frontBackHorizon;
+   float3 deltaPosBackface = deltaPos - V * THICKNESS;
+
+   // Project sample onto the unit circle and compute the angle relative to V
+   frontBackHorizon = float2(dot(normalize(deltaPos), V), dot(normalize(deltaPosBackface), V));
+   frontBackHorizon = float2(XeGTAO_FastACos(frontBackHorizon.x), XeGTAO_FastACos(frontBackHorizon.y));
+
+   // Shift sample from V to normal, map to [0..1] with smoothstep
+   frontBackHorizon = smoothstep(0.0, 1.0, (samplingDirection * -frontBackHorizon - N + XE_GTAO_PI_HALF) / XE_GTAO_PI);
+
+   // Sampling direction inverts min/max angles
+   frontBackHorizon = samplingDirection >= 0.0 ? frontBackHorizon.yx : frontBackHorizon.xy;
+
+   globalOccludedBitfield = UpdateSectors(frontBackHorizon.x, frontBackHorizon.y, globalOccludedBitfield);
+}
+
 void XeGTAO_MainPass(uint2 pixCoord, float2 localNoise, float3 viewspaceNormal, Texture2D sourceViewspaceDepth, SamplerState depthSampler, RWTexture2D<XE_GTAO_MAIN_PASS_OUTPUT_TYPE> outWorkingAOTermAndEdges)
 {
    float2 normalizedScreenPos = (pixCoord + 0.5) * VIEWPORT_PIXEL_SIZE;
@@ -341,14 +388,12 @@ void XeGTAO_MainPass(uint2 pixCoord, float2 localNoise, float3 viewspaceNormal, 
 #endif
 
 #if XE_GTAO_GENERATE_NORMALS
-   {
-      float3 CENTER = XeGTAO_ComputeViewspacePosition(normalizedScreenPos, viewspaceZ);
-      float3 LEFT = XeGTAO_ComputeViewspacePosition(normalizedScreenPos + float2(-1.0, 0.0) * VIEWPORT_PIXEL_SIZE, pixLZ);
-      float3 RIGHT = XeGTAO_ComputeViewspacePosition(normalizedScreenPos + float2(1.0, 0.0) * VIEWPORT_PIXEL_SIZE, pixRZ);
-      float3 TOP = XeGTAO_ComputeViewspacePosition(normalizedScreenPos + float2(0.0, -1.0) * VIEWPORT_PIXEL_SIZE, pixTZ);
-      float3 BOTTOM = XeGTAO_ComputeViewspacePosition(normalizedScreenPos + float2(0.0, 1.0) * VIEWPORT_PIXEL_SIZE, pixBZ);
-      viewspaceNormal = XeGTAO_CalculateNormal(edgesLRTB, CENTER, LEFT, RIGHT, TOP, BOTTOM);
-   }
+   float3 CENTER = XeGTAO_ComputeViewspacePosition(normalizedScreenPos, viewspaceZ);
+   float3 LEFT = XeGTAO_ComputeViewspacePosition(normalizedScreenPos + float2(-1.0, 0.0) * VIEWPORT_PIXEL_SIZE, pixLZ);
+   float3 RIGHT = XeGTAO_ComputeViewspacePosition(normalizedScreenPos + float2(1.0, 0.0) * VIEWPORT_PIXEL_SIZE, pixRZ);
+   float3 TOP = XeGTAO_ComputeViewspacePosition(normalizedScreenPos + float2(0.0, -1.0) * VIEWPORT_PIXEL_SIZE, pixTZ);
+   float3 BOTTOM = XeGTAO_ComputeViewspacePosition(normalizedScreenPos + float2(0.0, 1.0) * VIEWPORT_PIXEL_SIZE, pixBZ);
+   viewspaceNormal = XeGTAO_CalculateNormal(edgesLRTB, CENTER, LEFT, RIGHT, TOP, BOTTOM);
 #endif
 
    // Move center pixel slightly towards camera to avoid imprecision artifacts due to depth buffer imprecision; offset depends on depth texture format used
@@ -357,9 +402,11 @@ void XeGTAO_MainPass(uint2 pixCoord, float2 localNoise, float3 viewspaceNormal, 
    const float3 pixCenterPos = XeGTAO_ComputeViewspacePosition(normalizedScreenPos, viewspaceZ);
    const float3 viewVec = normalize(-pixCenterPos);
 
+#if !VISIBILITY_BITMASK
    // prevents normals that are facing away from the view vector - xeGTAO struggles with extreme cases. Upstream
    // ships this line commented out as rare in vanilla; this port runs it.
    viewspaceNormal = normalize(viewspaceNormal + max(0, -dot(viewspaceNormal, viewVec)) * viewVec);
+#endif
 
 #if DEVELOPMENT
    if (DebugViewRT >= 1.5 && DebugViewRT < 2.5) // 2 = normals view-facing term (smooth per-surface shading = correct decode)
@@ -371,6 +418,8 @@ void XeGTAO_MainPass(uint2 pixCoord, float2 localNoise, float3 viewspaceNormal, 
 
    const float effectRadius = XE_GTAO_MAIN_PASS_EFFECT_RADIUS(viewspaceZ);
    const float sampleDistributionPower = SAMPLE_DISTRIBUTION_POWER;
+
+#if !VISIBILITY_BITMASK
    const float thinOccluderCompensation = THIN_OCCLUDER_COMPENSATION;
    const float falloffRange = EFFECT_FALLOFF_RANGE * effectRadius;
    const float falloffFrom = effectRadius * (1.0 - EFFECT_FALLOFF_RANGE);
@@ -378,6 +427,7 @@ void XeGTAO_MainPass(uint2 pixCoord, float2 localNoise, float3 viewspaceNormal, 
    // fadeout precompute optimisation
    const float falloffMul = -1.0 / falloffRange;
    const float falloffAdd = falloffFrom / falloffRange + 1.0;
+#endif
 
    float visibility = 0.0;
 
@@ -389,14 +439,20 @@ void XeGTAO_MainPass(uint2 pixCoord, float2 localNoise, float3 viewspaceNormal, 
       // quality settings / tweaks / hacks
       const float pixelTooCloseThreshold = 1.3; // if the offset is under approx pixel size (pixelTooCloseThreshold), push it out to the minimum distance
 
+#if !XE_GTAO_CUSTOM_VIEWSPACE_POSITION
       // approx viewspace pixel size at pixCoord; approximation of NDCToViewspace( normalizedScreenPos.xy + consts.ViewportPixelSize.xy, pixCenterPos.z ).xy - pixCenterPos.xy;
       const float2 pixelDirRBViewspaceSizeAtCenterZ = viewspaceZ.xx * NDC_TO_VIEW_MUL_X_PIXEL_SIZE;
+#else
+      const float2 pixelDirRBViewspaceSizeAtCenterZ = XeGTAO_ComputeViewspacePosition(normalizedScreenPos + VIEWPORT_PIXEL_SIZE, pixCenterPos.z).xy - pixCenterPos.xy;
+#endif
 
       float screenspaceRadius = effectRadius * rcp(abs(pixelDirRBViewspaceSizeAtCenterZ.x));
       XE_GTAO_ADJUST_SCREENSPACE_RADIUS(screenspaceRadius)
 
+#if !VISIBILITY_BITMASK
       // fade out for small screen radii
       visibility += saturate((10.0 - screenspaceRadius) / 100.0) * 0.5;
+#endif
 
       // this is the min distance to start sampling from to avoid sampling from the center pixel (no useful data obtained from sampling center pixel)
       const float minS = pixelTooCloseThreshold * rcp(screenspaceRadius);
@@ -437,6 +493,9 @@ void XeGTAO_MainPass(uint2 pixCoord, float2 localNoise, float3 viewspaceNormal, 
          // line 15 from the paper
          float n = signNorm * XeGTAO_FastACos(cosNorm);
 
+#if VISIBILITY_BITMASK
+         uint globalOccludedBitfield = 0u;
+#else
          // this is a lower weight target; not using -1 as in the original paper because it is under horizon, so a 'weight' has different meaning based on the normal
          const float lowHorizonCos0 = cos(n + XE_GTAO_PI_HALF);
          const float lowHorizonCos1 = cos(n - XE_GTAO_PI_HALF);
@@ -444,6 +503,7 @@ void XeGTAO_MainPass(uint2 pixCoord, float2 localNoise, float3 viewspaceNormal, 
          // lines 17, 18 from the paper, manually unrolled the 'side' loop
          float horizonCos0 = lowHorizonCos0; //-1;
          float horizonCos1 = lowHorizonCos1; //-1;
+#endif
 
          [unroll] for (float step = 0.0; step < STEPS_PER_SLICE; step++)
          {
@@ -482,6 +542,16 @@ void XeGTAO_MainPass(uint2 pixCoord, float2 localNoise, float3 viewspaceNormal, 
 
             float3 sampleDelta0 = samplePos0 - pixCenterPos; // using lpfloat for sampleDelta causes precision issues
             float3 sampleDelta1 = samplePos1 - pixCenterPos; // using lpfloat for sampleDelta causes precision issues
+
+#if VISIBILITY_BITMASK
+            // Reject samples outside of the radius.
+            if (dot(sampleDelta0, sampleDelta0) < effectRadius * effectRadius) {
+               ProcessSample(sampleDelta0, viewVec, n, -1.0, globalOccludedBitfield);
+            }
+            if (dot(sampleDelta1, sampleDelta1) < effectRadius * effectRadius) {
+                ProcessSample(sampleDelta1, viewVec, n, 1.0, globalOccludedBitfield);
+            }
+#else
             float sampleDist0 = length(sampleDelta0);
             float sampleDist1 = length(sampleDelta1);
 
@@ -507,9 +577,15 @@ void XeGTAO_MainPass(uint2 pixCoord, float2 localNoise, float3 viewspaceNormal, 
             // thickness heuristic disabled (THIN_OCCLUDER_COMPENSATION == 0)
             horizonCos0 = max(horizonCos0, shc0);
             horizonCos1 = max(horizonCos1, shc1);
+#endif
+
          }
 
-#if 1 // I can't figure out the slight overdarkening on high slopes, so I'm adding this fudge - in the training set, 0.05 is close (PSNR 21.34) to disabled (PSNR 21.45)
+#if VISIBILITY_BITMASK
+visibility += 1.0 - float(countbits(globalOccludedBitfield)) / float(SECTOR_COUNT);
+#else
+
+#if  1 // I can't figure out the slight overdarkening on high slopes, so I'm adding this fudge - in the training set, 0.05 is close (PSNR 21.34) to disabled (PSNR 21.45)
          projectedNormalVecLength = lerp(projectedNormalVecLength, 1.0, 0.05);
 #endif
 
@@ -520,6 +596,8 @@ void XeGTAO_MainPass(uint2 pixCoord, float2 localNoise, float3 viewspaceNormal, 
          float iarc1 = (cosNorm + 2.0 * h1 * sin(n) - cos(2.0 * h1 - n)) / 4.0;
          float localVisibility = projectedNormalVecLength * (iarc0 + iarc1);
          visibility += localVisibility;
+#endif // VISIBILITY_BITMASK
+
       }
       visibility /= SLICE_COUNT;
       visibility = pow(max(0.0, visibility), max(0.05, FinalValuePowerRT)); // runtime dial (calibrated to the vanilla AO histogram); max(0,) also satisfies fxc strict X3571

@@ -206,10 +206,12 @@
 #include "includes/ui/ui.hpp"
 #endif
 
+#include "hooks/DXGIHooks.h"
 #include "utils/format.hpp"
 #include "utils/pipeline.hpp"
 #include "utils/shader_compiler.hpp"
 #include "utils/display.hpp"
+#include "utils/display.inl"
 #include "utils/resource.hpp"
 #include "utils/draw.hpp"
 #include "utils/system.h"
@@ -304,6 +306,9 @@ namespace
 
    bool hdr_enabled_display = false;
    bool hdr_supported_display = false;
+   // Makes the game see an SDR display (while Luma still sees the real one), so games with no HDR toggle pick their SDR path (needs the SafetyHook feature).
+   // Games set this statically from "OnInit()" (not user configurable).
+   bool force_sdr_display_capability = false;
    constexpr bool prevent_shader_cache_loading = false;
    bool prevent_shader_cache_saving = false;
 #if DEVELOPMENT
@@ -454,6 +459,7 @@ namespace
       bool enable_samplers_upgrade = false; // Can't be changed after boot
       bool ignore_upgraded_samplers = false; // Global live toggle. Can be enabled in certain parts of the rendering (for games that aren't multi threaded)
       int samplers_upgrade_mode = 4;
+      bool upgrade_comparison_samplers = true; // Disable when automatic mip bias should affect material textures but not shadow/depth comparison sampling.
       bool force_upgrade_linear_samplers = false; // Best avoided given that it might break things that weren't meant to have AF, unless you selectively turn "ignore_upgraded_samplers" on and off // TODO: delete? dev only?
 #if DEVELOPMENT
       int samplers_upgrade_mode_2 = 0;
@@ -2503,6 +2509,18 @@ namespace
       HRESULT hr2 = native_dxgi_device->SetMaximumFrameLatency(1);
       assert(SUCCEEDED(hr2));
 
+#if ENABLE_SAFETYHOOK
+      // The hooks are created disabled, so they can be toggled at runtime. They are shared by all the outputs and swapchains, so any instance does.
+      {
+         com_ptr<IDXGIAdapter> display_adapter;
+         com_ptr<IDXGIOutput> display_output;
+         if (SUCCEEDED(native_dxgi_device->GetAdapter(&display_adapter)) && SUCCEEDED(display_adapter->EnumOutputs(0, &display_output)))
+         {
+            DXGIHooks::InitDisplayCapability(display_output.get());
+         }
+      }
+#endif
+
 #if ENABLE_SR
       com_ptr<IDXGIAdapter> native_adapter;
       if (SUCCEEDED(hr))
@@ -2891,7 +2909,7 @@ namespace
 #endif
 
       swapchain_data.vanilla_was_linear_space = last_swapchain_linear_space || force_vanilla_swapchain_linear;
-#if !GAME_MAFIA_III && !GAME_DISHONORED_2 // We don't care for this case, it's dev only, if we didn't do this, when we unload shaders the game would be washed out (the UI still is)
+#if !GAME_MAFIA_III && !GAME_DISHONORED_2 && !GAME_METAL_GEAR_SOLID_V // We don't care for this case, it's dev only, if we didn't do this, when we unload shaders the game would be washed out (the UI still is)
       // We expect this define to be set to linear if the swapchain was already linear in Vanilla SDR (there might be code that makes such assumption)
       ASSERT_ONCE(!swapchain_data.vanilla_was_linear_space || (GetShaderDefineCompiledNumericalValue(POST_PROCESS_SPACE_TYPE_HASH) == 1));
 #endif
@@ -2968,6 +2986,15 @@ namespace
       // This is basically where we verify and update the user display settings
       if (native_swapchain3 != nullptr)
       {
+#if ENABLE_SAFETYHOOK
+         // Also try to hook the output here, in case it couldn't be done on device creation
+         DXGIHooks::InitDisplayCapability(native_swapchain3);
+         com_ptr<IDXGIOutput> display_output;
+         if (SUCCEEDED(native_swapchain3->GetContainingOutput(&display_output)))
+         {
+            DXGIHooks::InitDisplayCapability(display_output.get());
+         }
+#endif
          const std::unique_lock lock_reshade(s_mutex_reshade);
          Display::GetHDRMaxLuminance(native_swapchain3, device_data.default_user_peak_white, srgb_white_level); // TODO: detect when the display changes and update peak brightness calibration, and set HDR10+ on the new display too etc
          Display::IsHDRSupportedAndEnabled(swapchain_desc.OutputWindow, hdr_supported_display, hdr_enabled_display, native_swapchain3);
@@ -7048,7 +7075,7 @@ namespace
    {
       D3D11_SAMPLER_DESC desc = original_desc;
 #if !DEVELOPMENT
-      if (desc.Filter == D3D11_FILTER_ANISOTROPIC || desc.Filter == D3D11_FILTER_COMPARISON_ANISOTROPIC || (force_upgrade_linear_samplers && desc.Filter == D3D11_FILTER_MIN_MAG_MIP_LINEAR))
+      if (desc.Filter == D3D11_FILTER_ANISOTROPIC || (upgrade_comparison_samplers && desc.Filter == D3D11_FILTER_COMPARISON_ANISOTROPIC) || (force_upgrade_linear_samplers && desc.Filter == D3D11_FILTER_MIN_MAG_MIP_LINEAR))
       {
          if (desc.Filter == D3D11_FILTER_MIN_MAG_MIP_LINEAR)
          {
@@ -7095,7 +7122,7 @@ namespace
       // Note that this might not fix all cases because there's still "ID3D11DeviceContext::SetResourceMinLOD()" and textures that are blurry for other reasons
       // because they use other types of samplers (unfortunately it seems like some decals use "D3D11_FILTER_MIN_MAG_MIP_LINEAR").
       // Note that the AF on different textures in the game seems is possibly linked with other graphics settings than just AF (maybe textures or objects quality).
-      if (desc.Filter == D3D11_FILTER_ANISOTROPIC || desc.Filter == D3D11_FILTER_COMPARISON_ANISOTROPIC || (force_upgrade_linear_samplers && desc.Filter == D3D11_FILTER_MIN_MAG_MIP_LINEAR))
+      if (desc.Filter == D3D11_FILTER_ANISOTROPIC || (upgrade_comparison_samplers && desc.Filter == D3D11_FILTER_COMPARISON_ANISOTROPIC) || (force_upgrade_linear_samplers && desc.Filter == D3D11_FILTER_MIN_MAG_MIP_LINEAR))
       {
          if (desc.Filter == D3D11_FILTER_MIN_MAG_MIP_LINEAR)
          {
@@ -11996,6 +12023,10 @@ void Init(bool async)
    Shader::InitShaderCompiler();
 
    game->OnInit(async);
+
+#if ENABLE_SAFETYHOOK
+   DXGIHooks::SetSDRDisplaySpoof(force_sdr_display_capability); // The hooks will be created and enabled when the device and swapchain are
+#endif
 
    assert(luma_settings_cbuffer_index < D3D11_COMMONSHADER_CONSTANT_BUFFER_API_SLOT_COUNT);
    assert(luma_data_cbuffer_index < D3D11_COMMONSHADER_CONSTANT_BUFFER_API_SLOT_COUNT); // Not necessary for custom shaders unless used, but necessary for the final luma display composition shader (unless we forced that one to use cb0 or something for the buffer)
