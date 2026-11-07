@@ -38,7 +38,23 @@
 *.pdb
 *.exp
 *.vcxproj.user
+*.suo
+*.sln.docstates
+*.VC.db
+*.VC.opendb
+*.tlog/
+*.lastbuildstate
+*.ipch
+*.idb
+*.ilk
+*.iobj
+*.ipdb
 Source/Games/**/vcpkg_installed/**
+
+# Python caches
+__pycache__/
+*.py[cod]
+.pytest_cache/
 
 # JetBrains
 .idea/
@@ -61,9 +77,6 @@ deploy-*.ps1
 *.log
 
 # Forced not ignored (e.g. !./Source/Core/Luma.vcxproj)
-
-# Visual Studio per-user files
-*.vcxproj.user
 
 # Shader disassembly dumps
 *.asm
