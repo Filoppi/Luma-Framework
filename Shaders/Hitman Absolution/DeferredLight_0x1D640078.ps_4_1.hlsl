@@ -6,6 +6,7 @@
 // Uses SV_SampleIndex like the dump: each sample is loaded at its own index.
 
 #include "Includes/Common.hlsl"
+#include "Includes/DeferredLightSpecular.hlsl"
 
 #if TONEMAP_TYPE >= 1
 #define GBUFFER_CLAMP(v) saturate(v)
@@ -90,7 +91,7 @@ void main(
 
   // mapDeferred3 (t5): .x is specular scale, .y is specular exponent factor.
   float4 deferred3 = GBUFFER_CLAMP(mapDeferred3.Load(pixel, sampleI));
-  float specPow = exp2(e * deferred3.y);
+  float specPow = HMADeferredSpecularPower(e * deferred3.y);
   float specScalar = (deferred3.x * specPow) * cb2[19].x;
 
   float3 diffuseSpec = lut.xyz * deferred2.xyz + specScalar;

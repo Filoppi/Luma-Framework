@@ -3,6 +3,7 @@
 // since Luma's fp16 G-buffer lets values > 1 leak in and produce negative light. TONEMAP_TYPE 0 keeps the vanilla math exact.
 
 #include "Includes/Common.hlsl"
+#include "Includes/DeferredLightSpecular.hlsl"
 
 #if TONEMAP_TYPE >= 1
 #define LUMA_GBUFFER_READ(x) saturate(x)
@@ -129,7 +130,7 @@ void main(
   // Light model LUT: x = saturate(N.L), y = packed spec / gb2.w.
   float lutY = spec * 0.248047 + gb2.w * 0.753906;
   float4 lut = mapLightModel.Sample(samplerLightModel, float2(saturate(dN), lutY));
-  float specPow = exp2((lut.w * 1024.0 - 1000.0) * gb3.y);
+  float specPow = HMADeferredSpecularPower((lut.w * 1024.0 - 1000.0) * gb3.y);
 
   // Rim/back term.
   float lum = dot(gb2.xyz, float3(0.447058, 0.882354, 0.170587));

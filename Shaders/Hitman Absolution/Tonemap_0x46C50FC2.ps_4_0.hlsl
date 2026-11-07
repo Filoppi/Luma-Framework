@@ -215,7 +215,7 @@ void main(
   // above-white extension (sqrt space, then squared) and blew highlights out (~5x at p99).
   if (LumaSettings.GameSettings.LumaBloom != 0)
   {
-    hdrGraded += max(t4.Sample(s1, v2).rgb, 0.0) * LumaSettings.GameSettings.LumaBloomStrength * scale * (1.0 - fade.a);
+    hdrGraded += max(t4.Sample(s2, v2).rgb, 0.0) /* s2 = linear clamp (s1 is the game's point sampler: blocky half-res bloom) */ * LumaSettings.GameSettings.LumaBloomStrength * scale * (1.0 - fade.a);
   }
   {
     // Luminance grade around middle grey (0.18): contrast, then highlight/shadow pull.

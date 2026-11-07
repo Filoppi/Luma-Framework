@@ -5,6 +5,7 @@
 // TONEMAP_TYPE 0 keeps the exact vanilla math.
 
 #include "Includes/Common.hlsl"
+#include "Includes/DeferredLightSpecular.hlsl"
 
 #if TONEMAP_TYPE >= 1
 #define GBUFFER_CLAMP(v) saturate(v)
@@ -105,7 +106,7 @@ void main(
 
   float expo = lut.w * 1024.0 - 1000.0;
   expo = expo * extraTex.y;
-  float p = exp2(expo);
+  float p = HMADeferredSpecularPower(expo);
   p = p * extraTex.x;
   p = p * cb2[19].x;
 

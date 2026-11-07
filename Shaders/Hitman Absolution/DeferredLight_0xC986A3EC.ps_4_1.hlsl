@@ -7,6 +7,7 @@
 // TONEMAP_TYPE 0 keeps the exact vanilla math.
 
 #include "Includes/Common.hlsl"
+#include "Includes/DeferredLightSpecular.hlsl"
 
 #if TONEMAP_TYPE >= 1
 #define GBUFFER_CLAMP(v) saturate(v)
@@ -80,7 +81,7 @@ void main(
   float4 lut = mapLightModel.Sample(samplerLightModel, float2(saturate(NdotD), lutV));
 
   // Exponential term from g6.y and lut.w.
-  float E = exp2((lut.w * 1024.0 - 1000.0) * g6.y);
+  float E = HMADeferredSpecularPower((lut.w * 1024.0 - 1000.0) * g6.y);
 
   float D = dot(g5.xyz, float3(0.447058, 0.882354, 0.170587));
   float3 spec2 = g5.xyz * 2.0 - D;

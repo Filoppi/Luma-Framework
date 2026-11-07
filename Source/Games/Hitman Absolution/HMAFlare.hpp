@@ -385,6 +385,7 @@ static bool HMA_DrawFlare(ID3D11Device* device, ID3D11DeviceContext* ctx, Device
    auto draw_fullscreen = [&](ID3D11PixelShader* ps, ID3D11ShaderResourceView* src, UINT src_w, UINT src_h, HMAFlareTarget& dst, const char* name,
       ID3D11ShaderResourceView* t1, ID3D11ShaderResourceView* t3)
    {
+      ctx->OMSetRenderTargets(0, nullptr, nullptr); // The previous pass's output is still bound as RTV: D3D11 would null it when bound as an SRV
       HMAFlare_UnbindInputs(ctx);
       HMAFlare_SetSize(cbd.OutSize, dst.w, dst.h);
       HMAFlare_SetSize(cbd.InSize, src_w, src_h);

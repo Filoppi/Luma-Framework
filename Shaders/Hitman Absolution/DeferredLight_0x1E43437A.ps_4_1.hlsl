@@ -1,4 +1,5 @@
 #include "Includes/Common.hlsl"
+#include "Includes/DeferredLightSpecular.hlsl"
 
 cbuffer SharedPerViewData : register(b1) { float4 cb1[18]; };
 cbuffer SharedLightData : register(b2) { float4 cb2[8]; };
@@ -66,7 +67,7 @@ void main(float4 v0 : SV_POSITION, float2 v1 : TEXCOORD0, float3 v2 : TEXCOORD1,
 #if TONEMAP_TYPE >= 1
   specIn = saturate(specIn);
 #endif
-  float specPow = exp2((lut.w * 1024.0 - 1000.0) * specIn.y);
+  float specPow = HMADeferredSpecularPower((lut.w * 1024.0 - 1000.0) * specIn.y);
   uint4 occCoord = uint4(float4(pixel, 0.0, 0.0) * 0.5);
   float3 occ = t5.Load(int3(occCoord.xyz)).xyz;
   occ = occ * occ;

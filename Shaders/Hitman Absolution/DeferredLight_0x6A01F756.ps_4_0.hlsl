@@ -3,6 +3,7 @@
 // TONEMAP_TYPE 0 keeps the vanilla math exact.
 
 #include "Includes/Common.hlsl"
+#include "Includes/DeferredLightSpecular.hlsl"
 
 cbuffer Globals_cb4 : register(b4)
 {
@@ -92,7 +93,7 @@ void main(
 
   r2 = mapDeferred3.Sample(samplerDeferred3, v1.xy);
   r1.w = r1.w * r2.y;
-  r1.w = exp2(r1.w);
+  r1.w = HMADeferredSpecularPower(r1.w);
   r1.w = r2.x * r1.w;
   r2.xyz = r4.xyz * r1.w;
   r0.xyz = r1.xyz * r0.xyz + r2.xyz;

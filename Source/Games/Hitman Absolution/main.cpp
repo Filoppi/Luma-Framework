@@ -189,6 +189,7 @@ static uint32_t g_xegtao_t5_binds = 0;
 static constexpr uint32_t kSSAOHash = 0xF6310D28;
 // XeGTAO full res: the depth captured from PS 0x7BB58B6E (the draw just before the SSAO), and the AO consumer PS that reads the AO at t5.
 static constexpr uint32_t kFullResDepthHash = 0x7BB58B6E;
+static constexpr uint32_t kDepthDownsampleHash = 0x16B01762;
 static constexpr uint32_t kAOConsumerHash = 0x3994DDCA;
 
 static ID3D11ShaderResourceView* HMA_GetExposureSRV(DeviceData& device_data); // Defined after TemplateGameDeviceData
@@ -508,9 +509,18 @@ struct TemplateGameDeviceData final : public GameDeviceData
    HMAXeGTAO::Data gtao_data;
    // Full res depth of this frame (PS t0 of kFullResDepthHash, released in OnPresent), the frame index it was captured in, and the frame index the full res AO was written in
    ComPtr<ID3D11ShaderResourceView> fullres_depth_srv;
+   ComPtr<ID3D11ShaderResourceView> downsample_source_srv;
+   ComPtr<ID3D11Resource> downsample_target;
+   uint64_t downsample_frame = ~0ull;
    uint64_t frame_index = 0;
    uint64_t fullres_depth_frame = ~0ull;
    uint64_t fullres_ao_valid_frame = ~0ull;
+   ComPtr<ID3D11ShaderResourceView> gi_ao_srv;
+   ComPtr<ID3D11Resource> gi_normal_resource;
+   uint64_t gi_ao_frame = ~0ull;
+   ComPtr<ID3D11ShaderResourceView> sky_lower_srv;
+   ComPtr<ID3D11RenderTargetView> sky_target;
+   uint64_t sky_frame = ~0ull;
    // Modern lens flares: intermediates and the final flare target (owned here), and the result of this frame's tonemap draw (non-owning, valid only until OnPresent).
    HMAFlareResources flare_res;
    ID3D11ShaderResourceView* flare_srv_this_frame = nullptr;
@@ -727,6 +737,9 @@ public:
       Mcp::RegisterValues({{"gtao.radius", &g_xegtao_radius, 0.05f, 10.f}, {"gtao.intensity", &g_xegtao_intensity, 0.25f, 8.f}, {"gtao.thickness", &g_xegtao_thickness, 0.05f, 5.f}});
       Mcp::RegisterCounters({{"gtao.fullres_runs", &g_xegtao_fullres_runs}, {"gtao.halfres_runs", &g_xegtao_halfres_runs},
          {"gtao.failures", &g_xegtao_failures}, {"gtao.t5_binds", &g_xegtao_t5_binds}});
+      Mcp::RegisterCounters({{"gtao.fail_depth", &HMAXeGTAO::fail_depth}, {"gtao.fail_target", &HMAXeGTAO::fail_target},
+         {"gtao.fail_shaders", &HMAXeGTAO::fail_shaders}, {"gtao.fail_sampler", &HMAXeGTAO::fail_sampler},
+         {"gtao.fail_resources", &HMAXeGTAO::fail_resources}, {"gtao.fail_output", &HMAXeGTAO::fail_output}, {"gtao.fail_map", &HMAXeGTAO::fail_map}});
       Mcp::RegisterTextures({MCP_GAME_TEXTURE("gtao.depth", gtao_data.resources.depth.texture), MCP_GAME_TEXTURE("gtao.ao", gtao_data.resources.ao.texture),
          MCP_GAME_TEXTURE("gtao.denoised_ao", gtao_data.resources.denoised_ao.texture), MCP_GAME_TEXTURE("gtao.final_ao", gtao_data.resources.final_ao.texture),
          MCP_GAME_TEXTURE("gtao.fullres_ao", gtao_data.fullres_ao.texture)});
@@ -805,6 +818,8 @@ public:
       default_luma_global_game_settings.AutoExposureSpeed = cb_luma_global_settings.GameSettings.AutoExposureSpeed = 10.f;
       default_luma_global_game_settings.AutoExposureRange = cb_luma_global_settings.GameSettings.AutoExposureRange = 2.0f;
       default_luma_global_game_settings.AutoExposureKey = cb_luma_global_settings.GameSettings.AutoExposureKey = 0.11f;
+      default_luma_global_game_settings.GIStrength = cb_luma_global_settings.GameSettings.GIStrength = 1.f;
+      default_luma_global_game_settings.GIOcclusion = cb_luma_global_settings.GameSettings.GIOcclusion = 0.f;
       default_luma_global_game_settings.HighlightCompression = cb_luma_global_settings.GameSettings.HighlightCompression = 0.f;
 
       native_shaders_definitions.emplace(CompileTimeStringHash("HMA Tonemapped Resolve"), ShaderDefinition{ "Luma_HMA_TonemappedResolve", reshade::api::pipeline_subobject_type::pixel_shader });
@@ -832,6 +847,52 @@ public:
    DrawOrDispatchOverrideType OnDrawOrDispatch(ID3D11Device* native_device, ID3D11DeviceContext* native_device_context, CommandListData& cmd_list_data, DeviceData& device_data, reshade::api::shader_stage stages, const ShaderHashesList<OneShaderPerPipeline>& original_shader_hashes, bool is_custom_pass, bool& updated_cbuffers, std::function<void()>* original_draw_dispatch_func) override
    {
       auto& game_device_data = GetGameDeviceData(device_data);
+
+      // Pair consecutive sky layers only when their texture views and render target match.
+      if (native_device_context->GetType() == D3D11_DEVICE_CONTEXT_IMMEDIATE && (stages & reshade::api::shader_stage::pixel) != 0)
+      {
+         const bool sky_shader = original_shader_hashes.Contains(0x563FB90F, reshade::api::shader_stage::pixel) && original_shader_hashes.Contains(0x8A2E5A62, reshade::api::shader_stage::vertex);
+         ComPtr<ID3D11ShaderResourceView> sky_texture;
+         ComPtr<ID3D11RenderTargetView> sky_rtv;
+         ComPtr<ID3D11Resource> texture_resource, rt_resource;
+         ComPtr<ID3D11Texture2D> texture, rt_texture;
+         D3D11_TEXTURE2D_DESC tex_desc = {}, rt_desc = {};
+         D3D11_SHADER_RESOURCE_VIEW_DESC srv_desc = {};
+         if (sky_shader)
+         {
+            native_device_context->PSGetShaderResources(0, 1, sky_texture.put());
+            native_device_context->OMGetRenderTargets(1, sky_rtv.put(), nullptr);
+            if (sky_texture) { sky_texture->GetDesc(&srv_desc); sky_texture->GetResource(texture_resource.put()); }
+            if (texture_resource && SUCCEEDED(texture_resource->QueryInterface(texture.put()))) texture->GetDesc(&tex_desc);
+            HMA_GetRTVTexture(sky_rtv.get(), rt_resource, rt_texture, rt_desc);
+         }
+         const bool valid = sky_shader && sky_rtv && texture && tex_desc.SampleDesc.Count == 1 && tex_desc.ArraySize == 1 &&
+            srv_desc.ViewDimension == D3D11_SRV_DIMENSION_TEXTURE2D && srv_desc.Texture2D.MostDetailedMip == 0 && srv_desc.Format == DXGI_FORMAT_BC1_UNORM_SRGB &&
+            (rt_desc.Format == DXGI_FORMAT_R16G16B16A16_FLOAT || rt_desc.Format == DXGI_FORMAT_R11G11B10_FLOAT);
+         const bool lower = valid && tex_desc.Width == 512 && tex_desc.Height == 256;
+         const bool cap = valid && tex_desc.Width == 256 && tex_desc.Height == 256;
+         if (cap && cmd_list_data.pipeline_state_has_custom_pixel_shader && GetShaderDefineCompiledNumericalValue(TONEMAP_TYPE_HASH) >= 1 && original_draw_dispatch_func)
+         {
+            ComPtr<ID3D11ShaderResourceView> saved;
+            native_device_context->PSGetShaderResources(1, 1, saved.put());
+            ID3D11ShaderResourceView* lower_srv = game_device_data.sky_frame == game_device_data.frame_index && game_device_data.sky_target.get() == sky_rtv.get() ? game_device_data.sky_lower_srv.get() : nullptr;
+            native_device_context->PSSetShaderResources(1, 1, &lower_srv);
+            (*original_draw_dispatch_func)();
+            lower_srv = saved.get();
+            native_device_context->PSSetShaderResources(1, 1, &lower_srv);
+            game_device_data.sky_lower_srv.reset();
+            game_device_data.sky_target.reset();
+            return DrawOrDispatchOverrideType::Skip;
+         }
+         game_device_data.sky_lower_srv.reset();
+         game_device_data.sky_target.reset();
+         if (lower)
+         {
+            game_device_data.sky_lower_srv = sky_texture;
+            game_device_data.sky_target = sky_rtv;
+            game_device_data.sky_frame = game_device_data.frame_index;
+         }
+      }
 
       // G-buffer clamp (see "HMA_ClampGBuffers()"): detect the deferred fill, then clamp once before the first draw that reads it.
       if (g_gbuffer_clamp != 0u && native_device_context->GetType() == D3D11_DEVICE_CONTEXT_IMMEDIATE)
@@ -993,6 +1054,55 @@ public:
             return DrawOrDispatchOverrideType::Skip;
       }
 
+      // A new view's depth or AO pass invalidates the previous consumer's AO.
+      if (native_device_context->GetType() == D3D11_DEVICE_CONTEXT_IMMEDIATE &&
+         (original_shader_hashes.Contains(kFullResDepthHash, reshade::api::shader_stage::pixel) || original_shader_hashes.Contains(kSSAOHash, reshade::api::shader_stage::pixel)))
+      {
+         game_device_data.gi_ao_srv.reset();
+         game_device_data.gi_normal_resource.reset();
+         game_device_data.fullres_ao_valid_frame = ~0ull;
+      }
+
+      // The alternative path downsamples full-resolution R32 depth into the SSAO input.
+      if (g_enable_xegtao && native_device_context->GetType() == D3D11_DEVICE_CONTEXT_IMMEDIATE && original_shader_hashes.Contains(kDepthDownsampleHash, reshade::api::shader_stage::pixel))
+      {
+         game_device_data.downsample_source_srv.reset();
+         game_device_data.downsample_target.reset();
+         game_device_data.fullres_depth_srv.reset(); // A new downsample starts a new view.
+         ComPtr<ID3D11ShaderResourceView> source;
+         ComPtr<ID3D11RenderTargetView> target;
+         ComPtr<ID3D11Resource> source_resource, target_resource;
+         ComPtr<ID3D11Texture2D> source_texture, target_texture;
+         native_device_context->PSGetShaderResources(0, 1, source.put());
+         native_device_context->OMGetRenderTargets(1, target.put(), nullptr);
+         if (source) source->GetResource(source_resource.put());
+         if (target) target->GetResource(target_resource.put());
+         if (source_resource && target_resource && SUCCEEDED(source_resource->QueryInterface(source_texture.put())) && SUCCEEDED(target_resource->QueryInterface(target_texture.put())))
+         {
+            D3D11_TEXTURE2D_DESC src = {}, dst = {};
+            D3D11_SHADER_RESOURCE_VIEW_DESC srv = {};
+            D3D11_RENDER_TARGET_VIEW_DESC rtv = {};
+            source_texture->GetDesc(&src); target_texture->GetDesc(&dst);
+            source->GetDesc(&srv); target->GetDesc(&rtv);
+            UINT count = 1;
+            D3D11_VIEWPORT viewport = {};
+            native_device_context->RSGetViewports(&count, &viewport);
+            if (src.SampleDesc.Count == 1 && dst.SampleDesc.Count == 1 && src.ArraySize == 1 && dst.ArraySize == 1 &&
+               (src.Format == DXGI_FORMAT_R32_FLOAT || src.Format == DXGI_FORMAT_R32_TYPELESS) &&
+               (dst.Format == DXGI_FORMAT_R32_FLOAT || dst.Format == DXGI_FORMAT_R32_TYPELESS) &&
+               srv.Format == DXGI_FORMAT_R32_FLOAT && srv.ViewDimension == D3D11_SRV_DIMENSION_TEXTURE2D && srv.Texture2D.MostDetailedMip == 0 &&
+               rtv.Format == DXGI_FORMAT_R32_FLOAT && rtv.ViewDimension == D3D11_RTV_DIMENSION_TEXTURE2D && rtv.Texture2D.MipSlice == 0 &&
+               src.Width > 1 && src.Height > 1 && (dst.Width == src.Width / 2 || dst.Width == (src.Width + 1) / 2) && (dst.Height == src.Height / 2 || dst.Height == (src.Height + 1) / 2) &&
+               count == 1 && viewport.TopLeftX == 0 && viewport.TopLeftY == 0 &&
+               ((viewport.Width == float(dst.Width) && viewport.Height == float(dst.Height)) || (viewport.Width == float(src.Width) && viewport.Height == float(src.Height))))
+            {
+               game_device_data.downsample_source_srv = source;
+               game_device_data.downsample_target = target_resource;
+               game_device_data.downsample_frame = game_device_data.frame_index;
+            }
+         }
+      }
+
       // XeGTAO full res: keep the PS t0 of the draw just before the SSAO (full res raw device depth) for this frame. The draw itself runs.
       if (g_enable_xegtao && native_device_context->GetType() == D3D11_DEVICE_CONTEXT_IMMEDIATE && original_shader_hashes.Contains(kFullResDepthHash, reshade::api::shader_stage::pixel))
       {
@@ -1014,9 +1124,21 @@ public:
          native_device_context->PSGetShaderResources(0, 1, srv_depth.put());
          native_device_context->PSGetConstantBuffers(1, 1, cb1.put());
          native_device_context->OMGetRenderTargets(1, rtv_0.put(), nullptr);
-         // Full res path: the depth captured this frame. RT0 is not written; the AO consumer reads the full res output (kAOConsumerHash) instead.
-         if (game_device_data.fullres_depth_srv && game_device_data.fullres_depth_frame == game_device_data.frame_index && cb1
-            && HMAXeGTAO::DrawFullRes(native_device, native_device_context, device_data, game_device_data.gtao_data, game_device_data.fullres_depth_srv.get(), cb1.get(), g_xegtao_radius, g_xegtao_intensity, g_xegtao_vbao, g_xegtao_thickness))
+         ComPtr<ID3D11Resource> ssao_depth_resource;
+         if (srv_depth) srv_depth->GetResource(ssao_depth_resource.put());
+         ID3D11ShaderResourceView* fullres_depth = nullptr;
+         if (game_device_data.fullres_depth_srv && game_device_data.fullres_depth_frame == game_device_data.frame_index)
+            fullres_depth = game_device_data.fullres_depth_srv.get();
+         else if (game_device_data.downsample_frame == game_device_data.frame_index && ssao_depth_resource && ssao_depth_resource.get() == game_device_data.downsample_target.get())
+            fullres_depth = game_device_data.downsample_source_srv.get();
+         // Consume this candidate once; no later view may reuse it.
+         ComPtr<ID3D11ShaderResourceView> selected_depth = fullres_depth;
+         game_device_data.fullres_depth_srv.reset();
+         game_device_data.downsample_source_srv.reset();
+         game_device_data.downsample_target.reset();
+         // Full res path: RT0 is not written; the AO consumer reads the full res output instead.
+         if (selected_depth && cb1
+            && HMAXeGTAO::DrawFullRes(native_device, native_device_context, device_data, game_device_data.gtao_data, selected_depth.get(), cb1.get(), g_xegtao_radius, g_xegtao_intensity, g_xegtao_vbao, g_xegtao_thickness))
          {
             game_device_data.fullres_ao_valid_frame = game_device_data.frame_index;
             g_xegtao_fullres_runs++;
@@ -1041,18 +1163,55 @@ public:
          g_xegtao_failures++; // Neither path replaced the draw: the original SSAO runs
       }
 
-      // AO consumer (PS 0x3994DDCA) reads the AO at t5 with normalized UVs. With the full res AO valid this frame, t5 gets it for this draw only; the previous t5 is restored after.
-      if (native_device_context->GetType() == D3D11_DEVICE_CONTEXT_IMMEDIATE && original_draw_dispatch_func && original_shader_hashes.Contains(kAOConsumerHash, reshade::api::shader_stage::pixel)
-         && game_device_data.fullres_ao_valid_frame == game_device_data.frame_index && game_device_data.gtao_data.fullres_ao.srv)
+      // Capture the exact AO and G-buffer normal used by this view's deferred lighting.
+      static constexpr uint32_t ao_consumers[] = { 0x3994DDCA, 0x6A01F756, 0x2FBAC811, 0x9C3FA046, 0x46557B91, 0xE518B956, 0x4BAB9769, 0xB822DFF2, 0x04B76E1A, 0x5DE07B2B, 0x1E43437A, 0xAEACA752, 0x58C48E12, 0x86B62EAA };
+      if (native_device_context->GetType() == D3D11_DEVICE_CONTEXT_IMMEDIATE && std::any_of(std::begin(ao_consumers), std::end(ao_consumers), [&](uint32_t h) { return original_shader_hashes.Contains(h, reshade::api::shader_stage::pixel); }))
       {
-         ComPtr<ID3D11ShaderResourceView> srv_t5_saved;
-         native_device_context->PSGetShaderResources(5, 1, srv_t5_saved.put());
-         ID3D11ShaderResourceView* srv_ao = game_device_data.gtao_data.fullres_ao.srv.get();
-         native_device_context->PSSetShaderResources(5, 1, &srv_ao);
-         g_xegtao_t5_binds++;
+         game_device_data.gi_ao_srv.reset();
+         game_device_data.gi_normal_resource.reset();
+         ComPtr<ID3D11ShaderResourceView> normal;
+         native_device_context->PSGetShaderResources(2, 1, normal.put());
+         if (normal) normal->GetResource(game_device_data.gi_normal_resource.put());
+         const bool fullres = original_shader_hashes.Contains(kAOConsumerHash, reshade::api::shader_stage::pixel) && g_enable_xegtao && game_device_data.fullres_ao_valid_frame == game_device_data.frame_index && game_device_data.gtao_data.fullres_ao.srv;
+         if (fullres)
+            game_device_data.gi_ao_srv = game_device_data.gtao_data.fullres_ao.srv;
+         else
+            native_device_context->PSGetShaderResources(5, 1, game_device_data.gi_ao_srv.put());
+         game_device_data.gi_ao_frame = game_device_data.frame_index;
+         if (fullres && original_draw_dispatch_func)
+         {
+            ComPtr<ID3D11ShaderResourceView> saved;
+            native_device_context->PSGetShaderResources(5, 1, saved.put());
+            ID3D11ShaderResourceView* ao = game_device_data.gi_ao_srv.get();
+            native_device_context->PSSetShaderResources(5, 1, &ao);
+            g_xegtao_t5_binds++;
+            (*original_draw_dispatch_func)();
+            ao = saved.get();
+            native_device_context->PSSetShaderResources(5, 1, &ao);
+            return DrawOrDispatchOverrideType::Skip;
+         }
+      }
+
+      static constexpr uint32_t gi_hashes[] = { 0x8A0F6018, 0xADD46D0F, 0x626315E7, 0x0EA2360C, 0xA3EDF879, 0xF074469E, 0xCED3C761 };
+      if (native_device_context->GetType() == D3D11_DEVICE_CONTEXT_IMMEDIATE &&
+         std::any_of(std::begin(gi_hashes), std::end(gi_hashes), [&](uint32_t h) { return original_shader_hashes.Contains(h, reshade::api::shader_stage::pixel); }))
+      {
+         if (GetShaderDefineCompiledNumericalValue(TONEMAP_TYPE_HASH) < 1 || (cb_luma_global_settings.GameSettings.GIStrength == 1.f && cb_luma_global_settings.GameSettings.GIOcclusion == 0.f))
+         {
+            Shader::UsePipelineVariant(cmd_list_data, native_device_context, reshade::api::shader_stage::pixel, Shader::PipelineVariant::Original);
+            return DrawOrDispatchOverrideType::None;
+         }
+         if (!original_draw_dispatch_func) return DrawOrDispatchOverrideType::None;
+         ComPtr<ID3D11ShaderResourceView> saved, normal;
+         ComPtr<ID3D11Resource> normal_resource;
+         native_device_context->PSGetShaderResources(6, 1, saved.put());
+         native_device_context->PSGetShaderResources(4, 1, normal.put());
+         if (normal) normal->GetResource(normal_resource.put());
+         ID3D11ShaderResourceView* ao = game_device_data.gi_ao_frame == game_device_data.frame_index && normal_resource && normal_resource.get() == game_device_data.gi_normal_resource.get() ? game_device_data.gi_ao_srv.get() : nullptr;
+         native_device_context->PSSetShaderResources(6, 1, &ao);
          (*original_draw_dispatch_func)();
-         ID3D11ShaderResourceView* srv_t5_restore = srv_t5_saved.get();
-         native_device_context->PSSetShaderResources(5, 1, &srv_t5_restore);
+         ao = saved.get();
+         native_device_context->PSSetShaderResources(6, 1, &ao);
          return DrawOrDispatchOverrideType::Skip;
       }
 
@@ -1141,7 +1300,13 @@ public:
       auto& game_device_data = GetGameDeviceData(device_data);
 
       game_device_data.frame_index++;
+      game_device_data.sky_lower_srv.reset();
+      game_device_data.sky_target.reset();
+      game_device_data.gi_ao_srv.reset();
+      game_device_data.gi_normal_resource.reset();
       game_device_data.fullres_depth_srv.reset(); // Only used within the frame it was captured in
+      game_device_data.downsample_source_srv.reset();
+      game_device_data.downsample_target.reset();
       game_device_data.has_drawn_tonemap = false;
       game_device_data.exposure_dispatched_this_frame = false;
       device_data.has_drawn_main_post_processing = true;
@@ -1211,6 +1376,8 @@ public:
       reshade::get_config_value(runtime, NAME, "SkyDebanding", cb_luma_global_settings.GameSettings.SkyDebanding);
       reshade::get_config_value(runtime, NAME, "SunBrightness", cb_luma_global_settings.GameSettings.SunBrightness);
 #endif
+      reshade::get_config_value(runtime, NAME, "GIStrength", cb_luma_global_settings.GameSettings.GIStrength);
+      reshade::get_config_value(runtime, NAME, "GIOcclusion", cb_luma_global_settings.GameSettings.GIOcclusion);
       reshade::get_config_value(runtime, NAME, "Exposure", cb_luma_global_settings.GameSettings.Exposure);
       reshade::get_config_value(runtime, NAME, "Contrast", cb_luma_global_settings.GameSettings.Contrast);
       reshade::get_config_value(runtime, NAME, "Saturation", cb_luma_global_settings.GameSettings.Saturation);
@@ -1603,6 +1770,13 @@ public:
       if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
          ImGui::SetTooltip("Replaces the game's FXAA with SMAA.");
 #endif
+
+      if (ImGui::SliderFloat("GI Strength", &cb_luma_global_settings.GameSettings.GIStrength, 0.f, 4.f, "%.3f"))
+         reshade::set_config_value(runtime, NAME, "GIStrength", cb_luma_global_settings.GameSettings.GIStrength);
+      DrawResetButton(cb_luma_global_settings.GameSettings.GIStrength, default_luma_global_game_settings.GIStrength, "GIStrength", runtime);
+      if (ImGui::SliderFloat("GI Occlusion", &cb_luma_global_settings.GameSettings.GIOcclusion, 0.f, 1.f, "%.3f"))
+         reshade::set_config_value(runtime, NAME, "GIOcclusion", cb_luma_global_settings.GameSettings.GIOcclusion);
+      DrawResetButton(cb_luma_global_settings.GameSettings.GIOcclusion, default_luma_global_game_settings.GIOcclusion, "GIOcclusion", runtime);
 
       if (ImGui::Checkbox("XeGTAO", &g_enable_xegtao))
       {

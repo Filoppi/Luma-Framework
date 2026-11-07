@@ -1,4 +1,5 @@
 #include "Includes/Common.hlsl"
+#include "Includes/DeferredLightSpecular.hlsl"
 
 cbuffer SharedPerViewData : register(b1) { float4 cb1[13]; };
 cbuffer SharedLightData : register(b2) { float4 cb2[20]; };
@@ -38,7 +39,7 @@ void main(float4 v0 : SV_POSITION, float4 v1 : TEXCOORD0, float3 v2 : TEXCOORD1,
 #endif
   float lutY = dot(float2(spec, gb2.w), float2(0.248047, 0.753906));
   float4 lut = t0.Sample(s0, float2(saturate(ndotl), lutY));
-  float specPow = exp2((lut.w * 1024.0 - 1000.0) * gb3.y);
+  float specPow = HMADeferredSpecularPower((lut.w * 1024.0 - 1000.0) * gb3.y);
   float lum = dot(gb2.xyz, float3(0.447058, 0.882354, 0.170587));
   float3 rim = gb2.xyz * 2.0 - lum;
   float rimScale = (1.0 - cb2[3].w) * gb3.w;

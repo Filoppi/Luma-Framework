@@ -3,6 +3,7 @@
 // TONEMAP_TYPE 0 keeps the exact vanilla math.
 
 #include "Includes/Common.hlsl"
+#include "Includes/DeferredLightSpecular.hlsl"
 
 #if TONEMAP_TYPE >= 1
 #define GBUFFER_CLAMP(v) saturate(v)
@@ -80,7 +81,7 @@ void main(
   r1.w = r2.w * 1024.0 + -1000.0;
   r2 = GBUFFER_CLAMP(mapDeferred3.Sample(samplerDeferred3, v1.xy));
   r1.w = r1.w * r2.y;
-  r1.w = exp2(r1.w);
+  r1.w = HMADeferredSpecularPower(r1.w);
   r1.w = r2.x * r1.w;
   r2.xyz = r1.w * cb2[4].xyz;
   r0.xyz = r1.xyz * r0.xyz + r2.xyz;

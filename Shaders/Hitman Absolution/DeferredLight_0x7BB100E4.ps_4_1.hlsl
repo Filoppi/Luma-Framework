@@ -6,6 +6,7 @@
 // TONEMAP_TYPE 0 keeps the exact vanilla math.
 
 #include "Includes/Common.hlsl"
+#include "Includes/DeferredLightSpecular.hlsl"
 
 #if TONEMAP_TYPE >= 1
 #define GBUFFER_CLAMP(v) saturate(v)
@@ -94,7 +95,7 @@ void main(
   // Specular/material term from mapDeferred3 (MS, .xy): clamp.
   float2 specTex = GBUFFER_CLAMP(mapDeferred3.Load(pixel, sampleI).xy);
   float r0z = lut.w * 1024.0 - 1000.0;
-  float falloff = exp2(r0z * specTex.y) * specTex.x * cb2[19].x;
+  float falloff = HMADeferredSpecularPower(r0z * specTex.y) * specTex.x * cb2[19].x;
   float3 lit = lut.xyz * gb2.xyz + falloff;
 
   // Light-space position and cube projector (t1 is not MS, so unchanged).

@@ -3,6 +3,7 @@
 // TONEMAP_TYPE 0 keeps the vanilla math exact.
 
 #include "Includes/Common.hlsl"
+#include "Includes/DeferredLightSpecular.hlsl"
 
 cbuffer SharedPerViewData_cb1 : register(b1)
 {
@@ -77,7 +78,7 @@ void main(
   r2 = mapLightModel.Sample(samplerLightModel, r2.xy);
   r0.y = r2.w * 1024.0 - 1000.0;
   r0.y = r0.y * r4.y;
-  r0.y = exp2(r0.y);
+  r0.y = HMADeferredSpecularPower(r0.y);
   r0.z = dot(r3.xyz, float3(0.447058, 0.882354, 0.170587));
   r5.xyz = r3.xyz * 2.0 - r0.z;
   r0.z = 1.0 - cb2[3].w;

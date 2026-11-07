@@ -50,6 +50,8 @@ namespace CB
 		float AutoExposureKey;
 		uint ModernLensFlares;
 		uint BokehDOF;
+		float GIStrength;
+		float GIOcclusion;
 	};
 	
 	// Define the game specific cbuffer (instance/pass) data here

@@ -5,6 +5,7 @@
 // ps_4_0 has no SV_SampleIndex: vanilla always loads sample 0, so this does too.
 
 #include "Includes/Common.hlsl"
+#include "Includes/DeferredLightSpecular.hlsl"
 
 #if TONEMAP_TYPE >= 1
 #define GBUFFER_CLAMP(v) saturate(v)
@@ -93,7 +94,7 @@ void main(
   occ.xyz = occ.xyz * occ.xyz;
 
   r1w = r1w * deferred3.y;
-  r1w = exp2(r1w);
+  r1w = HMADeferredSpecularPower(r1w);
   r1w = deferred3.x * r1w;
   float3 r3 = r1w * cb2[4].xyz;
 

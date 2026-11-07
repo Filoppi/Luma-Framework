@@ -59,8 +59,13 @@ namespace HMAXeGTAO
       }
    };
 
+   inline uint32_t fail_depth = 0, fail_target = 0, fail_shaders = 0, fail_sampler = 0, fail_resources = 0, fail_output = 0, fail_map = 0;
+
    struct Data
    {
+      ComPtr<ID3D11Resource> depth_view_resource;
+      ComPtr<ID3D11ShaderResourceView> depth_view;
+      UINT depth_view_mip = UINT_MAX;
       Constants gtao_constants;
       ComPtr<ID3D11Buffer> gtao_constant_buffer;
       Resources resources;
@@ -72,6 +77,9 @@ namespace HMAXeGTAO
 
    inline void Clear(Data& data)
    {
+      data.depth_view.reset();
+      data.depth_view_resource.reset();
+      data.depth_view_mip = UINT_MAX;
       data.gtao_constant_buffer.reset();
       data.resources.Reset();
       data.fullres_ao.Reset();
@@ -153,26 +161,68 @@ namespace HMAXeGTAO
       return true;
    }
 
-   // The depth SRV must be a plain 2D R32_FLOAT texture (not an array, not MSAA) of at least min_dimension. Returns its size.
-   inline bool GetDepthSize(ID3D11ShaderResourceView* depth_srv, UINT& width, UINT& height)
+   // Convert a single-sample Texture2DMS view into the Texture2D view expected by the compute shader.
+   inline bool GetDepthView(ID3D11Device* device, Data& data, ID3D11ShaderResourceView* input, ID3D11ShaderResourceView*& view, UINT& width, UINT& height, bool fallback)
    {
-      if (!depth_srv)
-         return false;
-      ComPtr<ID3D11Resource> depth_resource;
-      depth_srv->GetResource(depth_resource.put());
-      ComPtr<ID3D11Texture2D> depth_tex;
-      if (!depth_resource || FAILED(depth_resource->QueryInterface(depth_tex.put())))
-         return false;
-      D3D11_TEXTURE2D_DESC depth_desc = {};
-      depth_tex->GetDesc(&depth_desc);
-      D3D11_SHADER_RESOURCE_VIEW_DESC depth_srv_desc = {};
-      depth_srv->GetDesc(&depth_srv_desc);
-      if (depth_srv_desc.ViewDimension != D3D11_SRV_DIMENSION_TEXTURE2D || depth_srv_desc.Format != DXGI_FORMAT_R32_FLOAT
-         || depth_desc.ArraySize != 1 || depth_desc.SampleDesc.Count != 1)
-         return false;
-      width = depth_desc.Width;
-      height = depth_desc.Height;
-      return width >= min_dimension && height >= min_dimension;
+      if (!input) return false;
+      D3D11_SHADER_RESOURCE_VIEW_DESC sd = {};
+      input->GetDesc(&sd);
+      ComPtr<ID3D11Resource> resource;
+      input->GetResource(resource.put());
+      ComPtr<ID3D11Texture2D> texture;
+      HRESULT hr = resource ? resource->QueryInterface(texture.put()) : E_POINTER;
+      D3D11_TEXTURE2D_DESC td = {};
+      if (SUCCEEDED(hr)) texture->GetDesc(&td);
+      UINT mip = 0;
+      bool compatible = SUCCEEDED(hr) && sd.Format == DXGI_FORMAT_R32_FLOAT && td.SampleDesc.Count == 1 && td.ArraySize == 1;
+      if (sd.ViewDimension == D3D11_SRV_DIMENSION_TEXTURE2D)
+         mip = sd.Texture2D.MostDetailedMip;
+      else if (sd.ViewDimension == D3D11_SRV_DIMENSION_TEXTURE2DMS)
+         mip = 0;
+      else
+         compatible = false;
+      compatible = compatible && mip < td.MipLevels;
+      if (compatible)
+      {
+         width = max(1u, td.Width >> mip);
+         height = max(1u, td.Height >> mip);
+         compatible = width >= min_dimension && height >= min_dimension;
+      }
+      bool normalized = false;
+      if (compatible && sd.ViewDimension == D3D11_SRV_DIMENSION_TEXTURE2DMS)
+      {
+         if (!data.depth_view || data.depth_view_resource.get() != resource.get() || data.depth_view_mip != mip)
+         {
+            D3D11_SHADER_RESOURCE_VIEW_DESC replacement = {};
+            replacement.Format = DXGI_FORMAT_R32_FLOAT;
+            replacement.ViewDimension = D3D11_SRV_DIMENSION_TEXTURE2D;
+            replacement.Texture2D.MostDetailedMip = mip;
+            replacement.Texture2D.MipLevels = 1;
+            ComPtr<ID3D11ShaderResourceView> next;
+            hr = device->CreateShaderResourceView(resource.get(), &replacement, next.put());
+            if (SUCCEEDED(hr))
+            {
+               data.depth_view = std::move(next);
+               data.depth_view_resource = resource;
+               data.depth_view_mip = mip;
+            }
+            else compatible = false;
+         }
+         if (compatible) { view = data.depth_view.get(); normalized = true; }
+      }
+      else if (compatible) view = input;
+      static bool logged_rejection[2] = {}, logged_normalization[2] = {};
+      bool& logged = compatible ? logged_normalization[fallback] : logged_rejection[fallback];
+      if ((!compatible || normalized) && !logged)
+      {
+         char message[512];
+         sprintf_s(message, "HMA XeGTAO depth %s: hr=0x%08lX view=%u format=%u resource format=%u size=%ux%u mips=%u array=%u samples=%u mip=%u",
+            compatible ? "normalized" : (fallback ? "fallback rejected" : "fullres rejected"), static_cast<unsigned long>(hr), unsigned(sd.ViewDimension), unsigned(sd.Format), unsigned(td.Format),
+            td.Width, td.Height, td.MipLevels, td.ArraySize, td.SampleDesc.Count, mip);
+         reshade::log::message(reshade::log::level::info, message);
+         logged = true;
+      }
+      return compatible;
    }
 
    // Runs the prefilter, main, denoise and final denoise passes on the device depth "depth_srv" (width x height) and writes the visibility into "output".
@@ -193,15 +243,15 @@ namespace HMAXeGTAO
       ID3D11ComputeShader* denoise_cs = find_cs(CompileTimeStringHash("HMA XeGTAO Denoise CS"));
       ID3D11ComputeShader* denoise_final_cs = find_cs(CompileTimeStringHash("HMA XeGTAO Denoise Final CS"));
       if (!prefilter_cs || !main_cs || !denoise_cs || !denoise_final_cs)
-         return false;
+      { ++fail_shaders; return false; }
       if (!device_data.sampler_state_point)
-         return false;
+      { ++fail_sampler; return false; }
 
       if (!PrepareResources(device, data, width, height))
-         return false;
+      { ++fail_resources; return false; }
       // "output" may be data.resources.final_ao, which PrepareResources just (re)created
       if (!output.uav)
-         return false;
+      { ++fail_output; return false; }
       const Resources& resources = data.resources;
 
       data.gtao_constants.viewport_size[0] = width;
@@ -213,7 +263,7 @@ namespace HMAXeGTAO
       data.gtao_constants.thickness = thickness;
       D3D11_MAPPED_SUBRESOURCE mapped;
       if (FAILED(context->Map(data.gtao_constant_buffer.get(), 0, D3D11_MAP_WRITE_DISCARD, 0, &mapped)))
-         return false;
+      { ++fail_map; return false; }
       std::memcpy(mapped.pData, &data.gtao_constants, sizeof(Constants));
       context->Unmap(data.gtao_constant_buffer.get(), 0);
 
@@ -293,11 +343,12 @@ namespace HMAXeGTAO
    {
       UINT width = 0;
       UINT height = 0;
-      if (!camera_cb || !GetDepthSize(depth_srv, width, height))
+      ID3D11ShaderResourceView* view = nullptr;
+      if (!camera_cb || !GetDepthView(device, data, depth_srv, view, width, height, false))
          return false;
       if (!PrepareFullResOutput(device, data, width, height))
          return false;
-      return Run(device, context, device_data, data, depth_srv, camera_cb, width, height, effect_radius, final_value_power, vbao, thickness, data.fullres_ao, nullptr);
+      return Run(device, context, device_data, data, view, camera_cb, width, height, effect_radius, final_value_power, vbao, thickness, data.fullres_ao, nullptr);
    }
 
    // Half res AO: runs on the game's SSAO depth input (t0 of the SSAO draw) and copies the result into RT0.
@@ -308,13 +359,14 @@ namespace HMAXeGTAO
    {
       UINT width = 0;
       UINT height = 0;
-      if (!camera_cb || !rt0_resource || !GetDepthSize(depth_srv, width, height))
-         return false;
+      ID3D11ShaderResourceView* view = nullptr;
+      if (!camera_cb || !rt0_resource || !GetDepthView(device, data, depth_srv, view, width, height, true))
+      { ++fail_depth; return false; }
       // RT0 must be a single mip R16G16B16A16_FLOAT target of the same size, as the final copy needs identical formats and subresources.
       if (rt0_desc.Format != DXGI_FORMAT_R16G16B16A16_FLOAT || rt0_desc.SampleDesc.Count != 1 || rt0_desc.ArraySize != 1 || rt0_desc.MipLevels != 1
          || rt0_desc.Width != width || rt0_desc.Height != height)
-         return false;
+      { ++fail_target; return false; }
 
-      return Run(device, context, device_data, data, depth_srv, camera_cb, width, height, effect_radius, final_value_power, vbao, thickness, data.resources.final_ao, rt0_resource);
+      return Run(device, context, device_data, data, view, camera_cb, width, height, effect_radius, final_value_power, vbao, thickness, data.resources.final_ao, rt0_resource);
    }
 }
