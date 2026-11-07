@@ -5,6 +5,7 @@
 
 #include "Includes/Common.hlsl"
 #include "../Includes/ColorGradingLUT.hlsl"
+#include "Includes/AutoExposure.hlsl"
 
 cbuffer cb4 : register(b4)
 {
@@ -184,7 +185,7 @@ void main(
   float3 lumaWeights = float3(0.299, 0.587, 0.114);
 
 #if TONEMAP_TYPE >= 1
-  float scale = cb4[41].z;
+  float scale = GetHMAExposure(cb4[41].z);
   float3 hdr = max(t1.Sample(s1, v2).rgb, 0.0) * scale;
   hdr *= LumaSettings.GameSettings.Exposure;
   // Sun: it's baked into the sky dome/cloud textures, so boost sky pixels (raw depth: sky dome ~0.9999945, far terrain <= ~0.99999)
@@ -206,7 +207,7 @@ void main(
   hdr = lerp(hdr, fade.rgb, fade.a);
 
   float3 hdrGraded = (noGrade ? hdr : LUTGradeHDR(hdr, d)) * lerp(skyBoost, 1.0, fade.a);
-  float3 sdrScene = saturate(t1.Sample(s1, v2).rgb * cb4[41].z * LumaSettings.GameSettings.Exposure);
+  float3 sdrScene = saturate(t1.Sample(s1, v2).rgb * GetHMAExposure(cb4[41].z) * LumaSettings.GameSettings.Exposure);
   float3 sdrRef = noGrade ? lerp(sdrScene, fade.rgb, fade.a) : LUTGrade(sdrScene, fade, d);
   float restore = LumaSettings.GameSettings.VanillaHueRestore;
   if (restore > 0.0)
@@ -237,10 +238,22 @@ void main(
   float w = saturate((Y - 1.0) / 3.0);
   hdrGraded = Y + (hdrGraded - Y) * lerp(1.0, LumaSettings.GameSettings.HighlightSaturation, w);
 
+  // Highlight compression: soft-rolls graded luminance above SDR white (0 = off, 1 = ceiling 1.25x white).
+  if (LumaSettings.GameSettings.HighlightCompression > 0.0)
+  {
+    float Yhc = GetLuminance(hdrGraded);
+    if (Yhc > 1.0)
+    {
+      float ehc = Yhc - 1.0;
+      float Ycomp = 1.0 + ehc / (1.0 + ehc * LumaSettings.GameSettings.HighlightCompression * 4.0);
+      hdrGraded *= Ycomp / Yhc;
+    }
+  }
+
   float3 outRgb = hdrGraded;
   o0 = float4(outRgb, dot(saturate(outRgb), lumaWeights));
 #else
-  float3 scene = saturate(t1.Sample(s1, v2).rgb * cb4[41].z);
+  float3 scene = saturate(t1.Sample(s1, v2).rgb * GetHMAExposure(cb4[41].z));
 
   float3 graded = noGrade ? lerp(scene, fade.rgb, fade.a) : LUTGrade(scene, fade, d);
 

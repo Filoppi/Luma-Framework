@@ -3,6 +3,7 @@
 // and the division by alpha is guarded against non-positive values.
 
 #include "Includes/Common.hlsl"
+#include "Includes/AutoExposure.hlsl"
 
 cbuffer cb4 : register(b4)
 {
@@ -24,6 +25,7 @@ void main(
   out float4 o2 : SV_TARGET2,
   out float4 o3 : SV_TARGET3)
 {
+  float exposure = GetHMAExposure(cb4[41].z);
   float4 r0 = t0.Sample(s0, v2);
   float4 r1 = t1.Sample(s1, v2);
 
@@ -45,12 +47,12 @@ void main(
   float sel = (0.0 >= r0.w) ? 1.0 : 0.0;
   float3 r3 = r0.xyz * r0.xyz - r2;
   r2 = sel * r3 + r2;
-  r2 = r2 * cb4[41].z;
+  r2 = r2 * exposure;
 
 #if TONEMAP_TYPE >= 1
-  float3 bright = max(0.0, r2 - cb4[41].x * cb4[41].z);
+  float3 bright = max(0.0, r2 - cb4[41].x * exposure);
 #else
-  float3 bright = saturate(r2 - cb4[41].x * cb4[41].z);
+  float3 bright = saturate(r2 - cb4[41].x * exposure);
 #endif
 
   float luma = dot(bright, float3(0.298039, 0.588236, 0.113725));

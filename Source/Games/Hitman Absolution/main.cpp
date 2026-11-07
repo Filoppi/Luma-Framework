@@ -63,6 +63,11 @@ static void ForceBorderlessFullscreen()
 }
 // Luma bloom: pyramid mip 0 is bound at kLumaBloomSlot for the tonemap draw. One sigma per mip, in mip texels (resolution-independent). Copied from Mass Effect.
 static constexpr uint32_t kLumaBloomSlot = 4;
+// GPU auto-exposure: the exposure texture is bound at t7 for the draws in kExposureBindHashes. The histogram runs on the scene of kExposureSourceHash(2).
+static constexpr uint32_t kExposureSlot = 7;
+static constexpr uint32_t kExposureSourceHash = 0x8C21ED83;
+static constexpr uint32_t kExposureSourceHash2 = 0xA439D28A;
+static constexpr uint32_t kExposureBindHashes[] = { 0x8C21ED83, 0xA6E2CE1F, 0x2B2B1728, 0x46C50FC2, 0xEED9AC77 };
 static constexpr uint32_t kTonemapHash = 0x46C50FC2;
 static constexpr uint32_t kTonemapHash2 = 0xEED9AC77; // Chinatown variant (skips LUT when depth coord > 1)
 static constexpr uint32_t kFogHash = 0x49154D1F; // Chinatown fullscreen fog, blended onto the scene RT
@@ -239,6 +244,20 @@ static bool HMA_DrawSMAAForFXAA(ID3D11Device* native_device, ID3D11DeviceContext
    return true;
 }
 
+// Matches the "AutoExposure" cbuffer in the exposure CS files (32 bytes).
+struct AutoExposureCBData
+{
+   float delta_time;
+   float reset;
+   float adapt_speed;
+   float range_stops;
+   uint32_t width;
+   uint32_t height;
+   float key;
+   uint32_t pad1;
+};
+static_assert(sizeof(AutoExposureCBData) == 32);
+
 struct TemplateGameDeviceData final : public GameDeviceData
 {
    bool has_drawn_tonemap = false;
@@ -247,6 +266,18 @@ struct TemplateGameDeviceData final : public GameDeviceData
    // Pre-fog copy of the scene RT, bound at t2 for the fog draw. Recreated when the RT size or format changes.
    ComPtr<ID3D11Texture2D> fog_scene_copy;
    ComPtr<ID3D11ShaderResourceView> fog_scene_copy_srv;
+   // GPU auto-exposure state
+   ComPtr<ID3D11Texture2D> exposure_tex; // 1x1 R32_FLOAT
+   ComPtr<ID3D11ShaderResourceView> exposure_srv;
+   ComPtr<ID3D11UnorderedAccessView> exposure_uav;
+   ComPtr<ID3D11Buffer> histogram_buf; // 512 bytes raw
+   ComPtr<ID3D11UnorderedAccessView> histogram_uav;
+   ComPtr<ID3D11Buffer> exposure_cb; // AutoExposureCBData
+   LARGE_INTEGER last_time = {};
+   bool need_reset = true;
+   bool exposure_dispatched_this_frame = false;
+   uint32_t last_auto_exposure_mode = 0u;
+   ComPtr<ID3D11Buffer> last_game_cb4; // Game's PS cb4, reused by the adapt CS when cb4 is not bound on the source draw
 };
 
 class TemplateGame final : public Game // Go view "Source/Core/includes/game.h" for all the overridable virtual functions
@@ -276,6 +307,165 @@ class TemplateGame final : public Game // Go view "Source/Core/includes/game.h" 
       }
       ID3D11ShaderResourceView* bloom_srv = gd.srv_luma_bloom.get();
       native_device_context->PSSetShaderResources(kLumaBloomSlot, 1, &bloom_srv);
+   }
+
+   // Creates the auto-exposure resources on first use. Returns false if any of them is missing (nothing is kept on failure).
+   static bool EnsureExposureResources(ID3D11Device* native_device, ID3D11DeviceContext* native_device_context, TemplateGameDeviceData& gd)
+   {
+      if (gd.exposure_srv && gd.exposure_uav && gd.histogram_uav && gd.exposure_cb)
+         return true;
+
+      D3D11_TEXTURE2D_DESC tex_desc = {};
+      tex_desc.Width = 1;
+      tex_desc.Height = 1;
+      tex_desc.MipLevels = 1;
+      tex_desc.ArraySize = 1;
+      tex_desc.Format = DXGI_FORMAT_R32_FLOAT;
+      tex_desc.SampleDesc.Count = 1;
+      tex_desc.Usage = D3D11_USAGE_DEFAULT;
+      tex_desc.BindFlags = D3D11_BIND_SHADER_RESOURCE | D3D11_BIND_UNORDERED_ACCESS;
+      ComPtr<ID3D11Texture2D> tex;
+      ComPtr<ID3D11ShaderResourceView> srv;
+      ComPtr<ID3D11UnorderedAccessView> uav;
+      if (FAILED(native_device->CreateTexture2D(&tex_desc, nullptr, tex.put()))
+         || FAILED(native_device->CreateShaderResourceView(tex.get(), nullptr, srv.put()))
+         || FAILED(native_device->CreateUnorderedAccessView(tex.get(), nullptr, uav.put())))
+         return false;
+
+      D3D11_BUFFER_DESC hist_desc = {};
+      hist_desc.ByteWidth = 512; // 128 x 32 bit bins
+      hist_desc.Usage = D3D11_USAGE_DEFAULT;
+      hist_desc.BindFlags = D3D11_BIND_UNORDERED_ACCESS;
+      hist_desc.MiscFlags = D3D11_RESOURCE_MISC_BUFFER_ALLOW_RAW_VIEWS;
+      ComPtr<ID3D11Buffer> hist_buf;
+      if (FAILED(native_device->CreateBuffer(&hist_desc, nullptr, hist_buf.put())))
+         return false;
+      D3D11_UNORDERED_ACCESS_VIEW_DESC hist_uav_desc = {};
+      hist_uav_desc.Format = DXGI_FORMAT_R32_TYPELESS;
+      hist_uav_desc.ViewDimension = D3D11_UAV_DIMENSION_BUFFER;
+      hist_uav_desc.Buffer.FirstElement = 0;
+      hist_uav_desc.Buffer.NumElements = 128;
+      hist_uav_desc.Buffer.Flags = D3D11_BUFFER_UAV_FLAG_RAW;
+      ComPtr<ID3D11UnorderedAccessView> hist_uav;
+      if (FAILED(native_device->CreateUnorderedAccessView(hist_buf.get(), &hist_uav_desc, hist_uav.put())))
+         return false;
+
+      D3D11_BUFFER_DESC cb_desc = {};
+      cb_desc.ByteWidth = sizeof(AutoExposureCBData);
+      cb_desc.Usage = D3D11_USAGE_DEFAULT; // Updated with UpdateSubresource every dispatch
+      cb_desc.BindFlags = D3D11_BIND_CONSTANT_BUFFER;
+      ComPtr<ID3D11Buffer> cb;
+      if (FAILED(native_device->CreateBuffer(&cb_desc, nullptr, cb.put())))
+         return false;
+
+      gd.exposure_tex = tex;
+      gd.exposure_srv = srv;
+      gd.exposure_uav = uav;
+      gd.histogram_buf = hist_buf;
+      gd.histogram_uav = hist_uav;
+      gd.exposure_cb = cb;
+
+      // Start from zero, and make the adapt pass reset its state on the next dispatch.
+      const UINT clear_uint[4] = { 0u, 0u, 0u, 0u };
+      native_device_context->ClearUnorderedAccessViewUint(gd.histogram_uav.get(), clear_uint);
+      const FLOAT clear_float[4] = { 0.f, 0.f, 0.f, 0.f };
+      native_device_context->ClearUnorderedAccessViewFloat(gd.exposure_uav.get(), clear_float);
+      gd.need_reset = true;
+      return true;
+   }
+
+   // Histogram + adapt compute passes on the HDR scene (srv_scene at t0). Silently does nothing if anything is missing.
+   static void DispatchAutoExposure(ID3D11Device* native_device, ID3D11DeviceContext* native_device_context, DeviceData& device_data, ID3D11ShaderResourceView* srv_scene)
+   {
+      auto& gd = GetGameDeviceData(device_data);
+
+      auto histogram_it = device_data.native_compute_shaders.find(CompileTimeStringHash("HMA Exposure Histogram CS"));
+      auto adapt_it = device_data.native_compute_shaders.find(CompileTimeStringHash("HMA Exposure Adapt CS"));
+      if (histogram_it == device_data.native_compute_shaders.end() || !histogram_it->second.get()
+         || adapt_it == device_data.native_compute_shaders.end() || !adapt_it->second.get())
+         return;
+      if (srv_scene == nullptr)
+         return;
+
+      D3D11_SHADER_RESOURCE_VIEW_DESC srv_desc = {};
+      srv_scene->GetDesc(&srv_desc);
+      if (srv_desc.ViewDimension != D3D11_SRV_DIMENSION_TEXTURE2D)
+         return;
+      ComPtr<ID3D11Resource> scene_resource;
+      srv_scene->GetResource(scene_resource.put());
+      ComPtr<ID3D11Texture2D> scene_tex;
+      if (!scene_resource || FAILED(scene_resource->QueryInterface(scene_tex.put())))
+         return;
+      D3D11_TEXTURE2D_DESC scene_desc = {};
+      scene_tex->GetDesc(&scene_desc);
+      if (scene_desc.Width == 0 || scene_desc.Height == 0 || scene_desc.SampleDesc.Count != 1)
+         return;
+
+      if (!EnsureExposureResources(native_device, native_device_context, gd))
+         return;
+
+      // Delta time from QPC, clamped.
+      static LARGE_INTEGER qpc_frequency = {};
+      if (qpc_frequency.QuadPart == 0)
+         QueryPerformanceFrequency(&qpc_frequency);
+      LARGE_INTEGER now = {};
+      QueryPerformanceCounter(&now);
+      float delta_time = 0.f;
+      if (gd.last_time.QuadPart != 0 && qpc_frequency.QuadPart != 0)
+         delta_time = (float)((double)(now.QuadPart - gd.last_time.QuadPart) / (double)qpc_frequency.QuadPart);
+      gd.last_time = now;
+      delta_time = delta_time < 0.f ? 0.f : (delta_time > 0.25f ? 0.25f : delta_time);
+
+      // The game's cb4 is needed by the adapt pass (bound now on the source draw, or the last one seen on a tonemap draw).
+      ComPtr<ID3D11Buffer> game_cb4;
+      native_device_context->PSGetConstantBuffers(4, 1, game_cb4.put());
+      ID3D11Buffer* cs_cb4 = game_cb4 ? game_cb4.get() : gd.last_game_cb4.get();
+      if (cs_cb4 == nullptr)
+         return;
+
+      AutoExposureCBData cb_data = {};
+      cb_data.delta_time = delta_time;
+      cb_data.reset = gd.need_reset ? 1.f : 0.f;
+      cb_data.adapt_speed = cb_luma_global_settings.GameSettings.AutoExposureSpeed;
+      cb_data.range_stops = cb_luma_global_settings.GameSettings.AutoExposureRange;
+      cb_data.key = cb_luma_global_settings.GameSettings.AutoExposureKey;
+      cb_data.width = scene_desc.Width;
+      cb_data.height = scene_desc.Height;
+      native_device_context->UpdateSubresource(gd.exposure_cb.get(), 0, nullptr, &cb_data, 0, 0);
+
+      DrawStateStack<DrawStateStackType::Compute> cs_state;
+      cs_state.Cache(native_device_context, device_data.uav_max_count);
+
+      ID3D11Buffer* cs_cb0 = gd.exposure_cb.get();
+      native_device_context->CSSetConstantBuffers(0, 1, &cs_cb0);
+
+      // Histogram: one group per 64x64 pixels.
+      ID3D11ShaderResourceView* cs_srv = srv_scene;
+      native_device_context->CSSetShaderResources(0, 1, &cs_srv);
+      ID3D11UnorderedAccessView* cs_hist_uav = gd.histogram_uav.get();
+      native_device_context->CSSetUnorderedAccessViews(0, 1, &cs_hist_uav, nullptr);
+      native_device_context->CSSetShader(histogram_it->second.get(), nullptr, 0);
+      native_device_context->Dispatch((scene_desc.Width + 63u) / 64u, (scene_desc.Height + 63u) / 64u, 1);
+
+      // Adapt: one group, reads the histogram and writes the exposure texture.
+      ID3D11ShaderResourceView* cs_srv_null = nullptr;
+      native_device_context->CSSetShaderResources(0, 1, &cs_srv_null);
+      const std::array<ID3D11UnorderedAccessView*, 2> cs_adapt_uavs = { gd.exposure_uav.get(), gd.histogram_uav.get() };
+      native_device_context->CSSetUnorderedAccessViews(0, cs_adapt_uavs.size(), cs_adapt_uavs.data(), nullptr);
+      native_device_context->CSSetConstantBuffers(4, 1, &cs_cb4);
+      native_device_context->CSSetShader(adapt_it->second.get(), nullptr, 0);
+      native_device_context->Dispatch(1, 1, 1);
+
+      // Unbind UAVs and SRVs before the exposure is read as an SRV.
+      const std::array<ID3D11UnorderedAccessView*, 2> cs_uav_nulls = {};
+      native_device_context->CSSetUnorderedAccessViews(0, cs_uav_nulls.size(), cs_uav_nulls.data(), nullptr);
+      native_device_context->CSSetShaderResources(0, 1, &cs_srv_null);
+      native_device_context->CSSetShader(nullptr, nullptr, 0);
+
+      cs_state.Restore(native_device_context);
+
+      gd.need_reset = false;
+      gd.exposure_dispatched_this_frame = true;
    }
 
 public:
@@ -348,9 +538,16 @@ public:
       default_luma_global_game_settings.SunShaftHDRBoost = cb_luma_global_settings.GameSettings.SunShaftHDRBoost = 1.f;
       default_luma_global_game_settings.VideoAutoHDR = cb_luma_global_settings.GameSettings.VideoAutoHDR = 0.5f;
       default_luma_global_game_settings.VanillaHueRestore = cb_luma_global_settings.GameSettings.VanillaHueRestore = 1.0f;
+      default_luma_global_game_settings.AutoExposureMode = cb_luma_global_settings.GameSettings.AutoExposureMode = 1u;
+      default_luma_global_game_settings.AutoExposureSpeed = cb_luma_global_settings.GameSettings.AutoExposureSpeed = 1.5f;
+      default_luma_global_game_settings.AutoExposureRange = cb_luma_global_settings.GameSettings.AutoExposureRange = 2.0f;
+      default_luma_global_game_settings.AutoExposureKey = cb_luma_global_settings.GameSettings.AutoExposureKey = 0.11f;
+      default_luma_global_game_settings.HighlightCompression = cb_luma_global_settings.GameSettings.HighlightCompression = 0.f;
 
       native_shaders_definitions.emplace(CompileTimeStringHash("HMA Tonemapped Resolve"), ShaderDefinition{ "Luma_HMA_TonemappedResolve", reshade::api::pipeline_subobject_type::pixel_shader });
       native_shaders_definitions.emplace(CompileTimeStringHash("SMAA Linear To sRGB CS"), ShaderDefinition{ "Luma_SMAA_LinearTosRGB_CS", reshade::api::pipeline_subobject_type::compute_shader });
+      native_shaders_definitions.emplace(CompileTimeStringHash("HMA Exposure Histogram CS"), ShaderDefinition{ "Luma_HMA_ExposureHistogram_CS", reshade::api::pipeline_subobject_type::compute_shader });
+      native_shaders_definitions.emplace(CompileTimeStringHash("HMA Exposure Adapt CS"), ShaderDefinition{ "Luma_HMA_ExposureAdapt_CS", reshade::api::pipeline_subobject_type::compute_shader });
       reshade::register_event<reshade::addon_event::resolve_texture_region>(HMA_OnResolveTextureRegion);
    }
 
@@ -383,6 +580,47 @@ public:
          ComPtr<ID3D11ShaderResourceView> srv_scene;
          native_device_context->PSGetShaderResources(1, 1, srv_scene.put());
          BindLumaBloom(native_device, native_device_context, device_data, srv_scene.get());
+      }
+
+      // GPU auto-exposure: a mode switch away from "Vanilla" restarts the adaptation.
+      if (game_device_data.last_auto_exposure_mode == 0u && cb_luma_global_settings.GameSettings.AutoExposureMode != 0u)
+         game_device_data.need_reset = true;
+      game_device_data.last_auto_exposure_mode = cb_luma_global_settings.GameSettings.AutoExposureMode;
+
+      if (native_device_context->GetType() == D3D11_DEVICE_CONTEXT_IMMEDIATE && cb_luma_global_settings.GameSettings.AutoExposureMode != 0u
+         && GetShaderDefineCompiledNumericalValue(TONEMAP_TYPE_HASH) >= 1)
+      {
+         // Keep the game's cb4 for the adapt pass, from the tonemap draws.
+         if (original_shader_hashes.Contains(kTonemapHash, reshade::api::shader_stage::pixel) || original_shader_hashes.Contains(kTonemapHash2, reshade::api::shader_stage::pixel))
+         {
+            ComPtr<ID3D11Buffer> cb4;
+            native_device_context->PSGetConstantBuffers(4, 1, cb4.put());
+            if (cb4)
+               game_device_data.last_game_cb4 = cb4;
+         }
+
+         // Histogram + adapt once per frame, on the exposure source draw.
+         if (!game_device_data.exposure_dispatched_this_frame
+            && (original_shader_hashes.Contains(kExposureSourceHash, reshade::api::shader_stage::pixel) || original_shader_hashes.Contains(kExposureSourceHash2, reshade::api::shader_stage::pixel)))
+         {
+            ComPtr<ID3D11ShaderResourceView> srv_scene;
+            native_device_context->PSGetShaderResources(0, 1, srv_scene.put());
+            if (srv_scene)
+               DispatchAutoExposure(native_device, native_device_context, device_data, srv_scene.get());
+         }
+
+         // Exposure at t7 only for the duration of the consumer draws: the game uses t7 elsewhere, so the previous t7 is restored right after.
+         if (game_device_data.exposure_srv && original_draw_dispatch_func && std::any_of(std::begin(kExposureBindHashes), std::end(kExposureBindHashes), [&](uint32_t h) { return original_shader_hashes.Contains(h, reshade::api::shader_stage::pixel); }))
+         {
+            ComPtr<ID3D11ShaderResourceView> srv_t7_saved;
+            native_device_context->PSGetShaderResources(kExposureSlot, 1, srv_t7_saved.put());
+            ID3D11ShaderResourceView* srv_exposure = game_device_data.exposure_srv.get();
+            native_device_context->PSSetShaderResources(kExposureSlot, 1, &srv_exposure);
+            (*original_draw_dispatch_func)();
+            ID3D11ShaderResourceView* srv_t7_restore = srv_t7_saved.get();
+            native_device_context->PSSetShaderResources(kExposureSlot, 1, &srv_t7_restore);
+            return DrawOrDispatchOverrideType::Skip;
+         }
       }
 
       // FXAA replacement: the game's FXAA pixel shader draw becomes Luma SMAA when "AntiAliasingMode" is 1. On failure the original draw runs.
@@ -449,6 +687,7 @@ public:
       auto& game_device_data = GetGameDeviceData(device_data);
 
       game_device_data.has_drawn_tonemap = false;
+      game_device_data.exposure_dispatched_this_frame = false;
       device_data.has_drawn_main_post_processing = true;
 
       // LumaBloom off: give the address space back (core's DrawKarisAverage output, ~66 MB at 4K). Core only drops the UAV on swapchain init, so both views go here.
@@ -514,6 +753,11 @@ public:
 #endif
       reshade::get_config_value(runtime, NAME, "VideoAutoHDR", cb_luma_global_settings.GameSettings.VideoAutoHDR);
       reshade::get_config_value(runtime, NAME, "VanillaHueRestore", cb_luma_global_settings.GameSettings.VanillaHueRestore);
+      reshade::get_config_value(runtime, NAME, "AutoExposureMode", cb_luma_global_settings.GameSettings.AutoExposureMode);
+      reshade::get_config_value(runtime, NAME, "AutoExposureSpeed", cb_luma_global_settings.GameSettings.AutoExposureSpeed);
+      reshade::get_config_value(runtime, NAME, "AutoExposureRange", cb_luma_global_settings.GameSettings.AutoExposureRange);
+      reshade::get_config_value(runtime, NAME, "AutoExposureKey", cb_luma_global_settings.GameSettings.AutoExposureKey);
+      reshade::get_config_value(runtime, NAME, "HighlightCompression", cb_luma_global_settings.GameSettings.HighlightCompression);
 #if DEVELOPMENT || TEST
       reshade::get_config_value(runtime, NAME, "TonemappedResolve", g_tonemapped_resolve);
 #endif
@@ -650,6 +894,43 @@ public:
       if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
          ImGui::SetTooltip("Pulls HDR colors toward the vanilla grade's hue and saturation (fixes over-saturated highlights)");
       DrawResetButton(cb_luma_global_settings.GameSettings.VanillaHueRestore, default_luma_global_game_settings.VanillaHueRestore, "VanillaHueRestore", runtime);
+
+      int auto_exposure_mode = (int)cb_luma_global_settings.GameSettings.AutoExposureMode;
+      if (ImGui::Combo("Auto Exposure", &auto_exposure_mode, "Vanilla\0Luma Histogram\0"))
+      {
+         cb_luma_global_settings.GameSettings.AutoExposureMode = auto_exposure_mode != 0 ? 1u : 0u;
+         reshade::set_config_value(runtime, NAME, "AutoExposureMode", cb_luma_global_settings.GameSettings.AutoExposureMode);
+      }
+      if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
+         ImGui::SetTooltip("Vanilla = game's exposure. Luma Histogram = GPU histogram auto-exposure on the HDR scene");
+      DrawResetButton(cb_luma_global_settings.GameSettings.AutoExposureMode, default_luma_global_game_settings.AutoExposureMode, "AutoExposureMode", runtime);
+
+      if (cb_luma_global_settings.GameSettings.AutoExposureMode != 0u)
+      {
+         if (ImGui::SliderFloat("Auto Exposure Speed", &cb_luma_global_settings.GameSettings.AutoExposureSpeed, 0.1f, 10.f, "%.3f"))
+            reshade::set_config_value(runtime, NAME, "AutoExposureSpeed", cb_luma_global_settings.GameSettings.AutoExposureSpeed);
+         if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
+            ImGui::SetTooltip("How fast the exposure adapts to brightness changes");
+         DrawResetButton(cb_luma_global_settings.GameSettings.AutoExposureSpeed, default_luma_global_game_settings.AutoExposureSpeed, "AutoExposureSpeed", runtime);
+
+         if (ImGui::SliderFloat("Auto Exposure Range", &cb_luma_global_settings.GameSettings.AutoExposureRange, 0.f, 4.f, "%.3f"))
+            reshade::set_config_value(runtime, NAME, "AutoExposureRange", cb_luma_global_settings.GameSettings.AutoExposureRange);
+         if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
+            ImGui::SetTooltip("Stops of exposure change allowed around the vanilla exposure");
+         DrawResetButton(cb_luma_global_settings.GameSettings.AutoExposureRange, default_luma_global_game_settings.AutoExposureRange, "AutoExposureRange", runtime);
+
+         if (ImGui::SliderFloat("Auto Exposure Target", &cb_luma_global_settings.GameSettings.AutoExposureKey, 0.02f, 0.4f, "%.3f"))
+            reshade::set_config_value(runtime, NAME, "AutoExposureKey", cb_luma_global_settings.GameSettings.AutoExposureKey);
+         if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
+            ImGui::SetTooltip("Scene brightness the Luma meter aims for (higher = brighter). 0.11 matches vanilla.");
+         DrawResetButton(cb_luma_global_settings.GameSettings.AutoExposureKey, default_luma_global_game_settings.AutoExposureKey, "AutoExposureKey", runtime);
+      }
+
+      if (ImGui::SliderFloat("Highlight Compression", &cb_luma_global_settings.GameSettings.HighlightCompression, 0.f, 1.f, "%.3f"))
+         reshade::set_config_value(runtime, NAME, "HighlightCompression", cb_luma_global_settings.GameSettings.HighlightCompression);
+      if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
+         ImGui::SetTooltip("Soft-compresses bright highlights. 0 = off");
+      DrawResetButton(cb_luma_global_settings.GameSettings.HighlightCompression, default_luma_global_game_settings.HighlightCompression, "HighlightCompression", runtime);
 
       if (ImGui::SliderFloat("Top Gradient", &cb_luma_global_settings.GameSettings.TopGradientStrength, 0.f, 1.f, "%.3f"))
          reshade::set_config_value(runtime, NAME, "TopGradientStrength", cb_luma_global_settings.GameSettings.TopGradientStrength);

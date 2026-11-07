@@ -3,6 +3,7 @@
 // (avoids NaN) and the color is not clipped to 1, so the HDR value is kept.
 
 #include "Includes/Common.hlsl"
+#include "Includes/AutoExposure.hlsl"
 
 cbuffer cb4 : register(b4)
 {
@@ -35,5 +36,5 @@ void main(
   o0 = float4(sqrt(c.rgb * s), s);
 #endif
 
-  o1 = float4(c.rgb * cb4[41].z, t1.Sample(s1, v2).a);
+  o1 = float4(c.rgb * GetHMAExposure(cb4[41].z), t1.Sample(s1, v2).a);
 }

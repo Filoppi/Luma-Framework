@@ -43,6 +43,11 @@ namespace CB
 		float SunShaftHDRBoost;
 		float VideoAutoHDR;
 		float VanillaHueRestore;
+		uint AutoExposureMode;
+		float AutoExposureSpeed;
+		float AutoExposureRange;
+		float HighlightCompression;
+		float AutoExposureKey;
 	};
 	
 	// Define the game specific cbuffer (instance/pass) data here
