@@ -6,7 +6,7 @@
 float MaxChromaOklch(float L, float h, bool bt2020)
 {
   float lo = 0.0;
-  float hi = 0.5;
+  float hi = 0.5 * max(L, 1.0);
   for (int i = 0; i < 14; i++)
   {
     float mid = 0.5 * (lo + hi);
@@ -38,22 +38,23 @@ float3 ExpandGamut(float3 c, float amount)
 
   float t = saturate(C / max(c709, 1e-6));
   float w = amount * smoothstep(0.5, 0.95, t) * skin;
-  float Cn = min(C * (1.0 + 0.25 * w), c2020);
+  float Cn = min(C * (1.0 + 0.25 * w), max(0.98 * c2020, C)); // stay just inside BT.2020 (never reduce chroma here)
 
   float3 out2020 = Oklab::oklch_to_linear_bt2020(float3(L, Cn, h));
   return BT2020_To_BT709(max(out2020, 0.0));
 }
 
-// Desaturates toward luminance until no BT.2020 channel is negative, then hard caps at BT.2020.
-float3 ClampToBT2020(float3 lin709)
+// Maps a linear BT.709 color into BT.2020 at constant OkLab lightness and hue, reducing chroma only where needed.
+float3 GamutMapToBT2020(float3 lin709)
 {
   float Y = GetLuminance(lin709);
   if (Y <= 0.0) return 0.0;
   float3 c2 = BT709_To_BT2020(lin709);
-  float mn = min(c2.r, min(c2.g, c2.b));
-  if (mn < 0.0)
-    lin709 = Y + (lin709 - Y) * (Y / (Y - mn));
-  return BT2020_To_BT709(max(BT709_To_BT2020(lin709), 0.0));
+  // Margin: colors at the exact boundary crossed it after fp16 storage and the gamma encode (AP0 in gamut views).
+  if (min(c2.r, min(c2.g, c2.b)) >= 0.005 * Y) return lin709;
+  float3 lch = Oklab::linear_srgb_to_oklch(lin709);
+  lch.y = min(lch.y, 0.98 * MaxChromaOklch(lch.x, lch.z, true));
+  return BT2020_To_BT709(max(Oklab::oklch_to_linear_bt2020(lch), 0.0));
 }
 
 #include "../Includes/Reinhard.hlsl"
@@ -130,7 +131,9 @@ float4 main(
   float3 cS = min(c, 1.0);
   float3 excess = c - cS;
 
-  float3 x = max(GrainLevels(cS, grain, v3 * LumaSettings.GameSettings.TopGradientStrength), 0.0);
+  // The top gradient is a gamma-space add that lifted pure black to ~v3^2: fade it out toward black (full above ~0.25 gamma).
+  float gradientFade = smoothstep(0.0, 0.25, max(cS.r, max(cS.g, cS.b)));
+  float3 x = max(GrainLevels(cS, grain, v3 * LumaSettings.GameSettings.TopGradientStrength * gradientFade), 0.0);
   x += excess;
 
   float3 b = max(bloom, 0.0) * LumaSettings.GameSettings.BloomStrength * (LumaSettings.GameSettings.LumaBloom != 0 ? LumaSettings.GameSettings.VanillaGlareStrength : 1.0);
@@ -140,7 +143,10 @@ float4 main(
   float3 byLum = Y2 > 0.0 ? lin2 * (pow(Y2, 1.1) / Y2) : lin2;
   float3 lin = lerp(perChannel, byLum, LumaSettings.GameSettings.GammaCorrectionByLuminance);
   lin += pow(b, 2.2);
+  // Gamut is mapped into BT.2020 at constant OkLab L and h before expansion and once at the end.
+  // Hue is recovered from the pre-expansion color.
   float3 hueRef = lin;
+  lin = GamutMapToBT2020(lin);
   lin = ExpandGamut(lin, LumaSettings.GameSettings.GamutExpansion);
   float peak = LumaSettings.PeakWhiteNits / LumaSettings.GamePaperWhiteNits;
   if (LumaSettings.GameSettings.DisplayMapping == 0u)
@@ -164,9 +170,9 @@ float4 main(
   float Yl = GetLuminance(lin);
   if (m > peak && m > Yl)
     lin = Yl + (lin - Yl) * saturate((peak - Yl) / (m - Yl));
-  if (LumaSettings.GameSettings.GamutExpansion > 0.0 && LumaSettings.GameSettings.GamutExpansionHueLock > 0.0)
+  if (LumaSettings.GameSettings.GamutExpansionHueLock > 0.0 && GetLuminance(hueRef) > 0.0)
     lin = RestoreHueAndChrominance(lin, hueRef, LumaSettings.GameSettings.GamutExpansionHueLock, 0.0, 0.0, FLT_MAX, 0.0, CS_DEFAULT);
-  lin = ClampToBT2020(lin);
+  lin = GamutMapToBT2020(lin);
 #if UI_DRAW_TYPE == 2 // The UI draws on top in gamma space; display composition scales everything by UI/game paper white, so pre-divide the scene
   lin *= LumaSettings.GamePaperWhiteNits / LumaSettings.UIPaperWhiteNits;
 #endif

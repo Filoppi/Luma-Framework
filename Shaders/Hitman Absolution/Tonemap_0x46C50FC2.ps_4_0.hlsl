@@ -88,13 +88,18 @@ float3 GradeCurve(float v, float x)
     // One shared growth rate for all channels: per-channel slopes differ a lot (red is much steeper), which tinted
     // bright highlights pink. Keeping the curve's color at white matches vanilla's clipped highlights.
     float3 s3 = max(slope, top);
+    // Slope stays continuous at white (a hard cap made a kink that read as clipping), but any rate above 1 decays within
+    // ~0.25 (sqrt space) into scene-linear growth: the LUT top slope reached ~2.2, which blew lit walls up superlinearly
+    // (2x white -> 3.6x, 4x -> 10x) in high-exposure interiors. Light sources stay HDR.
     float rate = (s3.r + s3.g + s3.b) / max(f1.r + f1.g + f1.b, 1e-6);
-    f = f1 * (1.0 + rate * (x - 1.0));
+    float t = x - 1.0;
+    float grow = rate <= 1.0 ? rate * t : t + (rate - 1.0) * 0.25 * (1.0 - exp(-t / 0.25));
+    f = f1 * (1.0 + grow);
   }
   // White normalization: scale so the curve's white reaches 1.
   float3 w1 = SampleCurve(v, 1.0);
   float wN = 1.0 / max(max(w1.r, max(w1.g, w1.b)), 0.5);
-  f *= wN;
+  f *= lerp(1.0, wN, smoothstep(LUT_KNEE, 1.0, x)); // only toward white: applied everywhere it lifted midtones ~10-20% over vanilla
   // Black floor removal, fading out toward mid gray.
   f -= f0 * saturate(1.0 - x / LUT_MID) * LumaSettings.GameSettings.BlackFloorRemoval;
   return f;
@@ -190,13 +195,19 @@ void main(
 #define SUN_SPECIFIC_BOOST 0 // TEMP (user): sun scales like the rest of the sky; SunBrightness ignored
   float skyBoost = 1.0 + (LumaSettings.GameSettings.SunBrightness - 1.0) * skyMask * sunRamp * SUN_SPECIFIC_BOOST;
   // Sky HDR expansion (moved here from Sky_0xACE3BFA3 so the auto-exposure meter sees the vanilla sky). Same curve; the sky
-  // texture luminance is estimated from the exposed sky (sun center ~0.5 after exposure = texture white).
-  float skyY = SoftCubicRamp(GetLuminance(hdr) * skyBoost / 0.5);
+  // texture luminance is estimated from the sky's pre-exposure brightness (sun center ~0.5 at ~0.47 exposure = 1.06 raw),
+  // so dim-exposure scenes still get the lift (same as Tonemap_0xEED9AC77).
+  float skyY = SoftCubicRamp(GetLuminance(hdr) / max(scale * LumaSettings.GameSettings.Exposure, 1e-6) * skyBoost / 1.06);
   skyBoost *= 1.0 + LumaSettings.GameSettings.SkyHDRBoost * 3.0 * skyMask * skyY;
   hdr = lerp(hdr, fade.rgb, fade.a);
 
   float3 hdrGraded = LUTGradeHDR(hdr, d) * lerp(skyBoost, 1.0, fade.a);
-  // Luma bloom is added after the grade, linearly: added before it, anything pushed past white went through the grade's steep
+  // Pull hue and chrominance toward the vanilla SDR grade of the same pixel (VanillaHueRestore, same as Tonemap_0xEED9AC77).
+  float3 sdrScene = saturate(t1.Sample(s1, v2).rgb * cb4[41].z * LumaSettings.GameSettings.Exposure);
+  float3 sdrRef = LUTGrade(sdrScene, fade, d);
+  float restore = LumaSettings.GameSettings.VanillaHueRestore;
+  if (restore > 0.0)
+    hdrGraded = RestoreHueAndChrominance(hdrGraded, sdrRef, 0.75 * restore, restore);  // Luma bloom is added after the grade, linearly: added before it, anything pushed past white went through the grade's steep
   // above-white extension (sqrt space, then squared) and blew highlights out (~5x at p99).
   if (LumaSettings.GameSettings.LumaBloom != 0)
   {

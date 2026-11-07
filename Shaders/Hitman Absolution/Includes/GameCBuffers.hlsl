@@ -41,6 +41,8 @@ namespace CB
 		float HighlightPurity;
 		float EmissiveHDRBoost;
 		float SunShaftHDRBoost;
+		float VideoAutoHDR;
+		float VanillaHueRestore;
 	};
 	
 	// Define the game specific cbuffer (instance/pass) data here
