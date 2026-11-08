@@ -107,6 +107,7 @@
 // UseLumaNGX is enabled in the .vcxproj, so the DLSS/DLAA code paths are compiled in.
 
 #include "..\..\Core\core.hpp"
+#include "taa_inputs.h"
 
 #include <fstream>
 #include <mutex>
@@ -519,19 +520,12 @@ struct MafiaDefinitiveEditionGameDeviceData final : public GameDeviceData
    int main_depth_rejected = 0;   // how often a depth target was seen and rejected (shadow atlas)
    int main_depth_logged = 0;
    com_ptr<ID3D11Texture2D> dlss_output_color; // UAV enabled copy of the AA target if needed
-   // All-zero motion vectors, used only as the last fallback: the real motion vectors are the
-   // resolve's own t2, but DLSS refuses a null resource, so a frame with a missing MV slot is
-   // still allowed to run (DLAA at native res tolerates "no motion" much better than a refusal).
-   com_ptr<ID3D11Texture2D> placeholder_motion_vectors;
-
-   // The raw SRV handles the AA pass had bound, so the auto-detect below (and dev builds'
-   // binding dump) can look at their formats.
+   // The live resolve bindings, retained for the input diagnostics below.
    com_ptr<ID3D11ShaderResourceView> aa_srv[8];
    // The resolves bind t0 = current HDR colour, t1 = history, t2 = UV space motion vectors.
-   // Auto-detection by format is what ships: slot 0 is R11G11B10_FLOAT during gameplay but a
-   // single channel R32_FLOAT in the menus, and DLSS fed that buffer is what produced the
-   // "oil painting then black" report of an early build.
-   int aa_auto_slots = 1;      // pick colour/motion-vector slots by format, with a safety gate
+   // RenoDX can hot-swap both colour and history to FP16; format alone cannot identify a role.
+   // R32 inputs are still rejected, including the unsupported menu binding seen in early probes.
+   int aa_auto_slots = 1;      // use the verified t0/t2 layout, with descriptor validation
    int aa_source_slot = 0;     // manual override, only used when aa_auto_slots is off
    int aa_mv_slot = 2;         // manual override, only used when aa_auto_slots is off
    // The TAA shader computes prevUV = curUV + t2.xy, but DLSS expects the opposite sign
@@ -552,7 +546,7 @@ struct MafiaDefinitiveEditionGameDeviceData final : public GameDeviceData
    // To tame the sharpening, zero cb0[0].z (the strength) in its constant buffer instead.
    bool skip_game_sharpen = false;
 #endif
-   int warned_no_source = 0;
+   int invalid_output_reports = 0;
    // Whether to cancel the resolves after the first one in a frame. This engine resolves the image
    // in *layers*: the same TAA shader is called more than once per frame "for different parts of
    // the image" (Mafia III's own mod says 3 times; this game does it twice), and the second call
@@ -658,7 +652,7 @@ struct MafiaDefinitiveEditionGameDeviceData final : public GameDeviceData
 #if DEVELOPMENT
    // MV sniffer. Mafia III's mod does not feed DLSS the TAA's own t2, it hooks a separate
    // "Encode Motion Vectors" pass and takes its R16G16F SRV, so this looks for any full
-   // resolution two channel float texture the game binds and prefers it as the MV source.
+   // resolution two channel float texture the game binds, for the diagnostic log only.
    // Its mission is complete: ~5.1M draws were sniffed and this game has no such buffer, the
    // resolve's t2 IS the motion vector. Wrapped in DEVELOPMENT so it cannot get re-enabled by
    // accident in a release build.
@@ -807,9 +801,15 @@ struct MafiaDefinitiveEditionGameDeviceData final : public GameDeviceData
    // Last reported DLSS/SR state, so the "[frame]" heartbeat only prints when that state changes (or
    // every 300 frames). Comparing running totals instead, as it used to, made it print every frame.
    int last_sr_state = -1;
-   // Log the first occurrence of each distinct resolve separately, otherwise only whichever one
-   // fires first is ever seen and there is no record of what the other variant binds.
+   // Log each colour format once: native and cloned colour can alternate every frame.
    int logged_each[3] = { 0, 0, 0 };   // [0] = 0x37B05605, [1] = 0x7B9B914F, [2] = dev PreTAA copy
+   uint32_t logged_colour_formats[3] = {};
+   bool logged_draw_ok[3] = {};
+   int last_sr_log_frame[3] = { -300, -300, -300 };
+   int input_rejections = 0;
+   int settings_failures = 0;
+   int draw_failures = 0;
+   int sr_resets = 0;
 };
 
 class MafiaDefinitiveEditionGame final : public Game
@@ -1817,75 +1817,52 @@ public:
          return DrawOrDispatchOverrideType::None;
       }
 
-      ID3D11ShaderResourceView* srvs[8] = {};
-      native_device_context->PSGetShaderResources(0, ARRAYSIZE(srvs), srvs);
-      ID3D11RenderTargetView* rtvs[D3D11_SIMULTANEOUS_RENDER_TARGET_COUNT] = {};
-      native_device_context->OMGetRenderTargets(D3D11_SIMULTANEOUS_RENDER_TARGET_COUNT, rtvs, nullptr);
+      com_ptr<ID3D11ShaderResourceView> srvs[8];
+      native_device_context->PSGetShaderResources(0, ARRAYSIZE(srvs), &srvs[0]);
+      com_ptr<ID3D11RenderTargetView> rtv;
+      native_device_context->OMGetRenderTargets(1, &rtv, nullptr);
+      for (UINT i = 0; i < ARRAYSIZE(srvs); ++i) game_device_data.aa_srv[i] = srvs[i];
 
-      for (UINT i = 0; i < ARRAYSIZE(srvs); ++i)
+      // Both resolve disassemblies use t0=current colour, t1=history and t2=UV motion.
+      // RenoDX can upgrade either colour texture to FP16 after a video/effect. Scanning for the
+      // first R11/FP16 then mistakes history for colour or colour for motion. Keep the roles fixed
+      // and validate the live views instead; an R32 t0 is still not a usable colour input.
+      const int slot = game_device_data.aa_auto_slots ? 0 : game_device_data.aa_source_slot;
+      const int mv_slot = game_device_data.aa_auto_slots ? 2 : game_device_data.aa_mv_slot;
+      const UINT render_width = static_cast<UINT>(device_data.render_resolution.x + 0.5f);
+      const UINT render_height = static_cast<UINT>(device_data.render_resolution.y + 0.5f);
+      com_ptr<ID3D11Resource> source_color;
+      com_ptr<ID3D11Resource> motion_vectors;
+      com_ptr<ID3D11Resource> output_color;
+      const bool source_is_valid = slot >= 0 && slot < static_cast<int>(ARRAYSIZE(srvs))
+         && MafiaDE::ReadResolveInput(srvs[slot].get(), render_width, render_height, false, source_color);
+      const bool motion_is_valid = mv_slot >= 0 && mv_slot < static_cast<int>(ARRAYSIZE(srvs))
+         && MafiaDE::ReadResolveInput(srvs[mv_slot].get(), render_width, render_height, true, motion_vectors);
+      if (!source_is_valid || !motion_is_valid || source_color == motion_vectors)
       {
-         game_device_data.aa_srv[i] = nullptr;
-         if (srvs[i] != nullptr) srvs[i]->QueryInterface(&game_device_data.aa_srv[i]);
-      }
-
-      // Auto-detect which SRV slot holds what instead of guessing a fixed slot: the binding
-      // layout changes between scenes (in the menus slot 0 is a single channel R32_FLOAT), and a
-      // hardcoded index is wrong often enough to matter - with the wrong slot the image was
-      // noisier and softer than the game's own AA. The formats are unambiguous:
-      //   - HDR colour     : full resolution R11G11B10_FLOAT (gameplay t0)
-      //   - motion vectors : full resolution R16G16B16A16_FLOAT (gameplay t2, two channels used)
-      // so pick them by format, and only fall back to the manual slot if nothing matches.
-      int detected_source = -1;
-      int detected_mv = -1;
-      for (UINT i = 0; i < ARRAYSIZE(game_device_data.aa_srv); ++i)
-      {
-         if (!game_device_data.aa_srv[i]) continue;
-         com_ptr<ID3D11Resource> res;
-         game_device_data.aa_srv[i]->GetResource(&res);
-         com_ptr<ID3D11Texture2D> tex;
-         if (!res || FAILED(res->QueryInterface(&tex)) || !tex) continue;
-         D3D11_TEXTURE2D_DESC desc = {};
-         tex->GetDesc(&desc);
-         // Full resolution and single mip only. The lookup tables (512x512 / 256x256 with 9-13
-         // mips) must never be mistaken for the colour buffer.
-         if (desc.Width < 1600 || desc.Height < 900 || desc.MipLevels != 1) continue;
-         if (detected_source < 0 && desc.Format == DXGI_FORMAT_R11G11B10_FLOAT)
+         ++game_device_data.input_rejections;
+         if (game_device_data.input_rejections <= 3 || Probe::s_frame % 300 == 0)
          {
-            detected_source = static_cast<int>(i);
-         }
-         else if (detected_mv < 0 && desc.Format == DXGI_FORMAT_R16G16B16A16_FLOAT)
-         {
-            detected_mv = static_cast<int>(i);
-         }
-      }
-
-      // Hard safety gate. An early build auto-detected single channel R32 buffers in the main
-      // menu scene (a different binding layout) and fed those to DLSS as the colour source, which
-      // turned the whole screen into an oil painting and then black. Only run the SR when the
-      // source was identified by format; otherwise leave the game's own AA in charge.
-      const bool source_is_valid = (detected_source >= 0);
-      const int slot = (game_device_data.aa_auto_slots && source_is_valid) ? detected_source
-                                                                          : game_device_data.aa_source_slot;
-      if (game_device_data.aa_auto_slots && !source_is_valid)
-      {
-         if (game_device_data.warned_no_source < 3)
-         {
-            ++game_device_data.warned_no_source;
-            Probe::Line("[AA] auto-detect found no full-res R11G11B10 colour input; "
-                        "leaving the game's own AA in charge this frame.");
+            Probe::Line(std::format("[AA inputs] frame={} resolve={} rejected colour[{}]={} motion[{}]={} alias={} total={}",
+               Probe::s_frame, resolve_name, slot, source_is_valid, mv_slot, motion_is_valid,
+               source_color == motion_vectors, game_device_data.input_rejections));
+            for (UINT i = 0; i < 3; ++i)
+            {
+               com_ptr<ID3D11Resource> resource;
+               D3D11_SHADER_RESOURCE_VIEW_DESC view_desc = {};
+               if (srvs[i])
+               {
+                  srvs[i]->GetResource(&resource);
+                  srvs[i]->GetDesc(&view_desc);
+               }
+               Probe::Line(std::format("  t{} view=0x{:X} resource=0x{:X} view_format={} {}", i,
+                  reinterpret_cast<uintptr_t>(srvs[i].get()), reinterpret_cast<uintptr_t>(resource.get()),
+                  static_cast<int>(view_desc.Format), Probe::Describe(resource.get())));
+            }
          }
          return DrawOrDispatchOverrideType::None;
       }
-      com_ptr<ID3D11Resource> source_color;
-      com_ptr<ID3D11Resource> output_color;
-      if (slot >= 0 && slot < static_cast<int>(ARRAYSIZE(srvs)) && srvs[slot] != nullptr)
-      {
-         srvs[slot]->GetResource(&source_color);
-      }
-      if (rtvs[0] != nullptr) rtvs[0]->GetResource(&output_color);
-
-      for (UINT i = 0; i < ARRAYSIZE(srvs); ++i) if (srvs[i]) srvs[i]->Release();
-      for (UINT i = 0; i < D3D11_SIMULTANEOUS_RENDER_TARGET_COUNT; ++i) if (rtvs[i]) rtvs[i]->Release();
+      if (rtv) rtv->GetResource(&output_color);
 
       com_ptr<ID3D11Texture2D> output_texture;
       if (!source_color || !output_color
@@ -1896,6 +1873,22 @@ public:
 
       D3D11_TEXTURE2D_DESC output_desc = {};
       output_texture->GetDesc(&output_desc);
+      D3D11_RENDER_TARGET_VIEW_DESC output_view_desc = {};
+      rtv->GetDesc(&output_view_desc);
+      // NGX writes a whole texture. A different slice, mip or aliased input cannot be represented
+      // by this resource-only interface, and the no-UAV fallback must remain a same-format copy.
+      if (output_desc.Width != render_width || output_desc.Height != render_height
+         || output_desc.MipLevels != 1 || output_desc.ArraySize != 1 || output_desc.SampleDesc.Count != 1
+         || output_view_desc.ViewDimension != D3D11_RTV_DIMENSION_TEXTURE2D || output_view_desc.Texture2D.MipSlice != 0
+         || (output_desc.Format != DXGI_FORMAT_R11G11B10_FLOAT && output_desc.Format != DXGI_FORMAT_R16G16B16A16_FLOAT)
+         || output_view_desc.Format != output_desc.Format
+         || output_color == source_color || output_color == motion_vectors)
+      {
+         if (game_device_data.invalid_output_reports++ < 3)
+            Probe::Line(std::format("[AA output] frame={} resolve={} rejected {} view_format={}",
+               Probe::s_frame, resolve_name, Probe::Describe(output_color.get()), static_cast<int>(output_view_desc.Format)));
+         return DrawOrDispatchOverrideType::None;
+      }
 
       SR::SettingsData settings_data;
       settings_data.output_width = static_cast<unsigned int>(device_data.output_resolution.x + 0.5f);
@@ -1912,6 +1905,15 @@ public:
       settings_data.render_preset = dlss_render_preset;
 
       const bool settings_ok = sr_implementation->UpdateSettings(sr_instance_data, native_device_context, settings_data);
+      if (!settings_ok)
+      {
+         // A failed feature recreation can leave no usable NGX instance to evaluate.
+         device_data.force_reset_sr = true;
+         ++game_device_data.settings_failures;
+         if (game_device_data.settings_failures <= 3 || Probe::s_frame % 300 == 0)
+            Probe::Line(std::format("[SR settings] frame={} resolve={} UpdateSettings failed, using game AA", Probe::s_frame, resolve_name));
+         return DrawOrDispatchOverrideType::None;
+      }
 
       // DLSS wants a UAV on the output. This game's AA target already has D3D11_BIND_UAV
       // (observed bind flags 0xA8), so normally we can use it directly.
@@ -1933,84 +1935,8 @@ public:
       draw_data.source_color = source_color.get();
       draw_data.output_color = dlss_output.get();
 
-      // Motion vectors. DLSS refuses a null resource, so start from an all-zero texture ("no
-      // motion", which DLAA at native res tolerates) and overwrite it with the game's vectors
-      // below. It is only a fallback: no frame in practice ever needs it.
-      if (!game_device_data.placeholder_motion_vectors)
-      {
-         D3D11_TEXTURE2D_DESC desc = {};
-         desc.Width = 4;
-         desc.Height = 4;
-         desc.MipLevels = 1;
-         desc.ArraySize = 1;
-         desc.Format = DXGI_FORMAT_R16G16_FLOAT;
-         desc.SampleDesc.Count = 1;
-         desc.Usage = D3D11_USAGE_DEFAULT;
-         desc.BindFlags = D3D11_BIND_SHADER_RESOURCE;
-         if (FAILED(native_device->CreateTexture2D(&desc, nullptr, &game_device_data.placeholder_motion_vectors)) || !game_device_data.placeholder_motion_vectors)
-         {
-            return DrawOrDispatchOverrideType::None;
-         }
-         // Zero it, so "no motion" is actually what the SR implementation reads.
-         D3D11_MAPPED_SUBRESOURCE mapped = {};
-         // Map/Unmap live on the device context, not on the texture.
-         if (SUCCEEDED(native_device_context->Map(game_device_data.placeholder_motion_vectors.get(), 0, D3D11_MAP_WRITE_DISCARD, 0, &mapped)))
-         {
-            std::memset(mapped.pData, 0, mapped.RowPitch * desc.Height);
-            native_device_context->Unmap(game_device_data.placeholder_motion_vectors.get(), 0);
-         }
-      }
-      com_ptr<ID3D11ShaderResourceView> placeholder_mv_srv;
-      if (FAILED(native_device->CreateShaderResourceView(game_device_data.placeholder_motion_vectors.get(), nullptr, &placeholder_mv_srv)) || !placeholder_mv_srv)
-      {
-         return DrawOrDispatchOverrideType::None;
-      }
-      // NOTE: D3D11's view interfaces do NOT derive from ID3D11Resource - ID3D11DeviceChild only
-      // *has* an ID3D11Resource* member. So an SRV has to be asked for its resource explicitly,
-      // there is no implicit upcast.
-      com_ptr<ID3D11Resource> placeholder_mv_resource;
-      placeholder_mv_srv->GetResource(&placeholder_mv_resource);
-      draw_data.motion_vectors = placeholder_mv_resource.get();
-      std::string mv_source = "zero placeholder (fallback)";
-
-#if DEVELOPMENT
-      // Diagnostics: prefer a real motion vector texture if the sniffer found one (see the field
-      // declaration - on this game it never finds anything, the resolve's t2 below always wins).
-      for (int q = 0; q < game_device_data.mv_sniffed_count; ++q)
-      {
-         if (!game_device_data.mv_sniffed[q]) continue;
-         com_ptr<ID3D11Texture2D> mt;
-         if (SUCCEEDED(game_device_data.mv_sniffed[q]->QueryInterface(&mt)) && mt)
-         {
-            D3D11_TEXTURE2D_DESC md = {};
-            mt->GetDesc(&md);
-            if (md.Width >= 1600 && md.Height >= 900)
-            {
-               draw_data.motion_vectors = game_device_data.mv_sniffed[q].get();
-               mv_source = std::format("sniffed MV {}x{} fmt {}", md.Width, md.Height, static_cast<int>(md.Format));
-               break;
-            }
-         }
-      }
-#endif
-
-      // The motion vectors DLSS is fed: the resolve's own t2 (3840x2160 R16G16B16A16_FLOAT, UV
-      // space - hence the resolution scale below). This game has no separate "encode motion
-      // vectors" pass like Mafia III does; that was verified by sniffing ~5.1M draws.
-      {
-         const int mv_slot = (game_device_data.aa_auto_slots && detected_mv >= 0) ? detected_mv : game_device_data.aa_mv_slot;
-         if (mv_slot >= 0 && mv_slot < static_cast<int>(ARRAYSIZE(game_device_data.aa_srv))
-            && game_device_data.aa_srv[mv_slot])
-         {
-            com_ptr<ID3D11Resource> mv_resource;
-            game_device_data.aa_srv[mv_slot]->GetResource(&mv_resource);
-            if (mv_resource)
-            {
-               draw_data.motion_vectors = mv_resource.get();
-               mv_source = std::format("resolve input slot {} = {}", mv_slot, Probe::Describe(mv_resource.get()));
-            }
-         }
-      }
+      // Keep the validated MV resource alive through Draw; missing motion falls back to TAA.
+      draw_data.motion_vectors = motion_vectors.get();
 
       // No valid main depth has been seen yet (a scene that never runs the position fill pass, or
       // the very first frames): DLSS/DLAA cannot reproject without it, so leave the game's own AA
@@ -2077,49 +2003,65 @@ public:
       draw_data.jitter_x = jitter_value.x * jitter_sign;
       draw_data.jitter_y = jitter_value.y * jitter_sign;
       draw_data.reset = device_data.force_reset_sr;
-      device_data.force_reset_sr = false;
 
       const bool draw_ok = sr_implementation->Draw(sr_instance_data, native_device_context, draw_data);
 
-      if (resolve_index >= 0 && resolve_index < static_cast<int>(ARRAYSIZE(game_device_data.logged_each))
-          && game_device_data.logged_each[resolve_index] == 0)
+      D3D11_SHADER_RESOURCE_VIEW_DESC colour_view_desc = {};
+      srvs[slot]->GetDesc(&colour_view_desc);
+      const uint32_t colour_format_bit = colour_view_desc.Format == DXGI_FORMAT_R11G11B10_FLOAT ? 1u : 2u;
+      if (game_device_data.logged_each[resolve_index] == 0
+          || (game_device_data.logged_colour_formats[resolve_index] & colour_format_bit) == 0
+          || ((game_device_data.logged_draw_ok[resolve_index] != draw_ok || draw_data.reset)
+              && Probe::s_frame - game_device_data.last_sr_log_frame[resolve_index] >= 60))
       {
          game_device_data.logged_each[resolve_index] = 1;
+         game_device_data.logged_colour_formats[resolve_index] |= colour_format_bit;
+         game_device_data.logged_draw_ok[resolve_index] = draw_ok;
+         game_device_data.last_sr_log_frame[resolve_index] = Probe::s_frame;
          std::string srv_lines;
          for (UINT i = 0; i < ARRAYSIZE(game_device_data.aa_srv); ++i)
          {
             if (!game_device_data.aa_srv[i]) continue;
             com_ptr<ID3D11Resource> res;
             game_device_data.aa_srv[i]->GetResource(&res);
-            srv_lines += std::format("\n    SRV[{}] {}", i, Probe::Describe(res.get()));
+            D3D11_SHADER_RESOURCE_VIEW_DESC view_desc = {};
+            game_device_data.aa_srv[i]->GetDesc(&view_desc);
+            srv_lines += std::format("\n    SRV[{}] view=0x{:X} resource=0x{:X} view_format={} {}", i,
+               reinterpret_cast<uintptr_t>(game_device_data.aa_srv[i].get()), reinterpret_cast<uintptr_t>(res.get()),
+               static_cast<int>(view_desc.Format), Probe::Describe(res.get()));
          }
          Probe::Line(std::format("=== SR hook (frame {}) draw_ok={}  resolve={} ===\n"
-                                 "  auto-detected slots: colour={} motion={}\n"
+                                 "  validated slots: colour={} motion={}\n"
                                  "  all SRVs the resolve had bound:{}\n"
                                  "  we used source : {}\n  output  : {}  (uav={})\n"
-                                 "  depth   : {}\n  mv      : {}  [{}]\n"
+                                 "  depth   : {}\n  mv      : {}\n"
                                  "  jitter={:.4},{:.4} (cb0 {:.6},{:.6})  mv_scale={},{}  mvs_jittered={}  hdr={}  auto_exposure={}  inverted_depth={}\n"
-                                 "  render  = {}x{}   output = {}x{}   min_res={}   UpdateSettings={}",
-                                 Probe::s_frame, draw_ok, resolve_name, slot, detected_mv, srv_lines,
+                                 "  render  = {}x{}   output = {}x{}   min_res={}   UpdateSettings={}   reset={}",
+                                 Probe::s_frame, draw_ok, resolve_name, slot, mv_slot, srv_lines,
                                  Probe::Describe(source_color.get()),
                                  Probe::Describe(output_color.get()), output_has_uav,
                                  Probe::Describe(game_device_data.main_depth.get()),
-                                 Probe::Describe(draw_data.motion_vectors), mv_source,
+                                 Probe::Describe(draw_data.motion_vectors),
                                  draw_data.jitter_x, draw_data.jitter_y,
                                  game_device_data.jitter_px.x, game_device_data.jitter_px.y,
                                  settings_data.mvs_x_scale, settings_data.mvs_y_scale,
                                  settings_data.mvs_jittered, settings_data.hdr, settings_data.auto_exposure, settings_data.inverted_depth,
                                  static_cast<int>(settings_data.render_width), static_cast<int>(settings_data.render_height),
                                  static_cast<int>(settings_data.output_width), static_cast<int>(settings_data.output_height),
-                                 sr_instance_data->min_resolution, settings_ok));
+                                 sr_instance_data->min_resolution, settings_ok, draw_data.reset));
       }
 
       if (!draw_ok)
       {
          // DLSS refused this input set - fall back to the game's own AA for this frame.
+         device_data.force_reset_sr = true;
+         ++game_device_data.draw_failures;
          return DrawOrDispatchOverrideType::None;
       }
 
+      // A reset is consumed only by a successful evaluation. Failed settings/draws must not lose it.
+      device_data.force_reset_sr = false;
+      if (draw_data.reset) ++game_device_data.sr_resets;
       ++game_device_data.dlss_drawn;
       device_data.has_drawn_sr = true;
       device_data.taa_detected = true;
@@ -2191,12 +2133,14 @@ public:
       // to clear it every frame (this is what Mafia III's mod does at the end of its frame
       // function). Without this the very first DLSS draw latches the flag and every later frame
       // skips the hook - we measured "resolve hooked 3962x, DLSS drawn 1x".
+      const bool sr_drawn_this_frame = device_data.has_drawn_sr;
+      const int resolves_this_frame = game_device_data.aa_this_frame;
+      // A resolve can run while its inputs/settings are rejected. That is a history gap too,
+      // even though aa_this_frame is nonzero; reset once when DLAA next succeeds.
+      if (!sr_drawn_this_frame) device_data.force_reset_sr = true;
       device_data.has_drawn_sr = false;
-      // If this frame did not run the resolve, DLSS has to be reset, otherwise the previous
-      // frame's history gets blended into the new scene.
       if (game_device_data.aa_this_frame == 0)
       {
-         device_data.force_reset_sr = true;
          device_data.taa_detected = false;
       }
       // The world was drawn but no resolve ran, i.e. the game's Anti-Aliasing is not on Low. Counted
@@ -2237,11 +2181,14 @@ public:
       game_device_data.last_sr_state = sr_state;
       if (state_changed || Probe::s_frame % 300 == 0)
       {
-         Probe::Line(std::format("[frame {}] draws={}lld  resolve hooked {}x, SR drawn {}x, sr={}  (resolve list size {}, posfill list size {})",
+         Probe::Line(std::format("[frame {}] draws={}  resolve hooked {}x, SR drawn {}x, sr={}  (resolve list size {}, posfill list size {})"
+                                  "  resolves_this_frame={} sr_drawn_this_frame={} resets={} input_rejections={} settings_failures={} draw_failures={}",
                                   Probe::s_frame, Probe::s_draw_calls, game_device_data.aa_seen, game_device_data.dlss_drawn,
                                   device_data.sr_type == SR::Type::None ? "NO" : "yes",
                                   shader_hashes_AA.pixel_shaders.size(),
-                                  shader_hashes_PositionBufferFill.pixel_shaders.size()));
+                                  shader_hashes_PositionBufferFill.pixel_shaders.size(),
+                                  resolves_this_frame, sr_drawn_this_frame, game_device_data.sr_resets,
+                                  game_device_data.input_rejections, game_device_data.settings_failures, game_device_data.draw_failures));
       }
    }
 
@@ -2503,7 +2450,7 @@ public:
       ImGui::SameLine();
       ImGui::TextUnformatted("(needs Luma set to read the image as LINEAR to look right)");
 
-      if (ImGui::Button(game_device_data.aa_auto_slots ? "Slots: AUTO by format (shipping default)" : "Slots: manual"))
+      if (ImGui::Button(game_device_data.aa_auto_slots ? "Slots: resolve layout t0/t2 (shipping default)" : "Slots: manual"))
       {
          game_device_data.aa_auto_slots = !game_device_data.aa_auto_slots;
       }
