@@ -1,11 +1,17 @@
 // clang-format off
 // ORDER MATTERS — do NOT let clang-format sort these. The game-local Common.hlsl MUST come first: it defines
-// LumaGameSettings (via GameCBuffers.hlsl) BEFORE the shared Settings.hlsl (reached through DICE.hlsl -> Common.hlsl)
-// declares the LumaSettings cbuffer. Sorted after DICE.hlsl, GameSettings becomes the empty fallback struct and
-// every LumaSettings.GameSettings.* reference fails to compile (invalid subscript).
+// LumaGameSettings (via GameCBuffers.hlsl) BEFORE the shared Settings.hlsl declares the LumaSettings cbuffer. Sorted
+// otherwise, GameSettings becomes the empty fallback struct and every LumaSettings.GameSettings.* reference fails to
+// compile (invalid subscript).
 #include "Includes/Common.hlsl" // game-local: LumaGameSettings (grade sliders) + shared Common (Color/Math/Settings) — keep FIRST
-#include "../Includes/DICE.hlsl"
+#include "../Includes/CInfinityRolloff.hlsl" // Tonemap::CInfinityRollOff::MaxChannel (the display map)
+#include "../Includes/Reinhard.hlsl" // Reinhard::ReinhardPiecewise (highlight whitening reference)
+#include "../Includes/MacLeodBoynton.hlsl" // MacLeodBoynton::HueAndPurityEmulationBT2020
 // clang-format on
+
+// fxc flags the early return of "MacLeodBoynton::SolvePurity()" as an uninitialized result (X4000). It comes at code generation, so
+// it stays off for the whole shader.
+#pragma warning(disable : 4000)
 
 // Borderlands 2 + The Pre-Sequel — uber post-process / tonemap SHARED IMPLEMENTATION (UE3, via dgVoodoo D3D9->11).
 // Holds the grade body as RunTonemap(); the per-hash wrapper files (Tonemap_0x<HASH>.ps_5_0.hlsl, one per game ×
@@ -20,16 +26,16 @@
 // exact native ImageAdjustments + ColorGradingLUT result is the COMPLETE colour reference, including the game's
 // per-channel hue, saturation, tint and its own highlight whitening. A separate unbounded continuation of the
 // measured K=0 response (W*c in linear light) passes through a reversible bounded copy of the real LUT to obtain
-// HDR luminance, and ONLY that luminance is projected onto the native graded RGB ratios. DICE performs the only
-// final display rolloff. SDR executes none of the reconstruction (its scene still gets the user Exposure, Bloom
-// and Vignette controls, and Luma's pyramidal bloom is on by default).
+// HDR luminance, and ONLY that luminance is projected onto the native graded RGB ratios. A max-channel C-infinity
+// rolloff performs the only final display mapping, and keeps those ratios. SDR executes none of the reconstruction
+// (its scene still gets the user Exposure, Bloom and Vignette controls, and Luma's pyramidal bloom is on by default).
 //
 // This is NOT inverse tonemapping, NOT hue restoration from the raw scene, and NOT MELE family 05's hard-clip
 // treatment: no path anywhere takes chroma from the working value.
 // The per-channel ImageAdjustments curve below MUST keep the original's swizzles (r0.zzxy / r3.z,w,xy) — a
 // "cleaner" rewrite swaps channels and casts the whole image green.
 
-// HDR / vanilla. 1 = the reconstruction + DICE display map above (default). 0 = the vanilla SDR grade on every
+// HDR / vanilla. 1 = the reconstruction + C-infinity rolloff above (default). 0 = the vanilla SDR grade on every
 // display mode, without the dither.
 #ifndef TONEMAP_TYPE
 #define TONEMAP_TYPE 1
@@ -170,7 +176,7 @@ float3 BL2TPS_SampleColorGradeGamma(float3 gammaRGB)
 // exactly W*c - a pure gain, not an approximation of one. Continuing THAT branch over the whole
 // positive range gives E(c) = W*c: the response the game itself applies to everything below mid-gray,
 // with the Reinhard shoulder and the clip at scene >= 14 simply absent. No asymptote, no invented
-// curve, no second tonemapper - DICE alone owns the display mapping.
+// curve, no second tonemapper - the C-infinity rolloff alone owns the display mapping.
 //
 // Valid only for K == 0, which is every constant set captured so far. A non-zero K mixes the toe in
 // and W*c stops being the native response, so this declines and the caller keeps the exact native
@@ -453,9 +459,6 @@ float4 RunTonemap(float4 v5, float4 v6)
 #if TONEMAP_TYPE >= 1
    if (LumaSettings.DisplayMode == 1) // HDR
    {
-      const float paperWhite = LumaSettings.GamePaperWhiteNits / sRGB_WhiteLevelNits;
-      const float peakWhite = LumaSettings.PeakWhiteNits / sRGB_WhiteLevelNits;
-
       // Colour from the native grade, range from the working value. Declining leaves the native grade exactly
       // as it is: there is no second HDR model to fall back to, and expanding a curve the reconstruction cannot
       // model is the failure the guards exist to prevent.
@@ -467,34 +470,34 @@ float4 RunTonemap(float4 v5, float4 v6)
          recovered = BL2TPS_NativeColorAtLuminance(sdrLinear, workLuminance);
       }
 
-      // --- User HDR grade (HDR display path only; defaults are vanilla no-ops) ---
-      // Contrast BEFORE the display map so DICE contains whatever it pushes up: after the rolloff the slider would
-      // escape the peak it just established, and nothing downstream re-contains it. Multiplicative around mid-gray, the
-      // repo's form (RenoDX_Contrast); 0.18 is mid-gray here too, display-referred with 1.0 = paper white (gamma code ~0.46).
-      // [branch] on a cbuffer uniform: at the 1.0 default this must be a BIT-EXACT no-op. The pow is spelled out with a
-      // floored log2 so Contrast 0 on a black pixel is 0 * log2(1e-30) = 0 rather than pow(0, 0) = NaN.
-      [branch] if (LumaSettings.GameSettings.Contrast != 1.0)
+      // Highlights Desaturation, off by default: the purity of a per-channel ReinhardPiecewise(5, 1.5) of the colour in BT.2020,
+      // but no hue from it: the native grade's LUT already turned the hue toward yellow white, a second turn would stack on it
+      // (see the file header). Skipped below the shoulder, where the reference is the colour itself.
+      const float highlightDechroma = LumaSettings.GameSettings.HighlightDechroma;
+      [branch] if (highlightDechroma != 0.0)
       {
-         recovered = exp2(LumaSettings.GameSettings.Contrast * log2(max(recovered / MidGray, 1e-30))) * MidGray; // MidGray = 0.18, Color.hlsl
+         const float3 color2020 = BT709_To_BT2020(recovered);
+         [branch] if (max3(color2020) > 1.5)
+         {
+            recovered = BT2020_To_BT709(MacLeodBoynton::HueAndPurityEmulationBT2020(color2020, Reinhard::ReinhardPiecewise(color2020, 5.0, 1.5),
+                                                                                    0.0, highlightDechroma));
+         }
       }
-
-      // Display rolloff to the user's peak/paper-white nits. DICE by-luminance keeps hue; the *_CORRECT_CHANNELS_BEYOND_
-      // PEAK_WHITE type also gamut-maps a single channel riding past peak. Feed linear BT.709 directly: DICE converts to
-      // BT.2020 itself, and a manual 709<->2020 round-trip no longer cancels once the per-channel gamut map is in.
-      DICESettings settings = DefaultDICESettings(DICE_TYPE_BY_LUMINANCE_PQ_CORRECT_CHANNELS_BEYOND_PEAK_WHITE);
-      // Highlight dechroma handed to DICE rather than run as our own pass afterwards: it runs INSIDE the containment in
-      // the processing primaries, and only above ShoulderStart * PeakWhite (1/3 of peak for this type), so mid-tones
-      // cannot be touched. Its ramp follows the max channel, but DICE enters it on its AVERAGE luminance, so a saturated
-      // highlight switches on with a visible step (DICE.hlsl notes it; shared code, left as is). 0 = off for the OUTPUT
-      // but not the cost: DICE's guard carries no [branch], so fxc flattens it for every pixel above the shoulder.
-      settings.HighlightsDesaturation = LumaSettings.GameSettings.HighlightDechroma;
-      float3 hdr = DICETonemap(recovered * paperWhite, peakWhite, settings) / paperWhite;
-
-      // User saturation LAST, after the display map: the repo's convention. Color.hlsl's Saturation() is
-      // lerp(GetLuminance(c, CS_BT709), c, s) - a BT.709-luminance lerp, not Oklab. 1 = vanilla.
-      hdr = Saturation(hdr, LumaSettings.GameSettings.Saturation);
-
-      postProcessedColor = hdr;
+      // Contrast (a power of relative luminance around mid gray) and a scale of the RGB distance from relative luminance: the
+      // rolloff doesn't take them
+      const float contrast = LumaSettings.GameSettings.Contrast;
+      [branch] if (contrast != 1.0)
+      {
+         recovered *= pow(max(GetLuminance(recovered, CS_BT709), FLT_MIN) / MidGray, contrast - 1.0);
+      }
+      const float saturationScale = LumaSettings.GameSettings.Saturation;
+      [branch] if (saturationScale != 1.0)
+      {
+         recovered = Saturation(recovered, saturationScale, CS_BT709);
+      }
+      // The rolloff (linear BT.709, 1.0 = paper white). The peak can't go below paper white (it needs to be above the mid gray anchor).
+      const float paperWhite = max(LumaSettings.GamePaperWhiteNits, 1.0);
+      postProcessedColor = Tonemap::CInfinityRollOff::MaxChannel(recovered, max(LumaSettings.PeakWhiteNits, paperWhite) / paperWhite, MidGray, 1.0);
    }
    else // SDR (still presented through the scRGB swapchain) — sdrLinear is the vanilla grade, untouched
 #endif
@@ -508,7 +511,7 @@ float4 RunTonemap(float4 v5, float4 v6)
    postProcessedColor *= LumaSettings.GamePaperWhiteNits / max(LumaSettings.UIPaperWhiteNits, 1.0);
 #endif
 
-   // Sanitize (signed LUT excursions, the user grade and DICE can emit NaN/negatives -> garbage on the swapchain).
+   // Sanitize (signed LUT excursions, the user grade and the display map can emit NaN/negatives -> garbage on the swapchain).
    postProcessedColor = (postProcessedColor == postProcessedColor) ? postProcessedColor : 0.0; // NaN -> 0
    postProcessedColor = max(0.0, postProcessedColor);
 
