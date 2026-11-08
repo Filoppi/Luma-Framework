@@ -4,4 +4,11 @@
     <ClCompile Include="main.cpp" />
     <ClCompile Include="..\..\Core\unity_build.cpp" />
   </ItemGroup>
+  <ItemGroup>
+    <ClInclude Include="dxbc.h" />
+    <ClInclude Include="MotionVectorPatches.h" />
+    <ClInclude Include="motion_vector_patch.h" />
+    <ClInclude Include="patched_draws.h" />
+    <ClInclude Include="SMAA_AreaTex_SharpU.h" />
+  </ItemGroup>
 </Project>

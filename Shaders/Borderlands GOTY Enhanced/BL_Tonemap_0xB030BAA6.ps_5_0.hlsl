@@ -1,5 +1,4 @@
-// Borderlands GOTY Enhanced — final color pass (FXAA path: writes SV_Target1 luma). HDR replacement.
-// See Luma_BL_Tonemap.hlsl for the implementation.
+// UE3 final color pass, FXAA variant (the FXAA luma at SV_Target1). See Luma_BL_Tonemap.hlsl.
 #include "Luma_BL_Tonemap.hlsl"
 
 void main(

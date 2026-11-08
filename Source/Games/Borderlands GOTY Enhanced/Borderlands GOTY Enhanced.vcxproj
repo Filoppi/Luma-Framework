@@ -65,6 +65,13 @@
       <Context>Project</Context>
     </PropertyPageSchema>
   </ItemGroup>
+  <PropertyGroup>
+    <UseLumaNGX>true</UseLumaNGX>
+    <UseLumaFSR>true</UseLumaFSR>
+    <UseLumaFastNoise>true</UseLumaFastNoise>
+    <UseLumaFSR4>true</UseLumaFSR4>
+    <UseLumaXeSS>true</UseLumaXeSS>
+  </PropertyGroup>
   <ImportGroup Label="ExtensionSettings">
   </ImportGroup>
   <ImportGroup Label="PropertySheets">
@@ -231,6 +238,13 @@
   <ItemGroup>
     <ClCompile Include="..\..\Core\unity_build.cpp" />
     <ClCompile Include="main.cpp" />
+  </ItemGroup>
+  <ItemGroup>
+    <ClInclude Include="dxbc.h" />
+    <ClInclude Include="MotionVectorPatches.h" />
+    <ClInclude Include="motion_vector_patch.h" />
+    <ClInclude Include="patched_draws.h" />
+    <ClInclude Include="SMAA_AreaTex_SharpU.h" />
   </ItemGroup>
   <!-- Apply feature settings after the final per-configuration properties. -->
   <Import Project="..\Luma.DXP.props" Condition="Exists('..\Luma.DXP.props')" />

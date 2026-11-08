@@ -14,14 +14,14 @@ namespace CB
 struct LumaGameSettings
 {
    float Exposure;           // exposure multiplier (1 = vanilla). Applied scene-referred, pre-grade.
-   float Saturation;         // 1 = vanilla. Luminance-relative saturation multiplier on the final HDR color.
-   float HighlightDechroma;  // 0 = off (default). DICE highlight desaturation: sources above a third of peak fade toward white, mid-tones untouched.
+   float Saturation;         // 1 = vanilla. Scales the RGB distance from relative luminance. HDR display path only.
+   float HighlightDechroma;  // 0 = off (default). Highlight whitening of the hue reference (MacLeod-Boynton purity). HDR display path only.
    float BloomIntensity;     // 1 = vanilla. Scales the game's bloom contribution in the scene mix.
-   float Contrast;           // 1 = vanilla. Multiplicative contrast around 18% mid-gray, applied before the display map.
+   float Contrast;           // 1 = vanilla. Power of relative luminance around mid gray. HDR display path only.
    float Dithering;          // 0/1 toggle. Animated triangular dither at output to break gradient banding.
    float FlareOut;           // 1 = vanilla. Scales the additive lens-flare/glare overlay (pass 0x010371F2).
    float VideoAutoHDREnable; // 0/1. Light AutoHDR on Bink movies (HDR only; pass 0x0E97A4A0). 0 = flat SDR at paper white.
-   float VideoAutoHDRBoost;  // 0..1 highlight-expansion strength. 0 = off (peak == paper white); 1 = full VIDEO_AUTO_HDR_PEAK_NITS.
+   float VideoAutoHDRBoost;  // 0..1 highlight-expansion strength. 0 = off (peak at sRGB white); 1 = a 250 nit peak.
 };
 
 // Game specific cbuffer (instance/pass) data.

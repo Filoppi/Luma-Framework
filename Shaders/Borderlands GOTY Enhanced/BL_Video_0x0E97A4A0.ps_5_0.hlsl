@@ -1,22 +1,15 @@
-// Borderlands GOTY Enhanced — video (YUV->RGB) pass. SDR clamp + light AutoHDR for HDR.
-//
-// The game's movie pass converts YUV to RGB and writes straight to the swapchain. The YUV->RGB matrix
-// overshoots (>1) and produces small negatives; on the vanilla 8-bit UNORM backbuffer those were clamped
-// for free, but Luma's fp16 scRGB swapchain keeps them — so we saturate() to restore the vanilla clamp.
-// Then apply a LIGHT PumboAutoHDR so SDR movies gain a little highlight pop in HDR instead of sitting flat at
-// paper white.
-// Kept conservative (videos are low-bitrate, highlight compression artifacts blow up if pushed hard).
+// Bink movie pass: converts Y'CbCr (YTex, CrCbTex) to R'G'B' straight into the swapchain. The matrix overshoots above 1 and gives
+// small negatives, which vanilla's 8-bit UNORM backbuffer clamped and Luma's fp16 one keeps: saturate() restores the clamp. In HDR,
+// an optional light PumboAutoHDR adds highlights on top, kept conservative because the low-bitrate movies' compression artifacts
+// blow up when pushed.
 
 // clang-format off
 #include "Includes/Common.hlsl" // game-local: pulls GameCBuffers (VideoAutoHDR* fields) BEFORE shared Settings
 // clang-format on
 
-// Light AutoHDR on videos (0 = off → flat SDR at paper white). Peak kept low on purpose.
+// 0 compiles the AutoHDR out (flat SDR at paper white).
 #ifndef ENABLE_VIDEO_AUTO_HDR
 #define ENABLE_VIDEO_AUTO_HDR 1
-#endif
-#ifndef VIDEO_AUTO_HDR_PEAK_NITS
-#define VIDEO_AUTO_HDR_PEAK_NITS 250.0
 #endif
 
 cbuffer _Globals : register(b0)
@@ -47,26 +40,21 @@ void main(
    r0.xyz = cmatrix[2].xyz + r0.xyz;
    r0.w = 1;
    o0.xyzw = alpha_mult.xyzw * r0.xyzw;
-   o0.rgb = saturate(o0.rgb); // restore the vanilla 8-bit backbuffer clamp (kills YUV overshoot + negatives)
+   o0.rgb = saturate(o0.rgb); // The vanilla UNORM clamp (see the header)
 
-   // Work in linear: AutoHDR (optional) and the paper-white pre-scale both belong in linear space. The
-   // composition decodes gamma then multiplies by UIPaperWhite (linear), so the pre-scale must pre-compensate
-   // that linear multiply BEFORE re-encoding — applying it in gamma space diverges for GamePaperWhite!=UIPaperWhite.
+   // AutoHDR and the paper white pre-scale both belong in linear: the composition decodes gamma and then multiplies by UIPaperWhite,
+   // so the pre-scale must compensate that multiply before the re-encode (in gamma it diverges when GamePaperWhite != UIPaperWhite).
    float3 lin = gamma_to_linear(o0.rgb);
 #if ENABLE_VIDEO_AUTO_HDR
-   // Video is gamma-encoded SDR; expand highlights mildly for HDR. Runtime-gated (ImGui "Video AutoHDR"):
-   // boost 0 = peak at paper white -> PumboAutoHDR no-ops (off); 1 = full VIDEO_AUTO_HDR_PEAK_NITS.
-   if (LumaSettings.GameSettings.VideoAutoHDREnable > 0.5)
+   [branch] if (LumaSettings.GameSettings.VideoAutoHDREnable > 0.5)
    {
-      const float peakNits = lerp(sRGB_WhiteLevelNits, VIDEO_AUTO_HDR_PEAK_NITS, saturate(LumaSettings.GameSettings.VideoAutoHDRBoost));
-      lin = PumboAutoHDR(lin, peakNits, LumaSettings.GamePaperWhiteNits);
+      // Boost 0 puts the peak at sRGB white, where PumboAutoHDR is a no-op. The 250 nit peak is kept low on purpose: a higher one exposes
+      // the low bitrate movies' compression blocks in the highlights.
+      lin = PumboAutoHDR(lin, lerp(sRGB_WhiteLevelNits, 250.0, saturate(LumaSettings.GameSettings.VideoAutoHDRBoost)), LumaSettings.GamePaperWhiteNits);
    }
 #endif
-#if UI_DRAW_TYPE >= 2
-   // Match the tonemap pass (linear pre-scale, see Luma_BL_Tonemap.hlsl): land full-screen movies at the same
-   // brightness as in-game after the composition's UIPaperWhite rescale, when UIPaperWhite != GamePaperWhite.
-   lin *= LumaSettings.GamePaperWhiteNits / max(LumaSettings.UIPaperWhiteNits, 1.0);
-#endif
-   o0.rgb = linear_to_gamma(lin); // re-encode for the gamma post buffer
+   // Full-screen movies land at the in-game brightness after the composition's UIPaperWhite rescale
+   lin *= GetUIPaperWhitePreScale(LumaSettings.GamePaperWhiteNits, LumaSettings.UIPaperWhiteNits);
+   o0.rgb = linear_to_gamma(lin); // Gamma, as the tonemap pass stores it
    return;
 }
