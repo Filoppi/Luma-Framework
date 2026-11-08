@@ -130,7 +130,8 @@ jobs:
           $vcxPath = Join-Path (Get-Location) $cellPaths[$i]
           if (-not (Test-Path $vcxPath)) { continue }
           $vcxContent = Get-Content $vcxPath -Raw
-          if ($vcxContent -match '<ConfigurationType>StaticLibrary</ConfigurationType>') { continue }
+          # Core and the tools (SR Bridge Helper) build too, but aren't addons
+          if ($vcxContent -notmatch '<TargetExt[^>]*>\.addon<') { continue }
           $projName = $cellProjects[$i]
           if ($vcxContent -match '<ProjectName>([^<]+)</ProjectName>') { $projName = $Matches[1] }
           $projName = $projName -replace '&amp;', '&' -replace '&lt;', '<' -replace '&gt;', '>' -replace '&quot;', '"'
