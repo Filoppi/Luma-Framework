@@ -7,7 +7,7 @@ cbuffer ExposureCB : register(b0)
 	uint Width;
 	uint Height;
 	float Key;
-	uint Pad1;
+	uint Mode;
 };
 
 cbuffer cb4 : register(b4)
@@ -107,6 +107,33 @@ void main(uint gidx : SV_GroupIndex)
 		}
 
 		ExposureTex[uint2(0, 0)] = outV;
+
+		// Estimate the weighted 99.99th percentile within its log-luminance bin.
+		float prevHighlight = ExposureTex[uint2(1, 0)];
+		bool highlightValid = prevHighlight > 0.0 && prevHighlight < 1e30;
+		float highlight = highlightValid ? prevHighlight : 1.0;
+		if (total > 0.0)
+		{
+			float rank = total * 0.9999;
+			float cum = 0.0;
+			float percentileLog = AE_MAX_LOG2;
+			for (int b = 0; b < AE_BINS; ++b)
+			{
+				float count = (float)gsHist[b];
+				if (count > 0.0 && cum + count >= rank)
+				{
+					float fraction = saturate((rank - cum) / count);
+					percentileLog = AE_MIN_LOG2 + ((float)b + fraction) / AE_BINS * (AE_MAX_LOG2 - AE_MIN_LOG2);
+					break;
+				}
+				cum += count;
+			}
+			float exposure = Mode != 0 ? outV : ((vanilla > 0.0 && vanilla < 1e30) ? vanilla : 1.0);
+			float targetHighlight = max(exp2(percentileLog) * exposure, 1e-6);
+			float t = 1.0 - exp(-max(DeltaTime, 0.0) * max(AdaptSpeed, 0.0));
+			highlight = (Reset > 0.5 || !highlightValid) ? targetHighlight : exp2(lerp(log2(prevHighlight), log2(targetHighlight), t));
+		}
+		ExposureTex[uint2(1, 0)] = highlight;
 	}
 
 	GroupMemoryBarrierWithGroupSync();

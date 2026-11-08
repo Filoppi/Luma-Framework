@@ -62,14 +62,39 @@ float3 GamutMapToBT2020(float3 lin709)
   return BT2020_To_BT709(max(Oklab::oklch_to_linear_bt2020(lch), 0.0));
 }
 
-// Shoulder that is linear up to s and reaches peak exactly at input W (extended Reinhard on the excess), flat beyond.
-float ShoulderToPeak(float x, float peak, float s, float W)
+// Identity below the knee, smoothly approaching peak while retaining highlight separation.
+float ShoulderToPeak(float x, float peak, float s, float strength)
 {
   if (x <= s) return x;
-  float a = x - s; float r = max(peak - s, 1e-4); float Wr = max(W - s, 1e-4);
-  return s + min(r, a * (1.0 + a * r / (Wr * Wr)) / (1.0 + a / r));
+  float excess = x - s; float room = max(peak - s, 1e-4);
+  return s + room * (1.0 - pow(1.0 + excess / (room * strength), -strength));
 }
-#define HMA_WHITE_POINT_MULT 3.0 // input (paper white units) that maps to peak, relative to peak
+
+// Margin over the histogram p99.99 used as the source peak (grade, sky, bloom), in paper-white units.
+#define HMA_EETF_HISTOGRAM_MARGIN 1.5
+// Source peak as a multiple of the display peak when there is no histogram (exposedBrightPoint unset).
+#define HMA_EETF_FALLBACK_SRC_PEAK_SCALE 8.0
+
+// BT.2390 EETF (adaptive, PQ domain). x, srcPeak, dstPeak are in paper-white units; returns paper-white units.
+float EETF_BT2390(float x, float srcPeak, float dstPeak)
+{
+  if (x <= 0.0) return x;
+  float pw = LumaSettings.GamePaperWhiteNits;
+  float srcPQ = Linear_to_PQ(max(srcPeak * pw / 10000.0, 1e-7), GCT_POSITIVE);
+  float dstPQ = Linear_to_PQ(max(dstPeak * pw / 10000.0, 1e-7), GCT_POSITIVE);
+  if (srcPQ <= dstPQ) return x;
+  float e = Linear_to_PQ(x * pw / 10000.0, GCT_POSITIVE) / srcPQ;
+  float maxLum = dstPQ / srcPQ;
+  float KS = 1.5 * maxLum - 0.5;
+  if (e > KS)
+  {
+    float t = (min(e, 1.0) - KS) / (1.0 - KS);
+    float t2 = t * t; float t3 = t2 * t;
+    e = (2.0 * t3 - 3.0 * t2 + 1.0) * KS + (t3 - 2.0 * t2 + t) * (1.0 - KS) + (-2.0 * t3 + 3.0 * t2) * maxLum;
+  }
+  float nits = PQ_to_Linear(e * srcPQ, GCT_POSITIVE) * 10000.0;
+  return nits / pw;
+}
 
 // Keeps targetBT709's luminance and hue, and sets its CIE u'v' distance from white to the source's (scaled by amount).
 float3 TransferPurityFP(float3 targetBT709, float3 sourceBT709, float amount)
@@ -85,7 +110,7 @@ float3 TransferPurityFP(float3 targetBT709, float3 sourceBT709, float amount)
   float rs = length(uvS - w);
   if (rt < 1e-6 || xyzT.y <= 0.0)
     return targetBT709;
-  float2 uv = w + (uvT - w) * lerp(1.0, rs / rt, amount);
+  float2 uv = w + (uvT - w) * lerp(1.0, min(rs / rt, 1.0), saturate(amount));
   float Y = xyzT.y;
   float v = max(uv.y, 1e-7);
   float X = Y * 9.0 * uv.x / (4.0 * v);
@@ -115,25 +140,42 @@ float3 HMA_GammaToLinear(float3 x)
 }
 
 // Linear scene (1 = paper white, flare already added) to the encoded swapchain value.
-float3 HMA_DisplayOutput(float3 lin)
+float3 HMA_DisplayOutput(float3 lin, float exposedBrightPoint = 0.0)
 {
   // Hue reference is taken after the flare is added so the hue lock keeps the flare tint and ghost chroma.
   float3 hueRef = lin;
   lin = GamutMapToBT2020(lin);
   lin = ExpandGamut(lin, LumaSettings.GameSettings.GamutExpansion);
-  float peak = LumaSettings.PeakWhiteNits / LumaSettings.GamePaperWhiteNits;
+  float peak = max(LumaSettings.PeakWhiteNits / max(LumaSettings.GamePaperWhiteNits, 1e-4), 1e-4);
   if (LumaSettings.GameSettings.DisplayMapping == 0u)
   {
     lin = Tonemap_DICE(lin, peak);
   }
-  else
+  else if (LumaSettings.GameSettings.DisplayMapping == 1u)
   {
     float shoulder = LumaSettings.GameSettings.ShoulderStart * peak;
+    float strength = 0.45;
+    if (exposedBrightPoint > 0.0 && exposedBrightPoint < FLT_MAX)
+      strength = lerp(0.45, 0.18, smoothstep(2.0, 8.0, log2(max(exposedBrightPoint / peak, 1.0))));
     float Y = GetLuminance(lin);
     if (Y > 0.0)
     {
-      float3 lumMapped = lin * (ShoulderToPeak(Y, peak, shoulder, peak * HMA_WHITE_POINT_MULT) / Y);
-      float3 ch = BT2020_To_BT709(Reinhard::ReinhardPiecewise(max(BT709_To_BT2020(lin), 0.0), peak, shoulder));
+      float3 lumMapped = lin * (ShoulderToPeak(Y, peak, shoulder, strength) / Y);
+      float3 ch2020 = max(BT709_To_BT2020(lin), 0.0);
+      float3 ch = BT2020_To_BT709(float3(ShoulderToPeak(ch2020.r, peak, shoulder, strength), ShoulderToPeak(ch2020.g, peak, shoulder, strength), ShoulderToPeak(ch2020.b, peak, shoulder, strength)));
+      lin = TransferPurityFP(lumMapped, ch, LumaSettings.GameSettings.HighlightPurity);
+    }
+  }
+  else
+  {
+    float srcPeak = (exposedBrightPoint > 0.0 && exposedBrightPoint < FLT_MAX) ? exposedBrightPoint * HMA_EETF_HISTOGRAM_MARGIN : peak * HMA_EETF_FALLBACK_SRC_PEAK_SCALE;
+    srcPeak = max(srcPeak, peak * 1.01);
+    float Y = GetLuminance(lin);
+    if (Y > 0.0)
+    {
+      float3 lumMapped = lin * (EETF_BT2390(Y, srcPeak, peak) / Y);
+      float3 ch2020 = max(BT709_To_BT2020(lin), 0.0);
+      float3 ch = BT2020_To_BT709(float3(EETF_BT2390(ch2020.r, srcPeak, peak), EETF_BT2390(ch2020.g, srcPeak, peak), EETF_BT2390(ch2020.b, srcPeak, peak)));
       lin = TransferPurityFP(lumMapped, ch, LumaSettings.GameSettings.HighlightPurity);
     }
   }

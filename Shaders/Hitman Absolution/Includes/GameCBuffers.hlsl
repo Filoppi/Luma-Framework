@@ -52,6 +52,11 @@ namespace CB
 		uint BokehDOF;
 		float GIStrength;
 		float GIOcclusion;
+		uint BokehDOFFiltering;
+		float BokehDOFRotation;
+		float AODarkness;
+		uint BokehDOFTapLimit;
+		uint TonemapVersion; // 0 = legacy extended-LUT grade, 1 = neutral-compressed LUT grade upgraded to HDR (UpgradeToneMap)
 	};
 	
 	// Define the game specific cbuffer (instance/pass) data here

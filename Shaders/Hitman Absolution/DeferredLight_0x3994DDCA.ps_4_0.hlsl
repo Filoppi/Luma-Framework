@@ -88,5 +88,8 @@ void main(
   o0.w = saturate(r0.w + -0.66);
   r1 = mapOcclusion.Sample(samplerOcclusion, v1.xy);
   r1.xyz = r1.xyz * r1.xyz;
+#if TONEMAP_TYPE >= 1
+  r1.xyz = lerp(1.0, r1.xyz, LumaSettings.GameSettings.AODarkness);
+#endif
   o0.xyz = r0.xyz * r1.xyz;
 }

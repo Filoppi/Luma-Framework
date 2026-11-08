@@ -88,6 +88,9 @@ void main(
   r4.xyz = cb2[5].xyz - cb2[4].xyz;
   r4.xyz = r3.w * r4.xyz + cb2[4].xyz;
   r3.xyz = r3.xyz * r3.xyz;
+#if TONEMAP_TYPE >= 1
+  r3.xyz = lerp(1.0, r3.xyz, LumaSettings.GameSettings.AODarkness);
+#endif
   r1.xyz = r2.xyz * r4.xyz + r1.xyz;
   r1.w = r2.w * 1024.0 - 1000.0;
 

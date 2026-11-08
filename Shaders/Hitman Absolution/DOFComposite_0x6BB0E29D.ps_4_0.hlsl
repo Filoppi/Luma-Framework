@@ -91,7 +91,7 @@ float4 BokehComposite(float4 pos, float2 uv)
   // Near-blur ring check: every pixel that is not a near center, plus near centers that are not gathering yet.
   if (!nearCenter || !gather)
   {
-    float ringRot = HMA_TAU * ign; // unfaded
+    float ringRot = HMA_TAU * ign * LumaSettings.GameSettings.BokehDOFRotation;
     float ringSpacing = maxR / 3.0;
     [loop]
     for (int k = 0; k < 36; k++)
@@ -123,8 +123,10 @@ float4 BokehComposite(float4 pos, float2 uv)
   bool farPath = !nearCenter && (nearCov <= 0.001) && !ringHit;
   float R = farPath ? max(r0, 1.0) : maxR;
   // Rotation fades with the gather radius, so small gathers do not dither.
-  float rot = HMA_TAU * ign * saturate((R - 1.0) / 3.0);
-  int N = int(clamp(ceil(R * R * 0.8), 8.0, float(HMA_BOKEH_TAPS)));
+  float rot = HMA_TAU * ign * saturate((R - 1.0) / 3.0) * LumaSettings.GameSettings.BokehDOFRotation;
+  uint tapLimit = LumaSettings.GameSettings.BokehDOFTapLimit;
+  tapLimit = tapLimit == 0u ? 64u : clamp(tapLimit, 8u, 128u);
+  int N = int(clamp(ceil(R * R * 0.8), 8.0, float(tapLimit)));
   float tapArea = R * R / float(N);
   float spacing = R * rsqrt(float(N));
 
@@ -156,12 +158,8 @@ float4 BokehComposite(float4 pos, float2 uv)
   }
 
   [loop]
-  for (int i = 0; i < HMA_BOKEH_TAPS; i++)
+  for (int i = 0; i < N; i++)
   {
-    if (i >= N)
-    {
-      break;
-    }
     float rr = R * sqrt((float(i) + 0.5) / float(N));
     // Incremental golden-angle spiral. Outer taps get the per-pixel rotation; inner taps keep a fixed spiral.
     float2 d = dir;
@@ -171,37 +169,50 @@ float4 BokehComposite(float4 pos, float2 uv)
     }
     dir = float2(dir.x * gC - dir.y * gS, dir.x * gS + dir.y * gC);
     float2 p = pos.xy + rr * d;
-    int2 tp = clamp(int2(p), int2(0, 0), maxPos);
-
-    float3 Ct = t2.Load(int3(tp, 0)).rgb;
-    float raw = t1.Load(int3(tp, 0)).x;
-    float ct = SignedCoC(raw);
-    float rt = CoCRadius(ct, maxR);
-    float zt = LinearDepth(raw);
-
-    if (ct < 0.0 && rt > 0.0)
+    // Pixel centers are at half-integers. Weight each texel before layer accumulation
+    // so depth and CoC boundaries do not mix colors across layers.
+    bool filtering = LumaSettings.GameSettings.BokehDOFFiltering != 0;
+    float2 texelPos = p - 0.5;
+    int2 basePos = filtering ? int2(floor(texelPos)) : int2(p);
+    float2 fracPos = filtering ? frac(texelPos) : float2(0.0, 0.0);
+    int footprintCount = filtering ? 4 : 1;
+    [loop]
+    for (int sampleIndex = 0; sampleIndex < footprintCount; sampleIndex++)
     {
-      float cov = saturate((rt - rr) / max(spacing, 1.0) + 0.5);
-      float invArea = 1.0 / max(rt * rt, 1.0);
-      float w = cov * invArea;
-      nearC += Ct * w;
-      nearW += w;
-      nearMass += cov * tapArea * invArea;
-    }
-    else
-    {
-      // Far blur must not bleed onto sharper foreground. Foreground blur still spreads onto the background.
-      float rEff = (zt > centerZ) ? min(rt, r0) : rt;
-      float cov = saturate((rEff - rr) / max(spacing, 1.0) + 0.5);
-      float invArea = 1.0 / max(rEff * rEff, 1.0);
-      float w = cov * invArea;
-      bgC += Ct * w;
-      bgW += w;
-      if (ct >= 0.0)
+      int2 offset = int2(sampleIndex & 1, sampleIndex >> 1);
+      float footprintWeight = (offset.x ? fracPos.x : 1.0 - fracPos.x) *
+                              (offset.y ? fracPos.y : 1.0 - fracPos.y);
+      int2 tp = clamp(basePos + offset, int2(0, 0), maxPos);
+      float3 Ct = t2.Load(int3(tp, 0)).rgb;
+      float raw = t1.Load(int3(tp, 0)).x;
+      float ct = SignedCoC(raw);
+      float rt = CoCRadius(ct, maxR);
+      float zt = LinearDepth(raw);
+
+      if (ct < 0.0 && rt > 0.0)
       {
-        float fw = 1.0 / (1.0 + rr);
-        fbC += Ct * fw;
-        fbW += fw;
+        float cov = saturate((rt - rr) / max(spacing, 1.0) + 0.5);
+        float invArea = 1.0 / max(rt * rt, 1.0);
+        float w = cov * invArea * footprintWeight;
+        nearC += Ct * w;
+        nearW += w;
+        nearMass += cov * tapArea * invArea * footprintWeight;
+      }
+      else
+      {
+        // Far blur must not bleed onto sharper foreground. Foreground blur still spreads onto the background.
+        float rEff = (zt > centerZ) ? min(rt, r0) : rt;
+        float cov = saturate((rEff - rr) / max(spacing, 1.0) + 0.5);
+        float invArea = 1.0 / max(rEff * rEff, 1.0);
+        float w = cov * invArea * footprintWeight;
+        bgC += Ct * w;
+        bgW += w;
+        if (ct >= 0.0)
+        {
+          float fw = footprintWeight / (1.0 + rr);
+          fbC += Ct * fw;
+          fbW += fw;
+        }
       }
     }
   }

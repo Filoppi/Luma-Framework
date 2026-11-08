@@ -71,6 +71,9 @@ void main(float4 v0 : SV_POSITION, float2 v1 : TEXCOORD0, float3 v2 : TEXCOORD1,
   uint4 occCoord = uint4(float4(pixel, 0.0, 0.0) * 0.5);
   float3 occ = t5.Load(int3(occCoord.xyz)).xyz;
   occ = occ * occ;
+#if TONEMAP_TYPE >= 1
+  occ = lerp(1.0, occ, LumaSettings.GameSettings.AODarkness);
+#endif
   float specTerm = specIn.x * specPow;
   float3 lit = light * color.xyz + specTerm * cb2[4].xyz;
   o0.w = saturate(color.w - 0.66);

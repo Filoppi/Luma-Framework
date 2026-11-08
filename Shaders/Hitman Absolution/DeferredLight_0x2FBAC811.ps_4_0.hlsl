@@ -92,6 +92,9 @@ void main(
   // Half-resolution occlusion/extra buffer, squared. Coordinates are pixel * 0.5 (truncated), as in the dump.
   float4 occ = mapOcclusion.Load(int3(uint2(float2(pixel) * 0.5), 0));
   occ.xyz = occ.xyz * occ.xyz;
+#if TONEMAP_TYPE >= 1
+  occ.xyz = lerp(1.0, occ.xyz, LumaSettings.GameSettings.AODarkness);
+#endif
 
   r1w = r1w * deferred3.y;
   r1w = HMADeferredSpecularPower(r1w);

@@ -38,6 +38,7 @@
 // game project (e.g. add ReShade, DLSS, etc), and manually add all cpp files too.
 //
 // To compile in different modes (e.g. "DEVELOPMENT", "TEST" etc see "global_defines.h").
+#define ENABLE_POST_DRAW_DISPATCH_CALLBACK 1
 #include "..\..\Core\core.hpp"
 #include "HMAFlare.hpp"
 #include "HardPause.hpp"
@@ -151,8 +152,16 @@ static constexpr uint32_t kTonemapHash2 = 0xEED9AC77; // Chinatown variant (skip
 static constexpr uint32_t kFogHash = 0x49154D1F; // Chinatown fullscreen fog, blended onto the scene RT
 static constexpr uint32_t kFinalPostHash = 0x53909A5F; // Final post pass: reads the modern lens flare result at t3
 // Settings "FlareIntensity", "FlareThreshold", "FlareKnee", "ModernGlare", "GlareIntensity" (used with "ModernLensFlares").
-static HMAFlareSettings g_flare_settings = {};
-static const HMAFlareSettings g_flare_defaults = {};
+static const HMAFlareSettings g_flare_defaults = [] {
+   HMAFlareSettings settings = {};
+#if !DEVELOPMENT && !TEST
+   settings.threshold = 0.372f;
+   settings.glare = true;
+   settings.glare_intensity = 0.055f;
+#endif
+   return settings;
+}();
+static HMAFlareSettings g_flare_settings = g_flare_defaults;
 static constexpr float g_bloom_sigmas[] = {1.5f, 2.f, 2.f, 2.f, 1.f, 0.5f};
 constexpr uint32_t TONEMAP_TYPE_HASH = char_ptr_crc32("TONEMAP_TYPE");
 
@@ -176,11 +185,11 @@ static constexpr uint32_t kFXAAHash = 0x1B00C911;
 // Settings "EnableXeGTAO", "XeGTAORadius" (meters), "XeGTAOIntensity" (final visibility exponent): XeGTAO replaces the SSAO draw kSSAOHash (its result goes into RT0).
 // Quality is the advanced "XE_GTAO_QUALITY" define.
 static bool g_enable_xegtao = true;
-static float g_xegtao_radius = 1.5f;
+static float g_xegtao_radius = 10.f;
 static float g_xegtao_intensity = 2.2f;
 // "XeGTAOMode" (0 GTAO, 1 GT-VBAO, the visibility bitmask main pass) and "XeGTAOThickness" (GT-VBAO only, meters: the depth surfaces are this thick)
 static bool g_xegtao_vbao = false;
-static float g_xegtao_thickness = 0.5f;
+static float g_xegtao_thickness = 5.f;
 // XeGTAO path counters (MCP only, incremented on the render thread)
 static uint32_t g_xegtao_fullres_runs = 0;
 static uint32_t g_xegtao_halfres_runs = 0;
@@ -481,20 +490,22 @@ struct AutoExposureCBData
    uint32_t width;
    uint32_t height;
    float key;
-   uint32_t pad1;
+   uint32_t mode;
 };
 static_assert(sizeof(AutoExposureCBData) == 32);
 
 struct TemplateGameDeviceData final : public GameDeviceData
 {
    bool has_drawn_tonemap = false;
+   ComPtr<ID3D11BlendState> ambient_original_blend;
+   ComPtr<ID3D11BlendState> ambient_multiply_blend;
    // Non-owning view onto core's DrawBloom mip 0 (core-managed, released with the swapchain). Rebuilt every tonemap draw.
    ComPtr<ID3D11ShaderResourceView> srv_luma_bloom;
    // Pre-fog copy of the scene RT, bound at t2 for the fog draw. Recreated when the RT size or format changes.
    ComPtr<ID3D11Texture2D> fog_scene_copy;
    ComPtr<ID3D11ShaderResourceView> fog_scene_copy_srv;
    // GPU auto-exposure state
-   ComPtr<ID3D11Texture2D> exposure_tex; // 1x1 R32_FLOAT
+   ComPtr<ID3D11Texture2D> exposure_tex; // 2x1 R32_FLOAT
    ComPtr<ID3D11ShaderResourceView> exposure_srv;
    ComPtr<ID3D11UnorderedAccessView> exposure_uav;
    ComPtr<ID3D11Buffer> histogram_buf; // 512 bytes raw
@@ -568,7 +579,7 @@ class TemplateGame final : public Game // Go view "Source/Core/includes/game.h" 
          return true;
 
       D3D11_TEXTURE2D_DESC tex_desc = {};
-      tex_desc.Width = 1;
+      tex_desc.Width = 2;
       tex_desc.Height = 1;
       tex_desc.MipLevels = 1;
       tex_desc.ArraySize = 1;
@@ -681,6 +692,7 @@ class TemplateGame final : public Game // Go view "Source/Core/includes/game.h" 
       cb_data.adapt_speed = cb_luma_global_settings.GameSettings.AutoExposureSpeed;
       cb_data.range_stops = cb_luma_global_settings.GameSettings.AutoExposureRange;
       cb_data.key = cb_luma_global_settings.GameSettings.AutoExposureKey;
+      cb_data.mode = cb_luma_global_settings.GameSettings.AutoExposureMode;
       cb_data.width = scene_desc.Width;
       cb_data.height = scene_desc.Height;
       native_device_context->UpdateSubresource(gd.exposure_cb.get(), 0, nullptr, &cb_data, 0, 0);
@@ -761,6 +773,12 @@ public:
       GetShaderDefineData(VANILLA_ENCODING_TYPE_HASH).SetDefaultValue('1'); // Gamma 2.2: the HDR final pass encodes with pow(1/2.2) (DICE runs in that space), so decoding as sRGB overshot the peak by ~2%
       GetShaderDefineData(GAMMA_CORRECTION_TYPE_HASH).SetDefaultValue('1'); // What SDR transfer curve to we want to emulate? This is relevant even if we work in linear space, as there can be a gamma mismatch on it
       GetShaderDefineData(UI_DRAW_TYPE_HASH).SetDefaultValue('2'); // UI draws on the swapchain in gamma space after the final pass, which pre-divides the scene by UI paper white
+#if !DEVELOPMENT && !TEST
+      GetShaderDefineData(GAMUT_MAPPING_TYPE_HASH).SetDefaultValue('1');
+      use_os_reference_white_level = false;
+      g_xegtao_intensity = 1.57f;
+      g_xegtao_vbao = true;
+#endif
 
       // Customize the cbuffers indexes here. They should be between 0 and 13 ("D3D11_COMMONSHADER_CONSTANT_BUFFER_API_SLOT_COUNT - 1"),
       // set them to invalid values (e.g. -1) to not set them (they won't be uploaded to the GPU, and thus not usable in shaders). All their values need to be different if they are valid.
@@ -805,7 +823,8 @@ public:
       default_luma_global_game_settings.ShadowLuminanceGrading = cb_luma_global_settings.GameSettings.ShadowLuminanceGrading = 1.f;
       default_luma_global_game_settings.GammaCorrectionByLuminance = cb_luma_global_settings.GameSettings.GammaCorrectionByLuminance = 0.f;
       default_luma_global_game_settings.GamutExpansion = cb_luma_global_settings.GameSettings.GamutExpansion = 1.f;
-      default_luma_global_game_settings.DisplayMapping = cb_luma_global_settings.GameSettings.DisplayMapping = 1u;
+      default_luma_global_game_settings.DisplayMapping = cb_luma_global_settings.GameSettings.DisplayMapping = 2u;
+      default_luma_global_game_settings.TonemapVersion = cb_luma_global_settings.GameSettings.TonemapVersion = 1u;
       default_luma_global_game_settings.ShoulderStart = cb_luma_global_settings.GameSettings.ShoulderStart = 0.75f;
       default_luma_global_game_settings.HighlightPurity = cb_luma_global_settings.GameSettings.HighlightPurity = 0.5f;
       default_luma_global_game_settings.EmissiveHDRBoost = cb_luma_global_settings.GameSettings.EmissiveHDRBoost = 0.5f;
@@ -813,17 +832,33 @@ public:
       default_luma_global_game_settings.VideoAutoHDR = cb_luma_global_settings.GameSettings.VideoAutoHDR = 0.5f;
       default_luma_global_game_settings.ModernLensFlares = cb_luma_global_settings.GameSettings.ModernLensFlares = 1u;
       default_luma_global_game_settings.BokehDOF = cb_luma_global_settings.GameSettings.BokehDOF = 1u;
+      default_luma_global_game_settings.BokehDOFFiltering = cb_luma_global_settings.GameSettings.BokehDOFFiltering = 1u;
+      default_luma_global_game_settings.BokehDOFRotation = cb_luma_global_settings.GameSettings.BokehDOFRotation = 0.f;
+      default_luma_global_game_settings.BokehDOFTapLimit = cb_luma_global_settings.GameSettings.BokehDOFTapLimit = 64u;
       default_luma_global_game_settings.VanillaHueRestore = cb_luma_global_settings.GameSettings.VanillaHueRestore = 1.0f;
       default_luma_global_game_settings.AutoExposureMode = cb_luma_global_settings.GameSettings.AutoExposureMode = 1u;
-      default_luma_global_game_settings.AutoExposureSpeed = cb_luma_global_settings.GameSettings.AutoExposureSpeed = 10.f;
+      default_luma_global_game_settings.AutoExposureSpeed = cb_luma_global_settings.GameSettings.AutoExposureSpeed = 2.f;
       default_luma_global_game_settings.AutoExposureRange = cb_luma_global_settings.GameSettings.AutoExposureRange = 2.0f;
       default_luma_global_game_settings.AutoExposureKey = cb_luma_global_settings.GameSettings.AutoExposureKey = 0.11f;
       default_luma_global_game_settings.GIStrength = cb_luma_global_settings.GameSettings.GIStrength = 1.f;
       default_luma_global_game_settings.GIOcclusion = cb_luma_global_settings.GameSettings.GIOcclusion = 0.f;
+      default_luma_global_game_settings.AODarkness = cb_luma_global_settings.GameSettings.AODarkness = 1.f;
       default_luma_global_game_settings.HighlightCompression = cb_luma_global_settings.GameSettings.HighlightCompression = 0.f;
+#if !DEVELOPMENT && !TEST
+      default_luma_global_game_settings.LumaBloomStrength = cb_luma_global_settings.GameSettings.LumaBloomStrength = 0.202f;
+      default_luma_global_game_settings.FilmGrainStrength = cb_luma_global_settings.GameSettings.FilmGrainStrength = 0.f;
+      default_luma_global_game_settings.TopGradientStrength = cb_luma_global_settings.GameSettings.TopGradientStrength = 0.f;
+      default_luma_global_game_settings.GamutExpansion = cb_luma_global_settings.GameSettings.GamutExpansion = 0.5f;
+      default_luma_global_game_settings.GamutExpansionHueLock = cb_luma_global_settings.GameSettings.GamutExpansionHueLock = 1.f;
+      default_luma_global_game_settings.ShoulderStart = cb_luma_global_settings.GameSettings.ShoulderStart = 0.5f;
+      default_luma_global_game_settings.BokehDOFRotation = cb_luma_global_settings.GameSettings.BokehDOFRotation = 1.f;
+      default_luma_global_game_settings.BokehDOFTapLimit = cb_luma_global_settings.GameSettings.BokehDOFTapLimit = 128u;
+      default_luma_global_game_settings.AODarkness = cb_luma_global_settings.GameSettings.AODarkness = 0.85f;
+#endif
 
       native_shaders_definitions.emplace(CompileTimeStringHash("HMA Tonemapped Resolve"), ShaderDefinition{ "Luma_HMA_TonemappedResolve", reshade::api::pipeline_subobject_type::pixel_shader });
       native_shaders_definitions.emplace(CompileTimeStringHash("HMA Tonemapped Resolve 2x2"), ShaderDefinition{ "Luma_HMA_TonemappedResolve2x2", reshade::api::pipeline_subobject_type::pixel_shader });
+      native_shaders_definitions.emplace(CompileTimeStringHash("HMA Ambient Volume"), ShaderDefinition{ "Luma_HMA_AmbientVolume", reshade::api::pipeline_subobject_type::pixel_shader });
       native_shaders_definitions.emplace(CompileTimeStringHash("HMA GBuffer Clamp Zero"), ShaderDefinition{ "Luma_HMA_GBufferClamp_Zero", reshade::api::pipeline_subobject_type::pixel_shader });
       native_shaders_definitions.emplace(CompileTimeStringHash("HMA GBuffer Clamp One"), ShaderDefinition{ "Luma_HMA_GBufferClamp_One", reshade::api::pipeline_subobject_type::pixel_shader });
       native_shaders_definitions.emplace(CompileTimeStringHash("HMA XeGTAO Prefilter CS"), ShaderDefinition{ "Luma_HMA_XeGTAO", reshade::api::pipeline_subobject_type::compute_shader, nullptr, "prefilter_depths16x16_cs" });
@@ -847,6 +882,64 @@ public:
    DrawOrDispatchOverrideType OnDrawOrDispatch(ID3D11Device* native_device, ID3D11DeviceContext* native_device_context, CommandListData& cmd_list_data, DeviceData& device_data, reshade::api::shader_stage stages, const ShaderHashesList<OneShaderPerPipeline>& original_shader_hashes, bool is_custom_pass, bool& updated_cbuffers, std::function<void()>* original_draw_dispatch_func) override
    {
       auto& game_device_data = GetGameDeviceData(device_data);
+
+      // Convert the game's ambient subtraction to multiplication by visibility.
+      if (native_device_context->GetType() == D3D11_DEVICE_CONTEXT_IMMEDIATE
+         && original_shader_hashes.Contains(0xD4342F38, reshade::api::shader_stage::pixel)
+         && GetShaderDefineCompiledNumericalValue(TONEMAP_TYPE_HASH) >= 1
+         && original_draw_dispatch_func)
+      {
+         auto shader = device_data.native_pixel_shaders.find(CompileTimeStringHash("HMA Ambient Volume"));
+         ComPtr<ID3D11BlendState> original_blend;
+         FLOAT blend_factor[4];
+         UINT sample_mask;
+         native_device_context->OMGetBlendState(original_blend.put(), blend_factor, &sample_mask);
+         if (shader != device_data.native_pixel_shaders.end() && shader->second.get() && original_blend)
+         {
+            D3D11_BLEND_DESC desc = {};
+            original_blend->GetDesc(&desc);
+            auto& rt = desc.RenderTarget[0];
+            if (rt.BlendEnable && rt.SrcBlend == D3D11_BLEND_ONE && rt.DestBlend == D3D11_BLEND_ONE
+               && rt.BlendOp == D3D11_BLEND_OP_REV_SUBTRACT)
+            {
+               if (game_device_data.ambient_original_blend.get() != original_blend.get())
+               {
+                  rt.SrcBlend = D3D11_BLEND_ZERO;
+                  rt.DestBlend = D3D11_BLEND_INV_SRC_COLOR;
+                  rt.BlendOp = D3D11_BLEND_OP_ADD;
+                  ComPtr<ID3D11BlendState> multiply_blend;
+                  if (SUCCEEDED(native_device->CreateBlendState(&desc, multiply_blend.put())))
+                  {
+                     game_device_data.ambient_original_blend = original_blend;
+                     game_device_data.ambient_multiply_blend = multiply_blend;
+                  }
+               }
+               if (game_device_data.ambient_original_blend.get() == original_blend.get() && game_device_data.ambient_multiply_blend)
+               {
+                  ComPtr<ID3D11PixelShader> saved;
+                  ID3D11ClassInstance* instances[256] = {};
+                  UINT count = 256;
+                  native_device_context->PSGetShader(saved.put(), instances, &count);
+                  native_device_context->PSSetShader(shader->second.get(), nullptr, 0);
+                  native_device_context->OMSetBlendState(game_device_data.ambient_multiply_blend.get(), blend_factor, sample_mask);
+                  (*original_draw_dispatch_func)();
+                  native_device_context->OMSetBlendState(original_blend.get(), blend_factor, sample_mask);
+                  native_device_context->PSSetShader(saved.get(), instances, count);
+                  for (UINT i = 0; i < count; ++i) if (instances[i]) instances[i]->Release();
+                  return DrawOrDispatchOverrideType::Skip;
+               }
+            }
+         }
+      }
+
+#if !DEVELOPMENT
+      if (!original_shader_hashes.Contains(kFinalPostHash, reshade::api::shader_stage::pixel)
+         && !original_shader_hashes.Contains(0x563FB90F, reshade::api::shader_stage::pixel)
+         && !original_shader_hashes.Contains(kFogHash, reshade::api::shader_stage::pixel)
+         && !original_shader_hashes.Contains(kAOConsumerHash, reshade::api::shader_stage::pixel)
+         && !std::any_of(std::begin(kExposureBindHashes), std::end(kExposureBindHashes), [&](uint32_t h) { return original_shader_hashes.Contains(h, reshade::api::shader_stage::pixel); }))
+         original_draw_dispatch_func = nullptr;
+#endif
 
       // Pair consecutive sky layers only when their texture views and render target match.
       if (native_device_context->GetType() == D3D11_DEVICE_CONTEXT_IMMEDIATE && (stages & reshade::api::shader_stage::pixel) != 0)
@@ -1006,12 +1099,12 @@ public:
          }
       }
 
-      // GPU auto-exposure: a mode switch away from "Vanilla" restarts the adaptation.
-      if (game_device_data.last_auto_exposure_mode == 0u && cb_luma_global_settings.GameSettings.AutoExposureMode != 0u)
+      // Restart adaptation when the exposure mode changes.
+      if (game_device_data.last_auto_exposure_mode != cb_luma_global_settings.GameSettings.AutoExposureMode)
          game_device_data.need_reset = true;
       game_device_data.last_auto_exposure_mode = cb_luma_global_settings.GameSettings.AutoExposureMode;
 
-      if (native_device_context->GetType() == D3D11_DEVICE_CONTEXT_IMMEDIATE && cb_luma_global_settings.GameSettings.AutoExposureMode != 0u
+      if (native_device_context->GetType() == D3D11_DEVICE_CONTEXT_IMMEDIATE
          && GetShaderDefineCompiledNumericalValue(TONEMAP_TYPE_HASH) >= 1)
       {
          // Keep the game's cb4 for the adapt pass, from the tonemap draws.
@@ -1034,7 +1127,7 @@ public:
          }
 
          // Exposure at t7 only for the duration of the consumer draws: the game uses t7 elsewhere, so the previous t7 is restored right after.
-         if (game_device_data.exposure_srv && original_draw_dispatch_func && std::any_of(std::begin(kExposureBindHashes), std::end(kExposureBindHashes), [&](uint32_t h) { return original_shader_hashes.Contains(h, reshade::api::shader_stage::pixel); }))
+         if (cb_luma_global_settings.GameSettings.AutoExposureMode != 0u && game_device_data.exposure_srv && original_draw_dispatch_func && std::any_of(std::begin(kExposureBindHashes), std::end(kExposureBindHashes), [&](uint32_t h) { return original_shader_hashes.Contains(h, reshade::api::shader_stage::pixel); }))
          {
             ComPtr<ID3D11ShaderResourceView> srv_t7_saved;
             native_device_context->PSGetShaderResources(kExposureSlot, 1, srv_t7_saved.put());
@@ -1269,6 +1362,10 @@ public:
       if (native_device_context->GetType() == D3D11_DEVICE_CONTEXT_IMMEDIATE && original_shader_hashes.Contains(kFinalPostHash, reshade::api::shader_stage::pixel)
          && GetShaderDefineCompiledNumericalValue(TONEMAP_TYPE_HASH) >= 1 && original_draw_dispatch_func)
       {
+         ComPtr<ID3D11ShaderResourceView> srv_t7_saved;
+         native_device_context->PSGetShaderResources(kExposureSlot, 1, srv_t7_saved.put());
+         ID3D11ShaderResourceView* srv_meter = game_device_data.exposure_dispatched_this_frame ? game_device_data.exposure_srv.get() : nullptr;
+         native_device_context->PSSetShaderResources(kExposureSlot, 1, &srv_meter);
          ComPtr<ID3D11ShaderResourceView> srv_t3_saved;
          native_device_context->PSGetShaderResources(3, 1, srv_t3_saved.put());
          ComPtr<ID3D11SamplerState> smp_s3_saved;
@@ -1279,6 +1376,8 @@ public:
          ID3D11ShaderResourceView* srv_flare = game_device_data.flare_valid_this_frame ? game_device_data.flare_srv_this_frame : nullptr;
          native_device_context->PSSetShaderResources(3, 1, &srv_flare);
          (*original_draw_dispatch_func)();
+         ID3D11ShaderResourceView* srv_t7_restore = srv_t7_saved.get();
+         native_device_context->PSSetShaderResources(kExposureSlot, 1, &srv_t7_restore);
          ID3D11ShaderResourceView* srv_t3_restore = srv_t3_saved.get();
          native_device_context->PSSetShaderResources(3, 1, &srv_t3_restore);
          ID3D11SamplerState* smp_s3_restore = smp_s3_saved.get();
@@ -1359,16 +1458,26 @@ public:
       reshade::get_config_value(runtime, NAME, "BloomStrength", cb_luma_global_settings.GameSettings.BloomStrength);
       reshade::get_config_value(runtime, NAME, "LumaBloom", cb_luma_global_settings.GameSettings.LumaBloom);
       reshade::get_config_value(runtime, NAME, "ModernLensFlares", cb_luma_global_settings.GameSettings.ModernLensFlares);
-      reshade::get_config_value(runtime, NAME, "BokehDOF", cb_luma_global_settings.GameSettings.BokehDOF);
-      reshade::get_config_value(runtime, NAME, "FlareIntensity", g_flare_settings.intensity);
       reshade::get_config_value(runtime, NAME, "FlareThreshold", g_flare_settings.threshold);
       reshade::get_config_value(runtime, NAME, "FlareKnee", g_flare_settings.knee);
-      reshade::get_config_value(runtime, NAME, "GlareIntensity", g_flare_settings.glare_intensity);
       uint32_t modern_glare = g_flare_settings.glare ? 1u : 0u;
       reshade::get_config_value(runtime, NAME, "ModernGlare", modern_glare);
       g_flare_settings.glare = modern_glare != 0u;
-      reshade::get_config_value(runtime, NAME, "LumaBloomStrength", cb_luma_global_settings.GameSettings.LumaBloomStrength);
       reshade::get_config_value(runtime, NAME, "VanillaGlareStrength", cb_luma_global_settings.GameSettings.VanillaGlareStrength);
+#endif
+      reshade::get_config_value(runtime, NAME, "LumaBloomStrength", cb_luma_global_settings.GameSettings.LumaBloomStrength);
+#if !DEVELOPMENT && !TEST
+      cb_luma_global_settings.GameSettings.LumaBloomStrength = std::clamp(cb_luma_global_settings.GameSettings.LumaBloomStrength, 0.f, 2.f);
+#endif
+      reshade::get_config_value(runtime, NAME, "FlareIntensity", g_flare_settings.intensity);
+      reshade::get_config_value(runtime, NAME, "GlareIntensity", g_flare_settings.glare_intensity);
+      reshade::get_config_value(runtime, NAME, "BokehDOF", cb_luma_global_settings.GameSettings.BokehDOF);
+#if DEVELOPMENT || TEST
+      reshade::get_config_value(runtime, NAME, "BokehDOFFiltering", cb_luma_global_settings.GameSettings.BokehDOFFiltering);
+      reshade::get_config_value(runtime, NAME, "BokehDOFRotation", cb_luma_global_settings.GameSettings.BokehDOFRotation);
+      cb_luma_global_settings.GameSettings.BokehDOFRotation = std::clamp(cb_luma_global_settings.GameSettings.BokehDOFRotation, 0.f, 1.f);
+      reshade::get_config_value(runtime, NAME, "BokehDOFTapLimit", cb_luma_global_settings.GameSettings.BokehDOFTapLimit);
+      cb_luma_global_settings.GameSettings.BokehDOFTapLimit = std::clamp(cb_luma_global_settings.GameSettings.BokehDOFTapLimit, 8u, 128u);
 #endif
       reshade::get_config_value(runtime, NAME, "FilmGrainStrength", cb_luma_global_settings.GameSettings.FilmGrainStrength);
 #if DEVELOPMENT || TEST
@@ -1376,8 +1485,12 @@ public:
       reshade::get_config_value(runtime, NAME, "SkyDebanding", cb_luma_global_settings.GameSettings.SkyDebanding);
       reshade::get_config_value(runtime, NAME, "SunBrightness", cb_luma_global_settings.GameSettings.SunBrightness);
 #endif
+#if DEVELOPMENT || TEST
       reshade::get_config_value(runtime, NAME, "GIStrength", cb_luma_global_settings.GameSettings.GIStrength);
       reshade::get_config_value(runtime, NAME, "GIOcclusion", cb_luma_global_settings.GameSettings.GIOcclusion);
+      reshade::get_config_value(runtime, NAME, "AODarkness", cb_luma_global_settings.GameSettings.AODarkness);
+      cb_luma_global_settings.GameSettings.AODarkness = std::clamp(cb_luma_global_settings.GameSettings.AODarkness, 0.f, 1.f);
+#endif
       reshade::get_config_value(runtime, NAME, "Exposure", cb_luma_global_settings.GameSettings.Exposure);
       reshade::get_config_value(runtime, NAME, "Contrast", cb_luma_global_settings.GameSettings.Contrast);
       reshade::get_config_value(runtime, NAME, "Saturation", cb_luma_global_settings.GameSettings.Saturation);
@@ -1401,13 +1514,14 @@ public:
 #endif
       reshade::get_config_value(runtime, NAME, "VideoAutoHDR", cb_luma_global_settings.GameSettings.VideoAutoHDR);
       reshade::get_config_value(runtime, NAME, "VanillaHueRestore", cb_luma_global_settings.GameSettings.VanillaHueRestore);
+      reshade::get_config_value(runtime, NAME, "TonemapVersion", cb_luma_global_settings.GameSettings.TonemapVersion);
       reshade::get_config_value(runtime, NAME, "AutoExposureMode", cb_luma_global_settings.GameSettings.AutoExposureMode);
       reshade::get_config_value(runtime, NAME, "AutoExposureSpeed", cb_luma_global_settings.GameSettings.AutoExposureSpeed);
       reshade::get_config_value(runtime, NAME, "AutoExposureRange", cb_luma_global_settings.GameSettings.AutoExposureRange);
       reshade::get_config_value(runtime, NAME, "AutoExposureKey", cb_luma_global_settings.GameSettings.AutoExposureKey);
       reshade::get_config_value(runtime, NAME, "HighlightCompression", cb_luma_global_settings.GameSettings.HighlightCompression);
-#if DEVELOPMENT || TEST
       reshade::get_config_value(runtime, NAME, "TonemappedResolve", g_tonemapped_resolve);
+#if DEVELOPMENT || TEST
       reshade::get_config_value(runtime, NAME, "GBufferClamp", g_gbuffer_clamp);
 #endif
       reshade::get_config_value(runtime, NAME, "AntiAliasingMode", g_anti_aliasing_mode);
@@ -1415,7 +1529,7 @@ public:
       reshade::get_config_value(runtime, NAME, "XeGTAORadius", g_xegtao_radius);
       reshade::get_config_value(runtime, NAME, "XeGTAOIntensity", g_xegtao_intensity);
       {
-         int xegtao_mode = 0;
+         int xegtao_mode = g_xegtao_vbao ? 1 : 0;
          reshade::get_config_value(runtime, NAME, "XeGTAOMode", xegtao_mode);
          g_xegtao_vbao = xegtao_mode != 0;
       }
@@ -1459,6 +1573,7 @@ public:
       if (ImGui::SliderFloat("Highlight Saturation", &cb_luma_global_settings.GameSettings.HighlightSaturation, 0.f, 2.f, "%.3f"))
          reshade::set_config_value(runtime, NAME, "HighlightSaturation", cb_luma_global_settings.GameSettings.HighlightSaturation);
       DrawResetButton(cb_luma_global_settings.GameSettings.HighlightSaturation, default_luma_global_game_settings.HighlightSaturation, "HighlightSaturation", runtime);
+#endif
 
       bool bokeh_dof = cb_luma_global_settings.GameSettings.BokehDOF != 0;
       if (ImGui::Checkbox("Bokeh Depth of Field", &bokeh_dof))
@@ -1470,6 +1585,35 @@ public:
          ImGui::SetTooltip("Replaces the game's half-res depth of field with a full-res bokeh blur using the game's focus. Off = vanilla DOF.");
       DrawResetButton(cb_luma_global_settings.GameSettings.BokehDOF, default_luma_global_game_settings.BokehDOF, "BokehDOF", runtime);
 
+#if DEVELOPMENT || TEST
+      if (cb_luma_global_settings.GameSettings.BokehDOF != 0u)
+      {
+         bool bokeh_filtering = cb_luma_global_settings.GameSettings.BokehDOFFiltering != 0u;
+         if (ImGui::Checkbox("Depth-Aware Bokeh Filtering", &bokeh_filtering))
+         {
+            cb_luma_global_settings.GameSettings.BokehDOFFiltering = bokeh_filtering ? 1u : 0u;
+            reshade::set_config_value(runtime, NAME, "BokehDOFFiltering", cb_luma_global_settings.GameSettings.BokehDOFFiltering);
+         }
+         if (ImGui::IsItemHovered()) ImGui::SetTooltip("Use depth-aware filtering to reduce bokeh bleeding across depth boundaries.");
+         DrawResetButton(cb_luma_global_settings.GameSettings.BokehDOFFiltering, default_luma_global_game_settings.BokehDOFFiltering, "BokehDOFFiltering", runtime);
+
+         if (ImGui::SliderFloat("Bokeh Sample Rotation", &cb_luma_global_settings.GameSettings.BokehDOFRotation, 0.f, 1.f, "%.3f"))
+            reshade::set_config_value(runtime, NAME, "BokehDOFRotation", cb_luma_global_settings.GameSettings.BokehDOFRotation);
+         if (ImGui::IsItemHovered()) ImGui::SetTooltip("Adjust the bokeh sampling pattern rotation.");
+         DrawResetButton(cb_luma_global_settings.GameSettings.BokehDOFRotation, default_luma_global_game_settings.BokehDOFRotation, "BokehDOFRotation", runtime);
+
+         int bokeh_tap_limit = (int)cb_luma_global_settings.GameSettings.BokehDOFTapLimit;
+         if (ImGui::SliderInt("Bokeh Tap Limit", &bokeh_tap_limit, 8, 128))
+         {
+            cb_luma_global_settings.GameSettings.BokehDOFTapLimit = (uint32_t)bokeh_tap_limit;
+            reshade::set_config_value(runtime, NAME, "BokehDOFTapLimit", cb_luma_global_settings.GameSettings.BokehDOFTapLimit);
+         }
+         if (ImGui::IsItemHovered()) ImGui::SetTooltip("Higher limits improve bokeh quality at greater GPU cost.");
+         DrawResetButton(cb_luma_global_settings.GameSettings.BokehDOFTapLimit, default_luma_global_game_settings.BokehDOFTapLimit, "BokehDOFTapLimit", runtime);
+      }
+#endif
+
+#if DEVELOPMENT || TEST
       if (ImGui::SliderFloat("Bloom Strength", &cb_luma_global_settings.GameSettings.BloomStrength, 0.f, 2.f, "%.3f"))
          reshade::set_config_value(runtime, NAME, "BloomStrength", cb_luma_global_settings.GameSettings.BloomStrength);
       DrawResetButton(cb_luma_global_settings.GameSettings.BloomStrength, default_luma_global_game_settings.BloomStrength, "BloomStrength", runtime);
@@ -1570,9 +1714,11 @@ public:
 
       ImGui::Separator();
       ImGui::TextUnformatted("Color Grading");
+#if DEVELOPMENT || TEST
       if (ImGui::SliderFloat("Film Grain Strength", &cb_luma_global_settings.GameSettings.FilmGrainStrength, 0.f, 2.f, "%.3f"))
          reshade::set_config_value(runtime, NAME, "FilmGrainStrength", cb_luma_global_settings.GameSettings.FilmGrainStrength);
       DrawResetButton(cb_luma_global_settings.GameSettings.FilmGrainStrength, default_luma_global_game_settings.FilmGrainStrength, "FilmGrainStrength", runtime);
+#endif
 
       if (ImGui::SliderFloat("Exposure", &cb_luma_global_settings.GameSettings.Exposure, 0.25f, 2.f, "%.3f"))
          reshade::set_config_value(runtime, NAME, "Exposure", cb_luma_global_settings.GameSettings.Exposure);
@@ -1608,6 +1754,7 @@ public:
       DrawResetButton(cb_luma_global_settings.GameSettings.HighlightRolloff, default_luma_global_game_settings.HighlightRolloff, "HighlightRolloff", runtime);
 #endif
 
+#if DEVELOPMENT || TEST
       ImGui::Separator();
       ImGui::TextUnformatted("Atmosphere");
       if (ImGui::SliderFloat("Distance Haze", &cb_luma_global_settings.GameSettings.DistanceHaze, 0.f, 1.f, "%.3f"))
@@ -1615,6 +1762,7 @@ public:
       if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
          ImGui::SetTooltip("Strength of the game's distance color grade (haze). 1 = vanilla");
       DrawResetButton(cb_luma_global_settings.GameSettings.DistanceHaze, default_luma_global_game_settings.DistanceHaze, "DistanceHaze", runtime);
+#endif
 
 #if DEVELOPMENT || TEST
 
@@ -1629,6 +1777,16 @@ public:
       if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
          ImGui::SetTooltip("Pulls HDR colors toward the vanilla grade's hue and saturation (fixes over-saturated highlights)");
       DrawResetButton(cb_luma_global_settings.GameSettings.VanillaHueRestore, default_luma_global_game_settings.VanillaHueRestore, "VanillaHueRestore", runtime);
+
+      int tonemap_version = (int)cb_luma_global_settings.GameSettings.TonemapVersion;
+      if (ImGui::Combo("Tonemapper", &tonemap_version, "Legacy (extended LUT)\0Neutral LUT upgrade\0"))
+      {
+         cb_luma_global_settings.GameSettings.TonemapVersion = tonemap_version != 0 ? 1u : 0u;
+         reshade::set_config_value(runtime, NAME, "TonemapVersion", cb_luma_global_settings.GameSettings.TonemapVersion);
+      }
+      if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
+         ImGui::SetTooltip("Neutral LUT upgrade grades a compressed copy of the scene with the game's LUT and carries the grade onto the HDR image, so the final display mapping is the only highlight compression.");
+      DrawResetButton(cb_luma_global_settings.GameSettings.TonemapVersion, default_luma_global_game_settings.TonemapVersion, "TonemapVersion", runtime);
 
       int auto_exposure_mode = (int)cb_luma_global_settings.GameSettings.AutoExposureMode;
       if (ImGui::Combo("Auto Exposure", &auto_exposure_mode, "Vanilla\0Luma Histogram\0"))
@@ -1661,11 +1819,14 @@ public:
          DrawResetButton(cb_luma_global_settings.GameSettings.AutoExposureKey, default_luma_global_game_settings.AutoExposureKey, "AutoExposureKey", runtime);
       }
 
-      if (ImGui::SliderFloat("Highlight Compression", &cb_luma_global_settings.GameSettings.HighlightCompression, 0.f, 1.f, "%.3f"))
-         reshade::set_config_value(runtime, NAME, "HighlightCompression", cb_luma_global_settings.GameSettings.HighlightCompression);
-      if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
-         ImGui::SetTooltip("Soft-compresses bright highlights. 0 = off");
-      DrawResetButton(cb_luma_global_settings.GameSettings.HighlightCompression, default_luma_global_game_settings.HighlightCompression, "HighlightCompression", runtime);
+      if (cb_luma_global_settings.GameSettings.TonemapVersion == 0u)
+      {
+         if (ImGui::SliderFloat("Highlight Compression", &cb_luma_global_settings.GameSettings.HighlightCompression, 0.f, 1.f, "%.3f"))
+            reshade::set_config_value(runtime, NAME, "HighlightCompression", cb_luma_global_settings.GameSettings.HighlightCompression);
+         if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
+            ImGui::SetTooltip("Soft-compresses bright highlights. 0 = off");
+         DrawResetButton(cb_luma_global_settings.GameSettings.HighlightCompression, default_luma_global_game_settings.HighlightCompression, "HighlightCompression", runtime);
+      }
 
       if (ImGui::SliderFloat("Top Gradient", &cb_luma_global_settings.GameSettings.TopGradientStrength, 0.f, 1.f, "%.3f"))
          reshade::set_config_value(runtime, NAME, "TopGradientStrength", cb_luma_global_settings.GameSettings.TopGradientStrength);
@@ -1704,13 +1865,13 @@ public:
       DrawResetButton(cb_luma_global_settings.GameSettings.GamutExpansionHueLock, default_luma_global_game_settings.GamutExpansionHueLock, "GamutExpansionHueLock", runtime);
 
       int display_mapping = (int)cb_luma_global_settings.GameSettings.DisplayMapping;
-      if (ImGui::Combo("Display Mapping", &display_mapping, "DICE (per channel)\0Reinhard Piecewise\0"))
+      if (ImGui::Combo("Display Mapping", &display_mapping, "DICE (per channel)\0Reinhard Piecewise\0BT.2390 (adaptive)\0"))
       {
          cb_luma_global_settings.GameSettings.DisplayMapping = (uint32_t)display_mapping;
          reshade::set_config_value(runtime, NAME, "DisplayMapping", cb_luma_global_settings.GameSettings.DisplayMapping);
       }
       if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
-         ImGui::SetTooltip("Tone mapping of the display peak. DICE = per channel (vanilla-like). Reinhard Piecewise = by luminance with highlight desaturation control.");
+         ImGui::SetTooltip("Tone mapping of the display peak. DICE = per channel (vanilla-like). Reinhard Piecewise = by luminance with highlight desaturation control. BT.2390: perceptual roll-off from the scene's measured brightest point to the display peak.");
       DrawResetButton(cb_luma_global_settings.GameSettings.DisplayMapping, default_luma_global_game_settings.DisplayMapping, "DisplayMapping", runtime);
 
       if (cb_luma_global_settings.GameSettings.DisplayMapping == 1u)
@@ -1749,7 +1910,40 @@ public:
 #endif
 
       ImGui::Separator();
+#if DEVELOPMENT || TEST
       ImGui::TextUnformatted("Rendering");
+#else
+      ImGui::TextUnformatted("Post Process");
+      if (ImGui::SliderFloat("Luma Bloom Intensity", &cb_luma_global_settings.GameSettings.LumaBloomStrength, 0.f, 2.f, "%.3f"))
+         reshade::set_config_value(runtime, NAME, "LumaBloomStrength", cb_luma_global_settings.GameSettings.LumaBloomStrength);
+      DrawResetButton(cb_luma_global_settings.GameSettings.LumaBloomStrength, default_luma_global_game_settings.LumaBloomStrength, "LumaBloomStrength", runtime);
+      const char* tonemapped_resolve_items[] = { "Off", "Standard", "2x2 grid (NVIDIA)" };
+      int tonemapped_resolve = (int)(g_tonemapped_resolve > 2u ? 2u : g_tonemapped_resolve);
+      if (ImGui::Combo("Tonemapped MSAA Resolve", &tonemapped_resolve, tonemapped_resolve_items, IM_ARRAYSIZE(tonemapped_resolve_items)))
+      {
+         g_tonemapped_resolve = (uint32_t)tonemapped_resolve;
+         reshade::set_config_value(runtime, NAME, "TonemappedResolve", g_tonemapped_resolve);
+      }
+      if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
+         ImGui::SetTooltip("Resolves the 4x MSAA HDR scene with a tonemapped weighted average instead of the hardware resolve. Off = native resolve. Standard = sample layout 0..3; 2x2 grid = NVIDIA layout (samples in a 2x2 grid in sample 0)");
+      ImGui::SameLine();
+      ImGui::TextColored(ImVec4(1.f, 0.f, 0.f, 1.f), "(EXPERIMENTAL)");
+      if (ImGui::SliderFloat("Flare Intensity", &g_flare_settings.intensity, 0.f, 20.f, "%.3f"))
+         reshade::set_config_value(runtime, NAME, "FlareIntensity", g_flare_settings.intensity);
+      DrawResetButton(g_flare_settings.intensity, g_flare_defaults.intensity, "FlareIntensity", runtime);
+      if (ImGui::SliderFloat("Glare Intensity", &g_flare_settings.glare_intensity, 0.f, 10.f, "%.3f"))
+         reshade::set_config_value(runtime, NAME, "GlareIntensity", g_flare_settings.glare_intensity);
+      DrawResetButton(g_flare_settings.glare_intensity, g_flare_defaults.glare_intensity, "GlareIntensity", runtime);
+      if (ImGui::SliderFloat("Film Grain Strength", &cb_luma_global_settings.GameSettings.FilmGrainStrength, 0.f, 2.f, "%.3f"))
+         reshade::set_config_value(runtime, NAME, "FilmGrainStrength", cb_luma_global_settings.GameSettings.FilmGrainStrength);
+      DrawResetButton(cb_luma_global_settings.GameSettings.FilmGrainStrength, default_luma_global_game_settings.FilmGrainStrength, "FilmGrainStrength", runtime);
+
+      if (ImGui::SliderFloat("Distance Haze", &cb_luma_global_settings.GameSettings.DistanceHaze, 0.f, 1.f, "%.3f"))
+         reshade::set_config_value(runtime, NAME, "DistanceHaze", cb_luma_global_settings.GameSettings.DistanceHaze);
+      if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
+         ImGui::SetTooltip("Strength of the game's distance color grade (haze). 1 = vanilla");
+      DrawResetButton(cb_luma_global_settings.GameSettings.DistanceHaze, default_luma_global_game_settings.DistanceHaze, "DistanceHaze", runtime);
+#endif
 #if DEVELOPMENT || TEST
       int anti_aliasing_mode = (int)g_anti_aliasing_mode;
       if (ImGui::Combo("Anti Aliasing", &anti_aliasing_mode, "FXAA (vanilla)\0SMAA\0"))
@@ -1771,12 +1965,18 @@ public:
          ImGui::SetTooltip("Replaces the game's FXAA with SMAA.");
 #endif
 
+#if DEVELOPMENT || TEST
       if (ImGui::SliderFloat("GI Strength", &cb_luma_global_settings.GameSettings.GIStrength, 0.f, 4.f, "%.3f"))
          reshade::set_config_value(runtime, NAME, "GIStrength", cb_luma_global_settings.GameSettings.GIStrength);
       DrawResetButton(cb_luma_global_settings.GameSettings.GIStrength, default_luma_global_game_settings.GIStrength, "GIStrength", runtime);
       if (ImGui::SliderFloat("GI Occlusion", &cb_luma_global_settings.GameSettings.GIOcclusion, 0.f, 1.f, "%.3f"))
          reshade::set_config_value(runtime, NAME, "GIOcclusion", cb_luma_global_settings.GameSettings.GIOcclusion);
       DrawResetButton(cb_luma_global_settings.GameSettings.GIOcclusion, default_luma_global_game_settings.GIOcclusion, "GIOcclusion", runtime);
+
+      if (ImGui::SliderFloat("AO Darkness", &cb_luma_global_settings.GameSettings.AODarkness, 0.f, 1.f, "%.3f"))
+         reshade::set_config_value(runtime, NAME, "AODarkness", cb_luma_global_settings.GameSettings.AODarkness);
+      DrawResetButton(cb_luma_global_settings.GameSettings.AODarkness, default_luma_global_game_settings.AODarkness, "AODarkness", runtime);
+#endif
 
       if (ImGui::Checkbox("XeGTAO", &g_enable_xegtao))
       {

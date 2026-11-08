@@ -22,6 +22,7 @@ Texture2D<float4> mapTLW1 : register(t2);
 #if TONEMAP_TYPE >= 1
 // Pretty Post Process style flare (W/2 x H/2, linear BT.709, exposed scene units, fade applied). Null/0-size when not produced this frame.
 Texture2D<float4> mapFlare : register(t3);
+Texture2D<float> mapExposure : register(t7);
 SamplerState samplerFlare : register(s3);
 #endif
 
@@ -75,7 +76,10 @@ float4 main(
     float flareScale = flareMax > 0.0 ? headroom * (1.0 - exp(-flareMax / max(headroom, 1e-4))) / flareMax : 0.0;
     lin += flare * flareScale;
   }
-  x = HMA_DisplayOutput(lin);
+  uint exposureWidth, exposureHeight;
+  mapExposure.GetDimensions(exposureWidth, exposureHeight);
+  float exposedBrightPoint = exposureWidth == 2 && exposureHeight == 1 ? mapExposure.Load(int3(1, 0, 0)) * LumaSettings.GameSettings.Exposure : 0.0;
+  x = HMA_DisplayOutput(lin, exposedBrightPoint);
 #else
   float grainMask = saturate(1.0 - mapTLW1.Sample(samplerTLW1, v1.zw).x * cb4[98].w);
   float3 grain = grainMask * v2;

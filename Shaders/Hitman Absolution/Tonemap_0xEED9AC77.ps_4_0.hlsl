@@ -26,6 +26,7 @@ SamplerState s2 : register(s2);
 SamplerState s3 : register(s3);
 #if TONEMAP_TYPE >= 1
 #include "Includes/ModernLensFlare.hlsl"
+#include "../Includes/Tonemap.hlsl"
 #endif
 
 // Vanilla grading on an SDR-range scene color. depthCoord is the linearized depth remapped to [0,1].
@@ -122,6 +123,37 @@ float3 GradePerChannel(float3 hdr, float d)
   return sum * sum;
 }
 
+#define NEUTRAL_SHOULDER 0.5
+
+// Identity below NEUTRAL_SHOULDER, slope-continuous rolloff above it; max channel stays below 1.
+float3 NeutralCompress(float3 c)
+{
+  c = max(c, 0.0);
+  float S = NEUTRAL_SHOULDER;
+  float m = max(c.r, max(c.g, c.b));
+  if (m <= S) return c;
+  float mc = S + (1.0 - S) * (m - S) / ((m - S) + (1.0 - S));
+  return c * (mc / m);
+}
+
+// LUTGrade without the fade lerp, with the depth row scaled by DistanceHaze (as GradePerChannel).
+float3 LUTGradeNeutral(float3 x, float d)
+{
+  float3 q = sqrt(max(x, 0.0));
+
+  float4 s = t2.Sample(s2, float2(d, 0.928570)) * LumaSettings.GameSettings.DistanceHaze;
+  float3 c = float3(s.x * 0.142857 + 0.071429,
+                    s.z * 0.142857 + 0.642857,
+                    s.y * 0.142857 + 0.357143);
+
+  float4 p1 = t2.Sample(s2, float2(q.r, c.x));
+  float4 p2 = t2.Sample(s2, float2(q.g, c.z));
+  float4 p3 = t2.Sample(s2, float2(q.b, c.y));
+
+  float3 sum = (p1.rgb + p2.rgb) + p3.rgb;
+  return sum * sum;
+}
+
 // Keeps targetBT709's luminance and hue, and sets its CIE u'v' distance from white to the source's (scaled by amount).
 float3 TransferPurity(float3 targetBT709, float3 sourceBT709, float amount)
 {
@@ -209,12 +241,51 @@ void main(
   skyBoost *= 1.0 + LumaSettings.GameSettings.SkyHDRBoost * 3.0 * skyMask * skyY;
   hdr = lerp(hdr, fade.rgb, fade.a);
 
-  float3 hdrGraded = (noGrade ? hdr : LUTGradeHDR(hdr, d)) * lerp(skyBoost, 1.0, fade.a);
-  float3 sdrScene = saturate(t1.Sample(s1, v2).rgb * GetHMAExposure(cb4[41].z) * LumaSettings.GameSettings.Exposure);
-  float3 sdrRef = noGrade ? lerp(sdrScene, fade.rgb, fade.a) : LUTGrade(sdrScene, fade, d);
   float restore = LumaSettings.GameSettings.VanillaHueRestore;
-  if (restore > 0.0)
-    hdrGraded = RestoreHueAndChrominance(hdrGraded, sdrRef, 0.75 * restore, restore);  // Luma bloom is added after the grade, linearly: added before it, anything pushed past white went through the grade's steep
+  float3 hdrGraded;
+  if (LumaSettings.GameSettings.TonemapVersion == 0)
+  {
+    hdrGraded = (noGrade ? hdr : LUTGradeHDR(hdr, d)) * lerp(skyBoost, 1.0, fade.a);
+    float3 sdrScene = saturate(t1.Sample(s1, v2).rgb * GetHMAExposure(cb4[41].z) * LumaSettings.GameSettings.Exposure);
+    float3 sdrRef = noGrade ? lerp(sdrScene, fade.rgb, fade.a) : LUTGrade(sdrScene, fade, d);
+    if (restore > 0.0)
+      hdrGraded = RestoreHueAndChrominance(hdrGraded, sdrRef, 0.75 * restore, restore);
+  }
+  else
+  {
+    float3 neutral = NeutralCompress(hdr);
+    float3 neutralGraded = neutral;
+    if (!noGrade)
+    {
+      neutralGraded = LUTGradeNeutral(neutral, d);
+      float3 floorC = LUTGradeNeutral(0.0, d);
+      neutralGraded = max(neutralGraded - floorC * saturate(1.0 - GetLuminance(neutral) / 0.18) * LumaSettings.GameSettings.BlackFloorRemoval, 0.0);
+    }
+    hdrGraded = UpgradeToneMap(hdr, neutral, neutralGraded, 1.0) * lerp(skyBoost, 1.0, fade.a);
+    if (restore > 0.0)
+      hdrGraded = RestoreHueAndChrominance(hdrGraded, neutralGraded * lerp(skyBoost, 1.0, fade.a), 0.75 * restore, restore);
+  }
+  if (!noGrade && restore > 0.0)
+  {
+    float3 vanillaScene = saturate(t1.Sample(s1, v2).rgb * cb4[41].z);
+    float3 vanillaRef = LUTGrade(vanillaScene, fade, d);
+    float vanillaY = GetLuminance(vanillaRef);
+    float gradedY = GetLuminance(hdrGraded);
+    if (vanillaY > 1e-6 && gradedY > 0.0)
+    {
+      float sceneY = GetLuminance(vanillaScene);
+      // Near true black the raw scene hue is noise (e.g. pure green 1e-5 pixels drew green speckles): fade to vanilla's graded hue.
+      // The LUT adds a coloured black floor (blue in some maps): strip it (faded out by mid grey, like BlackFloorRemoval) so its hue
+      // doesn't tint shadows once they are scaled to the brighter HDR level.
+      float3 vanillaHue = max(vanillaRef - LUTGrade(0.0, fade, d) * saturate(1.0 - vanillaY / 0.18), 0.0);
+      float vanillaHueY = GetLuminance(vanillaHue);
+      float3 vanillaTarget = vanillaHueY > 1e-6 ? vanillaHue * (gradedY / vanillaHueY) : gradedY.xxx;
+      float3 sceneTarget = sceneY > 1e-6 ? lerp(vanillaTarget, vanillaScene * (gradedY / sceneY), smoothstep(0.0005, 0.003, sceneY)) : vanillaTarget;
+      float3 shadowTarget = lerp(sceneTarget, vanillaTarget, smoothstep(0.009, 0.030, sceneY));
+      hdrGraded = lerp(hdrGraded, shadowTarget, (1.0 - smoothstep(0.035, 0.14, vanillaY)) * restore);
+    }
+  }
+  // Luma bloom is added after the grade, linearly: added before it, anything pushed past white went through the grade's steep
   // above-white extension (sqrt space, then squared) and blew highlights out (~5x at p99).
   if (LumaSettings.GameSettings.LumaBloom != 0)
   {
@@ -242,7 +313,7 @@ void main(
   hdrGraded = Y + (hdrGraded - Y) * lerp(1.0, LumaSettings.GameSettings.HighlightSaturation, w);
 
   // Highlight compression: soft-rolls graded luminance above SDR white (0 = off, 1 = ceiling 1.25x white).
-  if (LumaSettings.GameSettings.HighlightCompression > 0.0)
+  if (LumaSettings.GameSettings.TonemapVersion == 0 && LumaSettings.GameSettings.HighlightCompression > 0.0)
   {
     float Yhc = GetLuminance(hdrGraded);
     if (Yhc > 1.0)
