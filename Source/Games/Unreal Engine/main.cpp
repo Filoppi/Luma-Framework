@@ -9,6 +9,17 @@
 
 namespace
 {
+   bool IsBorderlands3()
+   {
+      static const bool matched = [] {
+         wchar_t path[MAX_PATH] = {};
+         const DWORD length = GetModuleFileNameW(nullptr, path, MAX_PATH);
+         return length > 0 && length < MAX_PATH &&
+            _wcsicmp(std::filesystem::path(path).filename().c_str(), L"Borderlands3.exe") == 0;
+      }();
+      return matched;
+   }
+
    ShaderHashesList shader_hashes_TAA;
    ShaderHashesList shader_hashes_TAA_Candidates;
    ShaderHashesList shader_hashes_SSAO;      // Added SSAO list
@@ -128,6 +139,19 @@ struct GameDeviceDataUnrealEngine final : public GameDeviceData
    com_ptr<ID3D11Resource> sr_drawn_source;
    com_ptr<ID3D11Texture2D> sr_drawn_output; // The TAA output or "sr_output_color"
    uint2 sr_drawn_size = {};
+   bool bl3_pending = false;
+   bool bl3_applied = false;
+   bool bl3_reset = true;
+   int bl3_last_result = -1;
+   SR::SettingsData bl3_settings;
+   SR::SuperResolutionImpl::DrawData bl3_draw;
+   com_ptr<ID3D11Resource> bl3_post;
+   com_ptr<ID3D11Texture2D> bl3_input;
+   com_ptr<ID3D11Texture2D> bl3_output;
+   com_ptr<ID3D11Texture2D> bl3_display;
+   com_ptr<ID3D11ShaderResourceView> bl3_view;
+   uint2 bl3_logged_input = {};
+   uint2 bl3_logged_output = {};
 #endif // ENABLE_SR
    float4 render_resolution = {0.0f, 0.0f, 0.0f, 0.0f};
    float4 viewport_rect = {0.0f, 0.0f, 0.0f, 0.0f};
@@ -615,6 +639,122 @@ public:
       GameDeviceDataUnrealEngine& game_device_data = GetGameDeviceData(device_data);
       bool is_compute_shader = stages == reshade::api::shader_stage::all_compute;
 
+      // BL3's observed post stack writes a tonemapped color to CS u0. The next
+      // fullscreen pass samples that same resource from PS t0 before UI draws.
+      if (game_device_data.bl3_pending && native_device_context->GetType() == D3D11_DEVICE_CONTEXT_IMMEDIATE)
+      {
+         auto& bl = game_device_data;
+         if (is_compute_shader && original_shader_hashes.compute_shaders[0] == 0x50653089u)
+         {
+            com_ptr<ID3D11UnorderedAccessView> post;
+            native_device_context->CSGetUnorderedAccessViews(0, 1, &post);
+            bl.bl3_post = nullptr;
+            if (post) post->GetResource(&bl.bl3_post);
+         }
+         else if (!is_compute_shader && original_shader_hashes.pixel_shaders[0] == 0x57192B01u &&
+                  bl.bl3_post && original_draw_dispatch_func && *original_draw_dispatch_func &&
+                  device_data.sr_type != SR::Type::None && !device_data.sr_suppressed)
+         {
+            com_ptr<ID3D11ShaderResourceView> slot;
+            com_ptr<ID3D11RenderTargetView> target;
+            native_device_context->PSGetShaderResources(0, 1, &slot);
+            native_device_context->OMGetRenderTargets(1, &target, nullptr);
+            com_ptr<ID3D11Resource> src, dst;
+            if (slot) slot->GetResource(&src);
+            if (target) target->GetResource(&dst);
+            com_ptr<ID3D11Texture2D> in_tex, out_tex;
+            if (src && src.get() == bl.bl3_post.get() && dst &&
+                SUCCEEDED(src->QueryInterface(&in_tex)) && SUCCEEDED(dst->QueryInterface(&out_tex)))
+            {
+               D3D11_TEXTURE2D_DESC in{}, out{};
+               in_tex->GetDesc(&in);
+               out_tex->GetDesc(&out);
+               D3D11_SHADER_RESOURCE_VIEW_DESC sv{};
+               slot->GetDesc(&sv);
+               const bool rgba = sv.Format == DXGI_FORMAT_R8G8B8A8_UNORM || sv.Format == DXGI_FORMAT_R8G8B8A8_UNORM_SRGB;
+               const UINT bl3_out_w = UINT(device_data.output_resolution.x), bl3_out_h = UINT(device_data.output_resolution.y);
+               const long long bl3_lhs = (long long)in.Width * out.Height, bl3_rhs = (long long)in.Height * out.Width;
+               const long long bl3_aspect_err = bl3_lhs > bl3_rhs ? bl3_lhs - bl3_rhs : bl3_rhs - bl3_lhs;
+               if (in.Width < out.Width && in.Height < out.Height && out.Width == bl3_out_w && out.Height == bl3_out_h &&
+                   bl3_aspect_err <= (long long)(out.Width + out.Height) && in.Width * 4 >= out.Width &&
+                   rgba && in.MipLevels == 1 && in.ArraySize == 1 && in.SampleDesc.Count == 1 && sv.ViewDimension == D3D11_SRV_DIMENSION_TEXTURE2D)
+               {
+                  bl.bl3_pending = false;
+                  // Typed LDR input for the backend, typeless output for both UAV and the game's original SRV interpretation.
+                  auto bl3_size_differs = [](com_ptr<ID3D11Texture2D>& t, UINT w, UINT h) {
+                     if (!t) return false;
+                     D3D11_TEXTURE2D_DESC td{};
+                     t->GetDesc(&td);
+                     return td.Width != w || td.Height != h;
+                  };
+                  if (bl3_size_differs(bl.bl3_input, in.Width, in.Height)) { bl.bl3_input = nullptr; bl.bl3_reset = true; }
+                  if (bl3_size_differs(bl.bl3_output, out.Width, out.Height)) { bl.bl3_output = nullptr; bl.bl3_reset = true; }
+                  if (bl3_size_differs(bl.bl3_display, out.Width, out.Height)) { bl.bl3_display = nullptr; bl.bl3_view = nullptr; }
+                  D3D11_TEXTURE2D_DESC d{};
+                  d.Width = in.Width; d.Height = in.Height;
+                  d.MipLevels = d.ArraySize = d.SampleDesc.Count = 1;
+                  d.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
+                  d.BindFlags = D3D11_BIND_SHADER_RESOURCE;
+                  if (!bl.bl3_input) native_device->CreateTexture2D(&d, nullptr, &bl.bl3_input);
+                  d.Width = out.Width; d.Height = out.Height;
+                  d.BindFlags |= D3D11_BIND_UNORDERED_ACCESS;
+                  if (!bl.bl3_output) native_device->CreateTexture2D(&d, nullptr, &bl.bl3_output);
+                  d.Format = DXGI_FORMAT_R8G8B8A8_TYPELESS;
+                  d.BindFlags = D3D11_BIND_SHADER_RESOURCE;
+                  if (!bl.bl3_display) native_device->CreateTexture2D(&d, nullptr, &bl.bl3_display);
+                  if (bl.bl3_view)
+                  {
+                     D3D11_SHADER_RESOURCE_VIEW_DESC old{};
+                     bl.bl3_view->GetDesc(&old);
+                     if (old.Format != sv.Format) bl.bl3_view = nullptr;
+                  }
+                  if (bl.bl3_display && !bl.bl3_view)
+                     native_device->CreateShaderResourceView(bl.bl3_display.get(), &sv, &bl.bl3_view);
+                  auto* instance = device_data.GetSRInstanceData();
+                  if (bl.bl3_input && bl.bl3_output && bl.bl3_view && instance)
+                  {
+                     auto& impl = sr_implementations[device_data.sr_type];
+                     DrawStateStack<DrawStateStackType::FullGraphics> gfx;
+                     DrawStateStack<DrawStateStackType::Compute> cs;
+                     gfx.Cache(native_device_context, device_data.uav_max_count);
+                     cs.Cache(native_device_context, device_data.uav_max_count);
+                     native_device_context->CopyResource(bl.bl3_input.get(), src.get());
+                     auto draw = bl.bl3_draw;
+                     draw.source_color = bl.bl3_input.get();
+                     draw.output_color = bl.bl3_output.get();
+                     draw.depth_buffer = bl.depth_buffer.get();
+                     draw.motion_vectors = bl.sr_motion_vectors.get();
+                     draw.pre_exposure = 1.f;
+                     draw.reset |= bl.bl3_reset;
+                     bool ok = impl->UpdateSettings(instance, native_device_context, bl.bl3_settings) &&
+                               impl->Draw(instance, native_device_context, draw);
+                     gfx.Restore(native_device_context);
+                     cs.Restore(native_device_context);
+                     if (bl.bl3_last_result != int(ok))
+                     {
+                        reshade::log::message(reshade::log::level::info, ok ?
+                              std::format("BL3 upscale applied: {}x{} -> {}x{} at PS 57192B01", in.Width, in.Height, out.Width, out.Height).c_str() :
+                              "BL3 upscale: backend declined; using native pass");
+                        bl.bl3_last_result = int(ok);
+                     }
+                     if (ok)
+                     {
+                        native_device_context->CopyResource(bl.bl3_display.get(), bl.bl3_output.get());
+                        ID3D11ShaderResourceView* replacement = bl.bl3_view.get();
+                        native_device_context->PSSetShaderResources(0, 1, &replacement);
+                        (*original_draw_dispatch_func)();
+                        ID3D11ShaderResourceView* previous = slot.get();
+                        native_device_context->PSSetShaderResources(0, 1, &previous);
+                        bl.bl3_applied = true;
+                        device_data.has_drawn_sr = true;
+                        return DrawOrDispatchOverrideType::Replaced;
+                     }
+                  }
+               }
+            }
+         }
+      }
+
       // TODO: filter then to a more optimized list after confirming them
       // Find the shader that reads the tonemap LUT to do the per tonemapping.
       // This usually happens after every other post process and TAA, just before UI, and directly writes on the swapchain.
@@ -789,7 +929,13 @@ public:
 
             if (std::fabs(output_aspect_ratio - swapchain_aspect_ratio) > FLT_EPSILON)
                continue;
-            if (desc.Width < device_data.render_resolution.x || desc.Height < device_data.render_resolution.y)
+            // Before the view buffer is identified the framework can still report the display size.
+            // Allow the two TAA permutations observed in BL3 to probe its scaled (25%-100%) scene textures.
+            const bool bl3_scaled_candidate = IsBorderlands3() &&
+               (shader_hash == 0x09EE1A63u || shader_hash == 0x06BDEC93u) &&
+               desc.Width * 4 >= device_data.output_resolution.x && desc.Height * 4 >= device_data.output_resolution.y &&
+               desc.Width <= device_data.output_resolution.x && desc.Height <= device_data.output_resolution.y;
+            if (!bl3_scaled_candidate && (desc.Width < device_data.render_resolution.x || desc.Height < device_data.render_resolution.y))
                continue;
 
             switch (desc.Format)
@@ -959,9 +1105,32 @@ public:
             native_device_context->RSGetViewports(&num_viewports, &viewport);
             // game_device_data.viewport_rect         = {viewport.TopLeftX, viewport.TopLeftY, viewport.Width, viewport.Height};
             // game_device_data.render_resolution     = {(float)taa_output_texture_desc.Width, (float)taa_output_texture_desc.Height, 1.0f / (float)taa_output_texture_desc.Width, 1.0f / (float)taa_output_texture_desc.Height};
+            if (IsBorderlands3())
+            {
+               // OnUnmapBufferRegion validated ViewSizeAndInvSize and the jittered projection.
+               const float w = device_data.render_resolution.x;
+               const float h = device_data.render_resolution.y;
+               if (w <= 0 || h <= 0)
+                  return DrawOrDispatchOverrideType::None;
+               game_device_data.render_resolution = {w, h, 1.f / w, 1.f / h};
+               game_device_data.viewport_rect = {0.f, 0.f, w, h};
+            }
             device_data.sr_render_resolution_scale = 1.0f; // DLAA only
 
             const uint2 sr_output_size = GetSROutputSize(native_device_context, game_device_data, is_compute_shader, taa_shader_info, taa_output_texture_desc);
+            if (IsBorderlands3())
+            {
+               const uint2 input = {UINT(game_device_data.render_resolution.x), UINT(game_device_data.render_resolution.y)};
+               if (input != game_device_data.bl3_logged_input || sr_output_size != game_device_data.bl3_logged_output)
+               {
+                  reshade::log::message(reshade::log::level::info, std::format("BL3 SR: view {}x{}, TAA output {}x{}, texture {}x{}", input.x, input.y, sr_output_size.x, sr_output_size.y, taa_output_texture_desc.Width, taa_output_texture_desc.Height).c_str());
+                  game_device_data.bl3_logged_input = input;
+                  game_device_data.bl3_logged_output = sr_output_size;
+               }
+               if (!sr_output_size.x || !sr_output_size.y)
+                  return DrawOrDispatchOverrideType::None;
+               device_data.sr_render_resolution_scale = float(input.y) / float(sr_output_size.y);
+            }
             const bool sr_output_is_partial = sr_output_size != uint2{taa_output_texture_desc.Width, taa_output_texture_desc.Height}; // SR then writes into a copy of the output area
 
             SR::SettingsData settings_data;
@@ -978,7 +1147,13 @@ public:
             settings_data.mvs_x_scale = 1.0f;
             settings_data.mvs_y_scale = 1.0f;
             const bool sr_output_supported = sr_output_size.x >= sr_instance_data->min_resolution && sr_output_size.y >= sr_instance_data->min_resolution;
-            const bool sr_settings_updated = sr_output_supported && sr_implementations[device_data.sr_type]->UpdateSettings(sr_instance_data, native_device_context, settings_data);
+            const bool defer_bl3 = IsBorderlands3() && UINT(settings_data.render_width) < UINT(device_data.output_resolution.x) &&
+               UINT(settings_data.render_height) < UINT(device_data.output_resolution.y) &&
+               sr_output_size.x == UINT(settings_data.render_width) && sr_output_size.y == UINT(settings_data.render_height) &&
+               native_device_context->GetType() == D3D11_DEVICE_CONTEXT_IMMEDIATE;
+            if (defer_bl3 && game_device_data.bl3_pending)
+               return DrawOrDispatchOverrideType::None;
+            const bool sr_settings_updated = defer_bl3 || (sr_output_supported && sr_implementations[device_data.sr_type]->UpdateSettings(sr_instance_data, native_device_context, settings_data));
 
             constexpr bool dlss_use_native_uav = true;
             bool dlss_output_supports_uav = dlss_use_native_uav && (taa_output_texture_desc.BindFlags & D3D11_BIND_UNORDERED_ACCESS) != 0 && !sr_output_is_partial;
@@ -1068,7 +1243,7 @@ public:
                   }
                }
 
-               if (taa_shader_info.has_multiple_render_targets)
+               if (!defer_bl3 && taa_shader_info.has_multiple_render_targets)
                {
                   // Call original draw to populate all render targets then replace the first one later with DLSS output
                   if (original_draw_dispatch_func && *original_draw_dispatch_func)
@@ -1090,6 +1265,11 @@ public:
                   SetLumaConstantBuffers(native_device_context, cmd_list_data, device_data, stages, LumaConstantBufferType::LumaData, 0, 0, 0.f, 0.f, do_safety_checks);
                }
 
+               if (IsBorderlands3() && !is_compute_shader)
+               {
+                  D3D11_VIEWPORT decode_view = {0.f, 0.f, game_device_data.render_resolution.x, game_device_data.render_resolution.y, 0.f, 1.f};
+                  native_device_context->RSSetViewports(1, &decode_view);
+               }
                DecodeMotionVectors(is_compute_shader, native_device_context, device_data, taa_shader_info);
                ID3D11RenderTargetView* const* rtvs_const = (ID3D11RenderTargetView**)std::addressof(render_target_views[0]);
                native_device_context->OMSetRenderTargets(D3D11_SIMULTANEOUS_RENDER_TARGET_COUNT, rtvs_const, depth_stencil_view.get());
@@ -1112,6 +1292,24 @@ public:
                draw_data.near_plane = game_device_data.near_plane / 100.0f;
                draw_data.far_plane = FLT_MAX; // TODO: made up values
                draw_data.vert_fov = game_device_data.fov_y;
+
+               if (defer_bl3)
+               {
+                  draw_state_stack.Restore(native_device_context);
+                  compute_state_stack.Restore(native_device_context);
+                  game_device_data.bl3_settings = settings_data;
+                  game_device_data.bl3_settings.output_width = UINT(device_data.output_resolution.x);
+                  game_device_data.bl3_settings.output_height = UINT(device_data.output_resolution.y);
+                  game_device_data.bl3_settings.hdr = false;
+                  game_device_data.bl3_settings.auto_exposure = false;
+                  game_device_data.bl3_draw = draw_data;
+                  game_device_data.bl3_pending = true;
+                  game_device_data.bl3_draw.source_color = nullptr;
+                  game_device_data.bl3_draw.output_color = nullptr;
+                  game_device_data.sr_source_color = nullptr;
+                  if (dlss_output_supports_uav) device_data.sr_output_color = nullptr;
+                  return DrawOrDispatchOverrideType::None; // Preserve UE's native TAA and intermediate effects.
+               }
 
                bool dlss_succeeded = sr_implementations[device_data.sr_type]->Draw(sr_instance_data, native_device_context, draw_data);
                draw_state_stack.Restore(native_device_context);
@@ -1161,6 +1359,10 @@ public:
    void OnPresent(ID3D11Device* native_device, DeviceData& device_data) override
    {
       auto& game_device_data = GetGameDeviceData(device_data);
+      game_device_data.bl3_reset = !game_device_data.bl3_applied;
+      game_device_data.bl3_applied = false;
+      game_device_data.bl3_pending = false;
+      game_device_data.bl3_post = nullptr;
       game_device_data.found_per_view_globals = false;
       game_device_data.camera_cut = !device_data.taa_detected && !device_data.has_drawn_sr && !device_data.force_reset_sr;
       device_data.has_drawn_sr = false;
