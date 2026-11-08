@@ -22,9 +22,9 @@ foreach ($m in [regex]::Matches($sln, 'Project\("\{([^}]+)\}"\) = "([^"]+)", "([
     $dir = $path -replace '\\', '/' # the solution uses Windows separators, and this also runs on Linux
     $projects[$guid] = [pscustomobject]@{ Name = $name; Path = $path; Dir = $dir.Substring(0, $dir.LastIndexOf('/')); Cells = @() }
 }
-foreach ($m in [regex]::Matches($sln, '\{([0-9A-Fa-f-]+)\}\.([^|\r\n]+\|[^.\r\n]+)\.Build\.0 = ([^\r\n]+)')) {
-    $guid, $cell, $mapped = $m.Groups[1].Value, $m.Groups[2].Value, $m.Groups[3].Value.Trim()
-    if ($projects.ContainsKey($guid) -and $mapped -eq $cell) { $projects[$guid].Cells += $cell }
+foreach ($m in [regex]::Matches($sln, '\{([0-9A-Fa-f-]+)\}\.([^|\r\n]+\|[^.\r\n]+)\.Build\.0 = ')) {
+    $guid, $cell = $m.Groups[1].Value, $m.Groups[2].Value
+    if ($projects.ContainsKey($guid)) { $projects[$guid].Cells += $cell }
 }
 
 $selected = $null # $null means all of them
@@ -48,6 +48,14 @@ if ($EventName -eq "pull_request") {
             }
             $selected[$owner.Name] = $true
         }
+    }
+}
+
+# A selected project also builds the projects it depends on in the solution (the x64 SR Bridge Helper a game packages), even if the PR doesn't touch them
+if ($null -ne $selected) {
+    foreach ($m in [regex]::Matches($sln, '"\{([^}]+)\}"\s+ProjectSection\(ProjectDependencies\) = postProject(.*?)EndProjectSection', 'Singleline')) {
+        if (-not $selected[$projects[$m.Groups[1].Value].Name]) { continue }
+        foreach ($dependency in [regex]::Matches($m.Groups[2].Value, '\{([^}]+)\} =')) { $selected[$projects[$dependency.Groups[1].Value].Name] = $true }
     }
 }
 
