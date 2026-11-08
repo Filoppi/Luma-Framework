@@ -8,6 +8,7 @@
 #include "Upscaling.cpp"
 
 #include <array>
+#include "Fixes/Integration.hpp"
 
 namespace
 {
@@ -290,6 +291,7 @@ public:
 #else
       (void)async;
 #endif
+      if (async) QuantumBreakFixes::Initialize();
       RuntimeConfig::ApplyUltrawidePatches();
 
       // QB custom shaders reserve these slots for Luma settings/data during the temporal resolve replacement.
@@ -492,6 +494,7 @@ public:
       ImGui::NewLine();
 
       // Keep user-facing grading/effects controls above the SR tuning/debug block.
+      if (QuantumBreakFixes::Draw()) device_data.force_reset_sr = true;
       Settings::DrawAll(runtime);
       QuantumBreakUpscaling::DrawSettings(device_data);
 
@@ -543,9 +546,8 @@ public:
                   "\n\nThird Party:"
                   "\nReShade"
                   "\nImGui"
-#if ENABLE_SR
-                  "\nMinHook (native camera / jitter) - Copyright (c) 2009-2017 Tsuda Kageyu. Licensed under BSD-2-Clause."
-#endif
+                  "\nMouse/input and native effects fixes - Mouse Fix contributors (MIT)."
+                  "\nMinHook (native fixes / camera / jitter) - Copyright (c) 2009-2017 Tsuda Kageyu. Licensed under BSD-2-Clause."
                   "\nLUT Scaling and Film Grain (from RenoDX) - Copyright (c) 2025 Carlos Lopez Jr. Licensed under MIT."
                   "");
       static const std::string renodx_license_link = std::string("RenoDX MIT License ") + std::string(ICON_FK_SEARCH);
