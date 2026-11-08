@@ -1,0 +1,39 @@
+#include <winres.h>
+
+// Luma has no public version numbers: bump this with the helper's protocol ("SRBridgeProtocol.h")
+#define LUMA_UPSCALER_VERSION 1, 0, 0, 0
+#define LUMA_UPSCALER_VERSION_STRING "1.0.0.0"
+
+// The exe's icon (the first icon resource)
+IDI_ICON1 ICON "Luma-Upscaler.ico"
+
+VS_VERSION_INFO VERSIONINFO
+FILEVERSION LUMA_UPSCALER_VERSION
+PRODUCTVERSION LUMA_UPSCALER_VERSION
+FILEFLAGSMASK VS_FFI_FILEFLAGSMASK
+FILEFLAGS 0
+FILEOS VOS_NT_WINDOWS32
+FILETYPE VFT_APP
+FILESUBTYPE VFT2_UNKNOWN
+BEGIN
+   BLOCK "StringFileInfo"
+   BEGIN
+      BLOCK "040904B0"
+      BEGIN
+         VALUE "CompanyName", "Luma Framework"
+         VALUE "FileDescription", "Luma Upscaler: DLSS, FSR and XeSS for 32-bit games"
+         VALUE "FileVersion", LUMA_UPSCALER_VERSION_STRING
+         VALUE "InternalName", "Luma-Upscaler"
+         VALUE "LegalCopyright", "Copyright (c) 2026 DristoforColumb"
+         VALUE "LegalTrademarks", "NVIDIA DLSS is a trademark of NVIDIA Corporation. AMD FidelityFX is a trademark of Advanced Micro Devices, Inc. Intel XeSS is a trademark of Intel Corporation."
+         VALUE "OriginalFilename", "Luma-Upscaler.exe"
+         VALUE "ProductName", "Luma"
+         VALUE "ProductVersion", LUMA_UPSCALER_VERSION_STRING
+         VALUE "Comments", "Started by the Luma ReShade addon of a 32-bit game to run DLSS, FSR or XeSS, which are 64-bit only. It exits with the game. Source: https://github.com/Filoppi/Luma-Framework (Source/Tools/SR Bridge Helper)"
+      END
+   END
+   BLOCK "VarFileInfo"
+   BEGIN
+      VALUE "Translation", 0x409, 1200
+   END
+END

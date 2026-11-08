@@ -147,6 +147,8 @@ Project("{8BC9CEB8-8B4A-11D0-8D11-00A0C91BC942}") = "NieR Replicant", "Source\Ga
 EndProject
 Project("{8BC9CEB8-8B4A-11D0-8D11-00A0C91BC942}") = "Sunset Overdrive", "Source\Games\Sunset Overdrive\Sunset Overdrive.vcxproj", "{3A6C5692-A5DE-46AE-8E7A-1838642DDC30}"
 EndProject
+Project("{8BC9CEB8-8B4A-11D0-8D11-00A0C91BC942}") = "SR Bridge Helper", "Source\Tools\SR Bridge Helper\SR Bridge Helper.vcxproj", "{1A1AC095-1247-455C-8FF4-D8D6051AA52A}"
+EndProject
 Global
 	GlobalSection(SolutionConfigurationPlatforms) = preSolution
 		Development-Debug|Win32 = Development-Debug|Win32
@@ -1031,6 +1033,18 @@ Global
 		{3A6C5692-A5DE-46AE-8E7A-1838642DDC30}.Test-Release|Win32.ActiveCfg = Test-Release|x64
 		{3A6C5692-A5DE-46AE-8E7A-1838642DDC30}.Test-Release|x64.ActiveCfg = Test-Release|x64
 		{3A6C5692-A5DE-46AE-8E7A-1838642DDC30}.Test-Release|x64.Build.0 = Test-Release|x64
+		{1A1AC095-1247-455C-8FF4-D8D6051AA52A}.Development-Debug|Win32.ActiveCfg = Development-Debug|x64
+		{1A1AC095-1247-455C-8FF4-D8D6051AA52A}.Development-Debug|Win32.Build.0 = Development-Debug|x64
+		{1A1AC095-1247-455C-8FF4-D8D6051AA52A}.Development-Debug|x64.ActiveCfg = Development-Debug|x64
+		{1A1AC095-1247-455C-8FF4-D8D6051AA52A}.Development-Release|Win32.ActiveCfg = Development-Release|x64
+		{1A1AC095-1247-455C-8FF4-D8D6051AA52A}.Development-Release|Win32.Build.0 = Development-Release|x64
+		{1A1AC095-1247-455C-8FF4-D8D6051AA52A}.Development-Release|x64.ActiveCfg = Development-Release|x64
+		{1A1AC095-1247-455C-8FF4-D8D6051AA52A}.Publishing-Release|Win32.ActiveCfg = Publishing-Release|x64
+		{1A1AC095-1247-455C-8FF4-D8D6051AA52A}.Publishing-Release|Win32.Build.0 = Publishing-Release|x64
+		{1A1AC095-1247-455C-8FF4-D8D6051AA52A}.Publishing-Release|x64.ActiveCfg = Publishing-Release|x64
+		{1A1AC095-1247-455C-8FF4-D8D6051AA52A}.Test-Release|Win32.ActiveCfg = Test-Release|x64
+		{1A1AC095-1247-455C-8FF4-D8D6051AA52A}.Test-Release|Win32.Build.0 = Test-Release|x64
+		{1A1AC095-1247-455C-8FF4-D8D6051AA52A}.Test-Release|x64.ActiveCfg = Test-Release|x64
 	EndGlobalSection
 	GlobalSection(SolutionProperties) = preSolution
 		HideSolutionNode = FALSE
