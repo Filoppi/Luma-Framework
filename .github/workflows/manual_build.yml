@@ -1,0 +1,49 @@
+name: Manual Build (bl3)
+
+# Parte da solo a ogni push sul branch bl3, oppure a mano dal pulsante "Run workflow".
+on:
+  workflow_dispatch:
+  push:
+    branches: [bl3]
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - name: Checkout (con submodule)
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Setup MSBuild
+        uses: microsoft/setup-msbuild@v2
+
+      - name: Trova la solution
+        id: sln
+        shell: pwsh
+        run: |
+          $sln = Get-ChildItem -Recurse -Filter *.sln | Select-Object -First 1
+          if (-not $sln) { throw "Nessun file .sln trovato nel repository" }
+          Write-Host "Solution: $($sln.FullName)"
+          "path=$($sln.FullName)" >> $env:GITHUB_OUTPUT
+
+      - name: Restore
+        shell: pwsh
+        run: msbuild "${{ steps.sln.outputs.path }}" /t:Restore /p:Configuration=Release /p:Platform=x64
+
+      - name: Build
+        shell: pwsh
+        run: msbuild "${{ steps.sln.outputs.path }}" /m /p:Configuration=Release /p:Platform=x64
+
+      - name: Upload mod (.addon / .dll)
+        uses: actions/upload-artifact@v4
+        with:
+          name: luma-bl3-build
+          if-no-files-found: warn
+          retention-days: 30
+          path: |
+            **/*.addon64
+            **/*.addon
+            **/Release/**/*.dll
+            !**/obj/**
+            !**/_deps/**
