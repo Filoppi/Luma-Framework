@@ -5876,7 +5876,7 @@ namespace
                if (!device_data.ui_initial_original_rtv)
                {
                   const std::shared_lock lock(device_data.mutex);
-                  targeting_swapchain = device_data.back_buffers.contains((uint64_t)rtv.get());
+                  targeting_swapchain = device_data.back_buffers.contains((uintptr_t)rtv.get());
                }
                if ((ui_separation_use_ui_hashes_only && cmd_list_data.is_known_ui_shader_bound) || targeting_swapchain || (AreViewsOfSameResource(rtv.get(), device_data.ui_initial_original_rtv.get()) && rtv_desc.Texture2D.MipSlice == 0)) // Make sure it was writing to the base mip (just in case the game did weird stuff)
                {
@@ -6085,7 +6085,7 @@ namespace
                      const uint8_t slot = auto_texture_format_upgrade_shader_hashes_data.rtv_slots[i];
                      if (rtvs[slot] != nullptr)
                      {
-                        const uint64_t prev_resource_view = reinterpret_cast<uint64_t>(rtvs[slot].get());
+                        const uint64_t prev_resource_view = reinterpret_cast<uintptr_t>(rtvs[slot].get());
                         // Already redirected to a mirror? Nothing to upgrade, keep the bound mirror.
 #if 1 // Faster // TODO: delete the branch here and in the UAV code below once verified
                         if (cmd_list_data.ps_rtvs_state[slot] >= CommandListData::ViewState::SetAndUpgraded)
@@ -6165,7 +6165,7 @@ namespace
                   const uint8_t slot = auto_texture_format_upgrade_shader_hashes_data.uav_slots[i];
                   if (uavs[slot] != nullptr)
                   {
-                     const uint64_t prev_resource_view = reinterpret_cast<uint64_t>(uavs[slot].get());
+                     const uint64_t prev_resource_view = reinterpret_cast<uintptr_t>(uavs[slot].get());
                      // Already redirected to a mirror? Nothing to upgrade, keep the bound mirror.
 #if 1 // Faster
                      if ((is_dispatch ? cmd_list_data.cs_uavs_state[slot] : cmd_list_data.ps_uavs_state[slot]) >= CommandListData::ViewState::SetAndUpgraded)
@@ -6275,7 +6275,7 @@ namespace
                         {
                            if (rtvs[i] != nullptr)
                            {
-                              const uint64_t rtv_resource = GetCachedResourceFromView(device_data, reinterpret_cast<uint64_t>(rtvs[i].get()), false, true);
+                              const uint64_t rtv_resource = GetCachedResourceFromView(device_data, reinterpret_cast<uintptr_t>(rtvs[i].get()), false, true);
                               // TODO: make a "upgraded view to IndirectUpgradedResource*" map to speed this up
                               // We need to do two lookups to pass from an upgraded view to the original resource (back to the upgraded resource struct)
                               if (auto mirror_it = std::ranges::find_if(device_data.resource_upgrades.original_resources_to_mirrored_upgraded_resources, [rtv_resource](const auto& pair) { return pair.second.mirror_handle == rtv_resource; }); mirror_it != device_data.resource_upgrades.original_resources_to_mirrored_upgraded_resources.end())
@@ -6296,7 +6296,7 @@ namespace
                         }
                         if (dsv.get())
                         {
-                           const uint64_t dsv_resource = GetCachedResourceFromView(device_data, reinterpret_cast<uint64_t>(dsv.get()), false, true);
+                           const uint64_t dsv_resource = GetCachedResourceFromView(device_data, reinterpret_cast<uintptr_t>(dsv.get()), false, true);
                            if (auto mirror_it = std::ranges::find_if(device_data.resource_upgrades.original_resources_to_mirrored_upgraded_resources, [dsv_resource](const auto& pair) { return pair.second.mirror_handle == dsv_resource; }); mirror_it != device_data.resource_upgrades.original_resources_to_mirrored_upgraded_resources.end())
                            {
                               any_scaled |= mirror_it->second.is_scaled;
@@ -6510,7 +6510,7 @@ namespace
             bool targeting_swapchain;
             {
                const std::shared_lock lock(device_data.mutex);
-               targeting_swapchain = device_data.back_buffers.contains((uint64_t)render_target_resource.get());
+               targeting_swapchain = device_data.back_buffers.contains((uintptr_t)render_target_resource.get());
             }
             // We check across all the swap chain back buffers, not just the one that will be presented this frame (we have no 100% of what swapchain will draw this frame).
             // Note that some games (e.g. Prey) compose the UI in separate render targets to then be drawn into the world (e.g. in game interactive computer screens), but these usually don't draw on any of the swapchain buffers.
@@ -10184,7 +10184,7 @@ namespace
                      // Redirect the hash
                      for (const auto& original_resource_to_mirrored_upgraded_resource : device_data.resource_upgrades.original_resources_to_mirrored_upgraded_resources)
                      {
-                        if (original_resource_to_mirrored_upgraded_resource.second.mirror_handle == uint64_t(selected_resource.get()))
+                        if (original_resource_to_mirrored_upgraded_resource.second.mirror_handle == uintptr_t(selected_resource.get()))
                         {
                            hash = std::to_string(std::hash<void*>{}((void*)original_resource_to_mirrored_upgraded_resource.first));
                            break;
@@ -10261,12 +10261,12 @@ namespace
                   {
                      std::shared_lock lock(device_data.mutex); // Note: this is probably not 100% safe, as we don't keep the resources as a com ptr, DX might destroy them as we iterate the array, but this is debug code so, whatever!
                   
-                     swapchain = device_data.back_buffers.contains(uint64_t(selected_resource.get()));
+                     swapchain = device_data.back_buffers.contains(uintptr_t(selected_resource.get()));
 
                      // Redirect the hash to the indirect texture
                      for (const auto& original_resource_to_mirrored_upgraded_resource : device_data.resource_upgrades.original_resources_to_mirrored_upgraded_resources)
                      {
-                        if (original_resource_to_mirrored_upgraded_resource.second.mirror_handle == uint64_t(selected_resource.get()))
+                        if (original_resource_to_mirrored_upgraded_resource.second.mirror_handle == uintptr_t(selected_resource.get()))
                         {
                            lock.unlock();
 
