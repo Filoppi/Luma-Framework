@@ -101,11 +101,15 @@
 #ifndef ENABLE_FIDELITY_SK
 #define ENABLE_FIDELITY_SK 0
 #endif // ENABLE_FIDELITY_SK
+// 32-bit only: DLSS, FSR and XeSS through an x64 helper process (see "SRBridge.h")
+#ifndef ENABLE_SR_BRIDGE
+#define ENABLE_SR_BRIDGE 0
+#endif // ENABLE_SR_BRIDGE
 // Automatically define "ENABLE_SR" if any SR tech is enabled
 #ifdef ENABLE_SR
 #undef ENABLE_SR
 #endif // ENABLE_SR
-#if (defined(ENABLE_NGX) && ENABLE_NGX) || (defined(ENABLE_FIDELITY_SK) && ENABLE_FIDELITY_SK) || (defined(_WIN64) && defined(ENABLE_XESS) && ENABLE_XESS && defined(ENABLE_D3D12_INTEROP) && ENABLE_D3D12_INTEROP && __has_include("xess/xess_d3d12.h")) // Same as "XeSS.h"
+#if (defined(ENABLE_NGX) && ENABLE_NGX) || (defined(ENABLE_FIDELITY_SK) && ENABLE_FIDELITY_SK) || (defined(_WIN64) && defined(ENABLE_XESS) && ENABLE_XESS && defined(ENABLE_D3D12_INTEROP) && ENABLE_D3D12_INTEROP && __has_include("xess/xess_d3d12.h")) /*Same as "XeSS.h"*/ || (ENABLE_SR_BRIDGE && !defined(_WIN64))
 #define ENABLE_SR 1
 #else
 #define ENABLE_SR 0
@@ -185,6 +189,7 @@
 #include "fsr/FSR.h" // see "ENABLE_FIDELITY_SK"
 #include "fsr/FSR4.h" // see "ENABLE_FSR4"
 #include "xess/XeSS.h" // see "ENABLE_XESS"
+#include "sr_bridge/SRBridge.h" // see "ENABLE_SR_BRIDGE"
 
 #include "includes/containers.h"
 #include "includes/globals.h"
@@ -10419,6 +10424,12 @@ namespace
             {
                xess_name = (Intel::XeSS::IsNativeDX11(xess_instance->second) ? "XeSS (Native DX11)" : "XeSS (DX12 Interop)");
             }
+#elif ENABLE_SR_BRIDGE
+            // The helper only tries the native DX11 XeSS on Intel GPUs (and doesn't report whether that worked), the ones it's auto selectable on
+            if (const auto xess_instance = device_data.sr_implementations_instances.find(SR::Type::XeSS); xess_instance != device_data.sr_implementations_instances.end() && xess_instance->second && !xess_instance->second->auto_selectable)
+            {
+               xess_name = "XeSS (DX12 Interop)";
+            }
 #endif
             const SR::Type sr_auto_type = SR::GetAutoType(device_data.sr_implementations_instances);
             const std::string auto_name = (sr_auto_type != SR::Type::None ? std::format("Auto ({})", SR::GetTypeName(sr_auto_type)) : "Auto");
@@ -10476,10 +10487,10 @@ namespace
                   AddComboItem(auto_name.c_str(), SR::UserType::Auto, sr_auto_type, sr_auto_type != SR::Type::None);
                AddComboItem("DLSS", SR::UserType::DLSS, SR::Type::DLSS, device_data.sr_implementations_instances.contains(SR::Type::DLSS));
                AddComboItem("FSR 3", SR::UserType::FSR_3, SR::Type::FSR, device_data.sr_implementations_instances.contains(SR::Type::FSR));
-#if ENABLE_FSR4
+#if ENABLE_FSR4 || ENABLE_SR_BRIDGE
                AddComboItem("FSR 4 (DX12 Interop)", SR::UserType::FSR_4, SR::Type::FSR_4, device_data.sr_implementations_instances.contains(SR::Type::FSR_4));
 #endif
-#if ENABLE_XESS
+#if ENABLE_XESS || ENABLE_SR_BRIDGE
                AddComboItem(xess_name, SR::UserType::XeSS, SR::Type::XeSS, device_data.sr_implementations_instances.contains(SR::Type::XeSS));
 #endif
                ImGui::EndCombo();
@@ -10594,6 +10605,7 @@ namespace
                auto* sr_instance_data = device_data.GetSRInstanceData();
                if (sr_instance_data)
                {
+                  sr_implementations[device_data.sr_type]->ReleaseResources(sr_instance_data);
 #if 0 // This would actually unload the previously selected SR DLL and all, making the game hitch, so it's better to just keep it in memory, especially because otherwise we need to check for compatibily again and load them again etc
                   sr_implementations[device_data.sr_type]->Deinit(sr_instance_data);
                   sr_instance_data = nullptr;
@@ -12066,6 +12078,12 @@ void Init(bool async)
 #endif
 #if ENABLE_XESS
    sr_implementations[SR::Type::XeSS] = std::make_unique<Intel::XeSS>();
+#endif
+#if ENABLE_SR_BRIDGE
+   for (const SR::Type type : {SR::Type::DLSS, SR::Type::FSR, SR::Type::FSR_4, SR::Type::XeSS})
+   {
+      sr_implementations[type] = std::make_unique<SRBridge::Bridge>(type);
+   }
 #endif
 #if DEVELOPMENT
    Mcp::Start();

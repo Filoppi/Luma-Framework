@@ -89,7 +89,8 @@ $useLumaDXP = Test-PropEnabled $vcxproj "UseLumaDXP"
 $useLumaNGX = Test-PropEnabled $vcxproj "UseLumaNGX"
 $useLumaFSR4 = (Test-PropEnabled $vcxproj "UseLumaFSR") -and (Test-PropEnabled $vcxproj "UseLumaFSR4")
 $useLumaXeSS = Test-PropEnabled $vcxproj "UseLumaXeSS"
-Write-Host "Opt-ins: UseLumaFastNoise=$useLumaFastNoise UseLumaDXP=$useLumaDXP UseLumaNGX=$useLumaNGX UseLumaFSR4=$useLumaFSR4 UseLumaXeSS=$useLumaXeSS"
+$useLumaSRBridge = ($Platform -eq "Win32") -and (Test-PropEnabled $vcxproj "UseLumaSRBridge")
+Write-Host "Opt-ins: UseLumaFastNoise=$useLumaFastNoise UseLumaDXP=$useLumaDXP UseLumaNGX=$useLumaNGX UseLumaFSR4=$useLumaFSR4 UseLumaXeSS=$useLumaXeSS UseLumaSRBridge=$useLumaSRBridge"
 
 # Locate the addon. When packaging runs from the LumaPackage build target the
 # exact build output is passed in (-AddonPath = $(TargetPath)); standalone runs
@@ -147,20 +148,29 @@ try {
     $reshadeSrc = if ($Platform -eq "Win32") { Join-Path $repoRoot "Source\External\reshade\bin\Win32\Release\ReShade32.dll" }
                   else { Join-Path $repoRoot "Source\External\reshade\bin\x64\Release\ReShade64.dll" }
     if (Test-Path $reshadeSrc) { Copy-Item $reshadeSrc -Destination (Join-Path $tempDir "dxgi.dll") -Force }
-    if ($useLumaNGX) {
+    # The SR bridge's x64 helper (a Luma.sln project, built next to the Win32 addons), which loads the dlls below
+    if ($useLumaSRBridge) {
+        $helperSrc = Join-Path $repoRoot "Binaries\Win32-$Config\Luma-Upscaler.exe"
+        if (-not (Test-Path $helperSrc)) {
+            Write-Error "Luma-Upscaler.exe not found: $helperSrc (build the ""SR Bridge Helper"" project)"
+            exit 1
+        }
+        Copy-Item $helperSrc -Destination $tempDir -Force
+    }
+    if ($useLumaNGX -or $useLumaSRBridge) {
         $ngxSrc = Join-Path $repoRoot "Source\External\NGX\bin\dev\nvngx_dlss.dll"
         if ($Config -notlike "Development*") { $ngxSrc = Join-Path $repoRoot "Source\External\NGX\bin\rel\nvngx_dlss.dll" }
         if (Test-Path $ngxSrc) { Copy-Item $ngxSrc -Destination $tempDir -Force }
     }
-    # FSR 4 loads them from next to the addon (x64 only)
-    if ($useLumaFSR4 -and $Platform -ne "Win32") {
+    # FSR 4 loads them from next to the addon (x64 only), and so does the SR bridge's helper
+    if (($useLumaFSR4 -and $Platform -ne "Win32") -or $useLumaSRBridge) {
         $ffxDir = Join-Path $repoRoot "Source\External\FidelityFX\bin"
         Copy-Item (Join-Path $ffxDir "*.dll") -Destination $tempDir -Force
         New-Item -ItemType Directory -Path "$tempDir\Licenses" -Force | Out-Null
         Copy-Item (Join-Path $ffxDir "FidelityFX_LICENSE.md") -Destination "$tempDir\Licenses" -Force
     }
-    # XeSS loads them from next to the addon (x64 only)
-    if ($useLumaXeSS -and $Platform -ne "Win32") {
+    # XeSS loads them from next to the addon (x64 only), and so does the SR bridge's helper
+    if (($useLumaXeSS -and $Platform -ne "Win32") -or $useLumaSRBridge) {
         $xessDir = Join-Path $repoRoot "Source\External\XeSS"
         Copy-Item (Join-Path $xessDir "bin\libxess.dll"), (Join-Path $xessDir "bin\libxess_dx11.dll") -Destination $tempDir -Force
         New-Item -ItemType Directory -Path "$tempDir\Licenses" -Force | Out-Null

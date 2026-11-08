@@ -16,6 +16,8 @@
     <UseLumaSafetyHook Condition="'$(UseLumaSafetyHook)'=='' and '$(UseLumaFSR)'=='true' and '$(UseLumaFSR4)'=='true'">true</UseLumaSafetyHook>
     <UseLumaSafetyHook Condition="'$(UseLumaSafetyHook)'==''">false</UseLumaSafetyHook>
     <UseLumaFastNoise Condition="'$(UseLumaFastNoise)'==''">false</UseLumaFastNoise>
+    <!-- 32-bit games: DLSS, FSR and XeSS through the x64 "SR Bridge Helper" (Source/Core/sr_bridge). package.ps1 ships it and the upscalers' dlls next to the addon. -->
+    <UseLumaSRBridge Condition="'$(UseLumaSRBridge)'==''">false</UseLumaSRBridge>
     <!-- On by default: NVAPI is a static lib that loads the driver's DLL at runtime, so it's harmless on non NVIDIA GPUs (init just fails). -->
     <UseLumaNVAPI Condition="'$(UseLumaNVAPI)'==''">true</UseLumaNVAPI>
   </PropertyGroup>
@@ -120,6 +122,9 @@
     <ClCompile Condition="'$(UseLumaSafetyHook)'=='true'">
       <AdditionalIncludeDirectories>$(LumaSafetyHookRoot)\include;$(LumaZydisRoot)\include;$(LumaZydisRoot)\dependencies\zycore\include;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
       <PreprocessorDefinitions>UNICODE;_UNICODE;ZYDIS_STATIC_BUILD;ZYCORE_STATIC_BUILD;ENABLE_SAFETYHOOK=1;%(PreprocessorDefinitions)</PreprocessorDefinitions>
+    </ClCompile>
+    <ClCompile Condition="'$(UseLumaSRBridge)'=='true'">
+      <PreprocessorDefinitions>UNICODE;_UNICODE;ENABLE_SR_BRIDGE=1;%(PreprocessorDefinitions)</PreprocessorDefinitions>
     </ClCompile>
     <ClCompile Condition="'$(UseLumaFastNoise)'=='true'">
       <PreprocessorDefinitions>UNICODE;_UNICODE;ENABLE_FAST_NOISE_TEXTURES=1;%(PreprocessorDefinitions)</PreprocessorDefinitions>
