@@ -22,7 +22,7 @@ namespace Trace
          // the upgraded one will be visible in the lists anyway
          auto RedirectMirroredRVS = [&]<typename T>(T* ptr) -> T*
          {
-            uint64_t handle = reinterpret_cast<uint64_t>(ptr);
+            uint64_t handle = reinterpret_cast<uintptr_t>(ptr);
             for (const auto& [key, value] : device_data.resource_upgrades.original_resource_views_to_mirrored_upgraded_resource_views)
             {
                if (value == handle)
@@ -37,9 +37,9 @@ namespace Trace
             {
                rv->GetResource(&resource);
 
-               const bool upgraded = device_data.resource_upgrades.original_resources_to_mirrored_upgraded_resources.contains((uint64_t)resource.get()) || device_data.resource_upgrades.upgraded_resources.contains((uint64_t)resource.get()) || (/*swapchain_upgrade_type > SwapchainUpgradeType::None &&*/ device_data.back_buffers.contains((uint64_t)resource.get())); // TODO: expose "swapchain_upgrade_type" here or something like that
+               const bool upgraded = device_data.resource_upgrades.original_resources_to_mirrored_upgraded_resources.contains((uintptr_t)resource.get()) || device_data.resource_upgrades.upgraded_resources.contains((uintptr_t)resource.get()) || (/*swapchain_upgrade_type > SwapchainUpgradeType::None &&*/ device_data.back_buffers.contains((uintptr_t)resource.get())); // TODO: expose "swapchain_upgrade_type" here or something like that
                const bool scaled = [&]() {
-                  auto it = device_data.resource_upgrades.original_resources_to_mirrored_upgraded_resources.find((uint64_t)resource.get());
+                  auto it = device_data.resource_upgrades.original_resources_to_mirrored_upgraded_resources.find((uintptr_t)resource.get());
                   return it != device_data.resource_upgrades.original_resources_to_mirrored_upgraded_resources.end() && it->second.is_scaled;
                }();
 
@@ -265,7 +265,7 @@ namespace Trace
                   if (rt_resource)
                   {
                      // If any of the set RTs are the swapchain, set it to true
-                     trace_draw_call_data.rt_is_swapchain[i] |= device_data.back_buffers.contains((uint64_t)rt_resource.get());
+                     trace_draw_call_data.rt_is_swapchain[i] |= device_data.back_buffers.contains((uintptr_t)rt_resource.get());
                      GetResourceInfo(rt_resource.get(), trace_draw_call_data.rt_size[i], trace_draw_call_data.rt_format[i], &trace_draw_call_data.rt_type_name[i], &trace_draw_call_data.rt_hash[i], &trace_draw_call_data.rt_debug_name[i]);
                
                      trace_draw_call_data.rtv_mip[i] = GetRTVMipLevel(rtv_desc);
