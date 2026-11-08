@@ -18,7 +18,8 @@ int main()
    com_ptr<ID3D11Device> device;
    com_ptr<ID3D11DeviceContext> context;
    Check(SUCCEEDED(D3D11CreateDevice(nullptr, D3D_DRIVER_TYPE_WARP, nullptr, 0, nullptr, 0,
-      D3D11_SDK_VERSION, &device, nullptr, &context)), "create WARP device");
+            D3D11_SDK_VERSION, &device, nullptr, &context)),
+      "create WARP device");
 
    // Small native resources exercise the production helper without a game or NGX dependency.
    const UINT width = 64, height = 36;
@@ -54,14 +55,13 @@ int main()
    };
 
    int cases = 0;
-   for (DXGI_FORMAT colour_format : { DXGI_FORMAT_R11G11B10_FLOAT, DXGI_FORMAT_R16G16B16A16_FLOAT })
+   for (DXGI_FORMAT colour_format : {DXGI_FORMAT_R11G11B10_FLOAT, DXGI_FORMAT_R16G16B16A16_FLOAT})
    {
-      for (DXGI_FORMAT history_format : { DXGI_FORMAT_R11G11B10_FLOAT, DXGI_FORMAT_R16G16B16A16_FLOAT })
+      for (DXGI_FORMAT history_format : {DXGI_FORMAT_R11G11B10_FLOAT, DXGI_FORMAT_R16G16B16A16_FLOAT})
       {
          com_ptr<ID3D11ShaderResourceView> bound[] = {
-            make_view(colour_format), make_view(history_format), make_view(DXGI_FORMAT_R16G16B16A16_FLOAT)
-         };
-         ID3D11ShaderResourceView* bindings[] = { bound[0].get(), bound[1].get(), bound[2].get() };
+            make_view(colour_format), make_view(history_format), make_view(DXGI_FORMAT_R16G16B16A16_FLOAT)};
+         ID3D11ShaderResourceView* bindings[] = {bound[0].get(), bound[1].get(), bound[2].get()};
          context->PSSetShaderResources(0, 3, bindings);
          com_ptr<ID3D11ShaderResourceView> live[3];
          context->PSGetShaderResources(0, 3, &live[0]);
