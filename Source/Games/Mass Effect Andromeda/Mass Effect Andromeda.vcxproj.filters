@@ -4,4 +4,7 @@
     <ClCompile Include="main.cpp" />
     <ClCompile Include="..\..\Core\unity_build.cpp" />
   </ItemGroup>
+  <ItemGroup>
+    <ClInclude Include="SMAA_AreaTex_SharpU.h" />
+  </ItemGroup>
 </Project>
