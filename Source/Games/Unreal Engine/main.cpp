@@ -393,7 +393,7 @@ public:
          }
 
 #if DEVELOPMENT
-         forced_shader_names.emplace(uint32_t(shader_hash), "Tonemap LUT");
+         forced_shader_names.emplace(uint32_t(shader_hash), "Grade/Tonemap/Encode LUT");
 #endif
 
          std::unique_ptr<std::byte[]> new_code = nullptr;
@@ -478,7 +478,7 @@ public:
          }
 
 #if DEVELOPMENT
-         forced_shader_names.emplace(uint32_t(shader_hash), "Tonemap");
+         forced_shader_names.emplace(uint32_t(shader_hash), "Grade/Tonemap/Encode");
 #endif
 
          std::unique_ptr<std::byte[]> new_code = nullptr;
@@ -626,13 +626,16 @@ public:
          else
             native_device_context->PSGetShaderResources(0, ARRAYSIZE(shader_resources), &shader_resources[0]);
 
+         // Never indirect upgrade textures until the first time we incur in this, otherwise we'd risk doing indirect upgrades before the first tonemapper call, which would be unintended
+         enable_chain_indirect_texture_format_upgrades = ChainTextureFormatUpgradesType::DirectAndIndirectDependencies;
+
          const auto shader_hash = is_compute_shader ? original_shader_hashes.compute_shaders[0] : original_shader_hashes.pixel_shaders[0];
 
          int32_t lut_srv_index = -1;
          for (size_t i = 0; i < ARRAYSIZE(shader_resources); i++)
          {
             if (shader_resources[i] == nullptr)
-               continue; // TODO: break instead? Could it be?
+               continue; // TODO: break instead? Could it be? Fair optimization
             com_ptr<ID3D11Resource> resource;
             shader_resources[i]->GetResource(&resource);
             if (resource == nullptr)
@@ -1170,8 +1173,9 @@ public:
 #endif
       game_device_data.jitter = {0.0f, 0.0f};
 
-      if (device_data.primary_command_list_data)
+      if (device_data.primary_command_list_data && enable_hdr)
       {
+         // Stop the next frame from doing indirect upgrades until the tonemapper's output
          device_data.primary_command_list_data->enable_chain_indirect_texture_format_upgrades = (uint)ChainTextureFormatUpgradesType::DirectDependencies;
       }
    }
@@ -1629,10 +1633,11 @@ BOOL APIENTRY DllMain(HMODULE hModule, DWORD ul_reason_for_call, LPVOID lpReserv
          swapchain_format_upgrade_type = TextureFormatUpgradesType::AllowedEnabled;
          swapchain_upgrade_type = SwapchainUpgradeType::scRGB;
          texture_format_upgrades_type = TextureFormatUpgradesType::AllowedEnabled;
-         enable_chain_indirect_texture_format_upgrades = ChainTextureFormatUpgradesType::DirectAndIndirectDependencies;
+         enable_chain_indirect_texture_format_upgrades = ChainTextureFormatUpgradesType::DirectDependencies;
 
 #if 0 // Not needed as it's done automatically now
       // TODO: automatically upgrade all textures that sample the tonemap LUT, and all textures in between tonemapping and the swapchain final write
+         // TODO: these can mess up startup videos as they are written from the CPU.
          texture_upgrade_formats = {
             reshade::api::format::r8g8b8a8_unorm,
             reshade::api::format::r8g8b8a8_typeless,
@@ -1667,7 +1672,7 @@ BOOL APIENTRY DllMain(HMODULE hModule, DWORD ul_reason_for_call, LPVOID lpReserv
 #if 0 // Not needed as we do it through "auto_texture_format_upgrade_shader_hashes"
       // LUT is usually 3D 32x (occasionally 2D, especially in older games)
          texture_format_upgrades_lut_size = 32; // TODO: upgrade both 2D and 3D (maybe manually by detecting the shaders?)
-         texture_format_upgrades_lut_dimensions = LUTDimensions::_3D;
+         texture_format_upgrades_lut_dimensions = LUTDimensions::_2DAnd3D;
 #endif
 
          // Add per game shader hashes that require texture format upgrades, after tonemapping:
