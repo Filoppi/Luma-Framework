@@ -304,10 +304,15 @@ std::optional<reshade::api::resource_desc> ResourceUpgradeManager::GetOptionalRe
       }
       default:
       case LUTDimensions::_2D:
+      case LUTDimensions::_2DAnd3D:
       {
          // For 2D, "texture_format_upgrades_lut_size" is the height, usually they extend in width and that's squared
          type_and_size_format_filter |= format_filter && desc.type == reshade::api::resource_type::texture_2d && desc.texture.width == (texture_format_upgrades_lut_size * texture_format_upgrades_lut_size) && desc.texture.height == texture_format_upgrades_lut_size && desc.texture.depth_or_layers == 1 && desc.texture.levels == 1 && desc.texture.samples == 1;
-         break;
+         if (texture_format_upgrades_lut_dimensions != LUTDimensions::_2DAnd3D)
+         {
+            break;
+         }
+         [[fallthrough]];
       }
       case LUTDimensions::_3D:
       {

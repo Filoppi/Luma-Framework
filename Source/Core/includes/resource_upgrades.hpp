@@ -130,7 +130,8 @@ public:
    {
       _1D,
       _2D,
-      _3D
+      _3D,
+      _2DAnd3D
    };
 
    struct AutoTextureFormatUpgradeShaderHash

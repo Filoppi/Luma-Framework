@@ -7624,6 +7624,7 @@ namespace
       }
       default:
       case LUTDimensions::_2D:
+      case LUTDimensions::_2DAnd3D:
       {
          lut_dimensions = reshade::api::resource_view_type::texture_2d;
          break;
@@ -7633,6 +7634,11 @@ namespace
          lut_dimensions = reshade::api::resource_view_type::texture_3d;
          break;
       }
+      }
+      reshade::api::resource_view_type lut_dimensions_alternative = lut_dimensions;
+      if (texture_format_upgrades_lut_dimensions == LUTDimensions::_2DAnd3D)
+      {
+         lut_dimensions_alternative = reshade::api::resource_view_type::texture_3d;
       }
 
 #if 0 // TODO: delete this and "redirect_empty_resource_views_to_swapchain" or test in more games (e.g. Mafia II, Titanfall 2)
@@ -7656,7 +7662,7 @@ namespace
 #endif
 
       // In DX11 apps can not pass a "DESC" when creating resource views, and DX11 will automatically generate the default one from it, we handle it through "reshade::api::resource_view_type::unknown".
-      if (resource.handle != 0 && (desc.type == reshade::api::resource_view_type::unknown || desc.type == lut_dimensions || desc.type == reshade::api::resource_view_type::texture_2d || desc.type == reshade::api::resource_view_type::texture_2d_array || desc.type == reshade::api::resource_view_type::texture_2d_multisample || desc.type == reshade::api::resource_view_type::texture_2d_multisample_array || desc.type == reshade::api::resource_view_type::texture_cube || desc.type == reshade::api::resource_view_type::texture_cube_array))
+      if (resource.handle != 0 && (desc.type == reshade::api::resource_view_type::unknown || desc.type == lut_dimensions || desc.type == lut_dimensions_alternative || desc.type == reshade::api::resource_view_type::texture_2d || desc.type == reshade::api::resource_view_type::texture_2d_array || desc.type == reshade::api::resource_view_type::texture_2d_multisample || desc.type == reshade::api::resource_view_type::texture_2d_multisample_array || desc.type == reshade::api::resource_view_type::texture_cube || desc.type == reshade::api::resource_view_type::texture_cube_array))
       {
          const reshade::api::resource_desc resource_desc = device->get_resource_desc(resource);
 
