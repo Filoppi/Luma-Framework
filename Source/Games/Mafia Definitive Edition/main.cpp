@@ -107,6 +107,7 @@
 // UseLumaNGX is enabled in the .vcxproj, so the DLSS/DLAA code paths are compiled in.
 
 #include "..\..\Core\core.hpp"
+#include "taa_inputs.h"
 
 #include <fstream>
 #include <mutex>
@@ -139,7 +140,7 @@ static HMODULE g_own_module = nullptr;
 // on the Game object, before any device data exists, while the setting itself lives in the per
 // device data ("sr_mvs_jittered", which carries the long explanation). OnCreateDevice() copies it
 // across. The panel writes both so the two never drift.
-static int g_mvs_jittered_ini = 0;   // 0 = OFF, which is also the shipping default when the key is absent
+static int g_mvs_jittered_ini = 0; // 0 = OFF, which is also the shipping default when the key is absent
 
 // Fill the pass hash lists during static initialisation rather than in Game::OnInit.
 // Game::OnInit() *is* called (core.hpp:16137), but it runs on a provider thread and its ordering
@@ -197,7 +198,7 @@ namespace Probe
    static bool s_cap_reported = false;
 
    static int s_frame = 0;
-   static long long s_draw_calls = 0;   // every OnDrawOrDispatch call, to tell "not called" apart from "no match"
+   static long long s_draw_calls = 0; // every OnDrawOrDispatch call, to tell "not called" apart from "no match"
 
    // Resolve our own module handle without needing DllMain to have run yet.
    static HMODULE SelfModule()
@@ -206,7 +207,7 @@ namespace Probe
       if (module == nullptr)
       {
          ::GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
-                              reinterpret_cast<LPCWSTR>(&SelfModule), &module);
+            reinterpret_cast<LPCWSTR>(&SelfModule), &module);
       }
       return module;
    }
@@ -229,27 +230,48 @@ namespace Probe
    {
       switch (format)
       {
-      case DXGI_FORMAT_UNKNOWN: return "UNKNOWN";
-      case DXGI_FORMAT_R32G32B32A32_TYPELESS: return "R32G32B32A32_TYPELESS";
-      case DXGI_FORMAT_R32G32B32A32_FLOAT: return "R32G32B32A32_FLOAT";
-      case DXGI_FORMAT_R16G16B16A16_TYPELESS: return "R16G16B16A16_TYPELESS";
-      case DXGI_FORMAT_R16G16B16A16_FLOAT: return "R16G16B16A16_FLOAT";
-      case DXGI_FORMAT_R10G10B10A2_UNORM: return "R10G10B10A2_UNORM";
-      case DXGI_FORMAT_R11G11B10_FLOAT: return "R11G11B10_FLOAT";
-      case DXGI_FORMAT_R8G8B8A8_TYPELESS: return "R8G8B8A8_TYPELESS";
-      case DXGI_FORMAT_R8G8B8A8_UNORM: return "R8G8B8A8_UNORM";
-      case DXGI_FORMAT_B8G8R8A8_UNORM: return "B8G8R8A8_UNORM";
-      case DXGI_FORMAT_R32G32_TYPELESS: return "R32G32_TYPELESS";
-      case DXGI_FORMAT_R32_FLOAT: return "R32_FLOAT";
-      case DXGI_FORMAT_R32G32_FLOAT: return "R32G32_FLOAT";
-      case DXGI_FORMAT_R16G16_FLOAT: return "R16G16_FLOAT";
-      case DXGI_FORMAT_R16_FLOAT: return "R16_FLOAT";
-      case DXGI_FORMAT_R16_TYPELESS: return "R16_TYPELESS";
-      case DXGI_FORMAT_D32_FLOAT: return "D32_FLOAT";
-      case DXGI_FORMAT_R24G8_TYPELESS: return "R24G8_TYPELESS";
-      case DXGI_FORMAT_D24_UNORM_S8_UINT: return "D24_UNORM_S8_UINT";
-      case DXGI_FORMAT_R8_UNORM: return "R8_UNORM";
-      default: return nullptr;
+      case DXGI_FORMAT_UNKNOWN:
+         return "UNKNOWN";
+      case DXGI_FORMAT_R32G32B32A32_TYPELESS:
+         return "R32G32B32A32_TYPELESS";
+      case DXGI_FORMAT_R32G32B32A32_FLOAT:
+         return "R32G32B32A32_FLOAT";
+      case DXGI_FORMAT_R16G16B16A16_TYPELESS:
+         return "R16G16B16A16_TYPELESS";
+      case DXGI_FORMAT_R16G16B16A16_FLOAT:
+         return "R16G16B16A16_FLOAT";
+      case DXGI_FORMAT_R10G10B10A2_UNORM:
+         return "R10G10B10A2_UNORM";
+      case DXGI_FORMAT_R11G11B10_FLOAT:
+         return "R11G11B10_FLOAT";
+      case DXGI_FORMAT_R8G8B8A8_TYPELESS:
+         return "R8G8B8A8_TYPELESS";
+      case DXGI_FORMAT_R8G8B8A8_UNORM:
+         return "R8G8B8A8_UNORM";
+      case DXGI_FORMAT_B8G8R8A8_UNORM:
+         return "B8G8R8A8_UNORM";
+      case DXGI_FORMAT_R32G32_TYPELESS:
+         return "R32G32_TYPELESS";
+      case DXGI_FORMAT_R32_FLOAT:
+         return "R32_FLOAT";
+      case DXGI_FORMAT_R32G32_FLOAT:
+         return "R32G32_FLOAT";
+      case DXGI_FORMAT_R16G16_FLOAT:
+         return "R16G16_FLOAT";
+      case DXGI_FORMAT_R16_FLOAT:
+         return "R16_FLOAT";
+      case DXGI_FORMAT_R16_TYPELESS:
+         return "R16_TYPELESS";
+      case DXGI_FORMAT_D32_FLOAT:
+         return "D32_FLOAT";
+      case DXGI_FORMAT_R24G8_TYPELESS:
+         return "R24G8_TYPELESS";
+      case DXGI_FORMAT_D24_UNORM_S8_UINT:
+         return "D24_UNORM_S8_UINT";
+      case DXGI_FORMAT_R8_UNORM:
+         return "R8_UNORM";
+      default:
+         return nullptr;
       }
    }
 
@@ -267,7 +289,7 @@ namespace Probe
          texture_2d->GetDesc(&desc);
          const char* name = FormatName(desc.Format);
          return std::format("{}x{} {}({}) mips={} bind=0x{:X}", desc.Width, desc.Height,
-                            name ? name : "?", static_cast<int>(desc.Format), desc.MipLevels, desc.BindFlags);
+            name ? name : "?", static_cast<int>(desc.Format), desc.MipLevels, desc.BindFlags);
       }
       return "(other)";
    }
@@ -325,9 +347,9 @@ namespace Probe
    static char s_new_hashes[512] = {};
    static int s_new_hash_count = 0;
    static uint32_t s_dumped_hashes[kFrameHashMax];
-   static int s_dumped_count = -1;              // -1 = nothing dumped yet
+   static int s_dumped_count = -1; // -1 = nothing dumped yet
    static int s_dumped_frame = -1000000;
-   static constexpr int kSetDumpIntervalFrames = 90;   // at most one set dump per ~1.5 s
+   static constexpr int kSetDumpIntervalFrames = 90; // at most one set dump per ~1.5 s
 
    // Called for every draw. Lock free on purpose: it is one linear scan over the ~50 distinct
    // shaders a frame uses, and the render thread is the only writer.
@@ -433,7 +455,7 @@ namespace Probe
    }
 #endif
 
-}
+} // namespace Probe
 
 ///////////////////////////////////////////////////////////////////////
 
@@ -497,15 +519,24 @@ static const char* DepthFuncName(D3D11_COMPARISON_FUNC func)
 {
    switch (func)
    {
-   case D3D11_COMPARISON_NEVER: return "NEVER";
-   case D3D11_COMPARISON_LESS: return "LESS";
-   case D3D11_COMPARISON_EQUAL: return "EQUAL";
-   case D3D11_COMPARISON_LESS_EQUAL: return "LESS_EQUAL";
-   case D3D11_COMPARISON_GREATER: return "GREATER";
-   case D3D11_COMPARISON_NOT_EQUAL: return "NOT_EQUAL";
-   case D3D11_COMPARISON_GREATER_EQUAL: return "GREATER_EQUAL";
-   case D3D11_COMPARISON_ALWAYS: return "ALWAYS";
-   default: return "?";
+   case D3D11_COMPARISON_NEVER:
+      return "NEVER";
+   case D3D11_COMPARISON_LESS:
+      return "LESS";
+   case D3D11_COMPARISON_EQUAL:
+      return "EQUAL";
+   case D3D11_COMPARISON_LESS_EQUAL:
+      return "LESS_EQUAL";
+   case D3D11_COMPARISON_GREATER:
+      return "GREATER";
+   case D3D11_COMPARISON_NOT_EQUAL:
+      return "NOT_EQUAL";
+   case D3D11_COMPARISON_GREATER_EQUAL:
+      return "GREATER_EQUAL";
+   case D3D11_COMPARISON_ALWAYS:
+      return "ALWAYS";
+   default:
+      return "?";
    }
 }
 #endif
@@ -516,27 +547,20 @@ struct MafiaDefinitiveEditionGameDeviceData final : public GameDeviceData
    // IsUsableMainDepth is ever stored, and a rejected candidate never overwrites a good one, so
    // this always holds the last *valid* main depth (the game reuses the same texture every frame).
    com_ptr<ID3D11Resource> main_depth;
-   int main_depth_rejected = 0;   // how often a depth target was seen and rejected (shadow atlas)
+   int main_depth_rejected = 0; // how often a depth target was seen and rejected (shadow atlas)
    int main_depth_logged = 0;
    com_ptr<ID3D11Texture2D> dlss_output_color; // UAV enabled copy of the AA target if needed
-   // All-zero motion vectors, used only as the last fallback: the real motion vectors are the
-   // resolve's own t2, but DLSS refuses a null resource, so a frame with a missing MV slot is
-   // still allowed to run (DLAA at native res tolerates "no motion" much better than a refusal).
-   com_ptr<ID3D11Texture2D> placeholder_motion_vectors;
-
-   // The raw SRV handles the AA pass had bound, so the auto-detect below (and dev builds'
-   // binding dump) can look at their formats.
+   // The live resolve bindings, retained for the input diagnostics below.
    com_ptr<ID3D11ShaderResourceView> aa_srv[8];
    // The resolves bind t0 = current HDR colour, t1 = history, t2 = UV space motion vectors.
-   // Auto-detection by format is what ships: slot 0 is R11G11B10_FLOAT during gameplay but a
-   // single channel R32_FLOAT in the menus, and DLSS fed that buffer is what produced the
-   // "oil painting then black" report of an early build.
-   int aa_auto_slots = 1;      // pick colour/motion-vector slots by format, with a safety gate
-   int aa_source_slot = 0;     // manual override, only used when aa_auto_slots is off
-   int aa_mv_slot = 2;         // manual override, only used when aa_auto_slots is off
+   // RenoDX can hot-swap both colour and history to FP16; format alone cannot identify a role.
+   // R32 inputs are still rejected, including the unsupported menu binding seen in early probes.
+   int aa_auto_slots = 1;  // use the verified t0/t2 layout, with descriptor validation
+   int aa_source_slot = 0; // manual override, only used when aa_auto_slots is off
+   int aa_mv_slot = 2;     // manual override, only used when aa_auto_slots is off
    // The TAA shader computes prevUV = curUV + t2.xy, but DLSS expects the opposite sign
    // convention. A negative mvs scale flips it without needing a pass of our own.
-   int mv_scale_sign = 1;   // +1 = as the game writes it, -1 = flipped
+   int mv_scale_sign = 1; // +1 = as the game writes it, -1 = flipped
 #if DEVELOPMENT
    // Where the SR draw is triggered. 0 = at the temporal resolve itself (the shipping mode),
    // 1 = at 0xA75736C5, the copy pass that runs right before the TAA (Mafia III style, because
@@ -552,7 +576,7 @@ struct MafiaDefinitiveEditionGameDeviceData final : public GameDeviceData
    // To tame the sharpening, zero cb0[0].z (the strength) in its constant buffer instead.
    bool skip_game_sharpen = false;
 #endif
-   int warned_no_source = 0;
+   int invalid_output_reports = 0;
    // Whether to cancel the resolves after the first one in a frame. This engine resolves the image
    // in *layers*: the same TAA shader is called more than once per frame "for different parts of
    // the image" (Mafia III's own mod says 3 times; this game does it twice), and the second call
@@ -568,7 +592,11 @@ struct MafiaDefinitiveEditionGameDeviceData final : public GameDeviceData
    bool cancel_second_taa = true;
 #if DEVELOPMENT
    // --- diagnostics: dump the draws that lead up to the resolve (one shot) -----------------
-   struct PreTaaEntry { uint32_t hash = 0; char rtv[160] = {}; };
+   struct PreTaaEntry
+   {
+      uint32_t hash = 0;
+      char rtv[160] = {};
+   };
    PreTaaEntry s_pre_taa_ring[kPreTaaRing] = {};
    int s_pre_taa_ring_pos = 0;
    int s_pre_taa_dumped = 0;
@@ -583,7 +611,11 @@ struct MafiaDefinitiveEditionGameDeviceData final : public GameDeviceData
    // the sharpening we are looking for is folded into another pass. This records the draws that
    // happen *after* the tonemapper until Present, which is where the final image is assembled, so
    // the real candidate can be read straight off the log instead of guessed at.
-   struct TailEntry { uint32_t hash = 0; char rtv[160] = {}; };
+   struct TailEntry
+   {
+      uint32_t hash = 0;
+      char rtv[160] = {};
+   };
    TailEntry s_tail_ring[kTailRing];
    int s_tail_ring_pos = 0;
    int s_tail_tonemap_seen = 0;
@@ -605,8 +637,8 @@ struct MafiaDefinitiveEditionGameDeviceData final : public GameDeviceData
    struct PostPassLog
    {
       uint32_t hash = 0;
-      int draws = 0;                 // draws of this shader seen since the arm
-      bool from_tonemap = false;     // seen on the tonemapper draw itself, not further down the tail
+      int draws = 0;             // draws of this shader seen since the arm
+      bool from_tonemap = false; // seen on the tonemapper draw itself, not further down the tail
       bool base_set[kPostSlots] = {};
       float base[kPostSlots][kPostFloats] = {};
       float last[kPostSlots][kPostFloats] = {};
@@ -615,9 +647,9 @@ struct MafiaDefinitiveEditionGameDeviceData final : public GameDeviceData
    int s_post_count = 0;
    com_ptr<ID3D11Buffer> cb_post_staging[kPostSlots];
    uint32_t cb_post_staging_size[kPostSlots] = {};
-   int s_post_cb_arm = 0;   // nonzero while the panel button's window is open
-   int s_post_cb_arm_frame = 0;   // the frame it was granted on, the window is counted in frames
-   int s_post_tonemap_seen = 0;   // the tonemapper has run this frame, so the tail has started
+   int s_post_cb_arm = 0;       // nonzero while the panel button's window is open
+   int s_post_cb_arm_frame = 0; // the frame it was granted on, the window is counted in frames
+   int s_post_tonemap_seen = 0; // the tonemapper has run this frame, so the tail has started
    // --- One shot, automatic: the tonemapper's own constants and inputs -----------------------
    // Reading absolute values never needed a button, and needing one was a reliable way to end up
    // with an empty log: two runs in a row produced nothing because the panel button was not pressed.
@@ -627,7 +659,7 @@ struct MafiaDefinitiveEditionGameDeviceData final : public GameDeviceData
    // What it buys, from the disassembly of 0x916B1D65: cb0[3].x is the tonemap operator index,
    // cb0[2].x its gamma exponent, cb1[4]/cb1[5] the Uncharted2 parameters, and t4 is a 1x1 texture
    // that holds the exposure and the white point, i.e. exactly what an HDR replacement needs.
-   int s_tm_dump_state = 0;   // 0 idle, 1 dumped
+   int s_tm_dump_state = 0; // 0 idle, 1 dumped
    com_ptr<ID3D11Buffer> cb_tm_staging[2];
    uint32_t cb_tm_staging_size[2] = {};
    com_ptr<ID3D11Texture2D> tex_tm_staging;
@@ -644,9 +676,9 @@ struct MafiaDefinitiveEditionGameDeviceData final : public GameDeviceData
    // buffer every frame, so it has to be rewritten every frame too; that is why this happens in
    // the draw hook rather than once. UpdateSubresource on a constant buffer is legal from here and
    // returns E_FAIL instead of crashing if the buffer turns out to be immutable.
-   int tm_probe_mode = 0;   // 0 off, 1 linear out, 2 linear + operator -2, 3 linear + operator -3
+   int tm_probe_mode = 0; // 0 off, 1 linear out, 2 linear + operator -2, 3 linear + operator -3
    int tm_probe_logged = 0;
-   com_ptr<ID3D11Buffer> cb_tm_patch;          // our own writable copy, bound in place of the game's
+   com_ptr<ID3D11Buffer> cb_tm_patch; // our own writable copy, bound in place of the game's
    uint32_t cb_tm_patch_size = 0;
    // What the tonemapper was actually asked to do last frame, for the panel readout. Without this
    // the panel cannot answer "is the HDR path on", which is the one question that matters here.
@@ -658,7 +690,7 @@ struct MafiaDefinitiveEditionGameDeviceData final : public GameDeviceData
 #if DEVELOPMENT
    // MV sniffer. Mafia III's mod does not feed DLSS the TAA's own t2, it hooks a separate
    // "Encode Motion Vectors" pass and takes its R16G16F SRV, so this looks for any full
-   // resolution two channel float texture the game binds and prefers it as the MV source.
+   // resolution two channel float texture the game binds, for the diagnostic log only.
    // Its mission is complete: ~5.1M draws were sniffed and this game has no such buffer, the
    // resolve's t2 IS the motion vector. Wrapped in DEVELOPMENT so it cannot get re-enabled by
    // accident in a release build.
@@ -671,8 +703,8 @@ struct MafiaDefinitiveEditionGameDeviceData final : public GameDeviceData
    // crashed this game, so no code path does one any more. The MV encoding was instead confirmed
    // from the disassembly: the resolve does "add r1.xyzw, r0.xyxy, v1.xyxy" on t2.
    // ---- RCAS sharpening on the SR output ----
-   com_ptr<ID3D11Buffer> cb_sharpen;          // (w, h, sharpness, 0)
-   com_ptr<ID3D11Texture2D> tex_sharpen_src;  // copy of the SR result (RCAS cannot read/write one target)
+   com_ptr<ID3D11Buffer> cb_sharpen;         // (w, h, sharpness, 0)
+   com_ptr<ID3D11Texture2D> tex_sharpen_src; // copy of the SR result (RCAS cannot read/write one target)
    com_ptr<ID3D11ShaderResourceView> tex_sharpen_srv;
    com_ptr<ID3D11RenderTargetView> tex_sharpen_rtv;
    uint32_t sharpen_w = 0, sharpen_h = 0;
@@ -712,14 +744,14 @@ struct MafiaDefinitiveEditionGameDeviceData final : public GameDeviceData
    // (1/8, 1/6, 5/18 ...) i.e. an 8 phase Halton sequence. They are already in pixel space and
    // are handed to DLSS as-is: no NDC conversion and no sign flip (flipping it made the temporal
    // accumulation pair the wrong pixels, which looked worse even though DLSS did run).
-   float2 jitter_px = { 0.f, 0.f };
+   float2 jitter_px = {0.f, 0.f};
 #if DEVELOPMENT
    // Dev experiments: jitter_flip negates the game's jitter, jitter_one_frame_late feeds DLSS the
    // previous frame's value in case the one readable at the resolve is the next frame's (that
    // mismatch shows up as speckle on high frequency content such as sunlit floors).
    int jitter_flip = 0;
    int jitter_one_frame_late = 0;
-   float2 jitter_prev = { 0.f, 0.f };
+   float2 jitter_prev = {0.f, 0.f};
 #endif
    // DLSS parameters that the game does not expose and that had to be established by A/B tests.
    // These are the values that ship; a DEVELOPMENT build can still toggle them in the overlay.
@@ -734,7 +766,7 @@ struct MafiaDefinitiveEditionGameDeviceData final : public GameDeviceData
    // The motion vectors are scaled by the render resolution because they are stored in UV space.
    // Reading UV space vectors as pixel space shrinks the perceived motion by a factor of 3840,
    // which makes DLSS see essentially random motion: that was the source of the heavy noise.
-   int sr_mv_scale_by_resolution = 1;   // 1 = multiply by render resolution (Mafia III behaviour)
+   int sr_mv_scale_by_resolution = 1; // 1 = multiply by render resolution (Mafia III behaviour)
    // Default OFF. READ THIS BEFORE CHANGING IT BACK, BECAUSE THE CODE AND THE
    // FACTS DISAGREE ON PURPOSE HERE.
    //
@@ -772,16 +804,16 @@ struct MafiaDefinitiveEditionGameDeviceData final : public GameDeviceData
    // unchanged and still has to be the offset the game really applied.
    int sr_mvs_jittered = 0;
 
-   int aa_seen = 0;      // how often the resolve was hooked (lifetime)
+   int aa_seen = 0;       // how often the resolve was hooked (lifetime)
    int aa_this_frame = 0; // how often it was hooked in the current frame
-   int dlss_drawn = 0;   // how often the SR draw actually succeeded
+   int dlss_drawn = 0;    // how often the SR draw actually succeeded
    // Which resolve variant is currently firing: 0 = 0x37B05605, 1 = 0x7B9B914F, 2 = the PreTAA
    // copy, -1 = none has been seen yet. The game picks a different one depending on the anti
    // aliasing quality level, so the panel has to be able to say which. "DLSS: active" on its own
    // only reports the type selection, and it keeps saying that even when every draw fails, which
    // makes a silent fallback look exactly like success.
    int resolve_last_index = -1;
-   uint32_t resolve_seen_mask = 0;   // bit per resolve variant, so each is announced exactly once
+   uint32_t resolve_seen_mask = 0; // bit per resolve variant, so each is announced exactly once
    // The video / letterbox pass (0x00D96EAE). Cutscenes are the one place this mod cannot do
    // anything: if the fullscreen pass that plays them is this one, then what is on screen is a
    // pre-rendered video with no geometry in it, so there is nothing to anti-alias and DLSS cannot
@@ -807,9 +839,15 @@ struct MafiaDefinitiveEditionGameDeviceData final : public GameDeviceData
    // Last reported DLSS/SR state, so the "[frame]" heartbeat only prints when that state changes (or
    // every 300 frames). Comparing running totals instead, as it used to, made it print every frame.
    int last_sr_state = -1;
-   // Log the first occurrence of each distinct resolve separately, otherwise only whichever one
-   // fires first is ever seen and there is no record of what the other variant binds.
-   int logged_each[3] = { 0, 0, 0 };   // [0] = 0x37B05605, [1] = 0x7B9B914F, [2] = dev PreTAA copy
+   // Log each colour format once: native and cloned colour can alternate every frame.
+   int logged_each[3] = {0, 0, 0}; // [0] = 0x37B05605, [1] = 0x7B9B914F, [2] = dev PreTAA copy
+   uint32_t logged_colour_formats[3] = {};
+   bool logged_draw_ok[3] = {};
+   int last_sr_log_frame[3] = {-300, -300, -300};
+   int input_rejections = 0;
+   int settings_failures = 0;
+   int draw_failures = 0;
+   int sr_resets = 0;
 };
 
 class MafiaDefinitiveEditionGame final : public Game
@@ -826,8 +864,8 @@ class MafiaDefinitiveEditionGame final : public Game
    void ApplyTextureUpgradeSetting()
    {
       texture_format_upgrades_type = texture_upgrades_enabled
-         ? TextureFormatUpgradesType::AllowedEnabled
-         : TextureFormatUpgradesType::None;
+                                        ? TextureFormatUpgradesType::AllowedEnabled
+                                        : TextureFormatUpgradesType::None;
    }
 
 public:
@@ -848,7 +886,7 @@ public:
       if (reshade_module != nullptr)
       {
          s += std::format("\n  ReShadeRegisterAddon found = {}",
-                          reinterpret_cast<const void*>(GetProcAddress(reshade_module, "ReShadeRegisterAddon")) != nullptr);
+            reinterpret_cast<const void*>(GetProcAddress(reshade_module, "ReShadeRegisterAddon")) != nullptr);
       }
       s += std::format("\n  RESHADE_API_VERSION = {}", static_cast<int>(RESHADE_API_VERSION));
       Probe::Line(s);
@@ -880,7 +918,7 @@ public:
    void OnCreateDevice(ID3D11Device* native_device, DeviceData& device_data) override
    {
       auto* gd = new MafiaDefinitiveEditionGameDeviceData;
-      gd->sr_mvs_jittered = g_mvs_jittered_ini;   // the ini value LoadConfigs() already read
+      gd->sr_mvs_jittered = g_mvs_jittered_ini; // the ini value LoadConfigs() already read
       device_data.game = gd;
    }
 
@@ -950,7 +988,7 @@ public:
       {
          ++gd.game_sharpen_logged;
          Probe::Line(std::format("[sharpen] game pass cb0[0] = {:.4f}, {:.4f}, {:.4f}, {:.4f} -> strength {:.4f} x {:.2f} = {:.4f}",
-                                 values[0], values[1], values[2], values[3], values[2], game_sharpen_scale, values[2] * game_sharpen_scale));
+            values[0], values[1], values[2], values[3], values[2], game_sharpen_scale, values[2] * game_sharpen_scale));
       }
       gd.game_sharpen_authored = values[2];
       values[2] *= game_sharpen_scale;
@@ -974,8 +1012,8 @@ public:
    // the SR result is first copied into a scratch texture; the pass then writes the sharpened
    // pixels back into the game's AA render target.
    void DrawSharpen(ID3D11Device* native_device, ID3D11DeviceContext* native_device_context,
-                    DeviceData& device_data, MafiaDefinitiveEditionGameDeviceData& gd,
-                    ID3D11Resource* output_color)
+      DeviceData& device_data, MafiaDefinitiveEditionGameDeviceData& gd,
+      ID3D11Resource* output_color)
    {
       if (gd.sharpen_amount <= 0.f || !output_color)
       {
@@ -1002,7 +1040,11 @@ public:
       if (vs_it == device_data.native_vertex_shaders.end() || ps_it == device_data.native_pixel_shaders.end())
       {
          static bool warned = false;
-         if (!warned) { warned = true; Probe::Line("[sharpen] Copy VS or MafiaDE Sharpen PS not found - skipping"); }
+         if (!warned)
+         {
+            warned = true;
+            Probe::Line("[sharpen] Copy VS or MafiaDE Sharpen PS not found - skipping");
+         }
          return;
       }
 
@@ -1020,9 +1062,7 @@ public:
          td.BindFlags = D3D11_BIND_SHADER_RESOURCE | D3D11_BIND_RENDER_TARGET;
          td.CPUAccessFlags = 0;
          td.MiscFlags = 0;
-         if (SUCCEEDED(native_device->CreateTexture2D(&td, nullptr, &gd.tex_sharpen_src)) && gd.tex_sharpen_src
-             && SUCCEEDED(native_device->CreateShaderResourceView(gd.tex_sharpen_src.get(), nullptr, &gd.tex_sharpen_srv))
-             && SUCCEEDED(native_device->CreateRenderTargetView(gd.tex_sharpen_src.get(), nullptr, &gd.tex_sharpen_rtv)))
+         if (SUCCEEDED(native_device->CreateTexture2D(&td, nullptr, &gd.tex_sharpen_src)) && gd.tex_sharpen_src && SUCCEEDED(native_device->CreateShaderResourceView(gd.tex_sharpen_src.get(), nullptr, &gd.tex_sharpen_srv)) && SUCCEEDED(native_device->CreateRenderTargetView(gd.tex_sharpen_src.get(), nullptr, &gd.tex_sharpen_rtv)))
          {
             gd.sharpen_w = w;
             gd.sharpen_h = h;
@@ -1032,7 +1072,7 @@ public:
       // (Re)create the immutable CB on resolution or strength change.
       if (!gd.cb_sharpen || gd.sharpen_w != w || gd.sharpen_h != h || gd.sharpen_amount_cached != gd.sharpen_amount)
       {
-         const float params[4] = { static_cast<float>(w), static_cast<float>(h), gd.sharpen_amount, 0.f };
+         const float params[4] = {static_cast<float>(w), static_cast<float>(h), gd.sharpen_amount, 0.f};
          D3D11_BUFFER_DESC bd = {};
          bd.ByteWidth = sizeof(params);
          bd.Usage = D3D11_USAGE_IMMUTABLE;
@@ -1067,8 +1107,8 @@ public:
       {
          ++gd.sharpen_logged;
          Probe::Line(std::format("[sharpen] RCAS {}x{} amount={:.2} src={} dst={}",
-                                  w, h, gd.sharpen_amount, Probe::Describe(gd.tex_sharpen_src.get()),
-                                  Probe::Describe(output_color)));
+            w, h, gd.sharpen_amount, Probe::Describe(gd.tex_sharpen_src.get()),
+            Probe::Describe(output_color)));
       }
 
       native_device_context->CopyResource(gd.tex_sharpen_src.get(), output_color);
@@ -1080,12 +1120,12 @@ public:
       ID3D11Buffer* cb = gd.cb_sharpen.get();
       native_device_context->PSSetConstantBuffers(0, 1, &cb);
       DrawCustomPixelShader(native_device_context,
-                            device_data.default_depth_stencil_state.get(),
-                            device_data.default_blend_state.get(),
-                            nullptr,
-                            vs_it->second.get(), ps_it->second.get(),
-                            gd.tex_sharpen_srv.get(), gd.cached_output_rtv.get(),
-                            w, h, false);
+         device_data.default_depth_stencil_state.get(),
+         device_data.default_blend_state.get(),
+         nullptr,
+         vs_it->second.get(), ps_it->second.get(),
+         gd.tex_sharpen_srv.get(), gd.cached_output_rtv.get(),
+         w, h, false);
 
       sharpen_state.Restore(native_device_context);
    }
@@ -1107,7 +1147,12 @@ public:
       // cutscene runs when the DLSS indicator has nothing to show.
       {
          uint32_t ps_hash = 0;
-         for (auto v : original_shader_hashes.pixel_shaders) { if (v == SHADER_HASH_NONE) break; ps_hash = static_cast<uint32_t>(v); break; }
+         for (auto v : original_shader_hashes.pixel_shaders)
+         {
+            if (v == SHADER_HASH_NONE) break;
+            ps_hash = static_cast<uint32_t>(v);
+            break;
+         }
          Probe::NotePixelShader(ps_hash);
       }
 #endif
@@ -1119,14 +1164,20 @@ public:
       if (game_device_data.s_pre_taa_dumped == 0)
       {
          auto& slot = game_device_data.s_pre_taa_ring[game_device_data.s_pre_taa_ring_pos];
-         for (auto v : original_shader_hashes.pixel_shaders) { if (v == SHADER_HASH_NONE) break; slot.hash = static_cast<uint32_t>(v); break; }
+         for (auto v : original_shader_hashes.pixel_shaders)
+         {
+            if (v == SHADER_HASH_NONE) break;
+            slot.hash = static_cast<uint32_t>(v);
+            break;
+         }
          slot.rtv[0] = 0;
          ID3D11RenderTargetView* r0[2] = {};
          native_device_context->OMGetRenderTargets(2, r0, nullptr);
          for (int q = 0; q < 2; ++q)
          {
             if (!r0[q]) continue;
-            com_ptr<ID3D11Resource> rr; r0[q]->GetResource(&rr);
+            com_ptr<ID3D11Resource> rr;
+            r0[q]->GetResource(&rr);
             std::string d = Probe::Describe(rr.get());
             snprintf(slot.rtv + strlen(slot.rtv), sizeof(slot.rtv) - strlen(slot.rtv), " RTV%d=%s", q, d.c_str());
             r0[q]->Release();
@@ -1147,14 +1198,20 @@ public:
          {
             auto& tslot = game_device_data.s_tail_ring[game_device_data.s_tail_ring_pos];
             tslot.hash = 0;
-            for (auto v : original_shader_hashes.pixel_shaders) { if (v == SHADER_HASH_NONE) break; tslot.hash = static_cast<uint32_t>(v); break; }
+            for (auto v : original_shader_hashes.pixel_shaders)
+            {
+               if (v == SHADER_HASH_NONE) break;
+               tslot.hash = static_cast<uint32_t>(v);
+               break;
+            }
             tslot.rtv[0] = 0;
             ID3D11RenderTargetView* trtv[2] = {};
             native_device_context->OMGetRenderTargets(2, trtv, nullptr);
             for (int q = 0; q < 2; ++q)
             {
                if (!trtv[q]) continue;
-               com_ptr<ID3D11Resource> rr; trtv[q]->GetResource(&rr);
+               com_ptr<ID3D11Resource> rr;
+               trtv[q]->GetResource(&rr);
                const std::string tdesc = Probe::Describe(rr.get());
                snprintf(tslot.rtv + strlen(tslot.rtv), sizeof(tslot.rtv) - strlen(tslot.rtv), " RTV%d=%s", q, tdesc.c_str());
                trtv[q]->Release();
@@ -1165,8 +1222,7 @@ public:
 
       // Dev probe: rewrite the tonemapper's constants so the shader outputs linear, and optionally
       // unclamped, values. See the field declaration for why two floats are enough to try HDR.
-      if (game_device_data.tm_probe_mode > 0
-       && original_shader_hashes.Contains(shader_hashes_Tonemap))
+      if (game_device_data.tm_probe_mode > 0 && original_shader_hashes.Contains(shader_hashes_Tonemap))
       {
          ID3D11Buffer* pcb = nullptr;
          native_device_context->PSGetConstantBuffers(0, 1, &pcb);
@@ -1177,8 +1233,8 @@ public:
             // Float indices, not registers: cb0[3].x is float 12 and cb0[8].z is float 34. Writing
             // float 35 instead of 34 was the first version's bug, and it patched cb0[8].w, the
             // dither clamp, which changes nothing you can see.
-            constexpr uint32_t kOpIndex = 12;    // cb0[3].x, the tonemap operator
-            constexpr uint32_t kSqrtGate = 34;   // cb0[8].z, > 0 enables the dithered sqrt encode
+            constexpr uint32_t kOpIndex = 12;  // cb0[3].x, the tonemap operator
+            constexpr uint32_t kSqrtGate = 34; // cb0[8].z, > 0 enables the dithered sqrt encode
             if (bd.ByteWidth >= (kSqrtGate + 1) * sizeof(float) && bd.ByteWidth <= 4096)
             {
                // UpdateSubresource on the engine's own buffer is a no-op if that buffer is
@@ -1224,9 +1280,15 @@ public:
                      const float old_gate = vals[kSqrtGate];
                      game_device_data.tm_operator_seen = static_cast<int>(old_op);
                      game_device_data.tm_sqrt_gate_seen = old_gate > 0.0f ? 1 : 0;
-                     vals[kSqrtGate] = 0.0f;   // <= 0 disables the dithered sqrt encode: linear output
-                     if (game_device_data.tm_probe_mode == 2) { vals[kOpIndex] = -2.0f; }
-                     else if (game_device_data.tm_probe_mode == 3) { vals[kOpIndex] = -3.0f; }
+                     vals[kSqrtGate] = 0.0f; // <= 0 disables the dithered sqrt encode: linear output
+                     if (game_device_data.tm_probe_mode == 2)
+                     {
+                        vals[kOpIndex] = -2.0f;
+                     }
+                     else if (game_device_data.tm_probe_mode == 3)
+                     {
+                        vals[kOpIndex] = -3.0f;
+                     }
                      D3D11_MAPPED_SUBRESOURCE wm = {};
                      // Filling the copy needs UpdateSubresource, not Map: D3D11_MAP_WRITE_DISCARD is
                      // only legal on a D3D11_USAGE_DYNAMIC buffer, and this one is USAGE_DEFAULT.
@@ -1243,8 +1305,8 @@ public:
                         {
                            game_device_data.tm_probe_logged++;
                            Probe::Line(std::format("[probe] mode {}: engine CB usage={:#x} bind={:#x} size={}; cb0[3].x {:.3f} -> {:.3f}, cb0[8].z {:.5f} -> 0, bound our copy",
-                                                  game_device_data.tm_probe_mode, static_cast<uint32_t>(bd.Usage), static_cast<uint32_t>(bd.BindFlags),
-                                                  bd.ByteWidth, old_op, vals[kOpIndex], old_gate));
+                              game_device_data.tm_probe_mode, static_cast<uint32_t>(bd.Usage), static_cast<uint32_t>(bd.BindFlags),
+                              bd.ByteWidth, old_op, vals[kOpIndex], old_gate));
                         }
                      }
                   }
@@ -1255,9 +1317,7 @@ public:
 
       // Diagnostics: one shot, automatic dump of the tonemapper's constants and inputs. See the
       // field declaration for why this does not wait for a button press.
-      if (game_device_data.s_tm_dump_state == 0
-       && game_device_data.aa_seen >= 30 && Probe::s_frame > 60
-       && original_shader_hashes.Contains(shader_hashes_Tonemap))
+      if (game_device_data.s_tm_dump_state == 0 && game_device_data.aa_seen >= 30 && Probe::s_frame > 60 && original_shader_hashes.Contains(shader_hashes_Tonemap))
       {
          game_device_data.s_tm_dump_state = 1;
          Probe::Line(std::format("[tm] ==== automatic tonemapper dump at frame {} ====", Probe::s_frame));
@@ -1273,7 +1333,10 @@ public:
             D3D11_BUFFER_DESC bd = {};
             pcb->GetDesc(&bd);
             const int floats = static_cast<int>(bd.ByteWidth / sizeof(float));
-            if (floats <= 0 || floats > 256) { continue; }
+            if (floats <= 0 || floats > 256)
+            {
+               continue;
+            }
             if (game_device_data.cb_tm_staging[slot] == nullptr || game_device_data.cb_tm_staging_size[slot] != bd.ByteWidth)
             {
                game_device_data.cb_tm_staging[slot] = nullptr;
@@ -1296,7 +1359,7 @@ public:
             for (int f = 0; f + 3 < floats; f += 4)
             {
                Probe::Line(std::format("[tm] cb{}[{}] = ({:.6f}, {:.6f}, {:.6f}, {:.6f})", slot, f / 4,
-                                       vals[f], vals[f + 1], vals[f + 2], vals[f + 3]));
+                  vals[f], vals[f + 1], vals[f + 2], vals[f + 3]));
             }
             native_device_context->Unmap(game_device_data.cb_tm_staging[slot].get(), 0);
          }
@@ -1369,9 +1432,22 @@ public:
                      const uint32_t exp = (h >> 10) & 0x1F;
                      const uint32_t man = h & 0x3FF;
                      uint32_t bits;
-                     if (exp == 0) { bits = sign; if (man) { bits = sign | (127u - 14u) << 23 | (man << 13); } }
-                     else if (exp == 31) { bits = sign | 0x7F800000u | (man << 13); }
-                     else { bits = sign | (exp + 127u - 15u) << 23 | (man << 13); }
+                     if (exp == 0)
+                     {
+                        bits = sign;
+                        if (man)
+                        {
+                           bits = sign | (127u - 14u) << 23 | (man << 13);
+                        }
+                     }
+                     else if (exp == 31)
+                     {
+                        bits = sign | 0x7F800000u | (man << 13);
+                     }
+                     else
+                     {
+                        bits = sign | (exp + 127u - 15u) << 23 | (man << 13);
+                     }
                      float out = 0.0f;
                      memcpy(&out, &bits, 4);
                      return out;
@@ -1379,7 +1455,7 @@ public:
                   game_device_data.tm_exposure_seen = half(raw + 0);
                   game_device_data.tm_white_point_seen = half(raw + 2);
                   Probe::Line(std::format("[tm] 1x1 exposure = {:.6f}, white point = {:.4f}  (shader reads .x and .y)",
-                                          game_device_data.tm_exposure_seen, game_device_data.tm_white_point_seen));
+                     game_device_data.tm_exposure_seen, game_device_data.tm_white_point_seen));
                   native_device_context->Unmap(game_device_data.tex_tm_staging.get(), 0);
                }
             }
@@ -1417,14 +1493,20 @@ public:
                   for (int k = 0; k < kPostFloats; k++)
                   {
                      if (e.base[slot][k] == e.last[slot][k]) continue;
-                     if (moved < 16) { d += std::format(" {}:{:.5f}->{:.5f}", k, e.base[slot][k], e.last[slot][k]); }
+                     if (moved < 16)
+                     {
+                        d += std::format(" {}:{:.5f}->{:.5f}", k, e.base[slot][k], e.last[slot][k]);
+                     }
                      moved++;
                   }
                   if (moved == 0 && !(e.from_tonemap && slot == 0)) continue;
                   if (moved > 0)
                   {
                      diff_slots++;
-                     if (moved > 16) { d += std::format(" ...(+{} more)", moved - 16); }
+                     if (moved > 16)
+                     {
+                        d += std::format(" ...(+{} more)", moved - 16);
+                     }
                      diffs += std::format("\n[post] CHG {:08X} s{}:{}", e.hash, slot, d);
                   }
                   // The diff says what moved but not what the value is, and for the tonemapper the
@@ -1450,13 +1532,13 @@ public:
                }
             }
             Probe::Line(std::format("[post] ==== window closed: {} frames, {} distinct passes after the tonemapper ====",
-                                     kPostArmFrames, game_device_data.s_post_count));
+               kPostArmFrames, game_device_data.s_post_count));
             Probe::Line(std::format("[post] passes seen:{}", seen));
             if (diff_slots == 0)
             {
                Probe::Line(game_device_data.s_post_count == 0
-                  ? "[post] RESULT: the tonemapper never ran while the window was open, so there was nothing to sample."
-                  : "[post] RESULT: not one constant moved. This setting does not reach the post chain through a constant buffer.");
+                              ? "[post] RESULT: the tonemapper never ran while the window was open, so there was nothing to sample."
+                              : "[post] RESULT: not one constant moved. This setting does not reach the post chain through a constant buffer.");
             }
             else
             {
@@ -1467,11 +1549,23 @@ public:
          if (game_device_data.s_post_cb_arm > 0 && (is_tonemap || game_device_data.s_post_tonemap_seen))
          {
             uint32_t ph = 0;
-            for (auto v : original_shader_hashes.pixel_shaders) { if (v == SHADER_HASH_NONE) break; ph = static_cast<uint32_t>(v); break; }
+            for (auto v : original_shader_hashes.pixel_shaders)
+            {
+               if (v == SHADER_HASH_NONE) break;
+               ph = static_cast<uint32_t>(v);
+               break;
+            }
             if (ph != 0)
             {
                int post_index = -1;
-               for (int i = 0; i < game_device_data.s_post_count; i++) { if (game_device_data.s_post[i].hash == ph) { post_index = i; break; } }
+               for (int i = 0; i < game_device_data.s_post_count; i++)
+               {
+                  if (game_device_data.s_post[i].hash == ph)
+                  {
+                     post_index = i;
+                     break;
+                  }
+               }
                if (post_index < 0 && game_device_data.s_post_count < kPostMaxHashes)
                {
                   post_index = game_device_data.s_post_count++;
@@ -1482,7 +1576,10 @@ public:
                if (post_index >= 0 && (game_device_data.s_post[post_index].draws++ % kPostSampleStride) == 0)
                {
                   auto& entry = game_device_data.s_post[post_index];
-               if (is_tonemap) { entry.from_tonemap = true; }
+                  if (is_tonemap)
+                  {
+                     entry.from_tonemap = true;
+                  }
                   ID3D11Buffer* pcbs[kPostSlots] = {};
                   native_device_context->PSGetConstantBuffers(0, kPostSlots, pcbs);
                   for (int slot = 0; slot < kPostSlots; slot++)
@@ -1543,15 +1640,16 @@ public:
                D3D11_TEXTURE2D_DESC d = {};
                tex->GetDesc(&d);
                const bool full_res = (d.Width >= 1600 && d.Height >= 900);
-               const bool two_channel_float = (d.Format == DXGI_FORMAT_R16G16_FLOAT
-                                            || d.Format == DXGI_FORMAT_R16G16_TYPELESS
-                                            || d.Format == DXGI_FORMAT_R32G32_FLOAT
-                                            || d.Format == DXGI_FORMAT_R32G32_TYPELESS);
+               const bool two_channel_float = (d.Format == DXGI_FORMAT_R16G16_FLOAT || d.Format == DXGI_FORMAT_R16G16_TYPELESS || d.Format == DXGI_FORMAT_R32G32_FLOAT || d.Format == DXGI_FORMAT_R32G32_TYPELESS);
                if (full_res && two_channel_float)
                {
                   bool already = false;
                   for (int q = 0; q < game_device_data.mv_sniffed_count; ++q)
-                     if (game_device_data.mv_sniffed[q].get() == res.get()) { already = true; break; }
+                     if (game_device_data.mv_sniffed[q].get() == res.get())
+                     {
+                        already = true;
+                        break;
+                     }
                   if (!already && game_device_data.mv_sniffed_count < 4)
                   {
                      game_device_data.mv_sniffed[game_device_data.mv_sniffed_count++] = res;
@@ -1559,9 +1657,14 @@ public:
                      {
                         ++game_device_data.mv_sniff_logged;
                         uint32_t h = 0;
-                        for (auto v : original_shader_hashes.pixel_shaders) { if (v == SHADER_HASH_NONE) break; h = static_cast<uint32_t>(v); break; }
+                        for (auto v : original_shader_hashes.pixel_shaders)
+                        {
+                           if (v == SHADER_HASH_NONE) break;
+                           h = static_cast<uint32_t>(v);
+                           break;
+                        }
                         Probe::Line(std::format("[MV sniff] full res two channel float: SRV[{}] {}x{} fmt {} bound by PS 0x{:08X}",
-                                                 k, d.Width, d.Height, static_cast<int>(d.Format), h));
+                           k, d.Width, d.Height, static_cast<int>(d.Format), h));
                      }
                   }
                }
@@ -1617,11 +1720,11 @@ public:
                      game_device_data.depth_func_logged = 1;
                      const bool reversed_z = ds.DepthFunc == D3D11_COMPARISON_GREATER || ds.DepthFunc == D3D11_COMPARISON_GREATER_EQUAL;
                      Probe::Line(std::format("[depth] main pass depth state: DepthFunc={} ({}), DepthEnable={}, WriteAll={} => reversed-Z = {} => sr_inverted_depth must be {}",
-                                              static_cast<int>(ds.DepthFunc), DepthFuncName(ds.DepthFunc),
-                                              ds.DepthEnable ? "yes" : "no",
-                                              (ds.DepthWriteMask == D3D11_DEPTH_WRITE_MASK_ALL) ? "yes" : "no",
-                                              reversed_z ? "yes" : "no",
-                                              reversed_z ? "1 (ON)" : "0 (OFF)"));
+                        static_cast<int>(ds.DepthFunc), DepthFuncName(ds.DepthFunc),
+                        ds.DepthEnable ? "yes" : "no",
+                        (ds.DepthWriteMask == D3D11_DEPTH_WRITE_MASK_ALL) ? "yes" : "no",
+                        reversed_z ? "yes" : "no",
+                        reversed_z ? "1 (ON)" : "0 (OFF)"));
                   }
                }
 #endif
@@ -1631,7 +1734,7 @@ public:
             {
                ++game_device_data.main_depth_rejected;
                Probe::Line(std::format("[depth] rejected, not a full res single slice target: {}",
-                                       Probe::Describe(candidate.get())));
+                  Probe::Describe(candidate.get())));
             }
          }
       }
@@ -1642,17 +1745,15 @@ public:
       // before the temporal resolve. Mafia III's mod hooks its equivalent because that game skips
       // its TAA shaders when TAA is off, so the colours there are the raw scene colours. Here it
       // went black: the copy runs several times per frame and the first one is far too early.
-      const bool is_pre_taa_copy = game_device_data.dlss_hook_mode == 1
-                                && original_shader_hashes.Contains(0xA75736C5u, reshade::api::shader_stage::pixel);
+      const bool is_pre_taa_copy = game_device_data.dlss_hook_mode == 1 && original_shader_hashes.Contains(0xA75736C5u, reshade::api::shader_stage::pixel);
       if (is_pre_taa_copy && original_draw_dispatch_func)
       {
-         (*original_draw_dispatch_func)();   // let the game do its copy first
+         (*original_draw_dispatch_func)(); // let the game do its copy first
       }
 
-      if (game_device_data.skip_game_sharpen
-          && original_shader_hashes.Contains(0x747C6210u, reshade::api::shader_stage::pixel))
+      if (game_device_data.skip_game_sharpen && original_shader_hashes.Contains(0x747C6210u, reshade::api::shader_stage::pixel))
       {
-         return DrawOrDispatchOverrideType::Replaced;   // skip the game's post-tonemap sharpener
+         return DrawOrDispatchOverrideType::Replaced; // skip the game's post-tonemap sharpener
       }
 
       if (game_device_data.dlss_hook_mode == 1 && original_shader_hashes.Contains(shader_hashes_AA))
@@ -1677,7 +1778,12 @@ public:
       }
       {
          uint32_t video_ps = 0;
-         for (auto v : original_shader_hashes.pixel_shaders) { if (v == SHADER_HASH_NONE) break; video_ps = static_cast<uint32_t>(v); break; }
+         for (auto v : original_shader_hashes.pixel_shaders)
+         {
+            if (v == SHADER_HASH_NONE) break;
+            video_ps = static_cast<uint32_t>(v);
+            break;
+         }
          if (video_ps == 0x00D96EAEu)
          {
             if (game_device_data.video_pass_draws == 0)
@@ -1685,7 +1791,7 @@ public:
                Probe::Line(std::format("[video] the video / letterbox pass (0x00D96EAE) drew for the first time at "
                                        "frame {} - what is on screen is a pre-rendered video, so there is no geometry "
                                        "for an anti aliasing pass to work on",
-                                       Probe::s_frame));
+                  Probe::s_frame));
             }
             ++game_device_data.video_pass_draws;
          }
@@ -1757,7 +1863,7 @@ public:
       {
          game_device_data.resolve_seen_mask |= resolve_bit;
          Probe::Line(std::format("[resolve] variant {} ({}) first seen at frame {}",
-                                 resolve_index, resolve_name, Probe::s_frame));
+            resolve_index, resolve_name, Probe::s_frame));
       }
       game_device_data.resolve_last_index = resolve_index;
 
@@ -1779,7 +1885,7 @@ public:
             extra_rtv->Release();
          }
          Probe::Line(std::format("[resolve #{} in frame {}] {} writes {}", game_device_data.aa_this_frame,
-                                 Probe::s_frame, resolve_name, extra_target));
+            Probe::s_frame, resolve_name, extra_target));
       }
 #endif
 
@@ -1792,8 +1898,7 @@ public:
       // once per frame and writes the whole frame, so a later occurrence is cancelled (see
       // cancel_second_taa) instead of letting the game's TAA re-resolve that layer over our
       // output; if SR is unavailable it is left alone so the game keeps its own AA.
-      const bool is_first_aa_this_frame = (game_device_data.aa_this_frame == 1)
-                                       || !game_device_data.cancel_second_taa;
+      const bool is_first_aa_this_frame = (game_device_data.aa_this_frame == 1) || !game_device_data.cancel_second_taa;
 
       if (!is_first_aa_this_frame)
       {
@@ -1817,85 +1922,71 @@ public:
          return DrawOrDispatchOverrideType::None;
       }
 
-      ID3D11ShaderResourceView* srvs[8] = {};
-      native_device_context->PSGetShaderResources(0, ARRAYSIZE(srvs), srvs);
-      ID3D11RenderTargetView* rtvs[D3D11_SIMULTANEOUS_RENDER_TARGET_COUNT] = {};
-      native_device_context->OMGetRenderTargets(D3D11_SIMULTANEOUS_RENDER_TARGET_COUNT, rtvs, nullptr);
-
+      com_ptr<ID3D11ShaderResourceView> srvs[8];
+      native_device_context->PSGetShaderResources(0, ARRAYSIZE(srvs), &srvs[0]);
+      com_ptr<ID3D11RenderTargetView> rtv;
+      native_device_context->OMGetRenderTargets(1, &rtv, nullptr);
       for (UINT i = 0; i < ARRAYSIZE(srvs); ++i)
-      {
-         game_device_data.aa_srv[i] = nullptr;
-         if (srvs[i] != nullptr) srvs[i]->QueryInterface(&game_device_data.aa_srv[i]);
-      }
+         game_device_data.aa_srv[i] = srvs[i];
 
-      // Auto-detect which SRV slot holds what instead of guessing a fixed slot: the binding
-      // layout changes between scenes (in the menus slot 0 is a single channel R32_FLOAT), and a
-      // hardcoded index is wrong often enough to matter - with the wrong slot the image was
-      // noisier and softer than the game's own AA. The formats are unambiguous:
-      //   - HDR colour     : full resolution R11G11B10_FLOAT (gameplay t0)
-      //   - motion vectors : full resolution R16G16B16A16_FLOAT (gameplay t2, two channels used)
-      // so pick them by format, and only fall back to the manual slot if nothing matches.
-      int detected_source = -1;
-      int detected_mv = -1;
-      for (UINT i = 0; i < ARRAYSIZE(game_device_data.aa_srv); ++i)
+      // Both resolve disassemblies use t0=current colour, t1=history and t2=UV motion.
+      // RenoDX can upgrade either colour texture to FP16 after a video/effect. Scanning for the
+      // first R11/FP16 then mistakes history for colour or colour for motion. Keep the roles fixed
+      // and validate the live views instead; an R32 t0 is still not a usable colour input.
+      const int slot = game_device_data.aa_auto_slots ? 0 : game_device_data.aa_source_slot;
+      const int mv_slot = game_device_data.aa_auto_slots ? 2 : game_device_data.aa_mv_slot;
+      const UINT render_width = static_cast<UINT>(device_data.render_resolution.x + 0.5f);
+      const UINT render_height = static_cast<UINT>(device_data.render_resolution.y + 0.5f);
+      com_ptr<ID3D11Resource> source_color;
+      com_ptr<ID3D11Resource> motion_vectors;
+      com_ptr<ID3D11Resource> output_color;
+      const bool source_is_valid = slot >= 0 && slot < static_cast<int>(ARRAYSIZE(srvs)) && MafiaDE::ReadResolveInput(srvs[slot].get(), render_width, render_height, false, source_color);
+      const bool motion_is_valid = mv_slot >= 0 && mv_slot < static_cast<int>(ARRAYSIZE(srvs)) && MafiaDE::ReadResolveInput(srvs[mv_slot].get(), render_width, render_height, true, motion_vectors);
+      if (!source_is_valid || !motion_is_valid || source_color == motion_vectors)
       {
-         if (!game_device_data.aa_srv[i]) continue;
-         com_ptr<ID3D11Resource> res;
-         game_device_data.aa_srv[i]->GetResource(&res);
-         com_ptr<ID3D11Texture2D> tex;
-         if (!res || FAILED(res->QueryInterface(&tex)) || !tex) continue;
-         D3D11_TEXTURE2D_DESC desc = {};
-         tex->GetDesc(&desc);
-         // Full resolution and single mip only. The lookup tables (512x512 / 256x256 with 9-13
-         // mips) must never be mistaken for the colour buffer.
-         if (desc.Width < 1600 || desc.Height < 900 || desc.MipLevels != 1) continue;
-         if (detected_source < 0 && desc.Format == DXGI_FORMAT_R11G11B10_FLOAT)
+         ++game_device_data.input_rejections;
+         if (game_device_data.input_rejections <= 3 || Probe::s_frame % 300 == 0)
          {
-            detected_source = static_cast<int>(i);
-         }
-         else if (detected_mv < 0 && desc.Format == DXGI_FORMAT_R16G16B16A16_FLOAT)
-         {
-            detected_mv = static_cast<int>(i);
-         }
-      }
-
-      // Hard safety gate. An early build auto-detected single channel R32 buffers in the main
-      // menu scene (a different binding layout) and fed those to DLSS as the colour source, which
-      // turned the whole screen into an oil painting and then black. Only run the SR when the
-      // source was identified by format; otherwise leave the game's own AA in charge.
-      const bool source_is_valid = (detected_source >= 0);
-      const int slot = (game_device_data.aa_auto_slots && source_is_valid) ? detected_source
-                                                                          : game_device_data.aa_source_slot;
-      if (game_device_data.aa_auto_slots && !source_is_valid)
-      {
-         if (game_device_data.warned_no_source < 3)
-         {
-            ++game_device_data.warned_no_source;
-            Probe::Line("[AA] auto-detect found no full-res R11G11B10 colour input; "
-                        "leaving the game's own AA in charge this frame.");
+            Probe::Line(std::format("[AA inputs] frame={} resolve={} rejected colour[{}]={} motion[{}]={} alias={} total={}",
+               Probe::s_frame, resolve_name, slot, source_is_valid, mv_slot, motion_is_valid,
+               source_color == motion_vectors, game_device_data.input_rejections));
+            for (UINT i = 0; i < 3; ++i)
+            {
+               com_ptr<ID3D11Resource> resource;
+               D3D11_SHADER_RESOURCE_VIEW_DESC view_desc = {};
+               if (srvs[i])
+               {
+                  srvs[i]->GetResource(&resource);
+                  srvs[i]->GetDesc(&view_desc);
+               }
+               Probe::Line(std::format("  t{} view=0x{:X} resource=0x{:X} view_format={} {}", i,
+                  reinterpret_cast<uintptr_t>(srvs[i].get()), reinterpret_cast<uintptr_t>(resource.get()),
+                  static_cast<int>(view_desc.Format), Probe::Describe(resource.get())));
+            }
          }
          return DrawOrDispatchOverrideType::None;
       }
-      com_ptr<ID3D11Resource> source_color;
-      com_ptr<ID3D11Resource> output_color;
-      if (slot >= 0 && slot < static_cast<int>(ARRAYSIZE(srvs)) && srvs[slot] != nullptr)
-      {
-         srvs[slot]->GetResource(&source_color);
-      }
-      if (rtvs[0] != nullptr) rtvs[0]->GetResource(&output_color);
-
-      for (UINT i = 0; i < ARRAYSIZE(srvs); ++i) if (srvs[i]) srvs[i]->Release();
-      for (UINT i = 0; i < D3D11_SIMULTANEOUS_RENDER_TARGET_COUNT; ++i) if (rtvs[i]) rtvs[i]->Release();
+      if (rtv) rtv->GetResource(&output_color);
 
       com_ptr<ID3D11Texture2D> output_texture;
-      if (!source_color || !output_color
-         || FAILED(output_color->QueryInterface(&output_texture)) || !output_texture)
+      if (!source_color || !output_color || FAILED(output_color->QueryInterface(&output_texture)) || !output_texture)
       {
          return DrawOrDispatchOverrideType::None;
       }
 
       D3D11_TEXTURE2D_DESC output_desc = {};
       output_texture->GetDesc(&output_desc);
+      D3D11_RENDER_TARGET_VIEW_DESC output_view_desc = {};
+      rtv->GetDesc(&output_view_desc);
+      // NGX writes a whole texture. A different slice, mip or aliased input cannot be represented
+      // by this resource-only interface, and the no-UAV fallback must remain a same-format copy.
+      if (output_desc.Width != render_width || output_desc.Height != render_height || output_desc.MipLevels != 1 || output_desc.ArraySize != 1 || output_desc.SampleDesc.Count != 1 || output_view_desc.ViewDimension != D3D11_RTV_DIMENSION_TEXTURE2D || output_view_desc.Texture2D.MipSlice != 0 || (output_desc.Format != DXGI_FORMAT_R11G11B10_FLOAT && output_desc.Format != DXGI_FORMAT_R16G16B16A16_FLOAT) || output_view_desc.Format != output_desc.Format || output_color == source_color || output_color == motion_vectors)
+      {
+         if (game_device_data.invalid_output_reports++ < 3)
+            Probe::Line(std::format("[AA output] frame={} resolve={} rejected {} view_format={}",
+               Probe::s_frame, resolve_name, Probe::Describe(output_color.get()), static_cast<int>(output_view_desc.Format)));
+         return DrawOrDispatchOverrideType::None;
+      }
 
       SR::SettingsData settings_data;
       settings_data.output_width = static_cast<unsigned int>(device_data.output_resolution.x + 0.5f);
@@ -1912,6 +2003,15 @@ public:
       settings_data.render_preset = dlss_render_preset;
 
       const bool settings_ok = sr_implementation->UpdateSettings(sr_instance_data, native_device_context, settings_data);
+      if (!settings_ok)
+      {
+         // A failed feature recreation can leave no usable NGX instance to evaluate.
+         device_data.force_reset_sr = true;
+         ++game_device_data.settings_failures;
+         if (game_device_data.settings_failures <= 3 || Probe::s_frame % 300 == 0)
+            Probe::Line(std::format("[SR settings] frame={} resolve={} UpdateSettings failed, using game AA", Probe::s_frame, resolve_name));
+         return DrawOrDispatchOverrideType::None;
+      }
 
       // DLSS wants a UAV on the output. This game's AA target already has D3D11_BIND_UAV
       // (observed bind flags 0xA8), so normally we can use it directly.
@@ -1933,84 +2033,8 @@ public:
       draw_data.source_color = source_color.get();
       draw_data.output_color = dlss_output.get();
 
-      // Motion vectors. DLSS refuses a null resource, so start from an all-zero texture ("no
-      // motion", which DLAA at native res tolerates) and overwrite it with the game's vectors
-      // below. It is only a fallback: no frame in practice ever needs it.
-      if (!game_device_data.placeholder_motion_vectors)
-      {
-         D3D11_TEXTURE2D_DESC desc = {};
-         desc.Width = 4;
-         desc.Height = 4;
-         desc.MipLevels = 1;
-         desc.ArraySize = 1;
-         desc.Format = DXGI_FORMAT_R16G16_FLOAT;
-         desc.SampleDesc.Count = 1;
-         desc.Usage = D3D11_USAGE_DEFAULT;
-         desc.BindFlags = D3D11_BIND_SHADER_RESOURCE;
-         if (FAILED(native_device->CreateTexture2D(&desc, nullptr, &game_device_data.placeholder_motion_vectors)) || !game_device_data.placeholder_motion_vectors)
-         {
-            return DrawOrDispatchOverrideType::None;
-         }
-         // Zero it, so "no motion" is actually what the SR implementation reads.
-         D3D11_MAPPED_SUBRESOURCE mapped = {};
-         // Map/Unmap live on the device context, not on the texture.
-         if (SUCCEEDED(native_device_context->Map(game_device_data.placeholder_motion_vectors.get(), 0, D3D11_MAP_WRITE_DISCARD, 0, &mapped)))
-         {
-            std::memset(mapped.pData, 0, mapped.RowPitch * desc.Height);
-            native_device_context->Unmap(game_device_data.placeholder_motion_vectors.get(), 0);
-         }
-      }
-      com_ptr<ID3D11ShaderResourceView> placeholder_mv_srv;
-      if (FAILED(native_device->CreateShaderResourceView(game_device_data.placeholder_motion_vectors.get(), nullptr, &placeholder_mv_srv)) || !placeholder_mv_srv)
-      {
-         return DrawOrDispatchOverrideType::None;
-      }
-      // NOTE: D3D11's view interfaces do NOT derive from ID3D11Resource - ID3D11DeviceChild only
-      // *has* an ID3D11Resource* member. So an SRV has to be asked for its resource explicitly,
-      // there is no implicit upcast.
-      com_ptr<ID3D11Resource> placeholder_mv_resource;
-      placeholder_mv_srv->GetResource(&placeholder_mv_resource);
-      draw_data.motion_vectors = placeholder_mv_resource.get();
-      std::string mv_source = "zero placeholder (fallback)";
-
-#if DEVELOPMENT
-      // Diagnostics: prefer a real motion vector texture if the sniffer found one (see the field
-      // declaration - on this game it never finds anything, the resolve's t2 below always wins).
-      for (int q = 0; q < game_device_data.mv_sniffed_count; ++q)
-      {
-         if (!game_device_data.mv_sniffed[q]) continue;
-         com_ptr<ID3D11Texture2D> mt;
-         if (SUCCEEDED(game_device_data.mv_sniffed[q]->QueryInterface(&mt)) && mt)
-         {
-            D3D11_TEXTURE2D_DESC md = {};
-            mt->GetDesc(&md);
-            if (md.Width >= 1600 && md.Height >= 900)
-            {
-               draw_data.motion_vectors = game_device_data.mv_sniffed[q].get();
-               mv_source = std::format("sniffed MV {}x{} fmt {}", md.Width, md.Height, static_cast<int>(md.Format));
-               break;
-            }
-         }
-      }
-#endif
-
-      // The motion vectors DLSS is fed: the resolve's own t2 (3840x2160 R16G16B16A16_FLOAT, UV
-      // space - hence the resolution scale below). This game has no separate "encode motion
-      // vectors" pass like Mafia III does; that was verified by sniffing ~5.1M draws.
-      {
-         const int mv_slot = (game_device_data.aa_auto_slots && detected_mv >= 0) ? detected_mv : game_device_data.aa_mv_slot;
-         if (mv_slot >= 0 && mv_slot < static_cast<int>(ARRAYSIZE(game_device_data.aa_srv))
-            && game_device_data.aa_srv[mv_slot])
-         {
-            com_ptr<ID3D11Resource> mv_resource;
-            game_device_data.aa_srv[mv_slot]->GetResource(&mv_resource);
-            if (mv_resource)
-            {
-               draw_data.motion_vectors = mv_resource.get();
-               mv_source = std::format("resolve input slot {} = {}", mv_slot, Probe::Describe(mv_resource.get()));
-            }
-         }
-      }
+      // Keep the validated MV resource alive through Draw; missing motion falls back to TAA.
+      draw_data.motion_vectors = motion_vectors.get();
 
       // No valid main depth has been seen yet (a scene that never runs the position fill pass, or
       // the very first frames): DLSS/DLAA cannot reproject without it, so leave the game's own AA
@@ -2066,8 +2090,8 @@ public:
 
 #if DEVELOPMENT
       const float2 jitter_value = game_device_data.jitter_one_frame_late
-         ? game_device_data.jitter_prev
-         : game_device_data.jitter_px;
+                                     ? game_device_data.jitter_prev
+                                     : game_device_data.jitter_px;
       game_device_data.jitter_prev = game_device_data.jitter_px;
       const float jitter_sign = game_device_data.jitter_flip ? -1.f : 1.f;
 #else
@@ -2077,49 +2101,62 @@ public:
       draw_data.jitter_x = jitter_value.x * jitter_sign;
       draw_data.jitter_y = jitter_value.y * jitter_sign;
       draw_data.reset = device_data.force_reset_sr;
-      device_data.force_reset_sr = false;
 
       const bool draw_ok = sr_implementation->Draw(sr_instance_data, native_device_context, draw_data);
 
-      if (resolve_index >= 0 && resolve_index < static_cast<int>(ARRAYSIZE(game_device_data.logged_each))
-          && game_device_data.logged_each[resolve_index] == 0)
+      D3D11_SHADER_RESOURCE_VIEW_DESC colour_view_desc = {};
+      srvs[slot]->GetDesc(&colour_view_desc);
+      const uint32_t colour_format_bit = colour_view_desc.Format == DXGI_FORMAT_R11G11B10_FLOAT ? 1u : 2u;
+      if (game_device_data.logged_each[resolve_index] == 0 || (game_device_data.logged_colour_formats[resolve_index] & colour_format_bit) == 0 || ((game_device_data.logged_draw_ok[resolve_index] != draw_ok || draw_data.reset) && Probe::s_frame - game_device_data.last_sr_log_frame[resolve_index] >= 60))
       {
          game_device_data.logged_each[resolve_index] = 1;
+         game_device_data.logged_colour_formats[resolve_index] |= colour_format_bit;
+         game_device_data.logged_draw_ok[resolve_index] = draw_ok;
+         game_device_data.last_sr_log_frame[resolve_index] = Probe::s_frame;
          std::string srv_lines;
          for (UINT i = 0; i < ARRAYSIZE(game_device_data.aa_srv); ++i)
          {
             if (!game_device_data.aa_srv[i]) continue;
             com_ptr<ID3D11Resource> res;
             game_device_data.aa_srv[i]->GetResource(&res);
-            srv_lines += std::format("\n    SRV[{}] {}", i, Probe::Describe(res.get()));
+            D3D11_SHADER_RESOURCE_VIEW_DESC view_desc = {};
+            game_device_data.aa_srv[i]->GetDesc(&view_desc);
+            srv_lines += std::format("\n    SRV[{}] view=0x{:X} resource=0x{:X} view_format={} {}", i,
+               reinterpret_cast<uintptr_t>(game_device_data.aa_srv[i].get()), reinterpret_cast<uintptr_t>(res.get()),
+               static_cast<int>(view_desc.Format), Probe::Describe(res.get()));
          }
          Probe::Line(std::format("=== SR hook (frame {}) draw_ok={}  resolve={} ===\n"
-                                 "  auto-detected slots: colour={} motion={}\n"
+                                 "  validated slots: colour={} motion={}\n"
                                  "  all SRVs the resolve had bound:{}\n"
                                  "  we used source : {}\n  output  : {}  (uav={})\n"
-                                 "  depth   : {}\n  mv      : {}  [{}]\n"
+                                 "  depth   : {}\n  mv      : {}\n"
                                  "  jitter={:.4},{:.4} (cb0 {:.6},{:.6})  mv_scale={},{}  mvs_jittered={}  hdr={}  auto_exposure={}  inverted_depth={}\n"
-                                 "  render  = {}x{}   output = {}x{}   min_res={}   UpdateSettings={}",
-                                 Probe::s_frame, draw_ok, resolve_name, slot, detected_mv, srv_lines,
-                                 Probe::Describe(source_color.get()),
-                                 Probe::Describe(output_color.get()), output_has_uav,
-                                 Probe::Describe(game_device_data.main_depth.get()),
-                                 Probe::Describe(draw_data.motion_vectors), mv_source,
-                                 draw_data.jitter_x, draw_data.jitter_y,
-                                 game_device_data.jitter_px.x, game_device_data.jitter_px.y,
-                                 settings_data.mvs_x_scale, settings_data.mvs_y_scale,
-                                 settings_data.mvs_jittered, settings_data.hdr, settings_data.auto_exposure, settings_data.inverted_depth,
-                                 static_cast<int>(settings_data.render_width), static_cast<int>(settings_data.render_height),
-                                 static_cast<int>(settings_data.output_width), static_cast<int>(settings_data.output_height),
-                                 sr_instance_data->min_resolution, settings_ok));
+                                 "  render  = {}x{}   output = {}x{}   min_res={}   UpdateSettings={}   reset={}",
+            Probe::s_frame, draw_ok, resolve_name, slot, mv_slot, srv_lines,
+            Probe::Describe(source_color.get()),
+            Probe::Describe(output_color.get()), output_has_uav,
+            Probe::Describe(game_device_data.main_depth.get()),
+            Probe::Describe(draw_data.motion_vectors),
+            draw_data.jitter_x, draw_data.jitter_y,
+            game_device_data.jitter_px.x, game_device_data.jitter_px.y,
+            settings_data.mvs_x_scale, settings_data.mvs_y_scale,
+            settings_data.mvs_jittered, settings_data.hdr, settings_data.auto_exposure, settings_data.inverted_depth,
+            static_cast<int>(settings_data.render_width), static_cast<int>(settings_data.render_height),
+            static_cast<int>(settings_data.output_width), static_cast<int>(settings_data.output_height),
+            sr_instance_data->min_resolution, settings_ok, draw_data.reset));
       }
 
       if (!draw_ok)
       {
          // DLSS refused this input set - fall back to the game's own AA for this frame.
+         device_data.force_reset_sr = true;
+         ++game_device_data.draw_failures;
          return DrawOrDispatchOverrideType::None;
       }
 
+      // A reset is consumed only by a successful evaluation. Failed settings/draws must not lose it.
+      device_data.force_reset_sr = false;
+      if (draw_data.reset) ++game_device_data.sr_resets;
       ++game_device_data.dlss_drawn;
       device_data.has_drawn_sr = true;
       device_data.taa_detected = true;
@@ -2144,7 +2181,7 @@ public:
    {
       const auto desc = swapchain->get_device()->get_resource_desc(swapchain->get_back_buffer(0));
       Probe::Line(std::format("[swapchain] game back buffer format: {} ({}x{}); Luma HDR upgrade and display composition disabled",
-                              static_cast<int>(desc.texture.format), desc.texture.width, desc.texture.height));
+         static_cast<int>(desc.texture.format), desc.texture.width, desc.texture.height));
    }
 
    void OnPresent(ID3D11Device* native_device, DeviceData& device_data) override
@@ -2191,12 +2228,14 @@ public:
       // to clear it every frame (this is what Mafia III's mod does at the end of its frame
       // function). Without this the very first DLSS draw latches the flag and every later frame
       // skips the hook - we measured "resolve hooked 3962x, DLSS drawn 1x".
+      const bool sr_drawn_this_frame = device_data.has_drawn_sr;
+      const int resolves_this_frame = game_device_data.aa_this_frame;
+      // A resolve can run while its inputs/settings are rejected. That is a history gap too,
+      // even though aa_this_frame is nonzero; reset once when DLAA next succeeds.
+      if (!sr_drawn_this_frame) device_data.force_reset_sr = true;
       device_data.has_drawn_sr = false;
-      // If this frame did not run the resolve, DLSS has to be reset, otherwise the previous
-      // frame's history gets blended into the new scene.
       if (game_device_data.aa_this_frame == 0)
       {
-         device_data.force_reset_sr = true;
          device_data.taa_detected = false;
       }
       // The world was drawn but no resolve ran, i.e. the game's Anti-Aliasing is not on Low. Counted
@@ -2232,16 +2271,19 @@ public:
       // 1.1 MB log, which put the line cap about fifteen minutes out. The totals are still worth
       // having, but as a sampled rate - which is what the heartbeat is for.
       const int sr_state = (device_data.sr_type == SR::Type::None) ? 0
-                         : (game_device_data.dlss_drawn > 0 ? 2 : 1);
+                                                                   : (game_device_data.dlss_drawn > 0 ? 2 : 1);
       const bool state_changed = (sr_state != game_device_data.last_sr_state);
       game_device_data.last_sr_state = sr_state;
       if (state_changed || Probe::s_frame % 300 == 0)
       {
-         Probe::Line(std::format("[frame {}] draws={}lld  resolve hooked {}x, SR drawn {}x, sr={}  (resolve list size {}, posfill list size {})",
-                                  Probe::s_frame, Probe::s_draw_calls, game_device_data.aa_seen, game_device_data.dlss_drawn,
-                                  device_data.sr_type == SR::Type::None ? "NO" : "yes",
-                                  shader_hashes_AA.pixel_shaders.size(),
-                                  shader_hashes_PositionBufferFill.pixel_shaders.size()));
+         Probe::Line(std::format("[frame {}] draws={}  resolve hooked {}x, SR drawn {}x, sr={}  (resolve list size {}, posfill list size {})"
+                                 "  resolves_this_frame={} sr_drawn_this_frame={} resets={} input_rejections={} settings_failures={} draw_failures={}",
+            Probe::s_frame, Probe::s_draw_calls, game_device_data.aa_seen, game_device_data.dlss_drawn,
+            device_data.sr_type == SR::Type::None ? "NO" : "yes",
+            shader_hashes_AA.pixel_shaders.size(),
+            shader_hashes_PositionBufferFill.pixel_shaders.size(),
+            resolves_this_frame, sr_drawn_this_frame, game_device_data.sr_resets,
+            game_device_data.input_rejections, game_device_data.settings_failures, game_device_data.draw_failures));
       }
    }
 
@@ -2260,7 +2302,7 @@ public:
       game_sharpen_scale = (std::clamp)(sharpen_scale_cfg, 0.f, 2.f);
       // The one setting the panel exposes that the ini has to remember, because the measured best
       // answer for it contradicts the technically correct one. See "sr_mvs_jittered".
-      int mvs_jittered_cfg = 0;   // shipping default is OFF, so an absent key means OFF too
+      int mvs_jittered_cfg = 0; // shipping default is OFF, so an absent key means OFF too
       reshade::get_config_value(runtime, NAME, "MVsJittered", mvs_jittered_cfg);
       g_mvs_jittered_ini = mvs_jittered_cfg != 0 ? 1 : 0;
       // DLSS render preset. "Default" is an unknown by design and is the worst place to be with
@@ -2302,7 +2344,7 @@ public:
       // Only a default is overridden. A preset the user picked explicitly is never touched.
       if (dlss_render_preset == 0)
       {
-         dlss_render_preset = 13;   // NVSDK_NGX_DLSS_Hint_Render_Preset_M
+         dlss_render_preset = 13; // NVSDK_NGX_DLSS_Hint_Render_Preset_M
          reshade::set_config_value(runtime, NAME, "DLSSRenderPreset", static_cast<int>(dlss_render_preset));
          Probe::Line("[preset] DLSS render preset was Default, pinned to M. M is the only measured preset "
                      "whose emissive/transparent layers (neon behind a wet window) match the game's own TAA; "
@@ -2364,21 +2406,22 @@ public:
       // "running" likewise has to mean running now. resolve_last_index is which variant ran last, so
       // it keeps naming one long after the resolve has stopped - and the totals printed beside it
       // freeze at that same instant. Both would otherwise contradict the warning a few lines below.
-      static const char* resolve_names[] = { "A (0x37B05605)", "B (0x7B9B914F)", "PreTAA copy (0xA75736C5)" };
+      static const char* resolve_names[] = {"A (0x37B05605)", "B (0x7B9B914F)", "PreTAA copy (0xA75736C5)"};
       const char* resolve_now = (game_device_data.resolve_last_index >= 0 && game_device_data.resolve_last_index < 3)
-                              ? resolve_names[game_device_data.resolve_last_index]
-                              : "none seen yet";
+                                   ? resolve_names[game_device_data.resolve_last_index]
+                                   : "none seen yet";
       if (resolve_running)
       {
          ImGui::Text("  resolve running: %s   hooked %dx, DLSS drew %dx%s",
-                     resolve_now, game_device_data.aa_seen, game_device_data.dlss_drawn,
-                     game_device_data.dlss_drawn == 0 && game_device_data.aa_seen > 0
-                        ? "   <-- the resolve IS hooked, DLSS refuses every draw" : "");
+            resolve_now, game_device_data.aa_seen, game_device_data.dlss_drawn,
+            game_device_data.dlss_drawn == 0 && game_device_data.aa_seen > 0
+               ? "   <-- the resolve IS hooked, DLSS refuses every draw"
+               : "");
       }
       else
       {
          ImGui::Text("  resolve NOT running (last was %s)   hooked %dx, DLSS drew %dx",
-                     resolve_now, game_device_data.aa_seen, game_device_data.dlss_drawn);
+            resolve_now, game_device_data.aa_seen, game_device_data.dlss_drawn);
       }
       // Where the game's anti-aliasing setting stands, said out loud on every panel draw.
       //
@@ -2391,7 +2434,7 @@ public:
       if (aa_setting_wrong)
       {
          ImGui::TextColored(ImVec4(1.0f, 0.75f, 0.25f, 1.0f),
-                            "  [!] Anti-Aliasing is not LOW: no temporal resolve is running, so DLAA");
+            "  [!] Anti-Aliasing is not LOW: no temporal resolve is running, so DLAA");
          ImGui::TextUnformatted("      has nothing to replace. Change it in the game's display settings.");
       }
       else
@@ -2401,19 +2444,28 @@ public:
       }
 
       ImGui::Text("RCAS sharpen amount: %.2f%s", game_device_data.sharpen_amount,
-                  game_device_data.sharpen_amount == 0.f ? "  (off - the pass is skipped)" : "");
-      if (ImGui::Button("Sharpen -0.05")) { game_device_data.sharpen_amount = (std::max)(-0.50f, game_device_data.sharpen_amount - 0.05f); }
+         game_device_data.sharpen_amount == 0.f ? "  (off - the pass is skipped)" : "");
+      if (ImGui::Button("Sharpen -0.05"))
+      {
+         game_device_data.sharpen_amount = (std::max)(-0.50f, game_device_data.sharpen_amount - 0.05f);
+      }
       ImGui::SameLine();
-      if (ImGui::Button("Sharpen +0.05")) { game_device_data.sharpen_amount = (std::min)(1.f, game_device_data.sharpen_amount + 0.05f); }
-      if (ImGui::Button("Sharpen 0 (off)")) { game_device_data.sharpen_amount = 0.f; }
+      if (ImGui::Button("Sharpen +0.05"))
+      {
+         game_device_data.sharpen_amount = (std::min)(1.f, game_device_data.sharpen_amount + 0.05f);
+      }
+      if (ImGui::Button("Sharpen 0 (off)"))
+      {
+         game_device_data.sharpen_amount = 0.f;
+      }
       // The MVJittered declaration, exposed because it is the one setting where the measured best
       // answer contradicts the technically correct one (see the long comment on "sr_mvs_jittered").
       // Shipping default is OFF: sharper and less noisy with DLSS 310.9.x, at the cost of a little
       // more edge aliasing. ON is the declaration the game's data says is right, and it comes out
       // softer and noisier. Either is defensible, so the user picks, and it is persisted.
       ImGui::Text("Motion vectors declared jittered: %s",
-                  game_device_data.sr_mvs_jittered ? "ON  (correct declaration, softer, noisier)"
-                                                   : "OFF (sharper, less noise, slightly more aliasing)");
+         game_device_data.sr_mvs_jittered ? "ON  (correct declaration, softer, noisier)"
+                                          : "OFF (sharper, less noise, slightly more aliasing)");
       if (ImGui::Button(game_device_data.sr_mvs_jittered ? "  Set OFF (shipping default)" : "  Set ON (technically correct)"))
       {
          game_device_data.sr_mvs_jittered = !game_device_data.sr_mvs_jittered;
@@ -2471,7 +2523,10 @@ public:
       // tonemapper, and which of their constants the setting moved.
       if (ImGui::Button(game_device_data.s_post_cb_arm > 0 ? "Snapshot post constants: ARMED" : "Snapshot post constants (15s)"))
       {
-         for (int i = 0; i < game_device_data.s_post_count; i++) { game_device_data.s_post[i] = MafiaDefinitiveEditionGameDeviceData::PostPassLog(); }
+         for (int i = 0; i < game_device_data.s_post_count; i++)
+         {
+            game_device_data.s_post[i] = MafiaDefinitiveEditionGameDeviceData::PostPassLog();
+         }
          game_device_data.s_post_count = 0;
          game_device_data.s_post_tonemap_seen = 0;
          game_device_data.s_post_cb_arm_frame = Probe::s_frame;
@@ -2497,23 +2552,29 @@ public:
       {
          game_device_data.tm_probe_mode = (game_device_data.tm_probe_mode + 1) % 4;
          game_device_data.tm_probe_logged = 0;
-         game_device_data.s_tm_dump_state = 0;   // re-arm the one shot dump, so the exposure readout refreshes
+         game_device_data.s_tm_dump_state = 0; // re-arm the one shot dump, so the exposure readout refreshes
          Probe::Line(std::format("[probe] tonemapper probe mode {} -> {}", game_device_data.tm_probe_mode, tm_probe_names[game_device_data.tm_probe_mode]));
       }
       ImGui::SameLine();
       ImGui::TextUnformatted("(needs Luma set to read the image as LINEAR to look right)");
 
-      if (ImGui::Button(game_device_data.aa_auto_slots ? "Slots: AUTO by format (shipping default)" : "Slots: manual"))
+      if (ImGui::Button(game_device_data.aa_auto_slots ? "Slots: resolve layout t0/t2 (shipping default)" : "Slots: manual"))
       {
          game_device_data.aa_auto_slots = !game_device_data.aa_auto_slots;
       }
       // ReShade exposes the ImGui API as plain function pointers whose parameters have no
       // defaults, so a button is simpler than fighting SliderInt's signature.
       ImGui::Text("manual colour slot: %d   manual MV slot: %d",
-                  game_device_data.aa_source_slot, game_device_data.aa_mv_slot);
-      if (ImGui::Button("Next colour slot")) { game_device_data.aa_source_slot = (game_device_data.aa_source_slot + 1) % 8; }
+         game_device_data.aa_source_slot, game_device_data.aa_mv_slot);
+      if (ImGui::Button("Next colour slot"))
+      {
+         game_device_data.aa_source_slot = (game_device_data.aa_source_slot + 1) % 8;
+      }
       ImGui::SameLine();
-      if (ImGui::Button("Next MV slot")) { game_device_data.aa_mv_slot = (game_device_data.aa_mv_slot + 1) % 8; }
+      if (ImGui::Button("Next MV slot"))
+      {
+         game_device_data.aa_mv_slot = (game_device_data.aa_mv_slot + 1) % 8;
+      }
       if (ImGui::Button(game_device_data.sr_auto_exposure ? "Auto exposure: ON" : "Auto exposure: OFF"))
       {
          game_device_data.sr_auto_exposure = !game_device_data.sr_auto_exposure;
@@ -2560,17 +2621,23 @@ public:
          game_device_data.jitter_one_frame_late = (next == 1 || next == 3);
          game_device_data.jitter_flip = (next >= 2);
          Probe::Line(std::format("[jitter] variant {} -> {} (one_frame_late={}, flip={})",
-                                 (jitter_variant + 1) % 4, jitter_names[(jitter_variant + 1) % 4],
-                                 game_device_data.jitter_one_frame_late, game_device_data.jitter_flip));
+            (jitter_variant + 1) % 4, jitter_names[(jitter_variant + 1) % 4],
+            game_device_data.jitter_one_frame_late, game_device_data.jitter_flip));
       }
       // Texture format upgrades: kept OFF. They are what an HDR path would need, but upgrading
       // R11G11B10 to FP16 produced black/silver blocks on car paint and floors in this game.
       // LoadConfigs() re-applies whatever ReShade.ini holds.
       ImGui::Text("Texture format upgrades: %s",
-                  texture_format_upgrades_type == TextureFormatUpgradesType::AllowedEnabled ? "ENABLED" : "off (shipping default)");
-      if (ImGui::Button("  Enable"))  { texture_format_upgrades_type = TextureFormatUpgradesType::AllowedEnabled; }
+         texture_format_upgrades_type == TextureFormatUpgradesType::AllowedEnabled ? "ENABLED" : "off (shipping default)");
+      if (ImGui::Button("  Enable"))
+      {
+         texture_format_upgrades_type = TextureFormatUpgradesType::AllowedEnabled;
+      }
       ImGui::SameLine();
-      if (ImGui::Button("  Disable")) { texture_format_upgrades_type = TextureFormatUpgradesType::None; }
+      if (ImGui::Button("  Disable"))
+      {
+         texture_format_upgrades_type = TextureFormatUpgradesType::None;
+      }
 
       reshade::api::effect_runtime* runtime = nullptr;
       if (ImGui::SliderFloat("Game Setting #01", &cb_luma_global_settings.GameSettings.GameSetting01, 0.f, 1.f, "%.3f"))
@@ -2595,7 +2662,7 @@ BOOL APIENTRY DllMain(HMODULE hModule, DWORD ul_reason_for_call, LPVOID lpReserv
    if (ul_reason_for_call == DLL_PROCESS_ATTACH)
    {
       Probe::Line("[DllMain] entered DLL_PROCESS_ATTACH");
-      g_own_module = hModule;   // so OnLoad can report it; see the comment on g_own_module
+      g_own_module = hModule; // so OnLoad can report it; see the comment on g_own_module
 
       // Every step is logged, and the whole thing is wrapped, because the loader only ever
       // reports "1114" no matter what went wrong. An access violation inside DllMain does NOT
@@ -2611,7 +2678,7 @@ BOOL APIENTRY DllMain(HMODULE hModule, DWORD ul_reason_for_call, LPVOID lpReserv
          const char* cleared_project_name = (project_name[0] == '_') ? (project_name + 1) : project_name;
          uint32_t mod_version = 1;
          Globals::SetGlobals(cleared_project_name, "Mafia: Definitive Edition Luma mod",
-                             "https://github.com/Filoppi/Luma-Framework/", mod_version);
+            "https://github.com/Filoppi/Luma-Framework/", mod_version);
          Probe::Line("[DllMain] step 1/5 SetGlobals OK");
 
          // DLAA only: leave output to the game, as in the other DLSS-only mods.
@@ -2645,9 +2712,7 @@ BOOL APIENTRY DllMain(HMODULE hModule, DWORD ul_reason_for_call, LPVOID lpReserv
          // buffer, popping a modal dialog every time. Note TextureFormatUpgrades2DSizeFilters::None
          // is defined as No1Px, i.e. Luma's own default includes it - the stock template's flag
          // combination drops it.
-         texture_format_upgrades_2d_size_filters = (uint32_t)TextureFormatUpgrades2DSizeFilters::SwapchainResolution
-            | (uint32_t)TextureFormatUpgrades2DSizeFilters::SwapchainAspectRatio
-            | (uint32_t)TextureFormatUpgrades2DSizeFilters::No1Px;
+         texture_format_upgrades_2d_size_filters = (uint32_t)TextureFormatUpgrades2DSizeFilters::SwapchainResolution | (uint32_t)TextureFormatUpgrades2DSizeFilters::SwapchainAspectRatio | (uint32_t)TextureFormatUpgrades2DSizeFilters::No1Px;
 
          enable_samplers_upgrade = false;
          Probe::Line("[DllMain] step 2/5 texture upgrades configured");

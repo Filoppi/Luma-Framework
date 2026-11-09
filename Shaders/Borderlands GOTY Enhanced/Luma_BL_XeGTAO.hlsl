@@ -1,33 +1,31 @@
-// XeGTAO adapted for Borderlands GOTY Enhanced (UE3.5) — replaces the game's NVIDIA HBAO+ (GFSDK_SSAO).
-// Source: https://github.com/GameTechDev/XeGTAO
-//
-// BL GOTY specifics:
-// - The native AO pipeline is FULL-RES (3840x2160 @ 4K): deinterleave 0xFFE232A6 -> normals 0xB2B47225 ->
-//   coarse horizon AO 0xF534EB09 -> bilateral blur 0x4E1BEE34 -> apply-multiply PS 0x44764BF6. We run at
-//   full res and write the final visibility term into the game's own FINAL AO target (the blur CS u0, a
-//   r16g16_float; apply blit reads .x). The apply blit (blend dst*src_color) is untouched by us.
-// - We read the game's OWN constant buffers, left bound by its AO passes (main.cpp does not rebind them):
-//   cb0 = HBAO+ $Globals (ProjInfo = NDC->view, live FOV), cb2 = CSOffsetConstants (MinZ_MaxZRatioCS = depth
-//   linearization).
-// - Depth input = the game's full-res r24_g8 scene depth (deinterleave 0xFFE232A6 t0), viewed r24_unorm_x8 and
-//   read with explicit Loads (see XeGTAO_PrefilterDepths16x16).
-// - Normals input = the game's ViewNormalTex (coarse-AO pass 0xF534EB09 t0), r11g11b10_float: xyz packed
-//   v*0.5+0.5 (full 3-channel view-space normal, no z reconstruct). View-space already.
-// - BL GOTY has NO TAA and no motion vectors: NoiseIndex is FROZEN at 0 (never feed a frame index — the
-//   pattern must be static or it boils), quality default is Very High and denoise runs twice; all
-//   stability is spatial.
-// - viewZ is in UE3 units (near plane ~10 units) — a huge range; DepthScale (default 50 -> ~meters)
-//   rescales it into the range XeGTAO's Intel-tuned constants expect (R32F pyramid, so no fp16 precision
-//   loss at huge Z). EFFECT_RADIUS below is anchored at that scale.
+// XeGTAO (https://github.com/GameTechDev/XeGTAO) for Borderlands GOTY Enhanced (UE3.5), replacing the game's NVIDIA HBAO+
+// (GFSDK_SSAO).
+// - The native AO runs at full resolution: deinterleave 0xFFE232A6 -> normals 0xB2B47225 -> coarse horizon AO 0xF534EB09 ->
+//   bilateral blur 0x4E1BEE34 -> apply-multiply PS 0x44764BF6. XeGTAO runs at full resolution too and writes the final visibility
+//   into the blur CS's u0, the game's final AO target (r16g16_float, the apply blit reads .x); the apply blit (dst * src_color) is
+//   untouched.
+// - It reads the game's own constant buffers, left bound by its AO passes (main.cpp does not rebind them): b0 = HBAO+ $Globals
+//   (ProjInfo = NDC to view, live FOV), b2 = CSOffsetConstants (MinZ_MaxZRatioCS, the depth linearization).
+// - Depth: the game's full-res r24_g8 scene depth (deinterleave 0xFFE232A6 t0), viewed r24_unorm_x8 and read with explicit Loads
+//   (see XeGTAO_PrefilterDepths16x16).
+// - Normals: the game's ViewNormalTex (coarse AO 0xF534EB09 t0), r11g11b10_float, the full view-space xyz packed v * 0.5 + 0.5 (no
+//   z reconstruction).
+// - Noise: frozen at 0 without an upscaler (the game has no TAA: a frame index would make the pattern boil), and denoise runs twice.
+//   With DLSS/FSR (they accumulate the lit scene the AO multiplies into) it cycles frame % 64, an AO history runs between the main
+//   pass and the denoise ("temporal_pass_cs", main.cpp) and denoise runs once, as Intel's XeGTAO.h advises with TAA (NoiseIndexRT,
+//   set by main.cpp). The quality default is Very High.
+// - GT-VBAO ("gtvbao_main_pass_cs", "GT-VBAO Enable") replaces the main pass only. It keeps both denoise passes.
+// - View z is in UE3 units (near plane ~10), a huge range: DepthScaleRT (default 50, to ~metres) brings it into the range Intel's
+//   constants expect (the R32F pyramid loses no precision at large z). EFFECT_RADIUS is anchored at that scale.
 
 // --- Game constant buffers (bound by the game at the hooked dispatches) ---
 
 cbuffer _Globals : register(b0) // NVIDIA GFSDK_SSAO $Globals
 {
    float RadiusToScreen;        // Offset:   0
-   float NegInvR2;              // Offset:   4  (GFSDK name; this build stores +1/R^2 (measured positive) -> R=sqrt(1/NegInvR2), view units = vanilla AO radius)
+   float NegInvR2;              // Offset:   4  (GFSDK name, but stored as +1/R^2, measured: R = sqrt(1/NegInvR2), the vanilla AO radius)
    float NDotVBias;             // Offset:   8
-   float2 InvFullResolution;    // Offset:  16  (1 / the AO input resolution; native HBAO+ runs full-res here — we size scratch + dispatches from that same depth, so the UV math matches by construction)
+   float2 InvFullResolution;    // Offset:  16  (1 / the AO input size: HBAO+ runs full-res; scratch and dispatches use that depth's size)
    float2 InvQuarterResolution; // Offset:  24
    int2 FullResOffset;          // Offset:  32
    int2 QuarterResOffset;       // Offset:  40
@@ -49,17 +47,18 @@ cbuffer CSOffsetConstants : register(b2)
    float4 DynamicScaleCS;            // Offset: 112
 }
 
-// --- Luma runtime knobs (set from main.cpp; live-tunable via DEV sliders, no recompile) ---
+// --- Luma runtime knobs (main.cpp; DEVELOPMENT/TEST sliders tune them live) ---
 cbuffer LumaGTAO : register(b11)
 {
    float FinalValuePowerRT; // primary darkness dial, calibrated to the vanilla AO histogram
-   float DepthScaleRT;      // viewZ divisor (UE3 units -> ~meters); THE dial against broad over-occlusion
+   float DepthScaleRT;      // view z divisor (UE3 units to ~metres), the dial against broad over-occlusion
    float RadiusOverrideRT;  // > 0 overrides EFFECT_RADIUS (view units after DepthScale)
-   float DebugViewRT;       // DEVELOPMENT: 0=off 1=depth gradient 2=normals 3=AO x8 4=edges
+   float DebugViewRT;       // DEVELOPMENT debug view (legend in the shared "XeGTAO.hlsl")
+   float NoiseIndexRT;      // frame % 64 with DLSS/FSR, 0 otherwise (see the header)
 }
 
 // clang-format off
-#include "Includes/Common.hlsl" // game-local: order load-bearing (pulls GameCBuffers before shared includes) — do not let SortIncludes move it
+#include "Includes/Common.hlsl" // Game-local, before any shared include (see Includes/Common.hlsl)
 // clang-format on
 
 // User configurable
@@ -75,13 +74,6 @@ cbuffer LumaGTAO : register(b11)
 
 #ifndef SAMPLE_DISTRIBUTION_POWER
 #define SAMPLE_DISTRIBUTION_POWER 1.5 // Default 2.0
-#endif
-
-// BL packs the full xyz view-space normal (v*0.5+0.5) — decoded directly, no reconstruction. NORMAL_Z_SIGN
-// flips only the decoded z if the view-space handedness needs it (verify via DebugViewRT=2: smooth
-// per-surface shading = correct; flip to -1.0 if the shading looks inverted).
-#ifndef NORMAL_Z_SIGN
-#define NORMAL_Z_SIGN (1.0)
 #endif
 
 #define VIEWPORT_PIXEL_SIZE InvFullResolution
@@ -100,7 +92,6 @@ float XeGTAO_ScreenSpaceToViewSpaceDepth(const float screenDepth)
    return max(0.0, viewZ) / max(1e-3, DepthScaleRT);
 }
 
-#define NoiseIndexRT                                      0
 #define XE_GTAO_ADJUST_VISIBILITY(visibility, viewspaceZ) visibility = max(0.03, visibility); // disallow total occlusion (which wouldn't make any sense anyhow since pixel is visible but also helps with packing bent normals)
 #define XE_GTAO_FINAL_OUTPUT_TYPE                         float2                              // the game's r16g16_float final AO (apply blit reads .x)
 #define XE_GTAO_ENCODE_FINAL(v)                           float2(v, 0.0)
@@ -111,11 +102,23 @@ float3 XeGTAO_LoadViewspaceNormal(uint2 pixCoord)
 {
    // tex1 = the game's ViewNormalTex (r11g11b10_float, captured at the coarse-AO dispatch)
 
-   // Decode the game's packed view-space normals: xyz in [0,1] -> [-1,1], all three channels (see NORMAL_Z_SIGN).
-   float3 n = tex1.Load(int3(pixCoord, 0)).xyz * 2.0 - 1.0;
-   n.z *= NORMAL_Z_SIGN;
-   return normalize(n);
+   // Decode the game's packed view-space normals: xyz in [0,1] -> [-1,1], all three channels, no reconstruction.
+   return normalize(tex1.Load(int3(pixCoord, 0)).xyz * 2.0 - 1.0);
 }
 
-// tex0 = the game's full-res scene depth (r24_g8, viewed r24_unorm_x8), captured at the deinterleave dispatch
-#include "../Includes/XeGTAO.hlsl"
+// GT-VBAO settings for UE3 with one AO pixel per scene pixel, not measured against this game's HBAO+: 2 slices, 1 under
+// the history ("temporal_pass_cs", main.cpp defines it) with Core's FAST noise, 8 steps, a 0.2 radius back face.
+#ifndef GTVBAO_SLICE_COUNT
+#define GTVBAO_SLICE_COUNT 2.0
+#endif
+#ifndef GTVBAO_STEP_COUNT
+#define GTVBAO_STEP_COUNT 8.0
+#endif
+#define GTVBAO_THICKNESS(effectRadius) (0.2 * (effectRadius))
+// Core's "FAST Noise" (Shaders/Global/Textures/FAST: 64 layers of 128x128 RGBA, filter adapted spatio-temporal noise), a layer per frame
+#if GTVBAO_FAST_NOISE
+Texture2DArray<float4> fast_noise : register(t4);
+#define GTVBAO_NOISE(pixCoord) fast_noise.Load(int4((pixCoord) & 127u, uint(NoiseIndexRT) & 63u, 0)).xyz
+#endif
+#include "Includes/GTVBAO.hlsl"
+#include "Includes/XeGTAOTemporal.hlsl"
