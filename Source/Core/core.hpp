@@ -4607,7 +4607,7 @@ namespace
    }
 
    // "in_source_resource" is optional and allows overriding the desc to base the new resource on.
-   bool FindOrCreateIndirectUpgradedResource(reshade::api::device* device, const uint64_t in_source_resource, const uint64_t in_resource, uint64_t& out_resource, DeviceData& device_data, bool allow_create, reshade::api::resource_usage initial_state, std::shared_lock<std::shared_mutex>& lock_device_read, bool allow_scale = false, bool force_scale = false, bool leave_locked = true, reshade::api::resource_usage additional_bind_flags = reshade::api::resource_usage(0), bool* scaled = nullptr)
+   bool FindOrCreateIndirectUpgradedResource(reshade::api::device* device, const uint64_t in_source_resource, const uint64_t in_resource, uint64_t& out_resource, DeviceData& device_data, bool allow_create, reshade::api::resource_usage initial_state, std::shared_lock<std::shared_mutex>& lock_device_read, bool allow_scale = false, bool force_scale = false, bool leave_locked = true, reshade::api::resource_usage additional_bind_flags = reshade::api::resource_usage(0), bool* scaled = nullptr, bool force_format_upgrade = false)
    {
       // Swapchain backbuffers are excluded by the caller (checked here before invoking the manager, since
       // the manager is decoupled from DeviceData's backbuffer bookkeeping).
@@ -4643,7 +4643,7 @@ namespace
       return device_data.resource_upgrades.FindOrCreateIndirectUpgradedResource(
          device, in_source_resource, in_resource, out_resource,
          allow_create && !is_back_buffer, initial_state, lock_device_read, state,
-         should_scale, leave_locked, additional_bind_flags, scaled);
+         should_scale, leave_locked, additional_bind_flags, scaled, force_format_upgrade);
    }
 
    bool FindOrCreateIndirectUpgradedResourceView(reshade::api::device* device, const uint64_t in_rv, uint64_t& out_rv, DeviceData& device_data, bool allow_create, reshade::api::resource_usage usage, std::shared_lock<std::shared_mutex>& lock_device_read)
@@ -5961,9 +5961,13 @@ namespace
          {
             // Do textures indirect upgrade "inline".
             // If this was previously upgraded, they'd already have the target format and hence wouldn't get upgraded.
-            // "force_indirect_texture_format_upgrades" takes priority over "auto_texture_format_upgrade_shader_hashes".
             const AutoTextureFormatUpgradeShaderHash* auto_texture_format_upgrades = is_dispatch ? cmd_list_data.auto_compute_texture_format_upgrades : cmd_list_data.auto_graphics_texture_format_upgrades;
             const bool hash_based_indirect_texture_format_upgrades = auto_texture_format_upgrades != nullptr;
+            // "auto_texture_format_upgrade_shader_hashes" takes priority over "force_indirect_texture_format_upgrades",
+            // because "auto_texture_format_upgrade_shader_hashes" is more specific, and forces a specific set of outputs to be upgraded,
+            // if we needed more, we could always add them to that list.
+            // While "force_indirect_texture_format_upgrades" is more of a generic/bruteforce method that might have mismatches.
+            force_indirect_texture_format_upgrades = force_indirect_texture_format_upgrades && !hash_based_indirect_texture_format_upgrades;
 
             bool inline_texture_upgrades = force_indirect_texture_format_upgrades || hash_based_indirect_texture_format_upgrades;
 
@@ -5990,7 +5994,7 @@ namespace
                const AutoTextureFormatUpgradeShaderHash dummy_empty_texture_format_upgrade_shader_hashes_data = { {}, {}, false };
 
                uint64_t source_resource = 0;
-               if (force_indirect_texture_format_upgrades && !hash_based_indirect_texture_format_upgrades && (is_dispatch ? cmd_list_data.any_upgraded_cs_srvs : cmd_list_data.any_upgraded_ps_srvs))
+               if (force_indirect_texture_format_upgrades && (is_dispatch ? cmd_list_data.any_upgraded_cs_srvs : cmd_list_data.any_upgraded_ps_srvs))
                {
                   const auto& upgraded_srvs = is_dispatch ? cmd_list_data.cs_srvs_state : cmd_list_data.ps_srvs_state;
                   // Use the first upgraded SRV, whether it's valid or not (it should be!).
@@ -6018,7 +6022,7 @@ namespace
                {
                   native_device_context->OMGetRenderTargetsAndUnorderedAccessViews(D3D11_SIMULTANEOUS_RENDER_TARGET_COUNT, &rtvs[0], &dsv, 0, device_data.uav_max_count, &uavs[0]);
                   
-                  if (force_indirect_texture_format_upgrades && !hash_based_indirect_texture_format_upgrades && source_resource == 0 && cmd_list_data.any_upgraded_ps_uavs)
+                  if (force_indirect_texture_format_upgrades && source_resource == 0 && cmd_list_data.any_upgraded_ps_uavs)
                   {
                      for (size_t i = 0; i < cmd_list_data.ps_uavs_state.size(); ++i)
                      {
@@ -6034,7 +6038,7 @@ namespace
                {
                   native_device_context->CSGetUnorderedAccessViews(0, device_data.uav_max_count, &uavs[0]);
                   
-                  if (force_indirect_texture_format_upgrades && !hash_based_indirect_texture_format_upgrades && source_resource == 0 && cmd_list_data.any_upgraded_cs_uavs)
+                  if (force_indirect_texture_format_upgrades && source_resource == 0 && cmd_list_data.any_upgraded_cs_uavs)
                   {
                      for (size_t i = 0; i < cmd_list_data.cs_uavs_state.size(); ++i)
                      {
@@ -6063,6 +6067,8 @@ namespace
                // TODO: why not do it with "force_indirect_texture_format_upgrades" too? Is it too generic?
                const bool allow_scale = hash_based_indirect_texture_format_upgrades && auto_texture_format_upgrades->scale; // "auto_texture_format_upgrades" is null on the forced (chain) path
                const bool force_scale = cmd_list_data.force_scale;
+               // The forced upgrades are generic, as such we wouldn't want to skip the format check!
+               const bool force_format_upgrade = !force_indirect_texture_format_upgrades && hash_based_indirect_texture_format_upgrades;
 
                bool any_changed = false;
                bool any_changed_inline = false;
@@ -6097,7 +6103,7 @@ namespace
                         const uint64_t seed_res_before = prev_resource;
 #endif
                         // TODO: what's the "resource != prev_resource" check for? It seems useless?
-                        if (FindOrCreateIndirectUpgradedResource(device, source_resource, prev_resource, resource, device_data, true, reshade::api::resource_usage::render_target, lock_device_read, allow_scale, force_scale) && resource != prev_resource)
+                        if (FindOrCreateIndirectUpgradedResource(device, source_resource, prev_resource, resource, device_data, true, reshade::api::resource_usage::render_target, lock_device_read, allow_scale, force_scale, true, {}, nullptr, force_format_upgrade) && resource != prev_resource)
                         {
                            uint64_t resource_view = prev_resource_view;
                            if (FindOrCreateIndirectUpgradedResourceView(device, prev_resource_view, resource_view, device_data, true, reshade::api::resource_usage::render_target, lock_device_read))
@@ -6171,7 +6177,7 @@ namespace
 #endif
                      uint64_t prev_resource = GetCachedResourceFromView(device_data, prev_resource_view, true, false, true, &lock_device_read, device);
                      uint64_t resource = prev_resource;
-                     if (FindOrCreateIndirectUpgradedResource(device, source_resource, prev_resource, resource, device_data, true, reshade::api::resource_usage::unordered_access, lock_device_read, allow_scale, force_scale) && resource != prev_resource)
+                     if (FindOrCreateIndirectUpgradedResource(device, source_resource, prev_resource, resource, device_data, true, reshade::api::resource_usage::unordered_access, lock_device_read, allow_scale, force_scale, true, {}, nullptr, force_format_upgrade) && resource != prev_resource)
                      {
                         uint64_t resource_view = prev_resource_view;
                         if (FindOrCreateIndirectUpgradedResourceView(device, prev_resource_view, resource_view, device_data, true, reshade::api::resource_usage::unordered_access, lock_device_read))

@@ -2,7 +2,7 @@
 
 // Implementation of ResourceUpgradeManager (see resource_upgrades.hpp).
 
-std::optional<reshade::api::resource_desc> ResourceUpgradeManager::GetOptionalResourceUpgradeDesc(const reshade::api::resource_desc& desc, const ResourceUpgradeFrameState& state, bool has_initial_data) const
+std::optional<reshade::api::resource_desc> ResourceUpgradeManager::GetOptionalResourceUpgradeDesc(const reshade::api::resource_desc& desc, const ResourceUpgradeFrameState& state, bool has_initial_data, bool force_format_upgrade) const
 {
    if (texture_format_upgrades_type < TextureFormatUpgradesType::AllowedEnabled)
    {
@@ -120,7 +120,7 @@ std::optional<reshade::api::resource_desc> ResourceUpgradeManager::GetOptionalRe
    }
 
    // The format needs to be in the upgrades list (color and depth textures have separate ones)
-   const bool format_filter = (is_upgradable_color && texture_upgrade_formats.contains(desc.texture.format)) || (is_depth && texture_depth_upgrade_formats.contains(desc.texture.format));
+   const bool format_filter = force_format_upgrade || (is_upgradable_color && texture_upgrade_formats.contains(desc.texture.format)) || (is_depth && texture_depth_upgrade_formats.contains(desc.texture.format));
 
    if (!format_filter && !resize_filter)
    {
@@ -347,7 +347,8 @@ bool ResourceUpgradeManager::FindOrCreateIndirectUpgradedResource(
    bool should_scale,
    bool leave_locked,
    reshade::api::resource_usage additional_bind_flags,
-   bool* scaled)
+   bool* scaled,
+   bool force_format_upgrade)
 {
    bool replaced = false;
 
@@ -404,16 +405,15 @@ bool ResourceUpgradeManager::FindOrCreateIndirectUpgradedResource(
       }
       else // Upgrade texture desc
       {
-#if 1
-         if (std::optional<reshade::api::resource_desc> upgraded_desc = GetOptionalResourceUpgradeDesc(source_desc, state, false))
+         if (std::optional<reshade::api::resource_desc> upgraded_desc = GetOptionalResourceUpgradeDesc(source_desc, state, false, force_format_upgrade))
          {
             target_desc = upgraded_desc.value();
             needs_upgraded_resource = true;
          }
-#else // TODO: delete older simpler branch
-         target_desc.texture.format = GetBestResourceUpgradeFormat(source_desc);
-         needs_upgraded_resource = source_desc.texture.format != target_desc.texture.format;
-#endif
+         else
+         {
+            ASSERT_ONCE_MSG(!force_format_upgrade, "Forced texture upgrade failed, this might be unwanted");
+         }
       }
 
       // Resolution scaling (upscale only): scale the mirror from render_resolution to output_resolution
