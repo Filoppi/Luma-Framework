@@ -1,8 +1,9 @@
 // Metal Gear Solid V: The Phantom Pain — Luma mod (Fox Engine, D3D11).
 // Replaces the game's FXAA with native resolution super resolution (FSR 3, FSR 4 through DX12 interop, DLSS).
 // The game has no TAA, so Luma injects the jitter (into the game's camera constants as they're uploaded) and builds full precision
-// motion vectors (a compute pass next to the game's own 8 bit ones). The game records FXAA on a deferred context, so SR splits that
-// command list at FXAA and runs on the immediate context between its two halves (like Persona 5 Royal).
+// motion vectors (a compute pass next to the game's own 8 bit ones). The game records its post processing on deferred contexts, so SR
+// splits the post processing command list right before the game's bloom and runs on the immediate context between its two halves (like
+// Persona 5 Royal at FXAA): bloom, lens flare, DoF, motion blur, the LUT and the tonemap run on its output, and FXAA is skipped.
 // The game quits at startup under ReShade's D3D11 wrapper unless its device check is answered for it ("InstallDeviceCheckFix()").
 // Development builds can also skip FXAA, jitter without SR and flip the SR inputs (MCP "luma_dev_values" or the dev settings).
 
@@ -22,15 +23,24 @@
 #include "..\..\Core\core.hpp"
 #include "..\..\Core\hooks\Hooks.h"
 
+#include <chrono>
 #include <intrin.h>
 #include <Psapi.h>
 
 namespace
 {
-   // FXAA 3.11 Quality, after tonemap and before the UI, at every Post-Processing level: the SR point
+   // FXAA 3.11 Quality, after tonemap and before the UI, at every Post-Processing level: SR replaces it, and runs here instead if the frame
+   // couldn't split before bloom
    constexpr uint32_t kFXAAHash = 0x900968FF;
    // Full screen velocity (camera motion from depth plus object velocity), only with Motion Blur on and Post-Processing High+
    constexpr uint32_t kVelocityHash = 0xA13321B6;
+   // The first bloom reduction (CopyReductionX4, which reads the scene), early in the post processing list at every Post-Processing level:
+   // the SR point. Bloom, lens flare, depth of field, motion blur and the tonemap then run on SR's output, the order the FidelityFX and DLSS
+   // guides give.
+   constexpr uint32_t kBloomReductionHash = 0x72C1D157;
+   // "tpp3dfw_TargetMaker" (sic) draws the marked enemy and night vision thermal outlines after SR, onto the final image, with the scene
+   // constants: they need the game's own camera, without our jitter (see "UnjitterOutlines()")
+   constexpr uint32_t kOutlineVSHash = 0x3D3E9DE2;
 
 #if DEVELOPMENT
    bool g_skip_fxaa = false;
@@ -137,6 +147,24 @@ namespace
    constexpr int kRowCameraCenterOffset = 28;      // "m_cameraCenterOffset"
    using SceneRows = float[kSceneCBSize / 16][4];
 
+   // A frame that can't split before bloom (seen on a scene's first frame) runs SR at FXAA's slot instead. That's a soft failure, logged as a
+   // warning on its 1st, 10th, 100th... time, so a layout that never fits can't flood the log.
+   enum class SRFallback : int
+   {
+      NoBloomReduction,     // FXAA came first on the frame's thread
+      BloomSplitImpossible, // The bloom reduction's input isn't a render size scene SR can write, or a split is still pending
+      Count
+   };
+   std::atomic<uint32_t> g_sr_fallbacks[int(SRFallback::Count)] = {};
+   void LogSRFallback(SRFallback kind, const char* reason)
+   {
+      const uint32_t count = ++g_sr_fallbacks[int(kind)];
+      if (count == 1 || count == 10 || count == 100 || count == 1000 || count % 10000 == 0)
+      {
+         reshade::log::message(reshade::log::level::warning, std::format("MGSV: SR couldn't run before bloom, so it runs at FXAA's slot ({} time{}): {}", count, count == 1 ? "" : "s", reason).c_str());
+      }
+   }
+
 #if DEVELOPMENT
    bool g_jitter_enable = false;         // Jitter without SR too (to see it with FXAA)
    bool g_decode_motion_vectors = true;  // Decode without SR too (for the MCP readbacks)
@@ -197,6 +225,15 @@ namespace
    thread_local VelocityCamera t_velocity_camera;
    // This thread decoded the motion vectors of the frame it's recording (at its velocity pass), so that frame's FXAA can become SR
    thread_local bool t_decoded_motion_vectors = false;
+   // Whether the frame this thread records split before bloom (the same thread records its velocity pass, the post processing list and
+   // FXAA's list): set at the bloom reduction, read at FXAA, reset at FXAA and at the velocity pass
+   enum class BloomSplit : uint8_t
+   {
+      None,   // No bloom reduction yet
+      Done,   // SR runs before bloom, FXAA goes
+      Failed, // Logged there: SR runs at FXAA's slot
+   };
+   thread_local BloomSplit t_bloom_split = BloomSplit::None;
 
 #if DEVELOPMENT
    // Diagnostics per FXAA interval (FXAA is the game's last pass before the UI)
@@ -235,6 +272,7 @@ namespace
       uint32_t phase = 0;
       bool counted = false; // Its velocity pass upload was seen
       bool valid = false;
+      uint32_t generation = 0; // See "g_generation"
    };
    std::mutex g_frame_phases_mutex;
    std::array<FramePhase, 8> g_frame_phases; // The latest camera keys (interleaved recording spans two frames)
@@ -242,6 +280,14 @@ namespace
    // Main camera frames so far, counted at their velocity pass upload (exactly one per frame), picks the phase of each new camera key.
    // Other uploads with a camera state of their own (the previous camera's values re-uploaded early in many frames) can't consume phases.
    uint32_t g_main_frames = 0;
+
+   // A perfectly still camera uploads the same key every frame, which would freeze the jitter. Its next frame starts at the first main view
+   // upload after a present that follows a pause of at least 1 ms in the uploads (the gap between two frames' recording): that starts a new
+   // generation, and a key from an older generation takes the next phase.
+   uint32_t g_generation = 0;
+   std::atomic<uint32_t> g_presents = 0;
+   uint32_t g_last_upload_present = UINT32_MAX; // "g_presents" at the last main view upload
+   std::chrono::steady_clock::time_point g_last_upload_time;
 
 #if DEVELOPMENT
    std::atomic<uint32_t> g_latest_frame = 0;
@@ -266,7 +312,7 @@ namespace
    uint32_t g_fxaa_phase_skips = 0;
 #endif
 
-   // Frames with an identical camera state share an index and phase (so a perfectly still camera keeps a static jitter)
+   // Frames with an identical camera state share an index and phase, until a still camera's next frame (see "g_generation")
    uint32_t GetFrameIndex(const SceneRows& rows, bool velocity_upload, uint32_t& phase)
    {
       FrameKey key;
@@ -283,11 +329,28 @@ namespace
             break;
          }
       }
+
+      // A still camera's next frame (see "g_generation")
+      const auto now = std::chrono::steady_clock::now();
+      const uint32_t present = g_presents.load(std::memory_order_relaxed);
+      if (present != g_last_upload_present && now - g_last_upload_time >= std::chrono::milliseconds(1))
+         g_generation++;
+      g_last_upload_present = present;
+      g_last_upload_time = now;
+      if (frame_phase && frame_phase->generation != g_generation)
+      {
+         // The same camera in a later frame takes that frame's phase
+         frame_phase->phase = g_main_frames % SR::GetDefaultJitterPhases();
+         frame_phase->counted = false;
+         frame_phase->generation = g_generation;
+      }
+
       if (!frame_phase)
       {
          const uint32_t frame = g_next_frame++;
          frame_phase = &g_frame_phases[frame % g_frame_phases.size()];
          *frame_phase = {key, frame, g_main_frames % SR::GetDefaultJitterPhases(), false, true};
+         frame_phase->generation = g_generation;
 #if DEVELOPMENT
          g_latest_frame = frame;
          g_new_frames++;
@@ -316,6 +379,16 @@ namespace
       void* data = nullptr;
    };
    thread_local PendingSceneCBMap t_pending_scene_cb_map;
+
+   // This thread's last jittered scene cbuffer upload, with the game's own rows, for the outlines (see "UnjitterOutlines()")
+   struct JitteredUpload
+   {
+      uint64_t buffer = 0;
+      SceneRows game_rows;
+      bool restored = false; // The game's rows are back in the buffer
+   };
+   thread_local JitteredUpload t_last_jittered_upload;
+   thread_local bool t_rewriting_scene_cb = false; // Our own write of a scene cbuffer, not the game's upload
 
 #if DEVELOPMENT
    // Outlier logger: every kind of view the game uploads scene constants for (main, shadow, reflection...)
@@ -386,7 +459,7 @@ namespace
    void OnMapSceneCB(reshade::api::device* device, reshade::api::resource resource, uint64_t offset, uint64_t size, reshade::api::map_access access, void** data)
    {
       SKIP_UNSUPPORTED_DEVICE_API(device->get_api());
-      if (access != reshade::api::map_access::write_discard)
+      if (access != reshade::api::map_access::write_discard || t_rewriting_scene_cb)
          return;
       // Only SR (or the development tools) needs the scene constants: skip the per map work otherwise (the game maps thousands of buffers)
       bool needed = SrUsable(*device->get_private_data<DeviceData>());
@@ -414,6 +487,9 @@ namespace
 #if DEVELOPMENT
       g_scene_cb_uploads++;
 #endif
+      // A new upload replaces the rows that buffer held (they're kept again below if we jitter them)
+      if (t_last_jittered_upload.buffer == resource.handle)
+         t_last_jittered_upload.buffer = 0;
 
       // Work on a copy, the mapped memory is write combined (slow to read)
       SceneRows rows;
@@ -486,6 +562,10 @@ namespace
       const float render_height = rows[kRowViewportSize][1] > 0.f ? rows[kRowViewportSize][1] : device_data.output_resolution.y;
       const float offset_x = 2.f * jitter_x / render_width;
       const float offset_y = -2.f * jitter_y / render_height;
+      JitteredUpload& last_upload = t_last_jittered_upload;
+      std::memcpy(last_upload.game_rows, rows, sizeof(rows));
+      last_upload.buffer = resource.handle;
+      last_upload.restored = false;
       JitterView(rows, prev_projection_view, offset_x, offset_y);
       std::memcpy(data, rows, sizeof(rows));
 #if DEVELOPMENT
@@ -500,12 +580,40 @@ namespace
       }
    }
 
-   // A split FXAA command list waiting for SR: recorded at the FXAA draw, run when the rest of that command list executes
+   // The outlines draw after SR (see "kOutlineVSHash") with this thread's last scene cbuffer upload, which carries our jitter: before their
+   // first draw, that buffer gets the game's own rows back. They stay for the rest of its draws, which all come after SR too.
+   void UnjitterOutlines(ID3D11DeviceContext* native_device_context, const DeviceData& device_data, const ShaderHashesList<OneShaderPerPipeline>& original_shader_hashes)
+   {
+      JitteredUpload& last_upload = t_last_jittered_upload;
+      if (last_upload.buffer == 0 || last_upload.restored || !original_shader_hashes.Contains(kOutlineVSHash, reshade::api::shader_stage::vertex))
+         return;
+      if (!SrUsable(device_data))
+      {
+         last_upload.buffer = 0; // Uploads aren't followed without SR, so this one could be stale
+         return;
+      }
+      com_ptr<ID3D11Buffer> bound;
+      native_device_context->VSGetConstantBuffers(2, 1, &bound);
+      if (reinterpret_cast<uint64_t>(bound.get()) != last_upload.buffer)
+         return;
+      // A new version of the buffer for the draws recorded from here on (deferred contexts take write discard maps of dynamic buffers)
+      t_rewriting_scene_cb = true;
+      D3D11_MAPPED_SUBRESOURCE mapped;
+      if (SUCCEEDED(native_device_context->Map(bound.get(), 0, D3D11_MAP_WRITE_DISCARD, 0, &mapped)))
+      {
+         std::memcpy(mapped.pData, last_upload.game_rows, sizeof(SceneRows));
+         native_device_context->Unmap(bound.get(), 0);
+         last_upload.restored = true;
+      }
+      t_rewriting_scene_cb = false;
+   }
+
+   // A split command list waiting for SR (split at the bloom reduction, or at FXAA), run when the rest of that command list executes
    struct SRJob
    {
-      com_ptr<ID3D11CommandList> partial_command_list; // Everything the deferred context recorded before FXAA
-      com_ptr<ID3D11ShaderResourceView> source_srv;    // FXAA's input (a copy of the tonemapped image)
-      com_ptr<ID3D11RenderTargetView> target_rtv;      // FXAA's output, where the UI draws next
+      com_ptr<ID3D11CommandList> partial_command_list; // Everything the deferred context recorded before the split
+      com_ptr<ID3D11ShaderResourceView> source_srv;    // The scene before bloom, or FXAA's input (a copy of the tonemapped image)
+      com_ptr<ID3D11RenderTargetView> target_rtv;      // The same scene, or FXAA's output (where the UI draws next)
       com_ptr<ID3D11Texture2D> motion_vectors;         // The textures this frame's decode wrote (they're recreated on resolution changes)
       com_ptr<ID3D11Texture2D> depth;
       UINT width = 0;
@@ -516,11 +624,11 @@ namespace
       float near_plane = 0.f;
       float far_plane = 0.f;
       uint32_t present_index = 0;
+      bool before_bloom = false; // SR writes the scene it read back in place, colour only (depth of field and motion blur read its alpha)
    };
    std::mutex g_sr_jobs_mutex;
    std::unordered_map<ID3D11DeviceContext*, SRJob> g_sr_jobs_by_context;    // Split, until the game finishes the rest of the list
    std::unordered_map<ID3D11CommandList*, SRJob> g_sr_jobs_by_command_list; // Until that command list executes
-   std::atomic<uint32_t> g_presents = 0;
 #endif
 } // namespace
 
@@ -542,6 +650,11 @@ struct GameDeviceDataMetalGearSolidV final : public GameDeviceData
    // 1x1 R32_FLOAT holding 1: the input is already exposed (after the tonemap). FSR 4 rejects frames without an exposure texture when its
    // auto exposure is off, FSR 3 assumes the same 1 without one.
    com_ptr<ID3D11Texture2D> sr_exposure;
+   // Before bloom, SR writes the scene back through this view of it (the game only reads the scene there)
+   com_ptr<ID3D11Texture2D> scene;
+   com_ptr<ID3D11RenderTargetView> scene_rtv;
+   // Writes colour only, so SR keeps the scene's alpha before bloom (depth of field and motion blur read it)
+   com_ptr<ID3D11BlendState> color_only_blend_state;
    // SR drew since the last present (otherwise its history resets on the next SR frame)
    std::atomic<bool> sr_drawn = false;
    // The SR type at the last present: the safety net's verdict only holds for the type it saw fail
@@ -642,7 +755,8 @@ class MetalGearSolidV final : public Game
       return true;
    }
 
-   // At the FXAA draw, on its deferred context: close the command list before FXAA (SR runs between this part and the rest)
+   // At the FXAA draw, on its deferred context, if the frame couldn't split before bloom: close the command list before FXAA (SR runs
+   // between this part and the rest)
    static bool SplitForSR(ID3D11DeviceContext* native_device_context, DeviceData& device_data)
    {
       com_ptr<ID3D11ShaderResourceView> source_srv;
@@ -667,6 +781,20 @@ class MetalGearSolidV final : public Game
          return false;
       job.source_srv = std::move(source_srv);
       job.target_rtv = std::move(target_rtv);
+      if (!FillSRJobFrame(job, device_data))
+         return false;
+
+      // Closed before the job is registered: our own split must never pass for the end of the game's command list
+      if (FAILED(native_device_context->FinishCommandList(TRUE, &job.partial_command_list)))
+         return false;
+      const std::lock_guard lock(g_sr_jobs_mutex);
+      g_sr_jobs_by_context[native_device_context] = std::move(job);
+      return true;
+   }
+
+   // The frame's motion vectors, depth and camera for SR, from this thread's velocity pass
+   static bool FillSRJobFrame(SRJob& job, DeviceData& device_data)
+   {
       {
          auto& game_device_data = GetGameDeviceData(device_data);
          const std::lock_guard lock(game_device_data.textures_mutex);
@@ -681,17 +809,75 @@ class MetalGearSolidV final : public Game
       job.near_plane = t_velocity_camera.near_plane;
       job.far_plane = t_velocity_camera.far_plane;
       job.present_index = g_presents;
+      return true;
+   }
 
-      // Closed before the job is registered: our own split must never pass for the end of the game's command list
+   // At the first bloom reduction, on the thread that decoded this frame's motion vectors: close the post processing list there, so SR runs
+   // before the rest of it, in place on the scene the reduction reads (through the game's own view of it, and a render target view alike)
+   static bool SplitBeforeBloom(ID3D11Device* native_device, ID3D11DeviceContext* native_device_context, DeviceData& device_data)
+   {
+      {
+         const std::lock_guard lock(g_sr_jobs_mutex);
+         if (g_sr_jobs_by_context.contains(native_device_context))
+            return false;
+      }
+      com_ptr<ID3D11ShaderResourceView> scene_srv;
+      native_device_context->PSGetShaderResources(0, 1, &scene_srv);
+      if (!scene_srv)
+         return false;
+      com_ptr<ID3D11Resource> resource;
+      scene_srv->GetResource(&resource);
+      com_ptr<ID3D11Texture2D> scene;
+      if (FAILED(resource->QueryInterface(&scene)))
+         return false;
+      D3D11_TEXTURE2D_DESC desc;
+      scene->GetDesc(&desc);
+      SRJob job;
+      job.before_bloom = true;
+      job.width = UINT(t_velocity_camera.data.RenderSize.x);
+      job.height = UINT(t_velocity_camera.data.RenderSize.y);
+      if (desc.SampleDesc.Count != 1 || desc.Width != job.width || desc.Height != job.height || (desc.BindFlags & D3D11_BIND_RENDER_TARGET) == 0)
+         return false;
+
+      com_ptr<ID3D11RenderTargetView> scene_rtv;
+      {
+         auto& game_device_data = GetGameDeviceData(device_data);
+         const std::lock_guard lock(game_device_data.textures_mutex);
+         if (game_device_data.scene.get() != scene.get())
+         {
+            D3D11_SHADER_RESOURCE_VIEW_DESC srv_desc;
+            scene_srv->GetDesc(&srv_desc);
+            D3D11_RENDER_TARGET_VIEW_DESC rtv_desc = {};
+            rtv_desc.Format = srv_desc.Format; // The stored, gamma encoded values (UNORM), like the game reads them
+            rtv_desc.ViewDimension = D3D11_RTV_DIMENSION_TEXTURE2D;
+            game_device_data.scene = scene;
+            game_device_data.scene_rtv.reset();
+            native_device->CreateRenderTargetView(scene.get(), &rtv_desc, &game_device_data.scene_rtv);
+         }
+         scene_rtv = game_device_data.scene_rtv;
+      }
+      if (!scene_rtv || !FillSRJobFrame(job, device_data))
+         return false;
+      job.source_srv = std::move(scene_srv);
+      job.target_rtv = std::move(scene_rtv);
+
+      // Closed before the job is registered, like at FXAA
       if (FAILED(native_device_context->FinishCommandList(TRUE, &job.partial_command_list)))
          return false;
       const std::lock_guard lock(g_sr_jobs_mutex);
       g_sr_jobs_by_context[native_device_context] = std::move(job);
+#if DEVELOPMENT || TEST
+      static std::atomic<bool> logged = false;
+      if (!logged.exchange(true))
+      {
+         reshade::log::message(reshade::log::level::info, std::format("MGSV: SR runs before bloom (scene {}x{}, texture format {})", desc.Width, desc.Height, int(desc.Format)).c_str());
+      }
+#endif
       return true;
    }
 
-   // On the immediate context, after the part of the command list before FXAA executed: FXAA's input into SR's input, SR, then SR's output
-   // into FXAA's target
+   // On the immediate context, after the part of the command list before the split executed: the source into SR's input, SR, then SR's
+   // output into the target
    static void DrawSR(ID3D11DeviceContext* native_device_context, DeviceData& device_data, const SRJob& job)
    {
       if (!SrActive(device_data))
@@ -701,6 +887,7 @@ class MetalGearSolidV final : public Game
       com_ptr<ID3D11Texture2D> input, output, exposure;
       com_ptr<ID3D11RenderTargetView> input_rtv;
       com_ptr<ID3D11ShaderResourceView> output_srv;
+      ID3D11BlendState* const output_blend_state = job.before_bloom ? game_device_data.color_only_blend_state.get() : device_data.default_blend_state.get();
       {
          com_ptr<ID3D11Device> native_device;
          native_device_context->GetDevice(&native_device);
@@ -734,7 +921,7 @@ class MetalGearSolidV final : public Game
             copy_ps = ps->second;
       }
       auto* sr_instance_data = device_data.GetSRInstanceData();
-      if (!input || !output || !exposure || !copy_vs || !copy_ps || !sr_instance_data)
+      if (!input || !output || !exposure || !output_blend_state || !copy_vs || !copy_ps || !sr_instance_data)
       {
          CountSRResult(false);
          return;
@@ -764,7 +951,7 @@ class MetalGearSolidV final : public Game
       settings_data.render_width = job.width;
       settings_data.render_height = job.height;
       settings_data.dynamic_resolution = false;
-      settings_data.hdr = false;                          // After the tonemap (gamma space LDR)
+      settings_data.hdr = false;                          // Gamma space LDR (the scene composite tonemaps it)
       settings_data.inverted_depth = true;                // Reverse Z, infinite far
       settings_data.mvs_jittered = false;                 // Our motion vectors subtract the jitter
       settings_data.mvs_x_scale = motion_vectors_scale_x; // They're in pixels, current to previous
@@ -790,7 +977,7 @@ class MetalGearSolidV final : public Game
       compute_state.Restore(native_device_context); // Also unbinds SR's output, which SR wrote as a UAV, before it's read
       if (drawn)
       {
-         DrawCustomPixelShader(native_device_context, device_data.default_depth_stencil_state.get(), device_data.default_blend_state.get(), nullptr, copy_vs.get(), copy_ps.get(), output_srv.get(), job.target_rtv.get(), job.width, job.height, true, "MGSV SR Output");
+         DrawCustomPixelShader(native_device_context, device_data.default_depth_stencil_state.get(), output_blend_state, nullptr, copy_vs.get(), copy_ps.get(), output_srv.get(), job.target_rtv.get(), job.width, job.height, true, "MGSV SR Output");
       }
       graphics_state.Restore(native_device_context);
       if (drawn)
@@ -857,6 +1044,15 @@ public:
       InstallDeviceCheckFix();
 #endif
       device_data.game = new GameDeviceDataMetalGearSolidV;
+#if ENABLE_SR
+      D3D11_BLEND_DESC blend_desc = {};
+      D3D11_RENDER_TARGET_BLEND_DESC& target_blend = blend_desc.RenderTarget[0];
+      target_blend.SrcBlend = target_blend.SrcBlendAlpha = D3D11_BLEND_ONE;
+      target_blend.DestBlend = target_blend.DestBlendAlpha = D3D11_BLEND_ZERO;
+      target_blend.BlendOp = target_blend.BlendOpAlpha = D3D11_BLEND_OP_ADD;
+      target_blend.RenderTargetWriteMask = D3D11_COLOR_WRITE_ENABLE_RED | D3D11_COLOR_WRITE_ENABLE_GREEN | D3D11_COLOR_WRITE_ENABLE_BLUE;
+      native_device->CreateBlendState(&blend_desc, &GetGameDeviceData(device_data).color_only_blend_state);
+#endif
    }
 
    // "GameDeviceData" has no virtual destructor, so delete it as what it is
@@ -910,6 +1106,9 @@ public:
 
    DrawOrDispatchOverrideType OnDrawOrDispatch(ID3D11Device* native_device, ID3D11DeviceContext* native_device_context, CommandListData& cmd_list_data, DeviceData& device_data, reshade::api::shader_stage stages, const ShaderHashesList<OneShaderPerPipeline>& original_shader_hashes, bool is_custom_pass, bool& updated_cbuffers, std::function<void()>* original_draw_dispatch_func) override
    {
+#if ENABLE_SR
+      UnjitterOutlines(native_device_context, device_data, original_shader_hashes);
+#endif
       if (original_shader_hashes.Contains(kFXAAHash, reshade::api::shader_stage::pixel))
       {
 #if DEVELOPMENT || TEST
@@ -972,11 +1171,31 @@ public:
          // SR replaces FXAA when this thread decoded this frame's motion vectors (no velocity pass, no SR: FXAA stays)
          const bool decoded = t_decoded_motion_vectors;
          t_decoded_motion_vectors = false;
+         const BloomSplit bloom_split = t_bloom_split;
+         t_bloom_split = BloomSplit::None;
+         if (decoded && bloom_split == BloomSplit::Done)
+            return DrawOrDispatchOverrideType::Skip; // SR ran before bloom
          if (SrUsable(device_data))
          {
             if (decoded && SplitForSR(native_device_context, device_data))
+            {
+               if (bloom_split == BloomSplit::None)
+                  LogSRFallback(SRFallback::NoBloomReduction, "no bloom reduction on this frame's thread");
                return DrawOrDispatchOverrideType::Skip;
+            }
             g_fxaa_over_jitter = true; // The scene uploads were jittered for SR
+         }
+#endif
+      }
+      else if (original_shader_hashes.Contains(kBloomReductionHash, reshade::api::shader_stage::pixel))
+      {
+#if ENABLE_SR
+         // The SR point (see "kBloomReductionHash"). The reduction draws twice a frame: the first one splits.
+         if (t_decoded_motion_vectors && t_bloom_split == BloomSplit::None && SrUsable(device_data))
+         {
+            t_bloom_split = SplitBeforeBloom(native_device, native_device_context, device_data) ? BloomSplit::Done : BloomSplit::Failed;
+            if (t_bloom_split == BloomSplit::Failed)
+               LogSRFallback(SRFallback::BloomSplitImpossible, "couldn't split at the bloom reduction");
          }
 #endif
       }
@@ -991,6 +1210,7 @@ public:
 #if DEVELOPMENT
          decode |= g_decode_motion_vectors;
 #endif
+         t_bloom_split = BloomSplit::None; // A new frame on this thread
          if (decode && t_velocity_camera.valid)
          {
             t_decoded_motion_vectors = DecodeMotionVectors(native_device, native_device_context, cmd_list_data, device_data);
