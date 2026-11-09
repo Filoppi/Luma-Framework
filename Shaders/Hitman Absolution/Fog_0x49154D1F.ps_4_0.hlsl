@@ -80,7 +80,10 @@ float4 main(float4 v0 : SV_POSITION, float4 v1 : TEXCOORD1) : SV_TARGET
   {
     float3 scene = t2.Load(int3(v0.xy, 0)).rgb;
     float m = max(scene.r, max(scene.g, scene.b));
-    o0.w *= lerp(smoothstep(0.0, 0.0625, m), 1.0, smoothstep(0.2, 0.5, o0.w));
+    // The scene copy is linear: ramp in gamma space (0..0.2 ~ linear 0..0.03) and keep at least 60% of the fog,
+    // a full fade to 0 cut black holes into the R&D smoke over dark ceilings.
+    float blackFade = lerp(0.6, 1.0, smoothstep(0.0, 0.2, pow(max(m, 0.0), 1.0 / 2.2)));
+    o0.w *= lerp(blackFade, 1.0, smoothstep(0.2, 0.5, o0.w));
   }
 #endif
 

@@ -139,6 +139,17 @@ float3 HMA_GammaToLinear(float3 x)
   return lerp(perChannel, byLum, LumaSettings.GameSettings.GammaCorrectionByLuminance);
 }
 
+// Blend a linear BT.709 flare into scene headroom relative to the display peak.
+float3 HMA_AddFlareHeadroom(float3 sceneLin, float3 flare)
+{
+  float3 scene2020 = BT709_To_BT2020(sceneLin);
+  float headroom = max(LumaSettings.PeakWhiteNits / LumaSettings.GamePaperWhiteNits - max(scene2020.r, max(scene2020.g, scene2020.b)), 0.0);
+  float3 flare2020 = BT709_To_BT2020(flare);
+  float flareMax = max(flare2020.r, max(flare2020.g, flare2020.b));
+  float flareScale = flareMax > 0.0 ? headroom * (1.0 - exp(-flareMax / max(headroom, 1e-4))) / flareMax : 0.0;
+  return sceneLin + flare * flareScale;
+}
+
 // Linear scene (1 = paper white, flare already added) to the encoded swapchain value.
 float3 HMA_DisplayOutput(float3 lin, float exposedBrightPoint = 0.0)
 {

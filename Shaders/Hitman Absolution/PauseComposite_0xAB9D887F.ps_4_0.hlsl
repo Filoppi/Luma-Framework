@@ -16,6 +16,11 @@ Texture2D<float4> t1 : register(t1);
 Texture2D<float4> t2 : register(t2);
 Texture2D<float4> t3 : register(t3);
 Texture2D<float4> t4 : register(t4);
+#if TONEMAP_TYPE >= 1
+// Modern flare is bound at t5 by C++; null/0-size when unavailable.
+Texture2D<float4> t5 : register(t5);
+SamplerState s5 : register(s5);
+#endif
 
 SamplerState s0 : register(s0);
 SamplerState s1 : register(s1);
@@ -69,8 +74,9 @@ float4 main(float4 v0 : SV_POSITION, float4 v1 : TEXCOORD0, float3 v2 : COLOR0, 
   r0.w = saturate(r0.w * cb4[114].x);
   r0.xy = r0.xy * cb4[113].w;
   r0.xy = r0.xy * 2.0 + v1.xy;
-  r1 = t4.Sample(s4, r0.xy);
-  r2 = t2.Sample(s2, r0.xy);
+  float2 overlayUV = r0.xy;
+  r1 = t4.Sample(s4, overlayUV);
+  r2 = t2.Sample(s2, overlayUV);
   r3 = t0.Sample(s0, v1.xy);
   r1.xyz = r1.xyz - r3.xyz;
   r0.xyz = r0.z * r1.xyz + r3.xyz;
@@ -92,12 +98,21 @@ float4 main(float4 v0 : SV_POSITION, float4 v1 : TEXCOORD0, float3 v2 : COLOR0, 
   float gradientFade = smoothstep(0.0, 0.25, max(cS.r, max(cS.g, cS.b)));
   float3 x = max(GrainLevels(cS, grain, v3 * LumaSettings.GameSettings.TopGradientStrength * gradientFade), 0.0) + excess;
 
-  // Overlay (t2) blended over the composite, as vanilla.
-  float3 ov = saturate(r2.xyz);
-  x = x * (1.0 - ov) + ov;
-
   float4 o0;
-  o0.xyz = HMA_DisplayOutput(HMA_GammaToLinear(x));
+  float3 lin = HMA_GammaToLinear(x);
+  uint flareWidth, flareHeight;
+  t5.GetDimensions(flareWidth, flareHeight);
+  bool newFlareValid = LumaSettings.GameSettings.LumaBloom != 0 && LumaSettings.GameSettings.ModernLensFlares != 0 && flareWidth > 0;
+  if (newFlareValid)
+    lin = HMA_AddFlareHeadroom(lin, max(t5.SampleLevel(s5, overlayUV, 0).rgb, 0.0));
+  else
+  {
+    // Keep the legacy overlay when the modern flare is unavailable.
+    float3 ov = saturate(r2.xyz);
+    x = x * (1.0 - ov) + ov;
+    lin = HMA_GammaToLinear(x);
+  }
+  o0.xyz = HMA_DisplayOutput(lin);
   o0.w = 0.0;
   return o0;
 #endif

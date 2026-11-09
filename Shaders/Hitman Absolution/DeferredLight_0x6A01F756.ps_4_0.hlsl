@@ -26,6 +26,7 @@ Texture2D<float4> mapDeferred1 : register(t2);
 Texture2D<float4> mapDeferred2 : register(t3);
 Texture2D<float4> mapDeferred3 : register(t4);
 Texture2D<float4> mapOcclusion : register(t5);
+Texture2D<float4> mapFogDensity : register(t6); // Luma: half-res fog density copy (bound by main.cpp; .w = density), null if none
 
 SamplerState samplerLightModel : register(s0);
 SamplerState samplerDeferred0 : register(s1);
@@ -90,6 +91,16 @@ void main(
   r3.xyz = r3.xyz * r3.xyz;
 #if TONEMAP_TYPE >= 1
   r3.xyz = lerp(1.0, r3.xyz, LumaSettings.GameSettings.AODarkness);
+  {
+    uint fogW, fogH;
+    mapFogDensity.GetDimensions(fogW, fogH);
+    if (fogW > 0)
+    {
+      float fogAlpha = saturate(mapFogDensity.Sample(samplerOcclusion, v1.xy).w);
+      fogAlpha *= fogAlpha; // the fog pass blends with density squared
+      r3.xyz = lerp(r3.xyz, 1.0, fogAlpha); // AO sits under the fog: hide it as much as the fog hides the surface
+    }
+  }
 #endif
   r1.xyz = r2.xyz * r4.xyz + r1.xyz;
   r1.w = r2.w * 1024.0 - 1000.0;

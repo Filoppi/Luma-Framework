@@ -57,6 +57,7 @@ namespace CB
 		float AODarkness;
 		uint BokehDOFTapLimit;
 		uint TonemapVersion; // 0 = legacy extended-LUT grade, 1 = neutral-compressed LUT grade upgraded to HDR (UpgradeToneMap)
+		float HazeModel; // 0 = sqrt-space curve blend, 1 = linear HDR experiment
 	};
 	
 	// Define the game specific cbuffer (instance/pass) data here

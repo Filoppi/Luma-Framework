@@ -45,11 +45,11 @@
 #include "BackgroundInput.hpp"
 #include "gtao.h"
 
+static bool g_pause_hotkey = true;
 #if DEVELOPMENT
 static bool g_force_borderless = true;
 static bool g_always_on_top = false;
 static bool g_pause_on_focus_loss = false;
-static bool g_pause_hotkey = true;
 static bool g_allow_background_controls = true;
 static HWND g_saved_window = nullptr;
 static LONG_PTR g_saved_style = 0, g_saved_ex_style = 0;
@@ -150,7 +150,9 @@ static constexpr uint32_t kExposureBindHashes[] = { 0x8C21ED83, 0xA6E2CE1F, 0x2B
 static constexpr uint32_t kTonemapHash = 0x46C50FC2;
 static constexpr uint32_t kTonemapHash2 = 0xEED9AC77; // Chinatown variant (skips LUT when depth coord > 1)
 static constexpr uint32_t kFogHash = 0x49154D1F; // Chinatown fullscreen fog, blended onto the scene RT
+static constexpr uint32_t kFogDensityHashes[] = { 0xC62DB387, 0x8B9419D7 }; // Half-res fog density RT, copied for the AO consumers
 static constexpr uint32_t kFinalPostHash = 0x53909A5F; // Final post pass: reads the modern lens flare result at t3
+static constexpr uint32_t kHurtCompositeHash = 0xAB9D887F; // Hurt composite: reads the modern lens flare result at t5
 // Settings "FlareIntensity", "FlareThreshold", "FlareKnee", "ModernGlare", "GlareIntensity" (used with "ModernLensFlares").
 static const HMAFlareSettings g_flare_defaults = [] {
    HMAFlareSettings settings = {};
@@ -202,6 +204,7 @@ static constexpr uint32_t kDepthDownsampleHash = 0x16B01762;
 static constexpr uint32_t kAOConsumerHash = 0x3994DDCA;
 
 static ID3D11ShaderResourceView* HMA_GetExposureSRV(DeviceData& device_data); // Defined after TemplateGameDeviceData
+static bool HMA_ExposureReady(DeviceData& device_data, uint32_t mode); // Defined after TemplateGameDeviceData
 
 static bool HMA_OnResolveTextureRegion(
    reshade::api::command_list* cmd_list,
@@ -287,7 +290,10 @@ static bool HMA_OnResolveTextureRegion(
    draw_state_stack.Cache(native_device_context.get(), device_data.uav_max_count);
 
    // Luma auto-exposure meter at t1 (only used by the tonemaps when auto exposure is on, otherwise the shader falls back to E = 1)
-   ID3D11ShaderResourceView* srv_exposure = cb_luma_global_settings.GameSettings.AutoExposureMode != 0u ? HMA_GetExposureSRV(device_data) : nullptr;
+   const uint32_t tonemap_type = GetShaderDefineCompiledNumericalValue(TONEMAP_TYPE_HASH);
+   const bool exposure_ready = cb_luma_global_settings.GameSettings.AutoExposureMode != 0u
+      && HMA_ExposureReady(device_data, cb_luma_global_settings.GameSettings.AutoExposureMode);
+   ID3D11ShaderResourceView* srv_exposure = tonemap_type >= 1 && exposure_ready ? HMA_GetExposureSRV(device_data) : nullptr;
    native_device_context->PSSetShaderResources(1, 1, &srv_exposure);
 
    // Full-screen draw into the (non-MS) destination, reading the MS source with Load()
@@ -480,7 +486,7 @@ static bool HMA_DrawSMAAForFXAA(ID3D11Device* native_device, ID3D11DeviceContext
    return true;
 }
 
-// Matches the "AutoExposure" cbuffer in the exposure CS files (32 bytes).
+// Matches the "AutoExposure" cbuffer in the exposure CS files (48 bytes).
 struct AutoExposureCBData
 {
    float delta_time;
@@ -491,8 +497,12 @@ struct AutoExposureCBData
    uint32_t height;
    float key;
    uint32_t mode;
+   uint32_t depth_valid;
+   float depth_numerator;
+   float depth_offset;
+   float pad;
 };
-static_assert(sizeof(AutoExposureCBData) == 32);
+static_assert(sizeof(AutoExposureCBData) == 48);
 
 struct TemplateGameDeviceData final : public GameDeviceData
 {
@@ -504,6 +514,10 @@ struct TemplateGameDeviceData final : public GameDeviceData
    // Pre-fog copy of the scene RT, bound at t2 for the fog draw. Recreated when the RT size or format changes.
    ComPtr<ID3D11Texture2D> fog_scene_copy;
    ComPtr<ID3D11ShaderResourceView> fog_scene_copy_srv;
+   // Copy of the half-res fog density RT, bound at t6 for the AO consumers. fog_density_frame is the frame it was captured in.
+   ComPtr<ID3D11Texture2D> fog_density_copy;
+   ComPtr<ID3D11ShaderResourceView> fog_density_copy_srv;
+   uint64_t fog_density_frame = 0;
    // GPU auto-exposure state
    ComPtr<ID3D11Texture2D> exposure_tex; // 2x1 R32_FLOAT
    ComPtr<ID3D11ShaderResourceView> exposure_srv;
@@ -514,6 +528,9 @@ struct TemplateGameDeviceData final : public GameDeviceData
    LARGE_INTEGER last_time = {};
    bool need_reset = true;
    bool exposure_dispatched_this_frame = false;
+   uint32_t exposure_dispatched_mode = 0u;
+   uint32_t exposure_width = 0;
+   uint32_t exposure_height = 0;
    uint32_t last_auto_exposure_mode = 0u;
    ComPtr<ID3D11Buffer> last_game_cb4; // Game's PS cb4, reused by the adapt CS when cb4 is not bound on the source draw
    // XeGTAO (replaces the SSAO draw), owns its intermediates
@@ -541,6 +558,12 @@ struct TemplateGameDeviceData final : public GameDeviceData
 static ID3D11ShaderResourceView* HMA_GetExposureSRV(DeviceData& device_data)
 {
    return static_cast<TemplateGameDeviceData*>(device_data.game)->exposure_srv.get();
+}
+
+static bool HMA_ExposureReady(DeviceData& device_data, uint32_t mode)
+{
+   const auto& gd = *static_cast<TemplateGameDeviceData*>(device_data.game);
+   return mode != 2u || (gd.exposure_dispatched_this_frame && gd.exposure_dispatched_mode == mode);
 }
 
 class TemplateGame final : public Game // Go view "Source/Core/includes/game.h" for all the overridable virtual functions
@@ -596,7 +619,7 @@ class TemplateGame final : public Game // Go view "Source/Core/includes/game.h" 
          return false;
 
       D3D11_BUFFER_DESC hist_desc = {};
-      hist_desc.ByteWidth = 512; // 128 x 32 bit bins
+      hist_desc.ByteWidth = 1280; // 128 histogram bins plus 48 sixteen-byte tile records
       hist_desc.Usage = D3D11_USAGE_DEFAULT;
       hist_desc.BindFlags = D3D11_BIND_UNORDERED_ACCESS;
       hist_desc.MiscFlags = D3D11_RESOURCE_MISC_BUFFER_ALLOW_RAW_VIEWS;
@@ -607,7 +630,7 @@ class TemplateGame final : public Game // Go view "Source/Core/includes/game.h" 
       hist_uav_desc.Format = DXGI_FORMAT_R32_TYPELESS;
       hist_uav_desc.ViewDimension = D3D11_UAV_DIMENSION_BUFFER;
       hist_uav_desc.Buffer.FirstElement = 0;
-      hist_uav_desc.Buffer.NumElements = 128;
+      hist_uav_desc.Buffer.NumElements = hist_desc.ByteWidth / sizeof(uint32_t);
       hist_uav_desc.Buffer.Flags = D3D11_BUFFER_UAV_FLAG_RAW;
       ComPtr<ID3D11UnorderedAccessView> hist_uav;
       if (FAILED(native_device->CreateUnorderedAccessView(hist_buf.get(), &hist_uav_desc, hist_uav.put())))
@@ -663,9 +686,20 @@ class TemplateGame final : public Game // Go view "Source/Core/includes/game.h" 
       scene_tex->GetDesc(&scene_desc);
       if (scene_desc.Width == 0 || scene_desc.Height == 0 || scene_desc.SampleDesc.Count != 1)
          return;
+      if (cb_luma_global_settings.GameSettings.AutoExposureMode == 2u
+         && (srv_desc.Texture2D.MostDetailedMip != 0
+            || (srv_desc.Format != DXGI_FORMAT_R16G16B16A16_FLOAT && srv_desc.Format != DXGI_FORMAT_R11G11B10_FLOAT)))
+         return;
 
       if (!EnsureExposureResources(native_device, native_device_context, gd))
          return;
+      if (gd.exposure_width != scene_desc.Width || gd.exposure_height != scene_desc.Height)
+         gd.need_reset = true;
+      if (gd.need_reset)
+      {
+         const UINT clear_uint[4] = { 0u, 0u, 0u, 0u };
+         native_device_context->ClearUnorderedAccessViewUint(gd.histogram_uav.get(), clear_uint);
+      }
 
       // Delta time from QPC, clamped.
       static LARGE_INTEGER qpc_frequency = {};
@@ -685,6 +719,13 @@ class TemplateGame final : public Game // Go view "Source/Core/includes/game.h" 
       ID3D11Buffer* cs_cb4 = game_cb4 ? game_cb4.get() : gd.last_game_cb4.get();
       if (cs_cb4 == nullptr)
          return;
+      if (cb_luma_global_settings.GameSettings.AutoExposureMode == 2u)
+      {
+         D3D11_BUFFER_DESC cb4_desc = {};
+         cs_cb4->GetDesc(&cb4_desc);
+         if (cb4_desc.ByteWidth < 42u * 16u)
+            return;
+      }
 
       AutoExposureCBData cb_data = {};
       cb_data.delta_time = delta_time;
@@ -695,6 +736,11 @@ class TemplateGame final : public Game // Go view "Source/Core/includes/game.h" 
       cb_data.mode = cb_luma_global_settings.GameSettings.AutoExposureMode;
       cb_data.width = scene_desc.Width;
       cb_data.height = scene_desc.Height;
+      // Live trace validation is pending; mode 2 currently uses color-only metering.
+      cb_data.depth_valid = 0u;
+      cb_data.depth_numerator = 0.f;
+      cb_data.depth_offset = 0.f;
+      cb_data.pad = 0.f;
       native_device_context->UpdateSubresource(gd.exposure_cb.get(), 0, nullptr, &cb_data, 0, 0);
 
       DrawStateStack<DrawStateStackType::Compute> cs_state;
@@ -703,17 +749,20 @@ class TemplateGame final : public Game // Go view "Source/Core/includes/game.h" 
       ID3D11Buffer* cs_cb0 = gd.exposure_cb.get();
       native_device_context->CSSetConstantBuffers(0, 1, &cs_cb0);
 
-      // Histogram: one group per 64x64 pixels.
-      ID3D11ShaderResourceView* cs_srv = srv_scene;
-      native_device_context->CSSetShaderResources(0, 1, &cs_srv);
+      // Mode 2 gathers 48 color-only tiles; modes 0 and 1 keep the original full-frame histogram dispatch.
+      const std::array<ID3D11ShaderResourceView*, 2> cs_srvs = { srv_scene, nullptr };
+      native_device_context->CSSetShaderResources(0, cs_srvs.size(), cs_srvs.data());
       ID3D11UnorderedAccessView* cs_hist_uav = gd.histogram_uav.get();
       native_device_context->CSSetUnorderedAccessViews(0, 1, &cs_hist_uav, nullptr);
       native_device_context->CSSetShader(histogram_it->second.get(), nullptr, 0);
-      native_device_context->Dispatch((scene_desc.Width + 63u) / 64u, (scene_desc.Height + 63u) / 64u, 1);
+      if (cb_data.mode == 2u)
+         native_device_context->Dispatch(8, 6, 1);
+      else
+         native_device_context->Dispatch((scene_desc.Width + 63u) / 64u, (scene_desc.Height + 63u) / 64u, 1);
 
       // Adapt: one group, reads the histogram and writes the exposure texture.
-      ID3D11ShaderResourceView* cs_srv_null = nullptr;
-      native_device_context->CSSetShaderResources(0, 1, &cs_srv_null);
+      const std::array<ID3D11ShaderResourceView*, 2> cs_srv_nulls = {};
+      native_device_context->CSSetShaderResources(0, cs_srv_nulls.size(), cs_srv_nulls.data());
       const std::array<ID3D11UnorderedAccessView*, 2> cs_adapt_uavs = { gd.exposure_uav.get(), gd.histogram_uav.get() };
       native_device_context->CSSetUnorderedAccessViews(0, cs_adapt_uavs.size(), cs_adapt_uavs.data(), nullptr);
       native_device_context->CSSetConstantBuffers(4, 1, &cs_cb4);
@@ -723,13 +772,16 @@ class TemplateGame final : public Game // Go view "Source/Core/includes/game.h" 
       // Unbind UAVs and SRVs before the exposure is read as an SRV.
       const std::array<ID3D11UnorderedAccessView*, 2> cs_uav_nulls = {};
       native_device_context->CSSetUnorderedAccessViews(0, cs_uav_nulls.size(), cs_uav_nulls.data(), nullptr);
-      native_device_context->CSSetShaderResources(0, 1, &cs_srv_null);
+      native_device_context->CSSetShaderResources(0, cs_srv_nulls.size(), cs_srv_nulls.data());
       native_device_context->CSSetShader(nullptr, nullptr, 0);
 
       cs_state.Restore(native_device_context);
 
       gd.need_reset = false;
       gd.exposure_dispatched_this_frame = true;
+      gd.exposure_dispatched_mode = cb_data.mode;
+      gd.exposure_width = scene_desc.Width;
+      gd.exposure_height = scene_desc.Height;
    }
 
 public:
@@ -744,6 +796,7 @@ public:
       Mcp::RegisterTextures({MCP_GAME_TEXTURE("flare.mip0", flare_res.mip0.tex), MCP_GAME_TEXTURE("flare.mip1", flare_res.mip1.tex),
          MCP_GAME_TEXTURE("flare.halo", flare_res.halo.tex), MCP_GAME_TEXTURE("flare.feature", flare_res.feature.tex),
          MCP_GAME_TEXTURE("flare.glare", flare_res.glare.tex), MCP_GAME_TEXTURE("flare.final", flare_res.final_flare.tex)});
+      Mcp::RegisterTextures({MCP_GAME_TEXTURE("exposure", exposure_tex)});
       // XeGTAO: knobs, intermediates and path counters
       Mcp::RegisterToggles({{"gtao.enable", &g_enable_xegtao}, {"gtao.vbao", &g_xegtao_vbao}});
       Mcp::RegisterValues({{"gtao.radius", &g_xegtao_radius, 0.05f, 10.f}, {"gtao.intensity", &g_xegtao_intensity, 0.25f, 8.f}, {"gtao.thickness", &g_xegtao_thickness, 0.05f, 5.f}});
@@ -776,7 +829,10 @@ public:
 #if !DEVELOPMENT && !TEST
       GetShaderDefineData(GAMUT_MAPPING_TYPE_HASH).SetDefaultValue('1');
       use_os_reference_white_level = false;
-      g_xegtao_intensity = 1.57f;
+      g_pause_hotkey = false;
+      g_tonemapped_resolve = 0u;
+      g_xegtao_radius = 5.f;
+      g_xegtao_intensity = 1.5f;
       g_xegtao_vbao = true;
 #endif
 
@@ -825,6 +881,7 @@ public:
       default_luma_global_game_settings.GamutExpansion = cb_luma_global_settings.GameSettings.GamutExpansion = 1.f;
       default_luma_global_game_settings.DisplayMapping = cb_luma_global_settings.GameSettings.DisplayMapping = 2u;
       default_luma_global_game_settings.TonemapVersion = cb_luma_global_settings.GameSettings.TonemapVersion = 1u;
+      default_luma_global_game_settings.HazeModel = cb_luma_global_settings.GameSettings.HazeModel = 0.f;
       default_luma_global_game_settings.ShoulderStart = cb_luma_global_settings.GameSettings.ShoulderStart = 0.75f;
       default_luma_global_game_settings.HighlightPurity = cb_luma_global_settings.GameSettings.HighlightPurity = 0.5f;
       default_luma_global_game_settings.EmissiveHDRBoost = cb_luma_global_settings.GameSettings.EmissiveHDRBoost = 0.5f;
@@ -846,14 +903,15 @@ public:
       default_luma_global_game_settings.HighlightCompression = cb_luma_global_settings.GameSettings.HighlightCompression = 0.f;
 #if !DEVELOPMENT && !TEST
       default_luma_global_game_settings.LumaBloomStrength = cb_luma_global_settings.GameSettings.LumaBloomStrength = 0.202f;
-      default_luma_global_game_settings.FilmGrainStrength = cb_luma_global_settings.GameSettings.FilmGrainStrength = 0.f;
+      default_luma_global_game_settings.FilmGrainStrength = cb_luma_global_settings.GameSettings.FilmGrainStrength = 0.500f;
       default_luma_global_game_settings.TopGradientStrength = cb_luma_global_settings.GameSettings.TopGradientStrength = 0.f;
-      default_luma_global_game_settings.GamutExpansion = cb_luma_global_settings.GameSettings.GamutExpansion = 0.5f;
+      default_luma_global_game_settings.GamutExpansion = cb_luma_global_settings.GameSettings.GamutExpansion = 0.901f;
       default_luma_global_game_settings.GamutExpansionHueLock = cb_luma_global_settings.GameSettings.GamutExpansionHueLock = 1.f;
       default_luma_global_game_settings.ShoulderStart = cb_luma_global_settings.GameSettings.ShoulderStart = 0.5f;
       default_luma_global_game_settings.BokehDOFRotation = cb_luma_global_settings.GameSettings.BokehDOFRotation = 1.f;
       default_luma_global_game_settings.BokehDOFTapLimit = cb_luma_global_settings.GameSettings.BokehDOFTapLimit = 128u;
-      default_luma_global_game_settings.AODarkness = cb_luma_global_settings.GameSettings.AODarkness = 0.85f;
+      default_luma_global_game_settings.AODarkness = cb_luma_global_settings.GameSettings.AODarkness = 0.5f;
+      default_luma_global_game_settings.AutoExposureRange = cb_luma_global_settings.GameSettings.AutoExposureRange = 0.99f;
 #endif
 
       native_shaders_definitions.emplace(CompileTimeStringHash("HMA Tonemapped Resolve"), ShaderDefinition{ "Luma_HMA_TonemappedResolve", reshade::api::pipeline_subobject_type::pixel_shader });
@@ -934,6 +992,7 @@ public:
 
 #if !DEVELOPMENT
       if (!original_shader_hashes.Contains(kFinalPostHash, reshade::api::shader_stage::pixel)
+         && !original_shader_hashes.Contains(kHurtCompositeHash, reshade::api::shader_stage::pixel)
          && !original_shader_hashes.Contains(0x563FB90F, reshade::api::shader_stage::pixel)
          && !original_shader_hashes.Contains(kFogHash, reshade::api::shader_stage::pixel)
          && !original_shader_hashes.Contains(kAOConsumerHash, reshade::api::shader_stage::pixel)
@@ -1079,6 +1138,14 @@ public:
          BindLumaBloom(native_device, native_device_context, device_data, srv_scene.get());
       }
 
+      // Restart adaptation before any current-frame exposure consumer, including flare and the resolve hook.
+      if (game_device_data.last_auto_exposure_mode != cb_luma_global_settings.GameSettings.AutoExposureMode)
+      {
+         game_device_data.need_reset = true;
+         game_device_data.exposure_dispatched_this_frame = false;
+      }
+      game_device_data.last_auto_exposure_mode = cb_luma_global_settings.GameSettings.AutoExposureMode;
+
       // Modern lens flares on the tonemap pass: the flare chain reads the HDR scene (t1), the game fade (t3), the game cb4 and the exposure. Its result is bound at t3 for the final post draw (kFinalPostHash).
       // Runs before the exposure t7 bind below, and restores all the state it touches.
       if (native_device_context->GetType() == D3D11_DEVICE_CONTEXT_IMMEDIATE && (original_shader_hashes.Contains(kTonemapHash, reshade::api::shader_stage::pixel) || original_shader_hashes.Contains(kTonemapHash2, reshade::api::shader_stage::pixel))
@@ -1090,19 +1157,27 @@ public:
          native_device_context->PSGetShaderResources(1, 1, srv_scene.put());
          native_device_context->PSGetShaderResources(3, 1, srv_fade.put());
          native_device_context->PSGetConstantBuffers(4, 1, cb4.put());
+         const bool flare_exposure_ready = HMA_ExposureReady(device_data, cb_luma_global_settings.GameSettings.AutoExposureMode);
+         ComPtr<ID3D11ShaderResourceView> srv_t7_saved;
+         if (cb_luma_global_settings.GameSettings.AutoExposureMode == 2u && !flare_exposure_ready)
+         {
+            native_device_context->PSGetShaderResources(kExposureSlot, 1, srv_t7_saved.put());
+            ID3D11ShaderResourceView* srv_null = nullptr;
+            native_device_context->PSSetShaderResources(kExposureSlot, 1, &srv_null);
+         }
          ID3D11ShaderResourceView* srv_flare = nullptr;
          if (srv_scene && HMA_DrawFlare(native_device, native_device_context, device_data, game_device_data.flare_res, g_flare_settings, srv_scene.get(), srv_fade.get(),
-               game_device_data.exposure_srv.get(), cb4.get(), &srv_flare) && srv_flare)
+               flare_exposure_ready ? game_device_data.exposure_srv.get() : nullptr, cb4.get(), &srv_flare) && srv_flare)
          {
             game_device_data.flare_valid_this_frame = true;
             game_device_data.flare_srv_this_frame = srv_flare; // Non-owning, owned by flare_res
          }
+         if (cb_luma_global_settings.GameSettings.AutoExposureMode == 2u && !flare_exposure_ready)
+         {
+            ID3D11ShaderResourceView* srv_t7_restore = srv_t7_saved.get();
+            native_device_context->PSSetShaderResources(kExposureSlot, 1, &srv_t7_restore);
+         }
       }
-
-      // Restart adaptation when the exposure mode changes.
-      if (game_device_data.last_auto_exposure_mode != cb_luma_global_settings.GameSettings.AutoExposureMode)
-         game_device_data.need_reset = true;
-      game_device_data.last_auto_exposure_mode = cb_luma_global_settings.GameSettings.AutoExposureMode;
 
       if (native_device_context->GetType() == D3D11_DEVICE_CONTEXT_IMMEDIATE
          && GetShaderDefineCompiledNumericalValue(TONEMAP_TYPE_HASH) >= 1)
@@ -1127,11 +1202,15 @@ public:
          }
 
          // Exposure at t7 only for the duration of the consumer draws: the game uses t7 elsewhere, so the previous t7 is restored right after.
-         if (cb_luma_global_settings.GameSettings.AutoExposureMode != 0u && game_device_data.exposure_srv && original_draw_dispatch_func && std::any_of(std::begin(kExposureBindHashes), std::end(kExposureBindHashes), [&](uint32_t h) { return original_shader_hashes.Contains(h, reshade::api::shader_stage::pixel); }))
+         const bool exposure_consumer = std::any_of(std::begin(kExposureBindHashes), std::end(kExposureBindHashes), [&](uint32_t h) { return original_shader_hashes.Contains(h, reshade::api::shader_stage::pixel); });
+         const bool exposure_mode = cb_luma_global_settings.GameSettings.AutoExposureMode != 0u;
+         const bool adaptive_ready = HMA_ExposureReady(device_data, cb_luma_global_settings.GameSettings.AutoExposureMode);
+         if (exposure_consumer && original_draw_dispatch_func
+            && ((exposure_mode && adaptive_ready && game_device_data.exposure_srv) || cb_luma_global_settings.GameSettings.AutoExposureMode == 2u))
          {
             ComPtr<ID3D11ShaderResourceView> srv_t7_saved;
             native_device_context->PSGetShaderResources(kExposureSlot, 1, srv_t7_saved.put());
-            ID3D11ShaderResourceView* srv_exposure = game_device_data.exposure_srv.get();
+            ID3D11ShaderResourceView* srv_exposure = exposure_mode && adaptive_ready ? game_device_data.exposure_srv.get() : nullptr;
             native_device_context->PSSetShaderResources(kExposureSlot, 1, &srv_exposure);
             (*original_draw_dispatch_func)();
             ID3D11ShaderResourceView* srv_t7_restore = srv_t7_saved.get();
@@ -1271,6 +1350,34 @@ public:
          else
             native_device_context->PSGetShaderResources(5, 1, game_device_data.gi_ao_srv.put());
          game_device_data.gi_ao_frame = game_device_data.frame_index;
+         // Fog density copy at t6 for the AO consumers (this frame or the previous one, else null). The original t6 is restored after the draw.
+         const bool fog_ao = GetShaderDefineCompiledNumericalValue(TONEMAP_TYPE_HASH) >= 1 && original_draw_dispatch_func
+            && (original_shader_hashes.Contains(kAOConsumerHash, reshade::api::shader_stage::pixel) || original_shader_hashes.Contains(0x6A01F756, reshade::api::shader_stage::pixel));
+         if (fog_ao)
+         {
+            ComPtr<ID3D11ShaderResourceView> saved_t6;
+            native_device_context->PSGetShaderResources(6, 1, saved_t6.put());
+            ID3D11ShaderResourceView* fog_density = game_device_data.fog_density_copy_srv && game_device_data.fog_density_frame + 1 >= game_device_data.frame_index ? game_device_data.fog_density_copy_srv.get() : nullptr;
+            native_device_context->PSSetShaderResources(6, 1, &fog_density);
+            if (fullres)
+            {
+               ComPtr<ID3D11ShaderResourceView> saved;
+               native_device_context->PSGetShaderResources(5, 1, saved.put());
+               ID3D11ShaderResourceView* ao = game_device_data.gi_ao_srv.get();
+               native_device_context->PSSetShaderResources(5, 1, &ao);
+               g_xegtao_t5_binds++;
+               (*original_draw_dispatch_func)();
+               ao = saved.get();
+               native_device_context->PSSetShaderResources(5, 1, &ao);
+            }
+            else
+            {
+               (*original_draw_dispatch_func)();
+            }
+            ID3D11ShaderResourceView* t6_restore = saved_t6.get();
+            native_device_context->PSSetShaderResources(6, 1, &t6_restore);
+            return DrawOrDispatchOverrideType::Skip;
+         }
          if (fullres && original_draw_dispatch_func)
          {
             ComPtr<ID3D11ShaderResourceView> saved;
@@ -1358,30 +1465,87 @@ public:
          }
       }
 
-      // Modern lens flares on the final post pass: t3 gets the flare result when valid, null otherwise (so a stale t3 is never read). Original t3 is restored after.
-      if (native_device_context->GetType() == D3D11_DEVICE_CONTEXT_IMMEDIATE && original_shader_hashes.Contains(kFinalPostHash, reshade::api::shader_stage::pixel)
+      // Fog density: the original draw runs, then the RT is copied for the AO consumers (t6). Always skipped here so the draw never runs twice.
+      if (native_device_context->GetType() == D3D11_DEVICE_CONTEXT_IMMEDIATE
+         && std::any_of(std::begin(kFogDensityHashes), std::end(kFogDensityHashes), [&](uint32_t h) { return original_shader_hashes.Contains(h, reshade::api::shader_stage::pixel); })
          && GetShaderDefineCompiledNumericalValue(TONEMAP_TYPE_HASH) >= 1 && original_draw_dispatch_func)
       {
+         (*original_draw_dispatch_func)();
+         ComPtr<ID3D11RenderTargetView> rtv_density;
+         native_device_context->OMGetRenderTargets(1, rtv_density.put(), nullptr);
+         ComPtr<ID3D11Resource> density_resource;
+         if (rtv_density)
+            rtv_density->GetResource(density_resource.put());
+         ComPtr<ID3D11Texture2D> density_tex;
+         if (density_resource && SUCCEEDED(density_resource->QueryInterface(density_tex.put())))
+         {
+            D3D11_TEXTURE2D_DESC density_desc = {};
+            density_tex->GetDesc(&density_desc);
+            if (density_desc.Width > 0 && density_desc.Height > 0 && density_desc.SampleDesc.Count == 1)
+            {
+               bool density_copy_ready = false;
+               if (game_device_data.fog_density_copy && game_device_data.fog_density_copy_srv)
+               {
+                  D3D11_TEXTURE2D_DESC copy_desc = {};
+                  game_device_data.fog_density_copy->GetDesc(&copy_desc);
+                  density_copy_ready = copy_desc.Width == density_desc.Width && copy_desc.Height == density_desc.Height && copy_desc.Format == density_desc.Format;
+               }
+               if (!density_copy_ready)
+               {
+                  D3D11_TEXTURE2D_DESC new_desc = density_desc;
+                  new_desc.BindFlags = D3D11_BIND_SHADER_RESOURCE;
+                  new_desc.Usage = D3D11_USAGE_DEFAULT;
+                  new_desc.CPUAccessFlags = 0;
+                  new_desc.MiscFlags = 0;
+                  game_device_data.fog_density_copy.reset();
+                  game_device_data.fog_density_copy_srv.reset();
+                  if (SUCCEEDED(native_device->CreateTexture2D(&new_desc, nullptr, game_device_data.fog_density_copy.put())))
+                     native_device->CreateShaderResourceView(game_device_data.fog_density_copy.get(), nullptr, game_device_data.fog_density_copy_srv.put());
+                  density_copy_ready = game_device_data.fog_density_copy && game_device_data.fog_density_copy_srv;
+               }
+               if (density_copy_ready)
+               {
+                  native_device_context->CopyResource(game_device_data.fog_density_copy.get(), density_tex.get());
+                  game_device_data.fog_density_frame = game_device_data.frame_index;
+               }
+            }
+         }
+         return DrawOrDispatchOverrideType::Skip;
+      }
+
+      // Modern lens flares on the final post and hurt composite passes: t3 and t5 respectively get the flare result when valid, null otherwise.
+      if (native_device_context->GetType() == D3D11_DEVICE_CONTEXT_IMMEDIATE
+         && (original_shader_hashes.Contains(kFinalPostHash, reshade::api::shader_stage::pixel) || original_shader_hashes.Contains(kHurtCompositeHash, reshade::api::shader_stage::pixel))
+         && GetShaderDefineCompiledNumericalValue(TONEMAP_TYPE_HASH) >= 1 && original_draw_dispatch_func)
+      {
+         const bool hurt_composite = original_shader_hashes.Contains(kHurtCompositeHash, reshade::api::shader_stage::pixel);
+         const UINT flare_slot = hurt_composite ? 5u : 3u;
          ComPtr<ID3D11ShaderResourceView> srv_t7_saved;
-         native_device_context->PSGetShaderResources(kExposureSlot, 1, srv_t7_saved.put());
-         ID3D11ShaderResourceView* srv_meter = game_device_data.exposure_dispatched_this_frame ? game_device_data.exposure_srv.get() : nullptr;
-         native_device_context->PSSetShaderResources(kExposureSlot, 1, &srv_meter);
-         ComPtr<ID3D11ShaderResourceView> srv_t3_saved;
-         native_device_context->PSGetShaderResources(3, 1, srv_t3_saved.put());
-         ComPtr<ID3D11SamplerState> smp_s3_saved;
-         native_device_context->PSGetSamplers(3, 1, smp_s3_saved.put());
+         if (!hurt_composite)
+         {
+            native_device_context->PSGetShaderResources(kExposureSlot, 1, srv_t7_saved.put());
+            ID3D11ShaderResourceView* srv_meter = game_device_data.exposure_dispatched_this_frame ? game_device_data.exposure_srv.get() : nullptr;
+            native_device_context->PSSetShaderResources(kExposureSlot, 1, &srv_meter);
+         }
+         ComPtr<ID3D11ShaderResourceView> srv_flare_slot_saved;
+         native_device_context->PSGetShaderResources(flare_slot, 1, srv_flare_slot_saved.put());
+         ComPtr<ID3D11SamplerState> smp_flare_slot_saved;
+         native_device_context->PSGetSamplers(flare_slot, 1, smp_flare_slot_saved.put());
          ID3D11SamplerState* smp_flare = game_device_data.flare_res.smp_clamp.get();
          if (game_device_data.flare_valid_this_frame && smp_flare)
-            native_device_context->PSSetSamplers(3, 1, &smp_flare);
-         ID3D11ShaderResourceView* srv_flare = game_device_data.flare_valid_this_frame ? game_device_data.flare_srv_this_frame : nullptr;
-         native_device_context->PSSetShaderResources(3, 1, &srv_flare);
+            native_device_context->PSSetSamplers(flare_slot, 1, &smp_flare);
+         ID3D11ShaderResourceView* srv_flare = game_device_data.flare_valid_this_frame && smp_flare ? game_device_data.flare_srv_this_frame : nullptr;
+         native_device_context->PSSetShaderResources(flare_slot, 1, &srv_flare);
          (*original_draw_dispatch_func)();
-         ID3D11ShaderResourceView* srv_t7_restore = srv_t7_saved.get();
-         native_device_context->PSSetShaderResources(kExposureSlot, 1, &srv_t7_restore);
-         ID3D11ShaderResourceView* srv_t3_restore = srv_t3_saved.get();
-         native_device_context->PSSetShaderResources(3, 1, &srv_t3_restore);
-         ID3D11SamplerState* smp_s3_restore = smp_s3_saved.get();
-         native_device_context->PSSetSamplers(3, 1, &smp_s3_restore);
+         if (!hurt_composite)
+         {
+            ID3D11ShaderResourceView* srv_t7_restore = srv_t7_saved.get();
+            native_device_context->PSSetShaderResources(kExposureSlot, 1, &srv_t7_restore);
+         }
+         ID3D11ShaderResourceView* srv_flare_slot_restore = srv_flare_slot_saved.get();
+         native_device_context->PSSetShaderResources(flare_slot, 1, &srv_flare_slot_restore);
+         ID3D11SamplerState* smp_flare_slot_restore = smp_flare_slot_saved.get();
+         native_device_context->PSSetSamplers(flare_slot, 1, &smp_flare_slot_restore);
          return DrawOrDispatchOverrideType::Skip;
       }
 
@@ -1393,8 +1557,10 @@ public:
       HMABackgroundInput::Install();
       UpdateWindowControls();
       HMAHardPause::Update(g_pause_hotkey, g_pause_on_focus_loss);
-#else
+#elif TEST
       HMAHardPause::Update();
+#else
+      HMAHardPause::Update(g_pause_hotkey);
 #endif
       auto& game_device_data = GetGameDeviceData(device_data);
 
@@ -1442,6 +1608,12 @@ public:
    void LoadConfigs() override
    {
       reshade::api::effect_runtime* runtime = nullptr;
+
+#if !DEVELOPMENT && !TEST
+      float scene_peak_white = 0.f;
+      if (!reshade::get_config_value(runtime, NAME, "ScenePeakWhite", scene_peak_white))
+         hdr_display_mode_pending_auto_peak_white_calibration = true;
+#endif
 
 #if DEVELOPMENT
       reshade::get_config_value(runtime, NAME, "ForceBorderless", g_force_borderless);
@@ -1498,6 +1670,7 @@ public:
       reshade::get_config_value(runtime, NAME, "Shadows", cb_luma_global_settings.GameSettings.Shadows);
       reshade::get_config_value(runtime, NAME, "BlackFloorRemoval", cb_luma_global_settings.GameSettings.BlackFloorRemoval);
       reshade::get_config_value(runtime, NAME, "DistanceHaze", cb_luma_global_settings.GameSettings.DistanceHaze);
+      cb_luma_global_settings.GameSettings.DistanceHaze = std::clamp(cb_luma_global_settings.GameSettings.DistanceHaze, 0.f, 2.f);
 #if DEVELOPMENT || TEST
       reshade::get_config_value(runtime, NAME, "HighlightRolloff", cb_luma_global_settings.GameSettings.HighlightRolloff);
       reshade::get_config_value(runtime, NAME, "HighlightHuePreservation", cb_luma_global_settings.GameSettings.HighlightHuePreservation);
@@ -1515,7 +1688,11 @@ public:
       reshade::get_config_value(runtime, NAME, "VideoAutoHDR", cb_luma_global_settings.GameSettings.VideoAutoHDR);
       reshade::get_config_value(runtime, NAME, "VanillaHueRestore", cb_luma_global_settings.GameSettings.VanillaHueRestore);
       reshade::get_config_value(runtime, NAME, "TonemapVersion", cb_luma_global_settings.GameSettings.TonemapVersion);
+      reshade::get_config_value(runtime, NAME, "HazeModel", cb_luma_global_settings.GameSettings.HazeModel);
+      cb_luma_global_settings.GameSettings.HazeModel = std::clamp(cb_luma_global_settings.GameSettings.HazeModel, 0.f, 1.f);
       reshade::get_config_value(runtime, NAME, "AutoExposureMode", cb_luma_global_settings.GameSettings.AutoExposureMode);
+      if (cb_luma_global_settings.GameSettings.AutoExposureMode > 2u)
+         cb_luma_global_settings.GameSettings.AutoExposureMode = 1u;
       reshade::get_config_value(runtime, NAME, "AutoExposureSpeed", cb_luma_global_settings.GameSettings.AutoExposureSpeed);
       reshade::get_config_value(runtime, NAME, "AutoExposureRange", cb_luma_global_settings.GameSettings.AutoExposureRange);
       reshade::get_config_value(runtime, NAME, "AutoExposureKey", cb_luma_global_settings.GameSettings.AutoExposureKey);
@@ -1757,10 +1934,23 @@ public:
 #if DEVELOPMENT || TEST
       ImGui::Separator();
       ImGui::TextUnformatted("Atmosphere");
-      if (ImGui::SliderFloat("Distance Haze", &cb_luma_global_settings.GameSettings.DistanceHaze, 0.f, 1.f, "%.3f"))
-         reshade::set_config_value(runtime, NAME, "DistanceHaze", cb_luma_global_settings.GameSettings.DistanceHaze);
+      int haze_model = cb_luma_global_settings.GameSettings.HazeModel >= 0.5f ? 1 : 0;
+      if (ImGui::Combo("Haze Model", &haze_model, "Curve blend\0Linear HDR experiment\0"))
+      {
+         cb_luma_global_settings.GameSettings.HazeModel = (float)haze_model;
+         reshade::set_config_value(runtime, NAME, "HazeModel", cb_luma_global_settings.GameSettings.HazeModel);
+      }
+      DrawResetButton(cb_luma_global_settings.GameSettings.HazeModel, default_luma_global_game_settings.HazeModel, "HazeModel", runtime);
+      haze_model = cb_luma_global_settings.GameSettings.HazeModel >= 0.5f ? 1 : 0;
+      const float haze_max = cb_luma_global_settings.GameSettings.TonemapVersion != 0u && haze_model == 1 ? 2.f : 1.f;
+      float displayed_haze = std::clamp(cb_luma_global_settings.GameSettings.DistanceHaze, 0.f, haze_max);
+      if (ImGui::SliderFloat("Distance Haze", &displayed_haze, 0.f, haze_max, "%.3f"))
+      {
+         cb_luma_global_settings.GameSettings.DistanceHaze = displayed_haze;
+         reshade::set_config_value(runtime, NAME, "DistanceHaze", displayed_haze);
+      }
       if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
-         ImGui::SetTooltip("Strength of the game's distance color grade (haze). 1 = vanilla");
+         ImGui::SetTooltip("Strength of the game's distance haze. 1 = vanilla; up to 2 is available with the linear HDR model.");
       DrawResetButton(cb_luma_global_settings.GameSettings.DistanceHaze, default_luma_global_game_settings.DistanceHaze, "DistanceHaze", runtime);
 #endif
 
@@ -1789,13 +1979,13 @@ public:
       DrawResetButton(cb_luma_global_settings.GameSettings.TonemapVersion, default_luma_global_game_settings.TonemapVersion, "TonemapVersion", runtime);
 
       int auto_exposure_mode = (int)cb_luma_global_settings.GameSettings.AutoExposureMode;
-      if (ImGui::Combo("Auto Exposure", &auto_exposure_mode, "Vanilla\0Luma Histogram\0"))
+      if (ImGui::Combo("Auto Exposure", &auto_exposure_mode, "Vanilla\0Luma Histogram\0Luma Adaptive\0"))
       {
-         cb_luma_global_settings.GameSettings.AutoExposureMode = auto_exposure_mode != 0 ? 1u : 0u;
+         cb_luma_global_settings.GameSettings.AutoExposureMode = (uint32_t)std::clamp(auto_exposure_mode, 0, 2);
          reshade::set_config_value(runtime, NAME, "AutoExposureMode", cb_luma_global_settings.GameSettings.AutoExposureMode);
       }
       if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
-         ImGui::SetTooltip("Vanilla = game's exposure. Luma Histogram = GPU histogram auto-exposure on the HDR scene");
+         ImGui::SetTooltip("Vanilla = game's exposure. Luma Histogram = full-frame GPU histogram. Luma Adaptive = zone-weighted color metering with independent highlight tracking; currently color-only pending depth trace validation");
       DrawResetButton(cb_luma_global_settings.GameSettings.AutoExposureMode, default_luma_global_game_settings.AutoExposureMode, "AutoExposureMode", runtime);
 
       if (cb_luma_global_settings.GameSettings.AutoExposureMode != 0u)
@@ -1928,20 +2118,19 @@ public:
          ImGui::SetTooltip("Resolves the 4x MSAA HDR scene with a tonemapped weighted average instead of the hardware resolve. Off = native resolve. Standard = sample layout 0..3; 2x2 grid = NVIDIA layout (samples in a 2x2 grid in sample 0)");
       ImGui::SameLine();
       ImGui::TextColored(ImVec4(1.f, 0.f, 0.f, 1.f), "(EXPERIMENTAL)");
-      if (ImGui::SliderFloat("Flare Intensity", &g_flare_settings.intensity, 0.f, 20.f, "%.3f"))
-         reshade::set_config_value(runtime, NAME, "FlareIntensity", g_flare_settings.intensity);
-      DrawResetButton(g_flare_settings.intensity, g_flare_defaults.intensity, "FlareIntensity", runtime);
-      if (ImGui::SliderFloat("Glare Intensity", &g_flare_settings.glare_intensity, 0.f, 10.f, "%.3f"))
-         reshade::set_config_value(runtime, NAME, "GlareIntensity", g_flare_settings.glare_intensity);
-      DrawResetButton(g_flare_settings.glare_intensity, g_flare_defaults.glare_intensity, "GlareIntensity", runtime);
       if (ImGui::SliderFloat("Film Grain Strength", &cb_luma_global_settings.GameSettings.FilmGrainStrength, 0.f, 2.f, "%.3f"))
          reshade::set_config_value(runtime, NAME, "FilmGrainStrength", cb_luma_global_settings.GameSettings.FilmGrainStrength);
       DrawResetButton(cb_luma_global_settings.GameSettings.FilmGrainStrength, default_luma_global_game_settings.FilmGrainStrength, "FilmGrainStrength", runtime);
-
-      if (ImGui::SliderFloat("Distance Haze", &cb_luma_global_settings.GameSettings.DistanceHaze, 0.f, 1.f, "%.3f"))
-         reshade::set_config_value(runtime, NAME, "DistanceHaze", cb_luma_global_settings.GameSettings.DistanceHaze);
+      int haze_model = cb_luma_global_settings.GameSettings.HazeModel >= 0.5f ? 1 : 0;
+      const float haze_max = cb_luma_global_settings.GameSettings.TonemapVersion != 0u && haze_model == 1 ? 2.f : 1.f;
+      float displayed_haze = std::clamp(cb_luma_global_settings.GameSettings.DistanceHaze, 0.f, haze_max);
+      if (ImGui::SliderFloat("Distance Haze", &displayed_haze, 0.f, haze_max, "%.3f"))
+      {
+         cb_luma_global_settings.GameSettings.DistanceHaze = displayed_haze;
+         reshade::set_config_value(runtime, NAME, "DistanceHaze", displayed_haze);
+      }
       if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
-         ImGui::SetTooltip("Strength of the game's distance color grade (haze). 1 = vanilla");
+         ImGui::SetTooltip("Strength of the game's distance haze. 1 = vanilla; up to 2 is available with the linear HDR model.");
       DrawResetButton(cb_luma_global_settings.GameSettings.DistanceHaze, default_luma_global_game_settings.DistanceHaze, "DistanceHaze", runtime);
 #endif
 #if DEVELOPMENT || TEST

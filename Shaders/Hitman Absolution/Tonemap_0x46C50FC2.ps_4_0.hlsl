@@ -26,15 +26,17 @@ SamplerState s3 : register(s3);
 #if TONEMAP_TYPE >= 1
 #include "Includes/ModernLensFlare.hlsl"
 #include "../Includes/Tonemap.hlsl"
+#include "Includes/HMAHaze.hlsl"
 #endif
 
 // Vanilla grading on an SDR-range scene color. depthCoord is the linearized depth remapped to [0,1].
-float3 LUTGrade(float3 scene, float4 fade, float depthCoord)
+// hazeScale multiplies LUT row 6 (distance haze blend): 0 = near curve only, 1 = full haze.
+float3 LUTGradeScaled(float3 scene, float4 fade, float depthCoord, float hazeScale)
 {
   float3 faded = lerp(scene, fade.rgb, fade.a);
   float3 q = sqrt(faded);
 
-  float4 s = t2.Sample(s2, float2(depthCoord, 0.928570));
+  float4 s = t2.Sample(s2, float2(depthCoord, 0.928570)) * hazeScale;
   float3 c = float3(s.x * 0.142857 + 0.071429,
                     s.z * 0.142857 + 0.642857,
                     s.y * 0.142857 + 0.357143);
@@ -47,23 +49,17 @@ float3 LUTGrade(float3 scene, float4 fade, float depthCoord)
   return sum * sum;
 }
 
+float3 LUTGrade(float3 scene, float4 fade, float depthCoord)
+{
+  return LUTGradeScaled(scene, fade, depthCoord, 1.0);
+}
+
 #if TONEMAP_TYPE >= 1
 #define LUT_KNEE 0.75
 #define LUT_MID 0.42
 
 // Catmull-Rom sample of one LUT row at x (sqrt space, clamped to [0,1]).
-float3 SampleCurve(float v, float x)
-{
-  float pos = clamp(min(x, 1.0) * 256.0 - 0.5, 0.0, 255.0);
-  float i = floor(pos);
-  float t = pos - i;
-  float3 pm1 = t2.SampleLevel(s2, float2((clamp(i - 1.0, 0.0, 255.0) + 0.5) / 256.0, v), 0).rgb;
-  float3 p0 = t2.SampleLevel(s2, float2((clamp(i, 0.0, 255.0) + 0.5) / 256.0, v), 0).rgb;
-  float3 p1 = t2.SampleLevel(s2, float2((clamp(i + 1.0, 0.0, 255.0) + 0.5) / 256.0, v), 0).rgb;
-  float3 p2 = t2.SampleLevel(s2, float2((clamp(i + 2.0, 0.0, 255.0) + 0.5) / 256.0, v), 0).rgb;
-  float3 r = p0 + 0.5 * t * (p1 - pm1 + t * (2.0 * pm1 - 5.0 * p0 + 4.0 * p1 - p2 + t * (3.0 * (p0 - p1) + p2 - pm1)));
-  return clamp(r, min(p0, p1), max(p0, p1));
-}
+
 
 // Curve value at xc (<= 1), with the highlight rolloff blend and the linear extension above the knee.
 float3 CurveAt(float v, float xc, float3 fk, float3 slope)
@@ -114,7 +110,7 @@ float3 GradeCurve(float v, float x)
 float3 GradePerChannel(float3 hdr, float d)
 {
   float3 q = sqrt(max(hdr, 0.0));
-  float4 s = t2.SampleLevel(s2, float2(d, 0.928570), 0) * LumaSettings.GameSettings.DistanceHaze;
+  float4 s = t2.SampleLevel(s2, float2(d, 0.928570), 0) * saturate(LumaSettings.GameSettings.DistanceHaze);
   float3 c = float3(s.x * 0.142857 + 0.071429,
                     s.z * 0.142857 + 0.642857,
                     s.y * 0.142857 + 0.357143);
@@ -136,11 +132,12 @@ float3 NeutralCompress(float3 c)
 }
 
 // LUTGrade without the fade lerp, with the depth row scaled by DistanceHaze (as GradePerChannel).
-float3 LUTGradeNeutral(float3 x, float d)
+// hazeScale replaces the DistanceHaze slider here, so callers can drop the depth haze (pass 0.0 for the near curve's floor only).
+float3 LUTGradeNeutral(float3 x, float d, float hazeScale)
 {
   float3 q = sqrt(max(x, 0.0));
 
-  float4 s = t2.Sample(s2, float2(d, 0.928570)) * LumaSettings.GameSettings.DistanceHaze;
+  float4 s = t2.Sample(s2, float2(d, 0.928570)) * hazeScale;
   float3 c = float3(s.x * 0.142857 + 0.071429,
                     s.z * 0.142857 + 0.642857,
                     s.y * 0.142857 + 0.357143);
@@ -238,21 +235,24 @@ void main(
   hdr = lerp(hdr, fade.rgb, fade.a);
 
   float restore = LumaSettings.GameSettings.VanillaHueRestore;
+  bool useLinearHaze = LumaSettings.GameSettings.TonemapVersion != 0 && LumaSettings.GameSettings.HazeModel >= 0.5;
+  float curveHaze = useLinearHaze ? 0.0 : saturate(LumaSettings.GameSettings.DistanceHaze);
+  float3 neutral = NeutralCompress(hdr);
   float3 hdrGraded;
   if (LumaSettings.GameSettings.TonemapVersion == 0)
   {
     hdrGraded = LUTGradeHDR(hdr, d) * lerp(skyBoost, 1.0, fade.a);
     // Pull hue and chrominance toward the vanilla SDR grade of the same pixel (VanillaHueRestore, same as Tonemap_0xEED9AC77).
     float3 sdrScene = saturate(t1.Sample(s1, v2).rgb * GetHMAExposure(cb4[41].z) * LumaSettings.GameSettings.Exposure);
-    float3 sdrRef = LUTGrade(sdrScene, fade, d);
+    float3 sdrRef = LUTGradeScaled(sdrScene, fade, d, curveHaze);
     if (restore > 0.0)
       hdrGraded = RestoreHueAndChrominance(hdrGraded, sdrRef, 0.75 * restore, restore);
   }
   else
   {
-    float3 neutral = NeutralCompress(hdr);
-    float3 neutralGraded = LUTGradeNeutral(neutral, d);
-    float3 floorC = LUTGradeNeutral(0.0, d);
+    float3 neutralGraded = LUTGradeNeutral(neutral, d, curveHaze);
+    // Floor uses the near curve only (no haze), so the depth haze veil isn't subtracted from shadows.
+    float3 floorC = LUTGradeNeutral(0.0, d, 0.0);
     neutralGraded = max(neutralGraded - floorC * saturate(1.0 - GetLuminance(neutral) / 0.18) * LumaSettings.GameSettings.BlackFloorRemoval, 0.0);
     hdrGraded = UpgradeToneMap(hdr, neutral, neutralGraded, 1.0) * lerp(skyBoost, 1.0, fade.a);
     if (restore > 0.0)
@@ -260,8 +260,9 @@ void main(
   }
   if (restore > 0.0)
   {
-    float3 vanillaScene = saturate(t1.Sample(s1, v2).rgb * cb4[41].z);
-    float3 vanillaRef = LUTGrade(vanillaScene, fade, d);
+    // Linear haze uses haze-free shadow references; the legacy curve model follows the saturated slider.
+    float3 vanillaScene = saturate(t1.Sample(s1, v2).rgb * GetHMAExposure(cb4[41].z) * LumaSettings.GameSettings.Exposure);
+    float3 vanillaRef = LUTGradeScaled(vanillaScene, fade, d, curveHaze);
     float vanillaY = GetLuminance(vanillaRef);
     float gradedY = GetLuminance(hdrGraded);
     if (vanillaY > 1e-6 && gradedY > 0.0)
@@ -270,13 +271,18 @@ void main(
       // Near true black the raw scene hue is noise (e.g. pure green 1e-5 pixels drew green speckles): fade to vanilla's graded hue.
       // The LUT adds a coloured black floor (blue in some maps): strip it (faded out by mid grey, like BlackFloorRemoval) so its hue
       // doesn't tint shadows once they are scaled to the brighter HDR level.
-      float3 vanillaHue = max(vanillaRef - LUTGrade(0.0, fade, d) * saturate(1.0 - vanillaY / 0.18), 0.0);
+      float3 vanillaHue = max(vanillaRef - LUTGradeScaled(0.0, fade, d, 0.0) * saturate(1.0 - vanillaY / 0.18), 0.0);
       float vanillaHueY = GetLuminance(vanillaHue);
       float3 vanillaTarget = vanillaHueY > 1e-6 ? vanillaHue * (gradedY / vanillaHueY) : gradedY.xxx;
       float3 sceneTarget = sceneY > 1e-6 ? lerp(vanillaTarget, vanillaScene * (gradedY / sceneY), smoothstep(0.0005, 0.003, sceneY)) : vanillaTarget;
       float3 shadowTarget = lerp(sceneTarget, vanillaTarget, smoothstep(0.009, 0.030, sceneY));
       hdrGraded = lerp(hdrGraded, shadowTarget, (1.0 - smoothstep(0.035, 0.14, vanillaY)) * restore);
     }
+  }
+  if (useLinearHaze && fade.a < 1.0)
+  {
+    float3 hazed = ApplyDistanceHaze(hdrGraded, neutral, d, clamp(LumaSettings.GameSettings.DistanceHaze, 0.0, 2.0));
+    hdrGraded = lerp(hazed, hdrGraded, fade.a);
   }
   // Luma bloom is added after the grade, linearly: added before it, anything pushed past white went through the grade's steep
   // above-white extension (sqrt space, then squared) and blew highlights out (~5x at p99).

@@ -66,15 +66,9 @@ float4 main(
   // Hue is recovered from the pre-expansion color.
   if (newFlareValid)
   {
-    // Linear scene and flare share units (1 = paper white). Soft peak-relative shoulder with one RGB scale.
+    // Linear scene and flare share units (1 = paper white).
     float3 flare = max(mapFlare.SampleLevel(samplerFlare, v1.xy, 0).rgb, 0.0);
-    float flarePeak = LumaSettings.PeakWhiteNits / LumaSettings.GamePaperWhiteNits;
-    float3 scene2020 = BT709_To_BT2020(lin);
-    float headroom = max(flarePeak - max(scene2020.r, max(scene2020.g, scene2020.b)), 0.0);
-    float3 flare2020 = BT709_To_BT2020(flare);
-    float flareMax = max(flare2020.r, max(flare2020.g, flare2020.b));
-    float flareScale = flareMax > 0.0 ? headroom * (1.0 - exp(-flareMax / max(headroom, 1e-4))) / flareMax : 0.0;
-    lin += flare * flareScale;
+    lin = HMA_AddFlareHeadroom(lin, flare);
   }
   uint exposureWidth, exposureHeight;
   mapExposure.GetDimensions(exposureWidth, exposureHeight);
