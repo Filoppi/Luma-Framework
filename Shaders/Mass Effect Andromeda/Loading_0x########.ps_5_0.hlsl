@@ -1,18 +1,29 @@
-// The game's HDR10 present for loading screens and movies, with the HDR fix (see Common.hlsl). No 1D output LUT here: the art is
-// sRGB encoded. The wrappers set the axes:
+// The game's HDR10 present for loading screens and movies, with the HDR fix (see "Includes/Common.hlsl"). No 1D output LUT here:
+// the art is sRGB encoded. All its permutations share this body, their hashes are listed in main.cpp ("redirected_shader_hashes")
+// and each one selects its axes below:
 //   MEA_LOADING_SCENE_SAMPLER  the scene sampler: 0 = s0, 1 = s1
 //   MEA_LOADING_FILTER         the scene fetch: 0 = one bilinear tap, 1 = Keys cubic (Resolution Scale below 100%)
-//   MEA_OUTPUT_SDR             1 = the row's SDR twin (in-game HDR off, sRGB out): vanilla, with the optional dithering
-// The three output gamuts of each row share a wrapper: the output is always BT.2020 HDR10.
+//   MEA_OUTPUT_SDR             1 = the SDR twin (in-game HDR off, sRGB out): vanilla, with the optional dithering
+// The three output gamuts of each permutation share a hash: the output is always BT.2020 HDR10.
 
-#include "Common.hlsl"
+#include "Includes/Common.hlsl"
 
-#ifndef MEA_OUTPUT_SDR
-#define MEA_OUTPUT_SDR 0
+#if _A4E53513 || _B78EE6A9 || _EF390C6B || _F5B7A93D
+#define MEA_LOADING_SCENE_SAMPLER 0
+#else
+#define MEA_LOADING_SCENE_SAMPLER 1
 #endif
 
-#if !defined(MEA_LOADING_SCENE_SAMPLER) || !defined(MEA_LOADING_FILTER)
-#error "Define MEA_LOADING_SCENE_SAMPLER and MEA_LOADING_FILTER before including Loading.hlsl"
+#if _4739F9F6 || _48E0CE55 || _4ACE2324 || _667C56AF
+#define MEA_LOADING_FILTER 1
+#else
+#define MEA_LOADING_FILTER 0
+#endif
+
+#if _4739F9F6 || _7C642BA7 || _EF390C6B
+#define MEA_OUTPUT_SDR 1
+#else
+#define MEA_OUTPUT_SDR 0
 #endif
 
 Texture2D<float4> sceneTexture : register(t0);
@@ -32,7 +43,7 @@ cbuffer cbData : register(b0)
 
 float4 main(float4 position : SV_Position, float2 texcoord : TEXCOORD) : SV_Target
 {
-#if MEA_LOADING_FILTER == 1
+#if MEA_LOADING_FILTER
    float4 scene = float4(SampleKeysCubic(sceneTexture, sceneSampler, texcoord, cbData[0]), 1.0);
 #else
    float4 scene = sceneTexture.SampleLevel(sceneSampler, texcoord, 0);

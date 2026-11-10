@@ -1,13 +1,21 @@
-// The game's motion blur gather (PS, full screen triangle VS 0x712F9EAE), decompiled, for its rows with 20 px tiles. Every row is
-// the same body; its wrappers set the axes:
+// The game's motion blur gather (PS, full screen triangle VS 0x712F9EAE), decompiled, for its permutations with 20 px tiles. They
+// share this body, and each hash selects its axes below:
 //   MEA_MB_STEP_PER_TAP  1 = the tile velocity divided by the tap count (and an unsigned tile jitter, unshifted dither)
 //   MEA_MB_KARIS         1 = taps weighted by 1 / (1 + max rgb), undone on the result
-// Luma: the tile size (and the speed clamp, 2 tiles) comes from "cb0[0].y" as in the game's other rows, not from a literal 20.
-// When upscaling, the motion blur runs at the output size with the engine's tile for the output width (see
+// Luma: the tile size (and the speed clamp, 2 tiles) comes from "cb0[0].y" as in the game's other permutations, not from a literal
+// 20. When upscaling, the motion blur runs at the output size with the engine's tile for the output width (see
 // "DrawOutputSizedMotionBlurPass").
 
-#if !defined(MEA_MB_STEP_PER_TAP) || !defined(MEA_MB_KARIS)
-#error "Define MEA_MB_STEP_PER_TAP and MEA_MB_KARIS before including MotionBlur.hlsl"
+#if _04678ABA || _9D5D747F
+#define MEA_MB_STEP_PER_TAP 1
+#else
+#define MEA_MB_STEP_PER_TAP 0
+#endif
+
+#if _05953C5C || _9D5D747F
+#define MEA_MB_KARIS 1
+#else
+#define MEA_MB_KARIS 0
 #endif
 
 Texture2D<float4> depthTexture : register(t0); // .x

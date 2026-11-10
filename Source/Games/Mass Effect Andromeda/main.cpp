@@ -345,8 +345,8 @@ static const ShaderHashesList shader_hashes_tonemap = {
 };
 // Motion blur, upscaling: the whole chain runs at the output size (see "DrawOutputSizedMotionBlurPass"). Tile max passes (a
 // column and a row pass per stage, one or two stages by resolution; the first stage reads the motion vectors), the tile
-// neighbourhood, the velocity buffer, then the gather: {20 px tiles} x {step per tap} x {Karis weights}, the 20 px rows replaced
-// to read the tile size from cb0[0].y like the others (see "Includes/MotionBlur.hlsl").
+// neighbourhood, the velocity buffer, then the gather: {20 px tiles} x {step per tap} x {Karis weights}, the 20 px permutations replaced
+// to read the tile size from cb0[0].y like the others (see "MotionBlur_0x04678ABA_0x05953C5C_0x812EA2D8_0x9D5D747F").
 static constexpr uint32_t kMBTileColumnsFromMVHash = 0xEF28CAAC;
 static constexpr uint32_t kMBTileRowsFromMVHash = 0x4C0E6DE6;
 static constexpr uint32_t kMBTileColumnsHash = 0x47305294;
@@ -4502,6 +4502,64 @@ BOOL APIENTRY DllMain(HMODULE hModule, DWORD ul_reason_for_call, LPVOID lpReserv
       // render size (see OnPresent)
       enable_samplers_upgrade = true; // boot-time only
       samplers_upgrade_mode = 4;
+
+      // The present permutations share one file each, "Present_0x########" and "Loading_0x########": every hash selects its axes in it
+      redirected_shader_hashes["Present"] = {
+         "0BF0C1CA",
+         "0BF80A15",
+         "0E11A4EE",
+         "19404650",
+         "20EE9B0F",
+         "22179331",
+         "3196D1D2",
+         "4091E710",
+         "4840CCE4",
+         "4BCF53E3",
+         "5C1B1CD3",
+         "66868010",
+         "6A9767E9",
+         "6BDFE71C",
+         "6DA050CF",
+         "6F7FC946",
+         "7D79A746",
+         "8498DBD5",
+         "8ECC1073",
+         "8FD42D7C",
+         "9201B072",
+         "950D3AE4",
+         "9BFA3175",
+         "9E9044E7",
+         "9FCE7944",
+         "A04BFC23",
+         "A1B754F2",
+         "A550FC99",
+         "A888DCF8",
+         "ACA466A8",
+         "AFFFA4AB",
+         "BE69B105",
+         "BF88A9F8",
+         "D0200425",
+         "D30EB54B",
+         "E0AA30A6",
+         "E1CF4FA8",
+         "EE044AAF",
+         "F5B0DBFA",
+         "FED81CFB",
+      };
+      redirected_shader_hashes["Loading"] = {
+         "182C8867",
+         "4739F9F6",
+         "48E0CE55",
+         "4ACE2324",
+         "667C56AF",
+         "70888904",
+         "7C642BA7",
+         "A4E53513",
+         "B78EE6A9",
+         "BF998050",
+         "EF390C6B",
+         "F5B7A93D",
+      };
 
       game = new MassEffectAndromeda();
    }
