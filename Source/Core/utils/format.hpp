@@ -673,7 +673,7 @@ namespace
       return false;
    }
 
-   DXGI_FORMAT GetTypelessFormat(DXGI_FORMAT format)
+   DXGI_FORMAT GetTypelessFormat(DXGI_FORMAT format, DXGI_FORMAT fallback_format = DXGI_FORMAT_UNKNOWN)
    {
       switch (format)
       {
@@ -742,7 +742,6 @@ namespace
       case DXGI_FORMAT_D16_UNORM:
          return DXGI_FORMAT_R16_TYPELESS;
       case DXGI_FORMAT_R8_TYPELESS:
-      case DXGI_FORMAT_A8_UNORM:
       case DXGI_FORMAT_R8_UNORM:
       case DXGI_FORMAT_R8_SNORM:
       case DXGI_FORMAT_R8_UINT:
@@ -753,14 +752,422 @@ namespace
       case DXGI_FORMAT_R10G10B10A2_UNORM:
       case DXGI_FORMAT_R10G10B10A2_UINT:
          return DXGI_FORMAT_R10G10B10A2_TYPELESS;
+
+      case DXGI_FORMAT_BC1_TYPELESS:
+      case DXGI_FORMAT_BC1_UNORM:
+      case DXGI_FORMAT_BC1_UNORM_SRGB:
+         return DXGI_FORMAT_BC1_TYPELESS;
+      case DXGI_FORMAT_BC2_TYPELESS:
+      case DXGI_FORMAT_BC2_UNORM:
+      case DXGI_FORMAT_BC2_UNORM_SRGB:
+         return DXGI_FORMAT_BC2_TYPELESS;
+      case DXGI_FORMAT_BC3_TYPELESS:
+      case DXGI_FORMAT_BC3_UNORM:
+      case DXGI_FORMAT_BC3_UNORM_SRGB:
+         return DXGI_FORMAT_BC3_TYPELESS;
+      case DXGI_FORMAT_BC4_TYPELESS:
+      case DXGI_FORMAT_BC4_UNORM:
+      case DXGI_FORMAT_BC4_SNORM:
+         return DXGI_FORMAT_BC4_TYPELESS;
+      case DXGI_FORMAT_BC5_TYPELESS:
+      case DXGI_FORMAT_BC5_UNORM:
+      case DXGI_FORMAT_BC5_SNORM:
+         return DXGI_FORMAT_BC5_TYPELESS;
+      case DXGI_FORMAT_BC6H_TYPELESS:
+      case DXGI_FORMAT_BC6H_UF16:
+      case DXGI_FORMAT_BC6H_SF16:
+         return DXGI_FORMAT_BC6H_TYPELESS;
+      case DXGI_FORMAT_BC7_TYPELESS:
+      case DXGI_FORMAT_BC7_UNORM:
+      case DXGI_FORMAT_BC7_UNORM_SRGB:
+         return DXGI_FORMAT_BC7_TYPELESS;
+
       case DXGI_FORMAT_R1_UNORM:
+      case DXGI_FORMAT_A8_UNORM: // There's no official typeless format for this, though we could re-use "DXGI_FORMAT_R8_TYPELESS" if necessary
       case DXGI_FORMAT_R8G8_B8G8_UNORM:
       case DXGI_FORMAT_G8R8_G8B8_UNORM:
       case DXGI_FORMAT_R9G9B9E5_SHAREDEXP:
       case DXGI_FORMAT_R11G11B10_FLOAT:
-         return DXGI_FORMAT_UNKNOWN; // These formats don't have a TYPELESS version (usually because they are encoded or unique), so return an invalid format to highlight that. There's a few more not included here.
+         return fallback_format; // These formats don't have a TYPELESS version (usually because they are encoded or unique), so return an invalid format to highlight that. There's a few more not included here.
       }
-      return DXGI_FORMAT_UNKNOWN;
+      return fallback_format;
+   }
+
+   enum class FormatEncodingType
+   {
+      TYPELESS,
+      UNORM,
+      UNORM_SRGB,
+      SNORM,
+      UINT,
+      SINT,
+      UFLOAT,
+      SFLOAT,
+      // Includes unknown format
+      OTHER
+   };
+
+   FormatEncodingType GetFormatEncodingType(DXGI_FORMAT format)
+   {
+      switch (format)
+      {
+      // Typeless
+      case DXGI_FORMAT_R32G32B32A32_TYPELESS:
+      case DXGI_FORMAT_R32G32B32_TYPELESS:
+      case DXGI_FORMAT_R16G16B16A16_TYPELESS:
+      case DXGI_FORMAT_R32G32_TYPELESS:
+      case DXGI_FORMAT_R32G8X24_TYPELESS:
+      case DXGI_FORMAT_R10G10B10A2_TYPELESS:
+      case DXGI_FORMAT_R8G8B8A8_TYPELESS:
+      case DXGI_FORMAT_R16G16_TYPELESS:
+      case DXGI_FORMAT_R32_TYPELESS:
+      case DXGI_FORMAT_R24G8_TYPELESS:
+      case DXGI_FORMAT_R8G8_TYPELESS:
+      case DXGI_FORMAT_R16_TYPELESS:
+      case DXGI_FORMAT_R8_TYPELESS:
+      case DXGI_FORMAT_BC1_TYPELESS:
+      case DXGI_FORMAT_BC2_TYPELESS:
+      case DXGI_FORMAT_BC3_TYPELESS:
+      case DXGI_FORMAT_BC4_TYPELESS:
+      case DXGI_FORMAT_BC5_TYPELESS:
+      case DXGI_FORMAT_BC6H_TYPELESS:
+      case DXGI_FORMAT_B8G8R8A8_TYPELESS:
+      case DXGI_FORMAT_B8G8R8X8_TYPELESS:
+      case DXGI_FORMAT_BC7_TYPELESS:
+         return FormatEncodingType::TYPELESS;
+
+      // UNORM
+      case DXGI_FORMAT_R16G16B16A16_UNORM:
+      case DXGI_FORMAT_R10G10B10A2_UNORM:
+      case DXGI_FORMAT_R10G10B10_XR_BIAS_A2_UNORM:
+      case DXGI_FORMAT_R8G8B8A8_UNORM:
+      case DXGI_FORMAT_R16G16_UNORM:
+      case DXGI_FORMAT_R8G8_UNORM:
+      case DXGI_FORMAT_R16_UNORM:
+      case DXGI_FORMAT_R8_UNORM:
+      case DXGI_FORMAT_A8_UNORM:
+      case DXGI_FORMAT_R1_UNORM:
+      case DXGI_FORMAT_BC1_UNORM:
+      case DXGI_FORMAT_BC2_UNORM:
+      case DXGI_FORMAT_BC3_UNORM:
+      case DXGI_FORMAT_BC4_UNORM:
+      case DXGI_FORMAT_BC5_UNORM:
+      case DXGI_FORMAT_B8G8R8A8_UNORM:
+      case DXGI_FORMAT_B8G8R8X8_UNORM:
+      case DXGI_FORMAT_BC7_UNORM:
+      case DXGI_FORMAT_D16_UNORM:
+         return FormatEncodingType::UNORM;
+
+      // UNORM SRGB
+      case DXGI_FORMAT_R8G8B8A8_UNORM_SRGB:
+      case DXGI_FORMAT_BC1_UNORM_SRGB:
+      case DXGI_FORMAT_BC2_UNORM_SRGB:
+      case DXGI_FORMAT_BC3_UNORM_SRGB:
+      case DXGI_FORMAT_B8G8R8A8_UNORM_SRGB:
+      case DXGI_FORMAT_B8G8R8X8_UNORM_SRGB:
+      case DXGI_FORMAT_BC7_UNORM_SRGB:
+         return FormatEncodingType::UNORM_SRGB;
+
+      // SNORM
+      case DXGI_FORMAT_R16G16B16A16_SNORM:
+      case DXGI_FORMAT_R8G8B8A8_SNORM:
+      case DXGI_FORMAT_R16G16_SNORM:
+      case DXGI_FORMAT_R8G8_SNORM:
+      case DXGI_FORMAT_R16_SNORM:
+      case DXGI_FORMAT_R8_SNORM:
+      case DXGI_FORMAT_BC4_SNORM:
+      case DXGI_FORMAT_BC5_SNORM:
+         return FormatEncodingType::SNORM;
+
+      // UINT
+      case DXGI_FORMAT_R32G32B32A32_UINT:
+      case DXGI_FORMAT_R32G32B32_UINT:
+      case DXGI_FORMAT_R16G16B16A16_UINT:
+      case DXGI_FORMAT_R32G32_UINT:
+      case DXGI_FORMAT_R10G10B10A2_UINT:
+      case DXGI_FORMAT_R8G8B8A8_UINT:
+      case DXGI_FORMAT_R16G16_UINT:
+      case DXGI_FORMAT_R32_UINT:
+      case DXGI_FORMAT_R8G8_UINT:
+      case DXGI_FORMAT_R16_UINT:
+      case DXGI_FORMAT_R8_UINT:
+         return FormatEncodingType::UINT;
+
+      // SINT
+      case DXGI_FORMAT_R32G32B32A32_SINT:
+      case DXGI_FORMAT_R32G32B32_SINT:
+      case DXGI_FORMAT_R16G16B16A16_SINT:
+      case DXGI_FORMAT_R32G32_SINT:
+      case DXGI_FORMAT_R8G8B8A8_SINT:
+      case DXGI_FORMAT_R16G16_SINT:
+      case DXGI_FORMAT_R32_SINT:
+      case DXGI_FORMAT_R8G8_SINT:
+      case DXGI_FORMAT_R16_SINT:
+      case DXGI_FORMAT_R8_SINT:
+         return FormatEncodingType::SINT;
+
+      // UFLOAT
+      case DXGI_FORMAT_R11G11B10_FLOAT:
+      case DXGI_FORMAT_R9G9B9E5_SHAREDEXP:
+      case DXGI_FORMAT_BC6H_UF16:
+         return FormatEncodingType::UFLOAT;
+
+      // SFLOAT
+      case DXGI_FORMAT_R32G32B32A32_FLOAT:
+      case DXGI_FORMAT_R32G32B32_FLOAT:
+      case DXGI_FORMAT_R16G16B16A16_FLOAT:
+      case DXGI_FORMAT_R32G32_FLOAT:
+      case DXGI_FORMAT_R16G16_FLOAT:
+      case DXGI_FORMAT_R32_FLOAT:
+      case DXGI_FORMAT_R16_FLOAT:
+      case DXGI_FORMAT_D32_FLOAT:
+      case DXGI_FORMAT_BC6H_SF16:
+         return FormatEncodingType::SFLOAT;
+
+      default:
+         return FormatEncodingType::OTHER;
+      }
+   }
+
+   // Only works on typeless formats! Returns the format unchanged otherwise.
+   // Not meant to be used for depth formats.
+   DXGI_FORMAT GetTypedFormat(DXGI_FORMAT typeless_format, FormatEncodingType format_encoding_type, bool return_unknown_on_failure = false)
+   {
+      if (format_encoding_type == FormatEncodingType::TYPELESS)
+         return typeless_format; // Assuming this is already typeless!
+
+      // TODO: would it be faster to do these with a map?
+      switch (typeless_format)
+      {
+      case DXGI_FORMAT_R32G32B32A32_TYPELESS:
+         switch (format_encoding_type)
+         {
+         case FormatEncodingType::UFLOAT: return DXGI_FORMAT_R32G32B32A32_FLOAT;
+         case FormatEncodingType::SFLOAT: return DXGI_FORMAT_R32G32B32A32_FLOAT;
+         case FormatEncodingType::UINT:  return DXGI_FORMAT_R32G32B32A32_UINT;
+         case FormatEncodingType::SINT:  return DXGI_FORMAT_R32G32B32A32_SINT;
+         default: break;
+         }
+         break;
+
+      case DXGI_FORMAT_R32G32B32_TYPELESS:
+         switch (format_encoding_type)
+         {
+         case FormatEncodingType::UFLOAT: return DXGI_FORMAT_R32G32B32_FLOAT;
+         case FormatEncodingType::SFLOAT: return DXGI_FORMAT_R32G32B32_FLOAT;
+         case FormatEncodingType::UINT:  return DXGI_FORMAT_R32G32B32_UINT;
+         case FormatEncodingType::SINT:  return DXGI_FORMAT_R32G32B32_SINT;
+         default: break;
+         }
+         break;
+
+      case DXGI_FORMAT_R16G16B16A16_TYPELESS:
+         switch (format_encoding_type)
+         {
+         case FormatEncodingType::UFLOAT: return DXGI_FORMAT_R16G16B16A16_FLOAT;
+         case FormatEncodingType::SFLOAT: return DXGI_FORMAT_R16G16B16A16_FLOAT;
+         case FormatEncodingType::UNORM: return DXGI_FORMAT_R16G16B16A16_UNORM;
+         case FormatEncodingType::SNORM: return DXGI_FORMAT_R16G16B16A16_SNORM;
+         case FormatEncodingType::UINT:  return DXGI_FORMAT_R16G16B16A16_UINT;
+         case FormatEncodingType::SINT:  return DXGI_FORMAT_R16G16B16A16_SINT;
+         default: break;
+         }
+         break;
+
+      case DXGI_FORMAT_R32G32_TYPELESS:
+         switch (format_encoding_type)
+         {
+         case FormatEncodingType::UFLOAT: return DXGI_FORMAT_R32G32_FLOAT;
+         case FormatEncodingType::SFLOAT: return DXGI_FORMAT_R32G32_FLOAT;
+         case FormatEncodingType::UINT:  return DXGI_FORMAT_R32G32_UINT;
+         case FormatEncodingType::SINT:  return DXGI_FORMAT_R32G32_SINT;
+         default: break;
+         }
+         break;
+
+      case DXGI_FORMAT_R10G10B10A2_TYPELESS:
+         switch (format_encoding_type)
+         {
+         case FormatEncodingType::UNORM: return DXGI_FORMAT_R10G10B10A2_UNORM;
+         case FormatEncodingType::UINT:  return DXGI_FORMAT_R10G10B10A2_UINT;
+         default: break;
+         }
+         break;
+
+      case DXGI_FORMAT_R8G8B8A8_TYPELESS:
+         switch (format_encoding_type)
+         {
+         case FormatEncodingType::UNORM:      return DXGI_FORMAT_R8G8B8A8_UNORM;
+         case FormatEncodingType::UNORM_SRGB: return DXGI_FORMAT_R8G8B8A8_UNORM_SRGB;
+         case FormatEncodingType::SNORM:      return DXGI_FORMAT_R8G8B8A8_SNORM;
+         case FormatEncodingType::UINT:       return DXGI_FORMAT_R8G8B8A8_UINT;
+         case FormatEncodingType::SINT:       return DXGI_FORMAT_R8G8B8A8_SINT;
+         default: break;
+         }
+         break;
+
+      case DXGI_FORMAT_R16G16_TYPELESS:
+         switch (format_encoding_type)
+         {
+         case FormatEncodingType::UFLOAT: return DXGI_FORMAT_R16G16_FLOAT;
+         case FormatEncodingType::SFLOAT: return DXGI_FORMAT_R16G16_FLOAT;
+         case FormatEncodingType::UNORM: return DXGI_FORMAT_R16G16_UNORM;
+         case FormatEncodingType::SNORM: return DXGI_FORMAT_R16G16_SNORM;
+         case FormatEncodingType::UINT:  return DXGI_FORMAT_R16G16_UINT;
+         case FormatEncodingType::SINT:  return DXGI_FORMAT_R16G16_SINT;
+         default: break;
+         }
+         break;
+
+      case DXGI_FORMAT_R32_TYPELESS:
+         switch (format_encoding_type)
+         {
+         case FormatEncodingType::UFLOAT: return DXGI_FORMAT_R32_FLOAT;
+         case FormatEncodingType::SFLOAT: return DXGI_FORMAT_R32_FLOAT;
+         case FormatEncodingType::UINT:  return DXGI_FORMAT_R32_UINT;
+         case FormatEncodingType::SINT:  return DXGI_FORMAT_R32_SINT;
+         default: break;
+         }
+         break;
+
+      case DXGI_FORMAT_R8G8_TYPELESS:
+         switch (format_encoding_type)
+         {
+         case FormatEncodingType::UNORM: return DXGI_FORMAT_R8G8_UNORM;
+         case FormatEncodingType::SNORM: return DXGI_FORMAT_R8G8_SNORM;
+         case FormatEncodingType::UINT:  return DXGI_FORMAT_R8G8_UINT;
+         case FormatEncodingType::SINT:  return DXGI_FORMAT_R8G8_SINT;
+         default: break;
+         }
+         break;
+
+      case DXGI_FORMAT_R16_TYPELESS:
+         switch (format_encoding_type)
+         {
+         case FormatEncodingType::UFLOAT: return DXGI_FORMAT_R16_FLOAT;
+         case FormatEncodingType::SFLOAT: return DXGI_FORMAT_R16_FLOAT;
+         case FormatEncodingType::UNORM: return DXGI_FORMAT_R16_UNORM;
+         case FormatEncodingType::SNORM: return DXGI_FORMAT_R16_SNORM;
+         case FormatEncodingType::UINT:  return DXGI_FORMAT_R16_UINT;
+         case FormatEncodingType::SINT:  return DXGI_FORMAT_R16_SINT;
+         default: break;
+         }
+         break;
+
+      case DXGI_FORMAT_R8_TYPELESS:
+         switch (format_encoding_type)
+         {
+         case FormatEncodingType::UNORM: return DXGI_FORMAT_R8_UNORM;
+         case FormatEncodingType::SNORM: return DXGI_FORMAT_R8_SNORM;
+         case FormatEncodingType::UINT:  return DXGI_FORMAT_R8_UINT;
+         case FormatEncodingType::SINT:  return DXGI_FORMAT_R8_SINT;
+         default: break;
+         }
+         break;
+
+      case DXGI_FORMAT_B8G8R8A8_TYPELESS:
+         switch (format_encoding_type)
+         {
+         case FormatEncodingType::UNORM:      return DXGI_FORMAT_B8G8R8A8_UNORM;
+         case FormatEncodingType::UNORM_SRGB: return DXGI_FORMAT_B8G8R8A8_UNORM_SRGB;
+         default: break;
+         }
+         break;
+
+      case DXGI_FORMAT_B8G8R8X8_TYPELESS:
+         switch (format_encoding_type)
+         {
+         case FormatEncodingType::UNORM:      return DXGI_FORMAT_B8G8R8X8_UNORM;
+         case FormatEncodingType::UNORM_SRGB: return DXGI_FORMAT_B8G8R8X8_UNORM_SRGB;
+         default: break;
+         }
+         break;
+
+      // BC formats
+      case DXGI_FORMAT_BC1_TYPELESS:
+         switch (format_encoding_type)
+         {
+         case FormatEncodingType::UNORM:      return DXGI_FORMAT_BC1_UNORM;
+         case FormatEncodingType::UNORM_SRGB: return DXGI_FORMAT_BC1_UNORM_SRGB;
+         default: break;
+         }
+         break;
+
+      case DXGI_FORMAT_BC2_TYPELESS:
+         switch (format_encoding_type)
+         {
+         case FormatEncodingType::UNORM:      return DXGI_FORMAT_BC2_UNORM;
+         case FormatEncodingType::UNORM_SRGB: return DXGI_FORMAT_BC2_UNORM_SRGB;
+         default: break;
+         }
+         break;
+
+      case DXGI_FORMAT_BC3_TYPELESS:
+         switch (format_encoding_type)
+         {
+         case FormatEncodingType::UNORM:      return DXGI_FORMAT_BC3_UNORM;
+         case FormatEncodingType::UNORM_SRGB: return DXGI_FORMAT_BC3_UNORM_SRGB;
+         default: break;
+         }
+         break;
+
+      case DXGI_FORMAT_BC4_TYPELESS:
+         switch (format_encoding_type)
+         {
+         case FormatEncodingType::UNORM: return DXGI_FORMAT_BC4_UNORM;
+         case FormatEncodingType::SNORM: return DXGI_FORMAT_BC4_SNORM;
+         default: break;
+         }
+         break;
+
+      case DXGI_FORMAT_BC5_TYPELESS:
+         switch (format_encoding_type)
+         {
+         case FormatEncodingType::UNORM: return DXGI_FORMAT_BC5_UNORM;
+         case FormatEncodingType::SNORM: return DXGI_FORMAT_BC5_SNORM;
+         default: break;
+         }
+         break;
+
+      case DXGI_FORMAT_BC6H_TYPELESS:
+         switch (format_encoding_type)
+         {
+         case FormatEncodingType::UFLOAT: return DXGI_FORMAT_BC6H_UF16;
+         case FormatEncodingType::SFLOAT: return DXGI_FORMAT_BC6H_SF16;
+         default: break;
+         }
+         break;
+
+      case DXGI_FORMAT_BC7_TYPELESS:
+         switch (format_encoding_type)
+         {
+         case FormatEncodingType::UNORM:      return DXGI_FORMAT_BC7_UNORM;
+         case FormatEncodingType::UNORM_SRGB: return DXGI_FORMAT_BC7_UNORM_SRGB;
+         default: break;
+         }
+         break;
+
+      default:
+         {
+            ASSERT_ONCE(typeless_format != DXGI_FORMAT_R32G8X24_TYPELESS && typeless_format != DXGI_FORMAT_R24G8_TYPELESS); // Depth format. We shouldn't have gotten here
+         }
+         break;
+      }
+
+      return return_unknown_on_failure ? DXGI_FORMAT_UNKNOWN : typeless_format;
+   }
+
+   // Works on any format. Useful to find the best view type for textures that were uprgaded.
+   // Generally makes little sense to be used if the target format wasn't already typeless, and the source wasn't typeless.
+   DXGI_FORMAT GetRemappedFormat(DXGI_FORMAT source_format, DXGI_FORMAT target_format)
+   {
+      FormatEncodingType format_encoding_type = GetFormatEncodingType(source_format);
+
+      // Return itself if the typeless cast failed (some formats don't have a typeless version)
+      target_format = GetTypelessFormat(target_format, target_format);
+
+      // This will return the same format if it was typeless
+      return GetTypedFormat(target_format, format_encoding_type);
    }
 
    // TODO: add a strict flag to avoid copying between e.g. UNORM and FLOAT
@@ -778,8 +1185,8 @@ namespace
          return false;
       };
 
-      format_a = GetTypelessFormat(format_a);
-      format_b = GetTypelessFormat(format_b);
+      format_a = GetTypelessFormat(format_a, format_a);
+      format_b = GetTypelessFormat(format_b, format_b);
       if (format_a == format_b || (Is32Bit4ChannelTypeless(format_a) && Is32Bit4ChannelTypeless(format_b)))
          return true;
       return false;
