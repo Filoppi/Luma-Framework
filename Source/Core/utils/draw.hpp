@@ -297,6 +297,7 @@ struct DrawStateStack
       UINT blend_sample_mask;
       com_ptr<ID3D11VertexShader> vs;
       com_ptr<ID3D11PixelShader> ps;
+      com_ptr<ID3D11GeometryShader> gs;
       com_ptr<ID3D11ComputeShader> cs;
 #if ENABLE_SHADER_CLASS_INSTANCES
       UINT vs_instances_count = max_shader_class_instances;
