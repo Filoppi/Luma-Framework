@@ -4662,6 +4662,9 @@ namespace
          return;
 
       std::vector<reshade::api::resource_view> replaced_rtvs;
+      // Keep the selected views alive across later lookups and the native bind.
+      std::array<com_ptr<ID3D11RenderTargetView>, D3D11_SIMULTANEOUS_RENDER_TARGET_COUNT> retained_rtvs;
+      com_ptr<ID3D11DepthStencilView> retained_dsv;
       bool any_replaced = false;
 
       CommandListData& cmd_list_data = *cmd_list->get_private_data<CommandListData>();
@@ -4686,6 +4689,7 @@ namespace
                   any_replaced = true;
                }
 
+               retained_rtvs[i] = reinterpret_cast<ID3D11RenderTargetView*>(replaced_rtv);
                replaced_rtvs[i] = {replaced_rtv};
 
                cmd_list_data.ps_rtvs_state[i] = CommandListData::ViewState::SetAndUpgraded;
@@ -4704,6 +4708,7 @@ namespace
          // Usually not needed (yet?) but won't hurt
          if (FindOrCreateIndirectUpgradedResourceView(cmd_list->get_device(), dsv.handle, dsv.handle, device_data, enable_chain_indirect_texture_format_upgrades >= ChainTextureFormatUpgradesType::DirectDependencies, reshade::api::resource_usage::depth_stencil, lock_device_read))
          {
+            retained_dsv = reinterpret_cast<ID3D11DepthStencilView*>(dsv.handle);
             cmd_list_data.ps_dsvs_state[0] = CommandListData::ViewState::SetAndUpgraded;
             cmd_list_data.any_upgraded_ps_dsvs = true;
             any_replaced = true;
