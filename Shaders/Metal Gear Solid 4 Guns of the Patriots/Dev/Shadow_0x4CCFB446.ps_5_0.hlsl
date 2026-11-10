@@ -201,5 +201,4 @@ void main(
   // Diagnostic only: use the original color encoding, then toggle IMPROVE_SHADOW_MAPS.
   o0 = float4(1.0, 0.0, 1.0, 0.25);
 #endif
-  return;
 }

@@ -42,9 +42,11 @@ void main(
   paletteUV.x = minLuminanceOffset + luminance;
   paletteUV.y = 0.5;
 #if 1 // Luma: fix 8 bit quantization from point sampler, and restore clipped colors
-  float LUTSize = 256;
-  float LUTScale = (LUTSize - 1.0) / LUTSize;
-  float LUTBias  = 0.5 / LUTSize;
+  float2 LUTSize2D = 256;
+  // Likely always 256x1 but checking won't hurt (it might have gotten upgraded)
+  paletteTexture.GetDimensions(LUTSize2D.x, LUTSize2D.y);
+  float2 LUTScale = (LUTSize2D - 1.0) / LUTSize2D;
+  float2 LUTBias  = 0.5 / LUTSize2D;
   float paletteXMax = max(paletteUV.x, 1.0); // TODO: implement "ShouldForceSDR" (barely matters)
   paletteUV = paletteUV * LUTScale + LUTBias;
   float4 palettedColor = paletteTexture.Sample(s0_s, paletteUV.xy).xyzw;

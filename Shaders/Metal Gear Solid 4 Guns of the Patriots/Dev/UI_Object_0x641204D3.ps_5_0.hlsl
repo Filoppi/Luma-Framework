@@ -19,7 +19,7 @@ cbuffer cb0 : register(b0)
 
 #define cmp
 
-// Draws 3D objects in the UI
+// Draws 3D objects in the UI. Also used for 3D meshes in the scene.
 void main(
   float4 v0 : SV_POSITION0,
   float4 v1 : COLOR0,
