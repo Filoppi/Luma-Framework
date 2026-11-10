@@ -2722,11 +2722,11 @@ namespace
 
       if (enable_samplers_upgrade)
       {
-         // Release custom samplers outside the lock, as releasing them can trigger "OnDestroySampler()", which locks it again (and would hang)
+         // Release custom samplers outside the lock, as releasing them can trigger OnDestroySampler.
+         // Device teardown can precede child-object destruction, and samplers can be shared.
          decltype(device_data.custom_sampler_by_original_sampler) samplers;
          {
             const std::unique_lock lock_samplers(s_mutex_samplers);
-            ASSERT_ONCE(device_data.custom_sampler_by_original_sampler.empty()); // These should have been cleared already ("OnDestroySampler()")
             samplers = std::move(device_data.custom_sampler_by_original_sampler);
             device_data.custom_sampler_by_original_sampler.clear();
          }
