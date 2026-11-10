@@ -652,7 +652,7 @@ namespace Display
 				setAdvancedColorState.header.adapterId = colorInfo.header.adapterId;
 				setAdvancedColorState.header.id = colorInfo.header.id;
 				setAdvancedColorState.enableAdvancedColor = enabled;
-				bool succeeded = (ERROR_SUCCESS == DisplayConfigSetDeviceInfo(&setAdvancedColorState.header));
+				bool succeeded = ERROR_SUCCESS == DisplayConfigSetDeviceInfo(&setAdvancedColorState.header);
 				return succeeded;
 			}
 			return static_cast<bool>( colorInfo.advancedColorEnabled ) == enabled;
@@ -694,20 +694,20 @@ namespace Display
 	// NOTE: Undocumented Windows feature. USE AT YOUR OWN RISK.
 	bool SetSDRWhiteLevel(HWND hwnd, float nits, HMONITOR fallbackMonitor)
 	{
-		DISPLAYCONFIG_GET_ADVANCED_COLOR_INFO colorInfo{};
-		if (GetColorInfo(hwnd, colorInfo, fallbackMonitor))
-		{
-			DISPLAYCONFIG_SET_SDR_WHITE_LEVEL setSdrWhiteLevel{};
-			setSdrWhiteLevel.header.type = DISPLAYCONFIG_DEVICE_INFO_SET_SDR_WHITE_LEVEL;
-			setSdrWhiteLevel.header.size = sizeof(DISPLAYCONFIG_SET_SDR_WHITE_LEVEL);
-			setSdrWhiteLevel.header.adapterId = colorInfo.header.adapterId;
-			setSdrWhiteLevel.header.id = colorInfo.header.id;
-			setSdrWhiteLevel.SDRWhiteLevel = static_cast <ULONG>((1000.0f * nits) / 80.0f);
-			setSdrWhiteLevel.finalValue = TRUE;
-			// This will return error for any range beyond 80-480 nits
-			bool succeeded = (ERROR_SUCCESS == DisplayConfigSetDeviceInfo((DISPLAYCONFIG_DEVICE_INFO_HEADER*)&setSdrWhiteLevel));
-			return succeeded;
-		}
+		DISPLAYCONFIG_PATH_INFO pathInfo{};
+      if (GetDisplayConfigPathInfo(hwnd, fallbackMonitor, pathInfo))
+      {
+         DISPLAYCONFIG_SET_SDR_WHITE_LEVEL setSdrWhiteLevel{};
+         setSdrWhiteLevel.header.type = DISPLAYCONFIG_DEVICE_INFO_SET_SDR_WHITE_LEVEL;
+         setSdrWhiteLevel.header.size = sizeof(DISPLAYCONFIG_SET_SDR_WHITE_LEVEL);
+         setSdrWhiteLevel.header.adapterId = pathInfo.targetInfo.adapterId;
+         setSdrWhiteLevel.header.id = pathInfo.targetInfo.id;
+         // Windows accepts SDR white levels from 80 to 480 nits. This might change in the future.
+         setSdrWhiteLevel.SDRWhiteLevel = static_cast<ULONG>(std::round(1000.0f * std::clamp(nits, 80.f, 480.f) / 80.0f));
+         setSdrWhiteLevel.finalValue = TRUE;
+         bool succeeded = ERROR_SUCCESS == DisplayConfigSetDeviceInfo(&setSdrWhiteLevel.header);
+         return succeeded;
+      }
 		return false;
 	}
 
