@@ -120,6 +120,18 @@
 #error "Only one async provider may be enabled: LUMA_PATCH_BYTECODE_ASYNC XOR LUMA_PATCH_RECIPE_ASYNC"
 #endif
 
+// The sync and async variants of the *same* method are mutually exclusive too:
+// both write the same per-method "processed" marker, and the sync one always
+// runs first (at shader creation), so it would mark the method definitively
+// resolved and the async provider would then be skipped for every shader.
+// Mixing methods (e.g. bytecode sync + recipe async) is still supported.
+#if LUMA_PATCH_BYTECODE_SYNC && LUMA_PATCH_BYTECODE_ASYNC
+#error "Only one bytecode provider may be enabled: LUMA_PATCH_BYTECODE_SYNC XOR LUMA_PATCH_BYTECODE_ASYNC"
+#endif
+#if LUMA_PATCH_RECIPE_SYNC && LUMA_PATCH_RECIPE_ASYNC
+#error "Only one recipe provider may be enabled: LUMA_PATCH_RECIPE_SYNC XOR LUMA_PATCH_RECIPE_ASYNC"
+#endif
+
 #if LUMA_USE_DXP
 #include <dxp/RecipeReport.hpp>
 #include <dxp/sm5/Recipe.hpp>
