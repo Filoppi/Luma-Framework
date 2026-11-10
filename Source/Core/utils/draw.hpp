@@ -17,6 +17,8 @@ enum class DrawStateStackType
    // Not 100% of the graphics state, but almost everything we'll ever need.
    // Note that if we set a render target that was also set as shader resource of the (e.g.) vertex stage, it won't be restored.
    FullGraphics,
+   // Includes ~everything in graphics.
+   ExtendedGraphics,
    // Not 100% of the compute state, but almost everything we'll ever need.
    Compute,
 };
@@ -43,10 +45,10 @@ struct DrawStateStack
 #endif
 
       state->uav_num = device_max_uav_num;
-      if constexpr (Mode == DrawStateStackType::SimpleGraphics || Mode == DrawStateStackType::FullGraphics)
+      if constexpr (Mode == DrawStateStackType::SimpleGraphics || Mode == DrawStateStackType::FullGraphics || Mode == DrawStateStackType::ExtendedGraphics)
       {
          device_context->OMGetRenderTargets(D3D11_SIMULTANEOUS_RENDER_TARGET_COUNT, &state->render_target_views[0], &state->depth_stencil_view); // TODO: optimize away for the "OMGetRenderTargetsAndUnorderedAccessViews" call case? We could just get all the RTVs and UAVs from slot 0 and then find the first valid UAV
-         if constexpr (Mode == DrawStateStackType::FullGraphics)
+         if constexpr (Mode == DrawStateStackType::FullGraphics || Mode == DrawStateStackType::ExtendedGraphics)
          {
             for (size_t i = 0; i < D3D11_SIMULTANEOUS_RENDER_TARGET_COUNT; i++)
             {
@@ -59,9 +61,6 @@ struct DrawStateStack
             }
             state->depth_stencil_view.reset();
             device_context->OMGetRenderTargetsAndUnorderedAccessViews(state->valid_render_target_views_bound, &state->render_target_views[0], &state->depth_stencil_view, state->valid_render_target_views_bound, state->uav_num - state->valid_render_target_views_bound, &state->unordered_access_views[0]);
-#if ENABLE_DRAW_STATE_VERTEX_BUFFER_CACHE
-            device_context->IAGetVertexBuffers(0, D3D11_IA_VERTEX_INPUT_RESOURCE_SLOT_COUNT, &state->vertex_buffers[0], state->vertex_buffer_strides, state->vertex_buffer_offsets);
-#endif // ENABLE_DRAW_STATE_VERTEX_BUFFER_CACHE
          }
          device_context->OMGetBlendState(&state->blend_state, state->blend_factor, &state->blend_sample_mask);
          device_context->IAGetPrimitiveTopology(&state->primitive_topology);
@@ -93,17 +92,12 @@ struct DrawStateStack
          device_context->IAGetInputLayout(&state->input_layout);
          device_context->RSGetState(&state->rasterizer_state);
 
-#if 0 // These are not needed until proven otherwise, we don't change, nor rely on these states
-         ID3D11Buffer* VSConstantBuffer;
-         ID3D11Buffer* VertexBuffer;
-         ID3D11Buffer* IndexBuffer;
-         UINT IndexBufferOffset, VertexBufferStride, VertexBufferOffset;
-         DXGI_FORMAT IndexBufferFormat;
-         device_context->VSGetConstantBuffers(0, 1, &VSConstantBuffer);
-         device_context->IAGetIndexBuffer(&IndexBuffer, &IndexBufferFormat, &IndexBufferOffset);
-         device_context->IAGetVertexBuffers(0, 1, &VertexBuffer, &VertexBufferStride, &VertexBufferOffset);
-         device_context->GSGetShader(&state->gs, nullptr, 0); // And others
-#endif
+         if constexpr (Mode == DrawStateStackType::ExtendedGraphics)
+         {
+            device_context->IAGetVertexBuffers(0, D3D11_IA_VERTEX_INPUT_RESOURCE_SLOT_COUNT, &state->vertex_buffers[0], state->vertex_buffer_strides, state->vertex_buffer_offsets);
+            device_context->IAGetIndexBuffer(&state->index_buffer, &state->index_buffer_format, &state->index_buffer_offset);
+            device_context->GSGetShader(&state->gs, nullptr, 0);
+         }
       }
       else if constexpr (Mode == DrawStateStackType::Compute)
       {
@@ -135,13 +129,13 @@ struct DrawStateStack
       com_ptr<ID3D11DeviceContext1> device_context_1;
       HRESULT hr = device_context->QueryInterface(&device_context_1);
 
-      if constexpr (Mode == DrawStateStackType::SimpleGraphics || Mode == DrawStateStackType::FullGraphics)
+      if constexpr (Mode == DrawStateStackType::SimpleGraphics || Mode == DrawStateStackType::FullGraphics || Mode == DrawStateStackType::ExtendedGraphics)
       {
          if (output_textures)
          {
             // Set the render targets first because they are "output" and take precedence over SR bindings of the same resource, which would otherwise get nulled
             ID3D11RenderTargetView* const* rtvs_const = (ID3D11RenderTargetView**)std::addressof(state->render_target_views[0]);
-            if constexpr (Mode == DrawStateStackType::FullGraphics)
+            if constexpr (Mode == DrawStateStackType::FullGraphics || Mode == DrawStateStackType::ExtendedGraphics)
             {
                ID3D11UnorderedAccessView* const* uavs_const = (ID3D11UnorderedAccessView**)std::addressof(state->unordered_access_views[0]);
                UINT uav_initial_counts[D3D11_1_UAV_SLOT_COUNT]; // TODO: Likely not necessary, we could pass in nullptr
@@ -155,13 +149,6 @@ struct DrawStateStack
          }
          device_context->OMSetBlendState(state->blend_state.get(), state->blend_factor, state->blend_sample_mask);
          device_context->IASetPrimitiveTopology(state->primitive_topology);
-#if ENABLE_DRAW_STATE_VERTEX_BUFFER_CACHE
-         if constexpr (Mode == DrawStateStackType::FullGraphics)
-         {
-            ID3D11Buffer* const* vertex_buffers_const = (ID3D11Buffer**)std::addressof(state->vertex_buffers[0]);
-            device_context->IASetVertexBuffers(0, D3D11_IA_VERTEX_INPUT_RESOURCE_SLOT_COUNT, vertex_buffers_const, state->vertex_buffer_strides, state->vertex_buffer_offsets);
-         }
-#endif // ENABLE_DRAW_STATE_VERTEX_BUFFER_CACHE
          device_context->RSSetScissorRects(state->scissor_rects_num, &state->scissor_rects[0]);
          device_context->RSSetViewports(state->viewports_num, &state->viewports[0]);
          ID3D11ShaderResourceView* const* srvs_const = (ID3D11ShaderResourceView**)std::addressof(state->shader_resource_views[0]); // We can't use "com_ptr"'s "T **operator&()" as it asserts if the object isn't null, even if the reference would be const
@@ -195,6 +182,14 @@ struct DrawStateStack
          device_context->PSSetSamplers(0, samplers_num, ps_samplers_state_const);
          device_context->IASetInputLayout(state->input_layout.get());
          device_context->RSSetState(state->rasterizer_state.get());
+
+         if constexpr (Mode == DrawStateStackType::ExtendedGraphics)
+         {
+            ID3D11Buffer* const* vertex_buffers_const = (ID3D11Buffer**)std::addressof(state->vertex_buffers[0]);
+            device_context->IASetVertexBuffers(0, D3D11_IA_VERTEX_INPUT_RESOURCE_SLOT_COUNT, vertex_buffers_const, state->vertex_buffer_strides, state->vertex_buffer_offsets);
+            device_context->IASetIndexBuffer(state->index_buffer.get(), state->index_buffer_format, state->index_buffer_offset);
+            device_context->GSSetShader(state->gs.get(), nullptr, 0);
+         }
       }
       else if constexpr (Mode == DrawStateStackType::Compute)
       {
@@ -242,14 +237,14 @@ struct DrawStateStack
 
    static constexpr size_t samplers_num = []
       {
-         if constexpr (Mode == DrawStateStackType::FullGraphics || Mode == DrawStateStackType::Compute)
+         if constexpr (Mode == DrawStateStackType::FullGraphics || Mode == DrawStateStackType::ExtendedGraphics || Mode == DrawStateStackType::Compute)
             return D3D11_COMMONSHADER_SAMPLER_SLOT_COUNT;
          else
             return size_t{ 1 };
       }();
    static constexpr size_t srv_num = []
       {
-         if constexpr (Mode == DrawStateStackType::FullGraphics || Mode == DrawStateStackType::Compute)
+         if constexpr (Mode == DrawStateStackType::FullGraphics || Mode == DrawStateStackType::ExtendedGraphics || Mode == DrawStateStackType::Compute)
             return D3D11_COMMONSHADER_INPUT_RESOURCE_SLOT_COUNT;
          else
             return size_t{ 3 }; // We usually don't use them beyond than the first 3
@@ -313,7 +308,6 @@ struct DrawStateStack
 #endif
       D3D11_PRIMITIVE_TOPOLOGY primitive_topology;
 
-      // TODO: move some of these to the heap, stack is too big
       com_ptr<ID3D11DepthStencilState> depth_stencil_state;
       UINT stencil_ref;
       com_ptr<ID3D11DepthStencilView> depth_stencil_view;
@@ -332,11 +326,13 @@ struct DrawStateStack
       D3D11_VIEWPORT viewports[D3D11_VIEWPORT_AND_SCISSORRECT_OBJECT_COUNT_PER_PIPELINE];
       UINT viewports_num = 1;
       com_ptr<ID3D11InputLayout> input_layout;
-#if ENABLE_DRAW_STATE_VERTEX_BUFFER_CACHE
       com_ptr<ID3D11Buffer> vertex_buffers[D3D11_IA_VERTEX_INPUT_RESOURCE_SLOT_COUNT];
       UINT vertex_buffer_strides[D3D11_IA_VERTEX_INPUT_RESOURCE_SLOT_COUNT] = {};
       UINT vertex_buffer_offsets[D3D11_IA_VERTEX_INPUT_RESOURCE_SLOT_COUNT] = {};
-#endif // ENABLE_DRAW_STATE_VERTEX_BUFFER_CACHE
+      com_ptr<ID3D11Buffer> index_buffer;
+      UINT index_buffer_offset;
+      DXGI_FORMAT index_buffer_format;
+
       com_ptr<ID3D11RasterizerState> rasterizer_state;
       UINT valid_render_target_views_bound = 0; // Includes null ones as well if bound between valid RTVs
       UINT uav_num = D3D11_1_UAV_SLOT_COUNT;

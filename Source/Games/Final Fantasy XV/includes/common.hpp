@@ -49,7 +49,7 @@ struct GameDeviceDataFFXV final : public GameDeviceData
    // Post-TAA upscale tracking
    UpscaleTrackingState upscale_tracking;
 
-   DrawStateStack<DrawStateStackType::FullGraphics> taa_state;
+   DrawStateStack<DrawStateStackType::ExtendedGraphics> taa_state;
 
    FFXVRainLayer rain;
 
