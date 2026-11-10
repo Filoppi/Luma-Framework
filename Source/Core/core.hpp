@@ -7971,6 +7971,8 @@ namespace
 
          reshade::api::descriptor_table_update replaced_update = update;
          std::vector<reshade::api::resource_view> replaced_descriptors;
+         // Keep mirrors alive across lookups that may release the device lock and until the bind takes its own references.
+         std::vector<com_ptr<ID3D11View>> retained_descriptor_views;
          bool any_replaced = false;
          bool any_upgraded = false;
 
@@ -8044,6 +8046,7 @@ namespace
                      replaced_rvs = (reshade::api::resource_view*)replaced_update.descriptors;
                   }
 
+                  retained_descriptor_views.emplace_back(reinterpret_cast<ID3D11View*>(replaced_rv));
                   replaced_rvs[i].handle = replaced_rv;
                }
 
@@ -8509,9 +8512,10 @@ namespace
       auto original_resource_view_to_mirrored_upgraded_resource_view = device_data.resource_upgrades.original_resource_views_to_mirrored_upgraded_resource_views.find(dsv.handle);
       if (!ignore_indirect_upgraded_textures && original_resource_view_to_mirrored_upgraded_resource_view != device_data.resource_upgrades.original_resource_views_to_mirrored_upgraded_resource_views.end())
       {
-         const auto original_resource_view_to_mirrored_upgraded_resource_view_ptr = original_resource_view_to_mirrored_upgraded_resource_view->second;
+         const uint64_t mirrored_handle = original_resource_view_to_mirrored_upgraded_resource_view->second;
+         com_ptr<ID3D11DepthStencilView> mirrored_view = reinterpret_cast<ID3D11DepthStencilView*>(mirrored_handle);
          lock.unlock(); // Avoids deadlock with the device
-         cmd_list->clear_depth_stencil_view({ original_resource_view_to_mirrored_upgraded_resource_view_ptr }, depth, stencil, rect_count, rects);
+         cmd_list->clear_depth_stencil_view({ mirrored_handle }, depth, stencil, rect_count, rects);
          return true;
       }
 
@@ -8531,9 +8535,10 @@ namespace
       auto original_resource_view_to_mirrored_upgraded_resource_view = device_data.resource_upgrades.original_resource_views_to_mirrored_upgraded_resource_views.find(rtv.handle);
       if (!ignore_indirect_upgraded_textures && original_resource_view_to_mirrored_upgraded_resource_view != device_data.resource_upgrades.original_resource_views_to_mirrored_upgraded_resource_views.end())
       {
-         const auto original_resource_view_to_mirrored_upgraded_resource_view_ptr = original_resource_view_to_mirrored_upgraded_resource_view->second;
+         const uint64_t mirrored_handle = original_resource_view_to_mirrored_upgraded_resource_view->second;
+         com_ptr<ID3D11RenderTargetView> mirrored_view = reinterpret_cast<ID3D11RenderTargetView*>(mirrored_handle);
          lock.unlock(); // Avoids deadlock with the device
-         cmd_list->clear_render_target_view({ original_resource_view_to_mirrored_upgraded_resource_view_ptr }, color, rect_count, rects);
+         cmd_list->clear_render_target_view({ mirrored_handle }, color, rect_count, rects);
          return true;
       }
 
@@ -8553,12 +8558,12 @@ namespace
       auto original_resource_view_to_mirrored_upgraded_resource_view = device_data.resource_upgrades.original_resource_views_to_mirrored_upgraded_resource_views.find(uav.handle);
       if (!ignore_indirect_upgraded_textures && original_resource_view_to_mirrored_upgraded_resource_view != device_data.resource_upgrades.original_resource_views_to_mirrored_upgraded_resource_views.end())
       {
-         const auto original_resource_view_to_mirrored_upgraded_resource_view_ptr = original_resource_view_to_mirrored_upgraded_resource_view->second;
+         const uint64_t mirrored_handle = original_resource_view_to_mirrored_upgraded_resource_view->second;
+         com_ptr<ID3D11UnorderedAccessView> mirrored_view = reinterpret_cast<ID3D11UnorderedAccessView*>(mirrored_handle);
          lock.unlock(); // Avoids deadlock with the device
 #if DEVELOPMENT
-         ID3D11UnorderedAccessView* uav = (ID3D11UnorderedAccessView*)original_resource_view_to_mirrored_upgraded_resource_view_ptr;
          D3D11_UNORDERED_ACCESS_VIEW_DESC desc;
-         uav->GetDesc(&desc);
+         mirrored_view->GetDesc(&desc);
          ASSERT_ONCE(!IsIntFormat(desc.Format)); // UNORM/SNORM/SFLOAT/UFLOAT formats are all support with the UAV clear float functions, only INT/UINT formats are not
 #endif
          // Use the float clearing function as all upgraded textures are float for the moment
@@ -8567,7 +8572,7 @@ namespace
          upgraded_values[1] = values[1];
          upgraded_values[2] = values[2];
          upgraded_values[3] = values[3];
-         cmd_list->clear_unordered_access_view_float({ original_resource_view_to_mirrored_upgraded_resource_view_ptr }, upgraded_values, rect_count, rects);
+         cmd_list->clear_unordered_access_view_float({ mirrored_handle }, upgraded_values, rect_count, rects);
          return true;
       }
 
@@ -8587,9 +8592,10 @@ namespace
       auto original_resource_view_to_mirrored_upgraded_resource_view = device_data.resource_upgrades.original_resource_views_to_mirrored_upgraded_resource_views.find(uav.handle);
       if (!ignore_indirect_upgraded_textures && original_resource_view_to_mirrored_upgraded_resource_view != device_data.resource_upgrades.original_resource_views_to_mirrored_upgraded_resource_views.end())
       {
-         const auto original_resource_view_to_mirrored_upgraded_resource_view_ptr = original_resource_view_to_mirrored_upgraded_resource_view->second;
+         const uint64_t mirrored_handle = original_resource_view_to_mirrored_upgraded_resource_view->second;
+         com_ptr<ID3D11UnorderedAccessView> mirrored_view = reinterpret_cast<ID3D11UnorderedAccessView*>(mirrored_handle);
          lock.unlock(); // Avoids deadlock with the device
-         cmd_list->clear_unordered_access_view_float({ original_resource_view_to_mirrored_upgraded_resource_view_ptr }, values, rect_count, rects);
+         cmd_list->clear_unordered_access_view_float({ mirrored_handle }, values, rect_count, rects);
          return true;
       }
 
