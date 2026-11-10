@@ -312,7 +312,22 @@
   <ItemGroup>
     <ClCompile Include="..\..\Core\unity_build.cpp" />
     <ClCompile Include="main.cpp" />
-    <ClCompile Include="..\..\External\reshade\deps\minhook\src\buffer.c;..\..\External\reshade\deps\minhook\src\hook.c;..\..\External\reshade\deps\minhook\src\trampoline.c;..\..\External\reshade\deps\minhook\src\hde\hde64.c">
+    <ClCompile Include="..\..\External\reshade\deps\minhook\src\buffer.c">
+      <CompileAs>CompileAsC</CompileAs>
+      <TreatWarningAsError>false</TreatWarningAsError>
+      <PrecompiledHeader>NotUsing</PrecompiledHeader>
+    </ClCompile>
+    <ClCompile Include="..\..\External\reshade\deps\minhook\src\hook.c">
+      <CompileAs>CompileAsC</CompileAs>
+      <TreatWarningAsError>false</TreatWarningAsError>
+      <PrecompiledHeader>NotUsing</PrecompiledHeader>
+    </ClCompile>
+    <ClCompile Include="..\..\External\reshade\deps\minhook\src\trampoline.c">
+      <CompileAs>CompileAsC</CompileAs>
+      <TreatWarningAsError>false</TreatWarningAsError>
+      <PrecompiledHeader>NotUsing</PrecompiledHeader>
+    </ClCompile>
+    <ClCompile Include="..\..\External\reshade\deps\minhook\src\hde\hde64.c">
       <CompileAs>CompileAsC</CompileAs>
       <TreatWarningAsError>false</TreatWarningAsError>
       <PrecompiledHeader>NotUsing</PrecompiledHeader>
