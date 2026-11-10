@@ -9177,17 +9177,12 @@ namespace
          thread_auto_dumping = std::thread(AutoDumpShaders);
       }
 
-      s_mutex_loading.lock_shared();
-      // Load new shaders
-      // We avoid running this if "thread_auto_compiling" is still running from boot.
-      // Note that this thread doesn't really need to be by "device", but we did so to make it simpler, to automatically handle the "CreateDeviceNativeShaders()" shaders.
 #if (LUMA_PATCH_PROVIDERS & (LUMA_PATCH_PROVIDER_BYTECODE_ASYNC | LUMA_PATCH_PROVIDER_RECIPE_ASYNC))
-      // Publish completed clones at the present boundary — the live clone map
-      // never mutates mid-frame (see worker lifecycle: OnInitDevice).
+      // Publish at the present boundary. Publishing takes s_mutex_generic and
+      // does not read custom_shaders_cache. Shader loading takes s_mutex_generic
+      // before s_mutex_loading, so holding s_mutex_loading here can deadlock.
       Patch::PublishReadyAsyncClones(device_data);
 #endif
-
-      s_mutex_loading.unlock_shared();
 
       if (needs_unload_shaders)
       {
