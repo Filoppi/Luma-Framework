@@ -2753,6 +2753,7 @@ namespace
       Display::NVAPI::DeInit();
 #endif
 
+      device_data.destroyed = true;
       device->destroy_private_data<DeviceData>();
    }
 
@@ -7283,7 +7284,7 @@ namespace
       SKIP_UNSUPPORTED_DEVICE_API(device->get_api());
 
       DeviceData& device_data = *device->get_private_data<DeviceData>();
-      if (&device_data == nullptr)
+      if (&device_data == nullptr || device_data.destroyed)
          return;
       // This only seems to happen when the game shuts down in Prey (as any destroy callback, it can be called from an arbitrary thread, but that's fine).
       // We don't need to check the custom samplers within the map even if they might be the same object, because they are strong pointers and thus wouldn't get destroyed if they were non null.
