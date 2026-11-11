@@ -34,10 +34,9 @@ void main(
   float3 divided = sq / r0.w;
 #endif
 
-  // Selects sq (undivided) when alpha <= 0.
-  float sel = (0.0 >= r0.w) ? 1.0 : 0.0;
-  float3 diff = sq - divided;
-  float3 scaled = sel * diff + divided;
+  // Selects sq (undivided) when alpha <= 0, like vanilla's predicated divide. Must stay a real select: the old
+  // arithmetic form (sel * (sq - divided) + divided) hit inf - inf = NaN when the divide overflowed at alpha == 0.
+  float3 scaled = (0.0 >= r0.w) ? sq : divided;
   scaled = scaled * GetHMAExposure(cb4[41].z);
 
   o1.xyz = scaled;

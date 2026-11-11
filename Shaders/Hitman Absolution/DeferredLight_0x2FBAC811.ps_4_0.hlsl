@@ -10,9 +10,11 @@
 #if TONEMAP_TYPE >= 1
 #define GBUFFER_CLAMP(v) saturate(v)
 #define SAFE_MIN(x) max((x), 1e-6)
+#define SAFE_W(x) (((x) < 0.0) ? min((x), -1e-6) : max((x), 1e-6))
 #else
 #define GBUFFER_CLAMP(v) (v)
 #define SAFE_MIN(x) (x)
+#define SAFE_W(x) (x)
 #endif
 
 cbuffer Globals_cb4 : register(b4)
@@ -58,7 +60,7 @@ void main(
   float4 depthTex = mapDeferred0.Load(pixel, sampleI);
   recon = depthTex.x * cb4[9] + recon;
   recon = recon + cb4[10];
-  float3 pos = recon.xyz / SAFE_MIN(recon.w);
+  float3 pos = recon.xyz / SAFE_W(recon.w); // Sign-preserving floor, like the sibling variants: a negative w must not flip the position
   pos = pos * rsqrt(SAFE_MIN(dot(pos, pos)));
   viewDir = negRay ? -pos : viewDir;
 

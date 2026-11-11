@@ -36,17 +36,16 @@ void main(
     sum += t1.Sample(s1, offsetUV).x;
   }
 
-  float3 r2 = r0.xyz * r0.xyz;
+  float3 sq = r0.xyz * r0.xyz;
 #if TONEMAP_TYPE >= 1
-  r2 = r2 / max(r0.w, 1e-6);
+  float3 divided = sq / max(r0.w, 1e-6);
 #else
-  r2 = r2 / r0.w;
+  float3 divided = sq / r0.w;
 #endif
 
-  // Selects r0^2 (undivided) when alpha <= 0.
-  float sel = (0.0 >= r0.w) ? 1.0 : 0.0;
-  float3 r3 = r0.xyz * r0.xyz - r2;
-  r2 = sel * r3 + r2;
+  // Selects sq (undivided) when alpha <= 0, like vanilla's predicated divide. Must stay a real select: the old
+  // arithmetic form (sel * (sq - divided) + divided) hit inf - inf = NaN when the divide overflowed at alpha == 0.
+  float3 r2 = (0.0 >= r0.w) ? sq : divided;
   r2 = r2 * exposure;
 
 #if TONEMAP_TYPE >= 1

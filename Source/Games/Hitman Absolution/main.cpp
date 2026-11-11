@@ -320,6 +320,11 @@ static bool HMA_GetRTVTexture(ID3D11RenderTargetView* rtv, ComPtr<ID3D11Resource
 }
 
 // Clamps the 3 stored G-buffer textures to 0..1 with two full-screen passes: MAX blend with 0 (negatives to 0), then MIN blend with 1 (values above 1 to 1).
+// Policy: this global pass is the authoritative G-buffer clamp. It runs once after the deferred fill, before the first draw that reads it, restoring the
+// vanilla 8-bit UNORM range that Luma's fp16 upgrade removed. The per-shader GBUFFER_CLAMP/saturate clamps in the DeferredLight variants (and their
+// SAFE_MIN/SAFE_W divide guards) are intentionally redundant belt-and-suspenders: they are no-ops once this pass has run,
+// but they enforce the 0..1 range locally in each faithful translation, where it also documents the deviation from vanilla
+// math. Do not remove either side without checking both.
 static void HMA_ClampGBuffers(ID3D11Device* native_device, ID3D11DeviceContext* native_device_context, DeviceData& device_data)
 {
    auto vs_it = device_data.native_vertex_shaders.find(CompileTimeStringHash("Copy VS"));
@@ -1204,7 +1209,8 @@ public:
                game_device_data.last_game_cb4 = cb4;
          }
 
-         // Histogram + adapt once per frame, on the exposure source draw.
+         // Histogram + adapt once per frame, on the exposure source draw. Runs even at mode 0 (vanilla): the exposure consumers fall back to the game's exposure,
+         // but the adapt pass still meters the scene bright point (meter (1,0)) that FinalPost's BT.2390 display mapping uses.
          if (!game_device_data.exposure_dispatched_this_frame
             && (original_shader_hashes.Contains(kExposureSourceHash, reshade::api::shader_stage::pixel) || original_shader_hashes.Contains(kExposureSourceHash2, reshade::api::shader_stage::pixel)))
          {

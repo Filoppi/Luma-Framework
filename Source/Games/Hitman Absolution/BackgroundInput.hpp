@@ -106,7 +106,11 @@ namespace HMABackgroundInput
    }
    static void Install()
    {
-      if (patch_count) return;
+      // Try once per process: "patch_count" only counts IAT patches, so without this the DirectInput mid-hooks
+      // would be re-created on every present when no import matched (stacking new hooks on still-live ones).
+      static bool install_attempted = false;
+      if (install_attempted) return;
+      install_attempted = true;
       InstallDirectInput();
       auto* base = reinterpret_cast<uint8_t*>(GetModuleHandleW(nullptr));
       if (!base) return;
