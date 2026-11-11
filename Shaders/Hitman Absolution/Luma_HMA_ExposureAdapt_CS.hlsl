@@ -101,7 +101,7 @@ void main(uint gidx : SV_GroupIndex)
 						gsTileEstimates[validTileCount] = rec.x / rec.y;
 						gsTileSorted[validTileCount] = gsTileEstimates[validTileCount];
 						uint tileNumber = (uint)tileIndex;
-						uint2 tile = uint2(tileNumber & (AE_ADAPTIVE_TILE_COLUMNS - 1), tileNumber >> 3);
+						uint2 tile = uint2(tileNumber % AE_ADAPTIVE_TILE_COLUMNS, tileNumber / AE_ADAPTIVE_TILE_COLUMNS);
 						float2 uv = (float2(tile) + 0.5) / float2(AE_ADAPTIVE_TILE_COLUMNS, AE_ADAPTIVE_TILE_ROWS);
 						gsTileCenters[validTileCount] = AE_ADAPTIVE_CENTER_WEIGHT_FLOOR + AE_ADAPTIVE_CENTER_WEIGHT_STRENGTH * saturate(1.0 - length(uv - 0.5) * AE_ADAPTIVE_CENTER_WEIGHT_RADIUS);
 						gsTileDepthEstimates[validTileCount] = rec.w > 0.0 ? rec.z / rec.w : gsTileEstimates[validTileCount];
@@ -198,9 +198,11 @@ void main(uint gidx : SV_GroupIndex)
 		ExposureTex[uint2(0, 0)] = outV;
 
 		// Estimate the weighted 99.99th percentile within its log-luminance bin.
-		float highlight = (Mode == 2 && total <= 0.0) ? 0.0 : (highlightValid ? prevHighlight : 1.0);
+		float highlight;
 		if (Mode == 2 && total <= 0.0)
 			highlight = Reset <= 0.5 && prevValid && highlightValid ? prevHighlight : 0.0;
+		else
+			highlight = highlightValid ? prevHighlight : 1.0;
 		if (total > 0.0)
 		{
 			float rank = total * 0.9999;

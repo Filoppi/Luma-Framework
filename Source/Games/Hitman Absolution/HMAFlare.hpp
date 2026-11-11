@@ -39,7 +39,6 @@ struct HMAFlareResources
    ComPtr<ID3D11SamplerState> smp_clamp, smp_border;
    ComPtr<ID3D11BlendState> blend_add;
    ComPtr<ID3D11RasterizerState> raster_nocull;
-   UINT scene_w = 0, scene_h = 0;
 
    void Release()
    {
@@ -57,8 +56,6 @@ struct HMAFlareResources
       smp_border.reset();
       blend_add.reset();
       raster_nocull.reset();
-      scene_w = 0;
-      scene_h = 0;
    }
 };
 
@@ -331,8 +328,6 @@ static bool HMA_DrawFlare(ID3D11Device* device, ID3D11DeviceContext* ctx, Device
       return false;
    if (settings.glare && !HMAFlare_EnsureTarget(device, res.glare, half_w, half_h))
       return false;
-   res.scene_w = scene_w;
-   res.scene_h = scene_h;
 
    // Constant values per frame (shipped asset defaults, see SPEC_upstream section 4).
    HMAFlareCBData cbd = {};

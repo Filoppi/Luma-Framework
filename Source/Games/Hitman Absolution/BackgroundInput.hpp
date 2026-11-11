@@ -100,7 +100,6 @@ namespace HMABackgroundInput
    {
       const DWORD result = xinput_state(index, state);
       if (result != ERROR_SUCCESS || !state || index >= 4) return result;
-      if (allow.load(std::memory_order_relaxed)) return result;
       if (Blocked()) memset(&state->Gamepad, 0, sizeof(state->Gamepad));
       return result;
    }
@@ -165,6 +164,10 @@ namespace HMABackgroundInput
          }
       }
       patch_count = 0;
+      // Clear the trampolines' saved originals so their null state matches the restored IAT slots.
+      async_key = nullptr;
+      keyboard_state = nullptr;
+      xinput_state = nullptr;
    }
 }
 #endif

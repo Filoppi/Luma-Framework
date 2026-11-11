@@ -22,9 +22,6 @@ cbuffer cb4 : register(b4)
 #define AE_MIN_LOG2 -14.0
 #define AE_MAX_LOG2 6.0
 #define AE_BINS 128
-#define LUMA_AE_KEY 0.18
-#define AE_LOW_PCT 0.5
-#define AE_HIGH_PCT 0.95
 #define AE_ADAPTIVE_TILE_COLUMNS 8
 #define AE_ADAPTIVE_TILE_ROWS 6
 #define AE_ADAPTIVE_SAMPLE_STRIDE 4

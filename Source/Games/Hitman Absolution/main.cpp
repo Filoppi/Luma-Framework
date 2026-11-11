@@ -9,7 +9,7 @@
 // This is optional but can be used to hardcode custom (per game) behaviours in the core library,
 // or other reasons. We can't automate it through the project define system (based on the project name) because
 // we need these defines to be upper case and space free.
-#define GAME_TEMPLATE 1
+#define GAME_HITMAN_ABSOLUTION 1
 #define ENABLE_BLOOM 1 // core registers the Bloom VS/Prefilter/Downsample/Upsample passes used by DrawBloom (Luma Bloom setting)
 #define ENABLE_SMAA 1 // core registers the SMAA passes used by DrawSMAA (AntiAliasingMode setting, replaces the game's FXAA)
 #if defined(_M_IX86) && !defined(LUMA_SEGMENTED_TRACE)
@@ -881,7 +881,6 @@ public:
       default_luma_global_game_settings.FilmGrainStrength = cb_luma_global_settings.GameSettings.FilmGrainStrength = 1.f;
       default_luma_global_game_settings.SkyHDRBoost = cb_luma_global_settings.GameSettings.SkyHDRBoost = 0.5f;
       default_luma_global_game_settings.SkyDebanding = cb_luma_global_settings.GameSettings.SkyDebanding = 1u;
-      default_luma_global_game_settings.SunBrightness = cb_luma_global_settings.GameSettings.SunBrightness = 1.2f;
       default_luma_global_game_settings.Exposure = cb_luma_global_settings.GameSettings.Exposure = 1.f;
       default_luma_global_game_settings.Contrast = cb_luma_global_settings.GameSettings.Contrast = 1.f;
       default_luma_global_game_settings.Saturation = cb_luma_global_settings.GameSettings.Saturation = 1.f;
@@ -1135,12 +1134,9 @@ public:
          }
       }
 
-      // Main tonemap pass
-      static uint32_t pixel_shader_hash_tonemap = Shader::Hash_StrToNum("46C50FC2");
-      static uint32_t pixel_shader_hash_tonemap2 = Shader::Hash_StrToNum("EED9AC77");
-
+      // Main tonemap pass: mark the main post process as drawn (kTonemapHash/kTonemapHash2).
       // Here you can track and customize shader passes by hash, you can do whatever you want in it
-      if (!game_device_data.has_drawn_tonemap && (original_shader_hashes.Contains(pixel_shader_hash_tonemap, reshade::api::shader_stage::pixel) || original_shader_hashes.Contains(pixel_shader_hash_tonemap2, reshade::api::shader_stage::pixel)))
+      if (!game_device_data.has_drawn_tonemap && (original_shader_hashes.Contains(kTonemapHash, reshade::api::shader_stage::pixel) || original_shader_hashes.Contains(kTonemapHash2, reshade::api::shader_stage::pixel)))
       {
          game_device_data.has_drawn_tonemap = true;
 
@@ -1674,7 +1670,6 @@ public:
 #if DEVELOPMENT || TEST
       reshade::get_config_value(runtime, NAME, "SkyHDRBoost", cb_luma_global_settings.GameSettings.SkyHDRBoost);
       reshade::get_config_value(runtime, NAME, "SkyDebanding", cb_luma_global_settings.GameSettings.SkyDebanding);
-      reshade::get_config_value(runtime, NAME, "SunBrightness", cb_luma_global_settings.GameSettings.SunBrightness);
 #endif
 #if DEVELOPMENT || TEST
       reshade::get_config_value(runtime, NAME, "GIStrength", cb_luma_global_settings.GameSettings.GIStrength);
@@ -1853,10 +1848,6 @@ public:
          reshade::set_config_value(runtime, NAME, "SkyDebanding", cb_luma_global_settings.GameSettings.SkyDebanding);
       }
       DrawResetButton(cb_luma_global_settings.GameSettings.SkyDebanding, default_luma_global_game_settings.SkyDebanding, "SkyDebanding", runtime);
-
-      if (ImGui::SliderFloat("Sun Brightness", &cb_luma_global_settings.GameSettings.SunBrightness, 1.f, 10.f, "%.3f"))
-         reshade::set_config_value(runtime, NAME, "SunBrightness", cb_luma_global_settings.GameSettings.SunBrightness);
-      DrawResetButton(cb_luma_global_settings.GameSettings.SunBrightness, default_luma_global_game_settings.SunBrightness, "SunBrightness", runtime);
 
       if (ImGui::SliderFloat("Emissive HDR Boost", &cb_luma_global_settings.GameSettings.EmissiveHDRBoost, 0.f, 2.f, "%.3f"))
          reshade::set_config_value(runtime, NAME, "EmissiveHDRBoost", cb_luma_global_settings.GameSettings.EmissiveHDRBoost);
@@ -2256,7 +2247,7 @@ public:
       ImGui::PushTextWrapPos(0.f);
       ImGui::Text(
          "Luma for \"Hitman Absolution\" is developed by Ostad Gaming and is open source and free.\n"
-         "It adds true HDR (Neutral LUT tonemapper with BT.2390 display mapping, windowed/borderless required), auto-exposure, emissive/sky/sun HDR boosts, SMAA anti-aliasing, XeGTAO ambient occlusion, bokeh depth of field, lens flares, and video AutoHDR, on top of the game's upgraded fp16 rendering pipeline.\n"
+         "It adds true HDR (Neutral LUT tonemapper with BT.2390 display mapping, windowed/borderless required), auto-exposure, emissive/sky HDR boosts, SMAA anti-aliasing, XeGTAO ambient occlusion, bokeh depth of field, lens flares, and video AutoHDR, on top of the game's upgraded fp16 rendering pipeline.\n"
          "Do NOT run another HDR mod (e.g. RenoDX) alongside it.\n"
          "Thanks to the Luma team and contributors.\n"
          "If you enjoy it, consider donating.");
@@ -2308,7 +2299,7 @@ BOOL APIENTRY DllMain(HMODULE hModule, DWORD ul_reason_for_call, LPVOID lpReserv
       const char* project_name = PROJECT_NAME;
       const char* cleared_project_name = (project_name[0] == '_') ? (project_name + 1) : project_name; // Remove the potential "_" at the beginning. This can include spaces!
 
-      uint32_t mod_version = 1; // Increase this to reset the game settings and shader binaries after making large changes to your mod
+      uint32_t mod_version = 2; // Increase this to reset the game settings and shader binaries after making large changes to your mod (2: removed the SunBrightness setting, changing the GameSettings cbuffer layout)
       Globals::SetGlobals(cleared_project_name, "Hitman Absolution Luma mod", "https://ko-fi.com/ostadgaming", mod_version);
       Globals::DEVELOPMENT_STATE = Globals::ModDevelopmentState::Playable;
 

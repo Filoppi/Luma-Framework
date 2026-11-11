@@ -13,10 +13,10 @@ namespace HMAXeGTAO
    {
       uint32_t viewport_size[2] = {};
       float viewport_pixel_size[2] = {};
-      float depth_scale = 1.f; // Set to -1 if the linear view depth comes out negative in testing
+      float depth_scale = 1.f; // Fixed at 1: device depth linearizes positive in the prefilter; not a runtime knob (no code sets it)
       float effect_radius = 0.5f; // In meters (view depth units)
       float final_value_power = 2.2f; // "Intensity"
-      uint32_t linear_depth = 0; // The SRV holds device depth, linearized in the prefilter pass.
+      uint32_t linear_depth = 0; // Fixed at 0 (device depth input): the SRV holds device depth, linearized in the prefilter pass; the slot only exists to mirror the HLSL struct
       float thickness = 0.5f; // GT-VBAO only: constant depth surface thickness in meters (view depth units)
       uint32_t padding[3] = {}; // Constant buffers are 16 byte aligned
    };

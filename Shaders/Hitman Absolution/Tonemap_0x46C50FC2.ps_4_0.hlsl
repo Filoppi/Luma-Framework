@@ -24,7 +24,6 @@ SamplerState s1 : register(s1);
 SamplerState s2 : register(s2);
 SamplerState s3 : register(s3);
 #if TONEMAP_TYPE >= 1
-#include "Includes/ModernLensFlare.hlsl"
 #include "../Includes/Tonemap.hlsl"
 #include "Includes/HMAHaze.hlsl"
 #endif
@@ -221,12 +220,9 @@ void main(
   // that are bright relative to exposure (measured: sun haze ~0.5, open sky ~0.18 after exposure).
   // Ramp must end below the dome's depth (seen 0.999992-0.9999945): inside it, float depth steps drew stepped contour lines.
   float skyMask = smoothstep(0.99999, 0.9999915, depth);
-  // The haze brightens gradually toward the sun center, so a cubic ramp over it peaks at the center and fades out smoothly (no disc edge).
-  // Smooth cubic-start roll-off (1 at x=1, no slope kink): a saturate()d cubic ramp drew rings around the sun core.
-  float sunRamp = SoftCubicRamp(max(GetLuminance(hdr) - 0.15, 0.0) / 0.35);
   // The boost is applied after the LUT grade: boosting before it pushed the sun core past the LUT top/knee kinks (contour lines).
-#define SUN_SPECIFIC_BOOST 0 // TEMP (user): sun scales like the rest of the sky; SunBrightness ignored
-  float skyBoost = 1.0 + (LumaSettings.GameSettings.SunBrightness - 1.0) * skyMask * sunRamp * SUN_SPECIFIC_BOOST;
+  // The sun scales like the rest of the sky: the old SunBrightness per-sun knob was multiplied by a hard zero and has been removed with the setting.
+  float skyBoost = 1.0;
   // Sky HDR expansion (moved here from Sky_0xACE3BFA3 so the auto-exposure meter sees the vanilla sky). Same curve; the sky
   // texture luminance is estimated from the sky's pre-exposure brightness (sun center ~0.5 at ~0.47 exposure = 1.06 raw),
   // so dim-exposure scenes still get the lift (same as Tonemap_0xEED9AC77).

@@ -5,7 +5,6 @@
 // Includers must include "Common.hlsl" (mod) first; Tonemap/Oklab are guarded and safe to repeat.
 #include "../../Includes/Tonemap.hlsl"
 #include "../../Includes/Oklab.hlsl"
-#include "../../Includes/Reinhard.hlsl"
 
 // Largest OKLCH chroma at (L, h) whose linear BT.709 (or BT.2020) conversion has no negative channel.
 float MaxChromaOklch(float L, float h, bool bt2020)

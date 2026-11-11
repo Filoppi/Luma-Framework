@@ -21,7 +21,6 @@ namespace CB
 		float FilmGrainStrength;
 		float SkyHDRBoost;
 		uint SkyDebanding;
-		float SunBrightness;
 		float Exposure;
 		float Contrast;
 		float Saturation;
@@ -40,7 +39,7 @@ namespace CB
 		float ShoulderStart;
 		float HighlightPurity;
 		float EmissiveHDRBoost;
-		float SunShaftHDRBoost;
+		float SunShaftHDRBoost; // WIP: only read by the .disabled SunGlare/SunShaftAdd shaders; keep the slot until they are re-enabled or deleted
 		float VideoAutoHDR;
 		float VanillaHueRestore;
 		uint AutoExposureMode;
