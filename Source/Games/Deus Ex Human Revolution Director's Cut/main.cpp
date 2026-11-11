@@ -1554,7 +1554,7 @@ BOOL APIENTRY DllMain(HMODULE hModule, DWORD ul_reason_for_call, LPVOID lpReserv
       compute_shader_hashes_SSAODenoise.compute_shaders = { 0x54A9A847, 0x8A03353C };
       pixel_shader_hashes_Copy.pixel_shaders = { 0xB8813A2F };
       pixel_shader_hashes_UI.pixel_shaders = { Shader::Hash_StrToNum("E5757FCE"), Shader::Hash_StrToNum("D07AC030"), Shader::Hash_StrToNum("B8813A2F"), Shader::Hash_StrToNum("3773AC30"), Shader::Hash_StrToNum("9CB44B83"), Shader::Hash_StrToNum("6BAF4A32") };
-      pixel_shader_hashes_Lighting.pixel_shaders = { Shader::Hash_StrToNum("944C549D"), Shader::Hash_StrToNum("4C48AF67"), Shader::Hash_StrToNum("D6937DB8"), Shader::Hash_StrToNum("0B16DD34"), Shader::Hash_StrToNum("2175B8F6"), Shader::Hash_StrToNum("00C1331B"), Shader::Hash_StrToNum("5EF35A1E"), Shader::Hash_StrToNum("C7F2C455"), Shader::Hash_StrToNum("EBE2567F"), Shader::Hash_StrToNum("0AB7755C"), Shader::Hash_StrToNum("7E526193"), Shader::Hash_StrToNum("C7B58EF0") }; // Some from OG, some from DC
+      pixel_shader_hashes_Lighting.pixel_shaders = { Shader::Hash_StrToNum("944C549D"), Shader::Hash_StrToNum("4C48AF67"), Shader::Hash_StrToNum("D6937DB8"), Shader::Hash_StrToNum("0B16DD34"), Shader::Hash_StrToNum("2175B8F6"), Shader::Hash_StrToNum("00C1331B"), Shader::Hash_StrToNum("5EF35A1E"), Shader::Hash_StrToNum("C7F2C455"), Shader::Hash_StrToNum("EBE2567F"), Shader::Hash_StrToNum("0AB7755C"), Shader::Hash_StrToNum("3E09ED32"), Shader::Hash_StrToNum("7E526193"), Shader::Hash_StrToNum("C7B58EF0") }; // Some from OG, some from DC
 
       default_luma_global_game_settings.BloomIntensity = 0.8f; // Not vanilla like!
       default_luma_global_game_settings.FogIntensity = is_dc ? 0.f : 0.f; // Not vanilla like!
