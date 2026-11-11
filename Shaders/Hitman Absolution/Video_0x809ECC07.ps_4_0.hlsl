@@ -72,7 +72,7 @@ float4 main(
 #if TONEMAP_TYPE >= 1
   rgb = max(rgb, 0.0);
   float3 lin = pow(rgb, 2.2);
-  if (LumaSettings.GameSettings.VideoAutoHDR > 0.0)
+  if (LumaSettings.GameSettings.VideoAutoHDREnable > 0 && LumaSettings.GameSettings.VideoAutoHDR > 0.0)
   {
     // PumboAutoHDR caps at MaxPeakWhiteNits / sRGB_WhiteLevelNits (80): pass the target as a paper white multiple so 1 = display peak.
     float targetNits = lerp(LumaSettings.GamePaperWhiteNits, LumaSettings.PeakWhiteNits, LumaSettings.GameSettings.VideoAutoHDR);

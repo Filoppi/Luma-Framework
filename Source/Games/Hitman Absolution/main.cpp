@@ -40,6 +40,7 @@
 // To compile in different modes (e.g. "DEVELOPMENT", "TEST" etc see "global_defines.h").
 #define ENABLE_POST_DRAW_DISPATCH_CALLBACK 1
 #include "..\..\Core\core.hpp"
+#include <shellapi.h> // ShellExecuteA for About links (system("start ...") hangs the render thread in exclusive fullscreen)
 #include "HMAFlare.hpp"
 #include "HardPause.hpp"
 #include "BackgroundInput.hpp"
@@ -788,6 +789,17 @@ public:
    // You can define any data to initialize once here
    void OnInit(bool async) override
    {
+      // The scRGB fp16 swapchain upgrade is the only thing making the presented backbuffer report as HDR to
+      // external tools (lilium's HDR analysis reads the format/colorspace, not the content). When the display is
+      // not in HDR mode, present the game's own UNORM swapchain instead: the SDR image is identical (the final
+      // pass already gamma-encodes into 0..1) and the game now reads as true SDR. The format is fixed at swapchain
+      // creation and cannot be changed afterwards, so this is decided once at launch from the primary monitor
+      // (null hwnd, no swapchain exists yet). Restart the game after toggling the Windows HDR setting.
+      bool hdr_supported = false, hdr_enabled = false;
+      Display::IsHDRSupportedAndEnabled(0, hdr_supported, hdr_enabled);
+      if (!hdr_enabled)
+         swapchain_upgrade_type = SwapchainUpgradeType::None;
+
       HMAHardPause::Init();
 #if DEVELOPMENT
       Mcp::RegisterToggles({{"hitman.hard_pause", &HMAHardPause::requested}});
@@ -887,6 +899,7 @@ public:
       default_luma_global_game_settings.EmissiveHDRBoost = cb_luma_global_settings.GameSettings.EmissiveHDRBoost = 0.5f;
       default_luma_global_game_settings.SunShaftHDRBoost = cb_luma_global_settings.GameSettings.SunShaftHDRBoost = 1.f;
       default_luma_global_game_settings.VideoAutoHDR = cb_luma_global_settings.GameSettings.VideoAutoHDR = 0.5f;
+      default_luma_global_game_settings.VideoAutoHDREnable = cb_luma_global_settings.GameSettings.VideoAutoHDREnable = 1u;
       default_luma_global_game_settings.ModernLensFlares = cb_luma_global_settings.GameSettings.ModernLensFlares = 1u;
       default_luma_global_game_settings.BokehDOF = cb_luma_global_settings.GameSettings.BokehDOF = 1u;
       default_luma_global_game_settings.BokehDOFFiltering = cb_luma_global_settings.GameSettings.BokehDOFFiltering = 1u;
@@ -1686,6 +1699,7 @@ public:
       reshade::get_config_value(runtime, NAME, "SunShaftHDRBoost", cb_luma_global_settings.GameSettings.SunShaftHDRBoost);
 #endif
       reshade::get_config_value(runtime, NAME, "VideoAutoHDR", cb_luma_global_settings.GameSettings.VideoAutoHDR);
+      reshade::get_config_value(runtime, NAME, "VideoAutoHDREnable", cb_luma_global_settings.GameSettings.VideoAutoHDREnable);
       reshade::get_config_value(runtime, NAME, "VanillaHueRestore", cb_luma_global_settings.GameSettings.VanillaHueRestore);
       reshade::get_config_value(runtime, NAME, "TonemapVersion", cb_luma_global_settings.GameSettings.TonemapVersion);
       reshade::get_config_value(runtime, NAME, "HazeModel", cb_luma_global_settings.GameSettings.HazeModel);
@@ -1750,44 +1764,6 @@ public:
       if (ImGui::SliderFloat("Highlight Saturation", &cb_luma_global_settings.GameSettings.HighlightSaturation, 0.f, 2.f, "%.3f"))
          reshade::set_config_value(runtime, NAME, "HighlightSaturation", cb_luma_global_settings.GameSettings.HighlightSaturation);
       DrawResetButton(cb_luma_global_settings.GameSettings.HighlightSaturation, default_luma_global_game_settings.HighlightSaturation, "HighlightSaturation", runtime);
-#endif
-
-      bool bokeh_dof = cb_luma_global_settings.GameSettings.BokehDOF != 0;
-      if (ImGui::Checkbox("Bokeh Depth of Field", &bokeh_dof))
-      {
-         cb_luma_global_settings.GameSettings.BokehDOF = bokeh_dof ? 1u : 0u;
-         reshade::set_config_value(runtime, NAME, "BokehDOF", cb_luma_global_settings.GameSettings.BokehDOF);
-      }
-      if (ImGui::IsItemHovered())
-         ImGui::SetTooltip("Replaces the game's half-res depth of field with a full-res bokeh blur using the game's focus. Off = vanilla DOF.");
-      DrawResetButton(cb_luma_global_settings.GameSettings.BokehDOF, default_luma_global_game_settings.BokehDOF, "BokehDOF", runtime);
-
-#if DEVELOPMENT || TEST
-      if (cb_luma_global_settings.GameSettings.BokehDOF != 0u)
-      {
-         bool bokeh_filtering = cb_luma_global_settings.GameSettings.BokehDOFFiltering != 0u;
-         if (ImGui::Checkbox("Depth-Aware Bokeh Filtering", &bokeh_filtering))
-         {
-            cb_luma_global_settings.GameSettings.BokehDOFFiltering = bokeh_filtering ? 1u : 0u;
-            reshade::set_config_value(runtime, NAME, "BokehDOFFiltering", cb_luma_global_settings.GameSettings.BokehDOFFiltering);
-         }
-         if (ImGui::IsItemHovered()) ImGui::SetTooltip("Use depth-aware filtering to reduce bokeh bleeding across depth boundaries.");
-         DrawResetButton(cb_luma_global_settings.GameSettings.BokehDOFFiltering, default_luma_global_game_settings.BokehDOFFiltering, "BokehDOFFiltering", runtime);
-
-         if (ImGui::SliderFloat("Bokeh Sample Rotation", &cb_luma_global_settings.GameSettings.BokehDOFRotation, 0.f, 1.f, "%.3f"))
-            reshade::set_config_value(runtime, NAME, "BokehDOFRotation", cb_luma_global_settings.GameSettings.BokehDOFRotation);
-         if (ImGui::IsItemHovered()) ImGui::SetTooltip("Adjust the bokeh sampling pattern rotation.");
-         DrawResetButton(cb_luma_global_settings.GameSettings.BokehDOFRotation, default_luma_global_game_settings.BokehDOFRotation, "BokehDOFRotation", runtime);
-
-         int bokeh_tap_limit = (int)cb_luma_global_settings.GameSettings.BokehDOFTapLimit;
-         if (ImGui::SliderInt("Bokeh Tap Limit", &bokeh_tap_limit, 8, 128))
-         {
-            cb_luma_global_settings.GameSettings.BokehDOFTapLimit = (uint32_t)bokeh_tap_limit;
-            reshade::set_config_value(runtime, NAME, "BokehDOFTapLimit", cb_luma_global_settings.GameSettings.BokehDOFTapLimit);
-         }
-         if (ImGui::IsItemHovered()) ImGui::SetTooltip("Higher limits improve bokeh quality at greater GPU cost.");
-         DrawResetButton(cb_luma_global_settings.GameSettings.BokehDOFTapLimit, default_luma_global_game_settings.BokehDOFTapLimit, "BokehDOFTapLimit", runtime);
-      }
 #endif
 
 #if DEVELOPMENT || TEST
@@ -1899,22 +1875,32 @@ public:
 
       if (ImGui::SliderFloat("Exposure", &cb_luma_global_settings.GameSettings.Exposure, 0.25f, 2.f, "%.3f"))
          reshade::set_config_value(runtime, NAME, "Exposure", cb_luma_global_settings.GameSettings.Exposure);
+      if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
+         ImGui::SetTooltip("Overall image brightness multiplier. 1 = vanilla.");
       DrawResetButton(cb_luma_global_settings.GameSettings.Exposure, default_luma_global_game_settings.Exposure, "Exposure", runtime);
 
       if (ImGui::SliderFloat("Contrast", &cb_luma_global_settings.GameSettings.Contrast, 0.5f, 2.f, "%.3f"))
          reshade::set_config_value(runtime, NAME, "Contrast", cb_luma_global_settings.GameSettings.Contrast);
+      if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
+         ImGui::SetTooltip("Contrast around mid gray. 1 = vanilla.");
       DrawResetButton(cb_luma_global_settings.GameSettings.Contrast, default_luma_global_game_settings.Contrast, "Contrast", runtime);
 
       if (ImGui::SliderFloat("Saturation", &cb_luma_global_settings.GameSettings.Saturation, 0.f, 2.f, "%.3f"))
          reshade::set_config_value(runtime, NAME, "Saturation", cb_luma_global_settings.GameSettings.Saturation);
+      if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
+         ImGui::SetTooltip("Color intensity. 1 = vanilla.");
       DrawResetButton(cb_luma_global_settings.GameSettings.Saturation, default_luma_global_game_settings.Saturation, "Saturation", runtime);
 
       if (ImGui::SliderFloat("Highlights", &cb_luma_global_settings.GameSettings.Highlights, 0.5f, 2.f, "%.3f"))
          reshade::set_config_value(runtime, NAME, "Highlights", cb_luma_global_settings.GameSettings.Highlights);
+      if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
+         ImGui::SetTooltip("Brightness of the highlights only. 1 = vanilla.");
       DrawResetButton(cb_luma_global_settings.GameSettings.Highlights, default_luma_global_game_settings.Highlights, "Highlights", runtime);
 
       if (ImGui::SliderFloat("Shadows", &cb_luma_global_settings.GameSettings.Shadows, 0.5f, 2.f, "%.3f"))
          reshade::set_config_value(runtime, NAME, "Shadows", cb_luma_global_settings.GameSettings.Shadows);
+      if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
+         ImGui::SetTooltip("Brightness of the shadows only. 1 = vanilla.");
       DrawResetButton(cb_luma_global_settings.GameSettings.Shadows, default_luma_global_game_settings.Shadows, "Shadows", runtime);
 
 #if DEVELOPMENT || TEST
@@ -2104,20 +2090,6 @@ public:
       ImGui::TextUnformatted("Rendering");
 #else
       ImGui::TextUnformatted("Post Process");
-      if (ImGui::SliderFloat("Luma Bloom Intensity", &cb_luma_global_settings.GameSettings.LumaBloomStrength, 0.f, 2.f, "%.3f"))
-         reshade::set_config_value(runtime, NAME, "LumaBloomStrength", cb_luma_global_settings.GameSettings.LumaBloomStrength);
-      DrawResetButton(cb_luma_global_settings.GameSettings.LumaBloomStrength, default_luma_global_game_settings.LumaBloomStrength, "LumaBloomStrength", runtime);
-      const char* tonemapped_resolve_items[] = { "Off", "Standard", "2x2 grid (NVIDIA)" };
-      int tonemapped_resolve = (int)(g_tonemapped_resolve > 2u ? 2u : g_tonemapped_resolve);
-      if (ImGui::Combo("Tonemapped MSAA Resolve", &tonemapped_resolve, tonemapped_resolve_items, IM_ARRAYSIZE(tonemapped_resolve_items)))
-      {
-         g_tonemapped_resolve = (uint32_t)tonemapped_resolve;
-         reshade::set_config_value(runtime, NAME, "TonemappedResolve", g_tonemapped_resolve);
-      }
-      if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
-         ImGui::SetTooltip("Resolves the 4x MSAA HDR scene with a tonemapped weighted average instead of the hardware resolve. Off = native resolve. Standard = sample layout 0..3; 2x2 grid = NVIDIA layout (samples in a 2x2 grid in sample 0)");
-      ImGui::SameLine();
-      ImGui::TextColored(ImVec4(1.f, 0.f, 0.f, 1.f), "(EXPERIMENTAL)");
       if (ImGui::SliderFloat("Film Grain Strength", &cb_luma_global_settings.GameSettings.FilmGrainStrength, 0.f, 2.f, "%.3f"))
          reshade::set_config_value(runtime, NAME, "FilmGrainStrength", cb_luma_global_settings.GameSettings.FilmGrainStrength);
       DrawResetButton(cb_luma_global_settings.GameSettings.FilmGrainStrength, default_luma_global_game_settings.FilmGrainStrength, "FilmGrainStrength", runtime);
@@ -2130,9 +2102,12 @@ public:
          reshade::set_config_value(runtime, NAME, "DistanceHaze", displayed_haze);
       }
       if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
-         ImGui::SetTooltip("Strength of the game's distance haze. 1 = vanilla; up to 2 is available with the linear HDR model.");
+         ImGui::SetTooltip("Strength of the game's distance haze. 1 = vanilla.");
       DrawResetButton(cb_luma_global_settings.GameSettings.DistanceHaze, default_luma_global_game_settings.DistanceHaze, "DistanceHaze", runtime);
 #endif
+
+      ImGui::Separator();
+      ImGui::TextUnformatted("Image Quality");
 #if DEVELOPMENT || TEST
       int anti_aliasing_mode = (int)g_anti_aliasing_mode;
       if (ImGui::Combo("Anti Aliasing", &anti_aliasing_mode, "FXAA (vanilla)\0SMAA\0"))
@@ -2153,6 +2128,7 @@ public:
       if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
          ImGui::SetTooltip("Replaces the game's FXAA with SMAA.");
 #endif
+      DrawResetButton(g_anti_aliasing_mode, 1u, "AntiAliasingMode", runtime);
 
 #if DEVELOPMENT || TEST
       if (ImGui::SliderFloat("GI Strength", &cb_luma_global_settings.GameSettings.GIStrength, 0.f, 4.f, "%.3f"))
@@ -2175,6 +2151,7 @@ public:
       }
       if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
          ImGui::SetTooltip("Replaces the game's SSAO with XeGTAO ambient occlusion. Quality is in the advanced settings (XE_GTAO_QUALITY)");
+      DrawResetButton(g_enable_xegtao, true, "EnableXeGTAO", runtime);
 #if DEVELOPMENT || TEST
       if (g_enable_xegtao)
       {
@@ -2206,22 +2183,113 @@ public:
          int xegtao_mode = vbao ? 1 : 0;
          reshade::set_config_value(runtime, NAME, "XeGTAOMode", xegtao_mode);
       }
+      DrawResetButton(g_xegtao_vbao, true, "XeGTAOMode", runtime);
       ImGui::EndDisabled();
+#endif
+
+      bool bokeh_dof = cb_luma_global_settings.GameSettings.BokehDOF != 0;
+      if (ImGui::Checkbox("Bokeh Depth of Field", &bokeh_dof))
+      {
+         cb_luma_global_settings.GameSettings.BokehDOF = bokeh_dof ? 1u : 0u;
+         reshade::set_config_value(runtime, NAME, "BokehDOF", cb_luma_global_settings.GameSettings.BokehDOF);
+      }
+      if (ImGui::IsItemHovered())
+         ImGui::SetTooltip("Replaces the game's half-res depth of field with a full-res bokeh blur using the game's focus. Off = vanilla DOF.");
+      DrawResetButton(cb_luma_global_settings.GameSettings.BokehDOF, default_luma_global_game_settings.BokehDOF, "BokehDOF", runtime);
+
+#if DEVELOPMENT || TEST
+      if (cb_luma_global_settings.GameSettings.BokehDOF != 0u)
+      {
+         bool bokeh_filtering = cb_luma_global_settings.GameSettings.BokehDOFFiltering != 0u;
+         if (ImGui::Checkbox("Depth-Aware Bokeh Filtering", &bokeh_filtering))
+         {
+            cb_luma_global_settings.GameSettings.BokehDOFFiltering = bokeh_filtering ? 1u : 0u;
+            reshade::set_config_value(runtime, NAME, "BokehDOFFiltering", cb_luma_global_settings.GameSettings.BokehDOFFiltering);
+         }
+         if (ImGui::IsItemHovered()) ImGui::SetTooltip("Use depth-aware filtering to reduce bokeh bleeding across depth boundaries.");
+         DrawResetButton(cb_luma_global_settings.GameSettings.BokehDOFFiltering, default_luma_global_game_settings.BokehDOFFiltering, "BokehDOFFiltering", runtime);
+
+         if (ImGui::SliderFloat("Bokeh Sample Rotation", &cb_luma_global_settings.GameSettings.BokehDOFRotation, 0.f, 1.f, "%.3f"))
+            reshade::set_config_value(runtime, NAME, "BokehDOFRotation", cb_luma_global_settings.GameSettings.BokehDOFRotation);
+         if (ImGui::IsItemHovered()) ImGui::SetTooltip("Adjust the bokeh sampling pattern rotation.");
+         DrawResetButton(cb_luma_global_settings.GameSettings.BokehDOFRotation, default_luma_global_game_settings.BokehDOFRotation, "BokehDOFRotation", runtime);
+
+         int bokeh_tap_limit = (int)cb_luma_global_settings.GameSettings.BokehDOFTapLimit;
+         if (ImGui::SliderInt("Bokeh Tap Limit", &bokeh_tap_limit, 8, 128))
+         {
+            cb_luma_global_settings.GameSettings.BokehDOFTapLimit = (uint32_t)bokeh_tap_limit;
+            reshade::set_config_value(runtime, NAME, "BokehDOFTapLimit", cb_luma_global_settings.GameSettings.BokehDOFTapLimit);
+         }
+         if (ImGui::IsItemHovered()) ImGui::SetTooltip("Higher limits improve bokeh quality at greater GPU cost.");
+         DrawResetButton(cb_luma_global_settings.GameSettings.BokehDOFTapLimit, default_luma_global_game_settings.BokehDOFTapLimit, "BokehDOFTapLimit", runtime);
+      }
 #endif
 
       ImGui::Separator();
       ImGui::TextUnformatted("Video");
-      if (ImGui::SliderFloat("Video AutoHDR", &cb_luma_global_settings.GameSettings.VideoAutoHDR, 0.f, 1.f, "%.3f"))
+      bool video_auto_hdr = cb_luma_global_settings.GameSettings.VideoAutoHDREnable != 0;
+      if (ImGui::Checkbox("Video AutoHDR", &video_auto_hdr))
+      {
+         cb_luma_global_settings.GameSettings.VideoAutoHDREnable = video_auto_hdr ? 1u : 0u;
+         reshade::set_config_value(runtime, NAME, "VideoAutoHDREnable", cb_luma_global_settings.GameSettings.VideoAutoHDREnable);
+      }
+      if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
+         ImGui::SetTooltip("HDR highlight expansion for pre-rendered videos. Off = vanilla SDR videos.");
+      DrawResetButton(cb_luma_global_settings.GameSettings.VideoAutoHDREnable, default_luma_global_game_settings.VideoAutoHDREnable, "VideoAutoHDREnable", runtime);
+      ImGui::BeginDisabled(cb_luma_global_settings.GameSettings.VideoAutoHDREnable == 0u);
+      if (ImGui::SliderFloat("Video AutoHDR Strength", &cb_luma_global_settings.GameSettings.VideoAutoHDR, 0.f, 1.f, "%.3f"))
          reshade::set_config_value(runtime, NAME, "VideoAutoHDR", cb_luma_global_settings.GameSettings.VideoAutoHDR);
       if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
-         ImGui::SetTooltip("HDR highlight expansion for pre-rendered videos (0 = vanilla)");
+         ImGui::SetTooltip("How far video highlights are pushed toward the display peak. 0 = vanilla");
       DrawResetButton(cb_luma_global_settings.GameSettings.VideoAutoHDR, default_luma_global_game_settings.VideoAutoHDR, "VideoAutoHDR", runtime);
+      ImGui::EndDisabled();
    }
 
    void PrintImGuiAbout() override
    {
-      // Remember to credit Luma developers, the game mod creators, and all third party code that is used (plus, optionally, testers too)
-      ImGui::Text("Hitman Absolution Luma mod - about and credits section", "");
+      ImGui::PushTextWrapPos(0.f);
+      ImGui::Text(
+         "Luma for \"Hitman Absolution\" is developed by Ostad Gaming and is open source and free.\n"
+         "It adds true HDR (Neutral LUT tonemapper with BT.2390 display mapping, windowed/borderless required), auto-exposure, emissive/sky/sun HDR boosts, SMAA anti-aliasing, XeGTAO ambient occlusion, bokeh depth of field, lens flares, and video AutoHDR, on top of the game's upgraded fp16 rendering pipeline.\n"
+         "Do NOT run another HDR mod (e.g. RenoDX) alongside it.\n"
+         "Thanks to the Luma team and contributors.\n"
+         "If you enjoy it, consider donating.");
+      ImGui::PopTextWrapPos();
+
+      ImGui::NewLine();
+      ImGui::PushStyleColor(ImGuiCol_Button, IM_COL32(70, 134, 0, 255));
+      ImGui::PushStyleColor(ImGuiCol_ButtonHovered, IM_COL32(70 + 9, 134 + 9, 0, 255));
+      ImGui::PushStyleColor(ImGuiCol_ButtonActive, IM_COL32(70 + 18, 134 + 18, 0, 255));
+      static const std::string donation_link = std::string("Buy Ostad Gaming a Coffee on ko-fi ") + std::string(ICON_FK_OK);
+      if (ImGui::Button(donation_link.c_str()))
+         ShellExecuteA(nullptr, "open", "https://ko-fi.com/ostadgaming", nullptr, nullptr, SW_SHOWNORMAL);
+      ImGui::PopStyleColor(3);
+
+      ImGui::NewLine();
+      static const std::string social_link = std::string("Join our \"HDR Den\" Discord ") + std::string(ICON_FK_SEARCH);
+      if (ImGui::Button(social_link.c_str()))
+      {
+         // Unique link for Luma's HDR Den (tracks the origin of people joining); do not share for other purposes.
+         static const std::string discord_link = std::string("https://discord.gg/J9fM") + std::string("3EVuEZ");
+         ShellExecuteA(nullptr, "open", discord_link.c_str(), nullptr, nullptr, SW_SHOWNORMAL);
+      }
+
+      ImGui::NewLine();
+      ImGui::Text("Build Date: %s %s", __DATE__, __TIME__);
+
+      ImGui::NewLine();
+      ImGui::Text("Credits:"
+                  "\n\nMain:"
+                  "\nOstad Gaming"
+                  "\n\nThird Party:"
+                  "\nReShade"
+                  "\nImGui"
+                  "\nRenoDX (HITMAN WoA hue-preserving grading method)"
+                  "\nDICE.hlsl (HDR display mapping)"
+                  "\nSMAA (Iryoku)"
+                  "\nIntel FidelityFX XeGTAO (ambient occlusion)"
+                  "\nAMD FidelityFX (RCAS)"
+                  "\nFroyok (Pretty Post Process lens flare method)");
    }
 };
 
@@ -2235,7 +2303,8 @@ BOOL APIENTRY DllMain(HMODULE hModule, DWORD ul_reason_for_call, LPVOID lpReserv
       const char* cleared_project_name = (project_name[0] == '_') ? (project_name + 1) : project_name; // Remove the potential "_" at the beginning. This can include spaces!
 
       uint32_t mod_version = 1; // Increase this to reset the game settings and shader binaries after making large changes to your mod
-      Globals::SetGlobals(cleared_project_name, "Hitman Absolution Luma mod", "" /*E.g. Nexus link*/, mod_version);
+      Globals::SetGlobals(cleared_project_name, "Hitman Absolution Luma mod", "https://ko-fi.com/ostadgaming", mod_version);
+      Globals::DEVELOPMENT_STATE = Globals::ModDevelopmentState::Playable;
 
       // The following can be toggled in the dev settings (it generally only fully applies after changing the game's resolution).
       // Default these to "false" for the mod to not do "anything" that might cause issues with the game by default.
