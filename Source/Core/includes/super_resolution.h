@@ -215,6 +215,8 @@ namespace SR
 		virtual bool Init(InstanceData*& data, ID3D11Device* device, IDXGIAdapter* adapter = nullptr) { return false; }
 		// Should be called before shutdown or on device destruction.
 		virtual void Deinit(InstanceData*& data, ID3D11Device* optional_device = nullptr) {}
+		// Called when it stops being the selected one. It stays initialized, but can release what it costs while unused.
+		virtual void ReleaseResources(InstanceData* data) {}
 
 		// Note that this might expect the same command list all the times.
 		// Returns true if the settings changed or were up to date.
@@ -256,6 +258,9 @@ namespace SR
 		// Returns the suggested or requested period, depending on the implementation.
 		// All implementations work well with Halton for now, so always use that.
 		virtual int GetJitterPhases(const SR::InstanceData* data) const { return 1 /*jitters disabled*/; }
+
+		// False while "Draw()" succeeds without upscaling yet (the SR bridge's helper is still starting)
+		virtual bool IsReady(const InstanceData* data) const { return true; }
 
 		// Returns the suggested mip lod bias for the current resolution scale.
 		// This assumes the jitter phases are increased with lower resolution scales.

@@ -1,0 +1,123 @@
+<?xml version="1.0" encoding="utf-8"?>
+<Project DefaultTargets="Build" ToolsVersion="17.0" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
+  <!-- x64 only: the 32-bit games' SR bridge (Source/Core/sr_bridge) starts it. The solution builds it in its Win32 configurations, next to
+       those addons. Luma.Features.props, imported through Luma.DXP.props, adds the upscalers' defines, libs and runtime dlls. -->
+  <ItemGroup Label="ProjectConfigurations">
+    <ProjectConfiguration Include="Development-Debug|x64">
+      <Configuration>Development-Debug</Configuration>
+      <Platform>x64</Platform>
+    </ProjectConfiguration>
+    <ProjectConfiguration Include="Development-Release|x64">
+      <Configuration>Development-Release</Configuration>
+      <Platform>x64</Platform>
+    </ProjectConfiguration>
+    <ProjectConfiguration Include="Publishing-Release|x64">
+      <Configuration>Publishing-Release</Configuration>
+      <Platform>x64</Platform>
+    </ProjectConfiguration>
+    <ProjectConfiguration Include="Test-Release|x64">
+      <Configuration>Test-Release</Configuration>
+      <Platform>x64</Platform>
+    </ProjectConfiguration>
+  </ItemGroup>
+  <PropertyGroup Label="Globals">
+    <ProjectGuid>{1A1AC095-1247-455C-8FF4-D8D6051AA52A}</ProjectGuid>
+    <Keyword>Win32Proj</Keyword>
+    <WindowsTargetPlatformVersion>10.0</WindowsTargetPlatformVersion>
+    <ProjectName>SR Bridge Helper</ProjectName>
+    <VCProjectUpgraderObjectName>NoUpgrade</VCProjectUpgraderObjectName>
+  </PropertyGroup>
+  <Import Project="$(VCTargetsPath)\Microsoft.Cpp.Default.props" />
+  <PropertyGroup Label="Configuration">
+    <ConfigurationType>Application</ConfigurationType>
+    <CharacterSet>Unicode</CharacterSet>
+    <PlatformToolset>v145</PlatformToolset>
+    <UseDebugLibraries Condition="'$(Configuration)'=='Development-Debug'">true</UseDebugLibraries>
+    <UseDebugLibraries Condition="'$(Configuration)'!='Development-Debug'">false</UseDebugLibraries>
+  </PropertyGroup>
+  <Import Project="$(VCTargetsPath)\Microsoft.Cpp.props" />
+  <ImportGroup Label="PropertySheets">
+    <Import Project="$(UserRootDir)\Microsoft.Cpp.$(Platform).user.props" Condition="exists('$(UserRootDir)\Microsoft.Cpp.$(Platform).user.props')" Label="LocalAppDataPlatform" />
+  </ImportGroup>
+  <PropertyGroup>
+    <UseLumaNGX>true</UseLumaNGX>
+    <UseLumaFSR>true</UseLumaFSR>
+    <UseLumaFSR4>true</UseLumaFSR4>
+    <UseLumaXeSS>true</UseLumaXeSS>
+    <UseLumaNVAPI>false</UseLumaNVAPI>
+    <TargetName>Luma-Upscaler</TargetName>
+    <OutDir>$(SolutionDir)\Binaries\Win32-$(Configuration)\</OutDir>
+    <IntDir>$(SolutionDir)\Binaries\Intermediate\SRBridgeHelper-$(Platform)-$(Configuration)\</IntDir>
+    <LinkIncremental>false</LinkIncremental>
+  </PropertyGroup>
+  <ItemDefinitionGroup>
+    <ClCompile>
+      <WarningLevel>Level3</WarningLevel>
+      <SDLCheck>true</SDLCheck>
+      <LanguageStandard>stdcpplatest</LanguageStandard>
+      <MultiProcessorCompilation>true</MultiProcessorCompilation>
+      <!-- RESHADE_API_LIBRARY_EXPORT + BUILTIN_ADDON (its header-only "reshade::log"): Core's ReShade log goes to main.cpp's "ReShadeLogMessage" (there is no ReShade module to find).
+           PREFER_OVERLAY_MESSAGE_ASSERTS: Core's asserts don't open a message box, which would stall the game on its fence (no window shows it) -->
+      <PreprocessorDefinitions>WIN32_LEAN_AND_MEAN;_WINDOWS;_CRT_SECURE_NO_WARNINGS;RESHADE_API_LIBRARY_EXPORT;BUILTIN_ADDON;PREFER_OVERLAY_MESSAGE_ASSERTS=1;%(PreprocessorDefinitions)</PreprocessorDefinitions>
+      <AdditionalIncludeDirectories>..\..\External\reshade;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+      <UseStandardPreprocessor>true</UseStandardPreprocessor>
+      <AdditionalOptions>%(AdditionalOptions) /utf-8</AdditionalOptions>
+      <RuntimeLibrary Condition="'$(Configuration)'=='Development-Debug'">MultiThreadedDebugDLL</RuntimeLibrary>
+      <RuntimeLibrary Condition="'$(Configuration)'!='Development-Debug'">MultiThreadedDLL</RuntimeLibrary>
+      <Optimization Condition="'$(Configuration)'=='Development-Debug'">Disabled</Optimization>
+      <Optimization Condition="'$(Configuration)'!='Development-Debug'">MaxSpeed</Optimization>
+      <ControlFlowGuard>Guard</ControlFlowGuard>
+      <DebugInformationFormat>ProgramDatabase</DebugInformationFormat>
+    </ClCompile>
+    <Link>
+      <SubSystem>Console</SubSystem>
+      <GenerateDebugInformation>true</GenerateDebugInformation>
+      <AdditionalDependencies>d3d11.lib;dxgi.lib;%(AdditionalDependencies)</AdditionalDependencies>
+      <!-- The standard mitigations, and only the PDB's name in the exe (not the build machine's path) -->
+      <RandomizedBaseAddress>true</RandomizedBaseAddress>
+      <DataExecutionPrevention>true</DataExecutionPrevention>
+      <CETCompat>true</CETCompat>
+      <AdditionalOptions>/HIGHENTROPYVA /PDBALTPATH:%_PDB% %(AdditionalOptions)</AdditionalOptions>
+    </Link>
+    <Manifest>
+      <AdditionalManifestFiles>Luma-Upscaler.manifest;%(AdditionalManifestFiles)</AdditionalManifestFiles>
+    </Manifest>
+  </ItemDefinitionGroup>
+  <!-- The same configuration defines as the game addons, for Core's debug.h -->
+  <ItemDefinitionGroup Condition="'$(Configuration)'=='Development-Debug'">
+    <ClCompile>
+      <PreprocessorDefinitions>DEVELOPMENT=1;%(PreprocessorDefinitions)</PreprocessorDefinitions>
+    </ClCompile>
+  </ItemDefinitionGroup>
+  <ItemDefinitionGroup Condition="'$(Configuration)'=='Development-Release'">
+    <ClCompile>
+      <PreprocessorDefinitions>NDEBUG;DEVELOPMENT=1;%(PreprocessorDefinitions)</PreprocessorDefinitions>
+    </ClCompile>
+  </ItemDefinitionGroup>
+  <ItemDefinitionGroup Condition="'$(Configuration)'=='Test-Release'">
+    <ClCompile>
+      <PreprocessorDefinitions>NDEBUG;TEST=1;%(PreprocessorDefinitions)</PreprocessorDefinitions>
+    </ClCompile>
+  </ItemDefinitionGroup>
+  <ItemDefinitionGroup Condition="'$(Configuration)'=='Publishing-Release'">
+    <ClCompile>
+      <PreprocessorDefinitions>NDEBUG;%(PreprocessorDefinitions)</PreprocessorDefinitions>
+    </ClCompile>
+  </ItemDefinitionGroup>
+  <ItemGroup>
+    <ClCompile Include="main.cpp" />
+    <ClCompile Include="..\..\Core\unity_build.cpp" />
+  </ItemGroup>
+  <ItemGroup>
+    <ClInclude Include="..\..\Core\sr_bridge\SRBridgeProtocol.h" />
+    <ClInclude Include="..\..\Core\sr_bridge\DepthCopyCS.h" />
+  </ItemGroup>
+  <ItemGroup>
+    <ResourceCompile Include="SR Bridge Helper.rc" />
+  </ItemGroup>
+  <ItemGroup>
+    <Image Include="Luma-Upscaler.ico" />
+  </ItemGroup>
+  <Import Project="..\..\Games\Luma.DXP.props" Condition="Exists('..\..\Games\Luma.DXP.props')" />
+  <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
+</Project>

@@ -15,3 +15,4 @@
 #include "fsr/FSR.cpp"
 #include "fsr/FSR4.cpp"
 #include "xess/XeSS.cpp"
+#include "sr_bridge/SRBridge.cpp"

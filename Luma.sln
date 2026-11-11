@@ -80,6 +80,9 @@ EndProject
 Project("{8BC9CEB8-8B4A-11D0-8D11-00A0C91BC942}") = "Vanquish", "Source\Games\Vanquish\Vanquish.vcxproj", "{51BFC834-EC5F-4F25-90DC-A2001E88B491}"
 EndProject
 Project("{8BC9CEB8-8B4A-11D0-8D11-00A0C91BC942}") = "Borderlands 2 and The Pre-Sequel", "Source\Games\Borderlands 2 and The Pre-Sequel\Borderlands 2 and The Pre-Sequel.vcxproj", "{56B56CAD-A792-42A8-B7CD-7CFE9FF7D402}"
+	ProjectSection(ProjectDependencies) = postProject
+		{1A1AC095-1247-455C-8FF4-D8D6051AA52A} = {1A1AC095-1247-455C-8FF4-D8D6051AA52A}
+	EndProjectSection
 EndProject
 Project("{8BC9CEB8-8B4A-11D0-8D11-00A0C91BC942}") = "Project Diva Mega Mix", "Source\Games\Project Diva Mega Mix\Project Diva Mega Mix.vcxproj", "{E9C6A0CB-74CC-4202-855B-FA91EBA2104B}"
 EndProject
@@ -146,6 +149,8 @@ EndProject
 Project("{8BC9CEB8-8B4A-11D0-8D11-00A0C91BC942}") = "NieR Replicant", "Source\Games\NieR Replicant\NieR Replicant.vcxproj", "{D7DCEC3D-3209-4370-8CED-8CF6A4D34D78}"
 EndProject
 Project("{8BC9CEB8-8B4A-11D0-8D11-00A0C91BC942}") = "Sunset Overdrive", "Source\Games\Sunset Overdrive\Sunset Overdrive.vcxproj", "{3A6C5692-A5DE-46AE-8E7A-1838642DDC30}"
+EndProject
+Project("{8BC9CEB8-8B4A-11D0-8D11-00A0C91BC942}") = "SR Bridge Helper", "Source\Tools\SR Bridge Helper\SR Bridge Helper.vcxproj", "{1A1AC095-1247-455C-8FF4-D8D6051AA52A}"
 EndProject
 Global
 	GlobalSection(SolutionConfigurationPlatforms) = preSolution
@@ -1031,6 +1036,18 @@ Global
 		{3A6C5692-A5DE-46AE-8E7A-1838642DDC30}.Test-Release|Win32.ActiveCfg = Test-Release|x64
 		{3A6C5692-A5DE-46AE-8E7A-1838642DDC30}.Test-Release|x64.ActiveCfg = Test-Release|x64
 		{3A6C5692-A5DE-46AE-8E7A-1838642DDC30}.Test-Release|x64.Build.0 = Test-Release|x64
+		{1A1AC095-1247-455C-8FF4-D8D6051AA52A}.Development-Debug|Win32.ActiveCfg = Development-Debug|x64
+		{1A1AC095-1247-455C-8FF4-D8D6051AA52A}.Development-Debug|Win32.Build.0 = Development-Debug|x64
+		{1A1AC095-1247-455C-8FF4-D8D6051AA52A}.Development-Debug|x64.ActiveCfg = Development-Debug|x64
+		{1A1AC095-1247-455C-8FF4-D8D6051AA52A}.Development-Release|Win32.ActiveCfg = Development-Release|x64
+		{1A1AC095-1247-455C-8FF4-D8D6051AA52A}.Development-Release|Win32.Build.0 = Development-Release|x64
+		{1A1AC095-1247-455C-8FF4-D8D6051AA52A}.Development-Release|x64.ActiveCfg = Development-Release|x64
+		{1A1AC095-1247-455C-8FF4-D8D6051AA52A}.Publishing-Release|Win32.ActiveCfg = Publishing-Release|x64
+		{1A1AC095-1247-455C-8FF4-D8D6051AA52A}.Publishing-Release|Win32.Build.0 = Publishing-Release|x64
+		{1A1AC095-1247-455C-8FF4-D8D6051AA52A}.Publishing-Release|x64.ActiveCfg = Publishing-Release|x64
+		{1A1AC095-1247-455C-8FF4-D8D6051AA52A}.Test-Release|Win32.ActiveCfg = Test-Release|x64
+		{1A1AC095-1247-455C-8FF4-D8D6051AA52A}.Test-Release|Win32.Build.0 = Test-Release|x64
+		{1A1AC095-1247-455C-8FF4-D8D6051AA52A}.Test-Release|x64.ActiveCfg = Test-Release|x64
 	EndGlobalSection
 	GlobalSection(SolutionProperties) = preSolution
 		HideSolutionNode = FALSE

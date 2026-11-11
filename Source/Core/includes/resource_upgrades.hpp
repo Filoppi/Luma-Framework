@@ -130,7 +130,8 @@ public:
    {
       _1D,
       _2D,
-      _3D
+      _3D,
+      _2DAnd3D
    };
 
    struct AutoTextureFormatUpgradeShaderHash
@@ -389,9 +390,8 @@ public:
       return original_view_desc.format; // Unchanged
    }
 
-   // Decides whether a resource should be upgraded at creation time. Uses the frame state for
-   // resolution/aspect-ratio filters.
-   std::optional<reshade::api::resource_desc> GetOptionalResourceUpgradeDesc(const reshade::api::resource_desc& desc, const ResourceUpgradeFrameState& state, bool has_initial_data = false) const;
+   // Decides whether a resource should be upgraded at creation time or later. Uses the frame state for resolution/aspect-ratio filters.
+   std::optional<reshade::api::resource_desc> GetOptionalResourceUpgradeDesc(const reshade::api::resource_desc& desc, const ResourceUpgradeFrameState& state, bool has_initial_data = false, bool force_format_upgrade = false) const;
 
    // ------------------------------------------------------------------
    // Mirror creation / lookup (migrated from core.hpp)
@@ -415,7 +415,8 @@ public:
       bool should_scale = false,
       bool leave_locked = true,
       reshade::api::resource_usage additional_bind_flags = reshade::api::resource_usage(0),
-      bool* scaled = nullptr);
+      bool* scaled = nullptr,
+      bool force_format_upgrade = false);
 
    bool FindOrCreateIndirectUpgradedResourceView(
       reshade::api::device* device,

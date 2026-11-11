@@ -1046,6 +1046,14 @@ namespace Mcp
          {
             return inner->GetJitterPhases(data);
          }
+         void ReleaseResources(SR::InstanceData* data) override
+         {
+            inner->ReleaseResources(data);
+         }
+         bool IsReady(const SR::InstanceData* data) const override
+         {
+            return inner->IsReady(data);
+         }
          bool NeedsStateRestoration() const override
          {
             return inner->NeedsStateRestoration();

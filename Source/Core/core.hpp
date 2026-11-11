@@ -101,11 +101,15 @@
 #ifndef ENABLE_FIDELITY_SK
 #define ENABLE_FIDELITY_SK 0
 #endif // ENABLE_FIDELITY_SK
+// 32-bit only: DLSS, FSR and XeSS through an x64 helper process (see "SRBridge.h")
+#ifndef ENABLE_SR_BRIDGE
+#define ENABLE_SR_BRIDGE 0
+#endif // ENABLE_SR_BRIDGE
 // Automatically define "ENABLE_SR" if any SR tech is enabled
 #ifdef ENABLE_SR
 #undef ENABLE_SR
 #endif // ENABLE_SR
-#if (defined(ENABLE_NGX) && ENABLE_NGX) || (defined(ENABLE_FIDELITY_SK) && ENABLE_FIDELITY_SK) || (defined(_WIN64) && defined(ENABLE_XESS) && ENABLE_XESS && defined(ENABLE_D3D12_INTEROP) && ENABLE_D3D12_INTEROP && __has_include("xess/xess_d3d12.h")) // Same as "XeSS.h"
+#if (defined(ENABLE_NGX) && ENABLE_NGX) || (defined(ENABLE_FIDELITY_SK) && ENABLE_FIDELITY_SK) || (defined(_WIN64) && defined(ENABLE_XESS) && ENABLE_XESS && defined(ENABLE_D3D12_INTEROP) && ENABLE_D3D12_INTEROP && __has_include("xess/xess_d3d12.h")) /*Same as "XeSS.h"*/ || (ENABLE_SR_BRIDGE && !defined(_WIN64))
 #define ENABLE_SR 1
 #else
 #define ENABLE_SR 0
@@ -185,6 +189,7 @@
 #include "fsr/FSR.h" // see "ENABLE_FIDELITY_SK"
 #include "fsr/FSR4.h" // see "ENABLE_FSR4"
 #include "xess/XeSS.h" // see "ENABLE_XESS"
+#include "sr_bridge/SRBridge.h" // see "ENABLE_SR_BRIDGE"
 
 #include "includes/containers.h"
 #include "includes/globals.h"
@@ -4607,7 +4612,7 @@ namespace
    }
 
    // "in_source_resource" is optional and allows overriding the desc to base the new resource on.
-   bool FindOrCreateIndirectUpgradedResource(reshade::api::device* device, const uint64_t in_source_resource, const uint64_t in_resource, uint64_t& out_resource, DeviceData& device_data, bool allow_create, reshade::api::resource_usage initial_state, std::shared_lock<std::shared_mutex>& lock_device_read, bool allow_scale = false, bool force_scale = false, bool leave_locked = true, reshade::api::resource_usage additional_bind_flags = reshade::api::resource_usage(0), bool* scaled = nullptr)
+   bool FindOrCreateIndirectUpgradedResource(reshade::api::device* device, const uint64_t in_source_resource, const uint64_t in_resource, uint64_t& out_resource, DeviceData& device_data, bool allow_create, reshade::api::resource_usage initial_state, std::shared_lock<std::shared_mutex>& lock_device_read, bool allow_scale = false, bool force_scale = false, bool leave_locked = true, reshade::api::resource_usage additional_bind_flags = reshade::api::resource_usage(0), bool* scaled = nullptr, bool force_format_upgrade = false)
    {
       // Swapchain backbuffers are excluded by the caller (checked here before invoking the manager, since
       // the manager is decoupled from DeviceData's backbuffer bookkeeping).
@@ -4643,7 +4648,7 @@ namespace
       return device_data.resource_upgrades.FindOrCreateIndirectUpgradedResource(
          device, in_source_resource, in_resource, out_resource,
          allow_create && !is_back_buffer, initial_state, lock_device_read, state,
-         should_scale, leave_locked, additional_bind_flags, scaled);
+         should_scale, leave_locked, additional_bind_flags, scaled, force_format_upgrade);
    }
 
    bool FindOrCreateIndirectUpgradedResourceView(reshade::api::device* device, const uint64_t in_rv, uint64_t& out_rv, DeviceData& device_data, bool allow_create, reshade::api::resource_usage usage, std::shared_lock<std::shared_mutex>& lock_device_read)
@@ -5871,7 +5876,7 @@ namespace
                if (!device_data.ui_initial_original_rtv)
                {
                   const std::shared_lock lock(device_data.mutex);
-                  targeting_swapchain = device_data.back_buffers.contains((uint64_t)rtv.get());
+                  targeting_swapchain = device_data.back_buffers.contains((uintptr_t)rtv.get());
                }
                if ((ui_separation_use_ui_hashes_only && cmd_list_data.is_known_ui_shader_bound) || targeting_swapchain || (AreViewsOfSameResource(rtv.get(), device_data.ui_initial_original_rtv.get()) && rtv_desc.Texture2D.MipSlice == 0)) // Make sure it was writing to the base mip (just in case the game did weird stuff)
                {
@@ -5961,9 +5966,13 @@ namespace
          {
             // Do textures indirect upgrade "inline".
             // If this was previously upgraded, they'd already have the target format and hence wouldn't get upgraded.
-            // "force_indirect_texture_format_upgrades" takes priority over "auto_texture_format_upgrade_shader_hashes".
             const AutoTextureFormatUpgradeShaderHash* auto_texture_format_upgrades = is_dispatch ? cmd_list_data.auto_compute_texture_format_upgrades : cmd_list_data.auto_graphics_texture_format_upgrades;
             const bool hash_based_indirect_texture_format_upgrades = auto_texture_format_upgrades != nullptr;
+            // "auto_texture_format_upgrade_shader_hashes" takes priority over "force_indirect_texture_format_upgrades",
+            // because "auto_texture_format_upgrade_shader_hashes" is more specific, and forces a specific set of outputs to be upgraded,
+            // if we needed more, we could always add them to that list.
+            // While "force_indirect_texture_format_upgrades" is more of a generic/bruteforce method that might have mismatches.
+            force_indirect_texture_format_upgrades = force_indirect_texture_format_upgrades && !hash_based_indirect_texture_format_upgrades;
 
             bool inline_texture_upgrades = force_indirect_texture_format_upgrades || hash_based_indirect_texture_format_upgrades;
 
@@ -5990,7 +5999,7 @@ namespace
                const AutoTextureFormatUpgradeShaderHash dummy_empty_texture_format_upgrade_shader_hashes_data = { {}, {}, false };
 
                uint64_t source_resource = 0;
-               if (force_indirect_texture_format_upgrades && !hash_based_indirect_texture_format_upgrades && (is_dispatch ? cmd_list_data.any_upgraded_cs_srvs : cmd_list_data.any_upgraded_ps_srvs))
+               if (force_indirect_texture_format_upgrades && (is_dispatch ? cmd_list_data.any_upgraded_cs_srvs : cmd_list_data.any_upgraded_ps_srvs))
                {
                   const auto& upgraded_srvs = is_dispatch ? cmd_list_data.cs_srvs_state : cmd_list_data.ps_srvs_state;
                   // Use the first upgraded SRV, whether it's valid or not (it should be!).
@@ -6018,7 +6027,7 @@ namespace
                {
                   native_device_context->OMGetRenderTargetsAndUnorderedAccessViews(D3D11_SIMULTANEOUS_RENDER_TARGET_COUNT, &rtvs[0], &dsv, 0, device_data.uav_max_count, &uavs[0]);
                   
-                  if (force_indirect_texture_format_upgrades && !hash_based_indirect_texture_format_upgrades && source_resource == 0 && cmd_list_data.any_upgraded_ps_uavs)
+                  if (force_indirect_texture_format_upgrades && source_resource == 0 && cmd_list_data.any_upgraded_ps_uavs)
                   {
                      for (size_t i = 0; i < cmd_list_data.ps_uavs_state.size(); ++i)
                      {
@@ -6034,7 +6043,7 @@ namespace
                {
                   native_device_context->CSGetUnorderedAccessViews(0, device_data.uav_max_count, &uavs[0]);
                   
-                  if (force_indirect_texture_format_upgrades && !hash_based_indirect_texture_format_upgrades && source_resource == 0 && cmd_list_data.any_upgraded_cs_uavs)
+                  if (force_indirect_texture_format_upgrades && source_resource == 0 && cmd_list_data.any_upgraded_cs_uavs)
                   {
                      for (size_t i = 0; i < cmd_list_data.cs_uavs_state.size(); ++i)
                      {
@@ -6063,6 +6072,8 @@ namespace
                // TODO: why not do it with "force_indirect_texture_format_upgrades" too? Is it too generic?
                const bool allow_scale = hash_based_indirect_texture_format_upgrades && auto_texture_format_upgrades->scale; // "auto_texture_format_upgrades" is null on the forced (chain) path
                const bool force_scale = cmd_list_data.force_scale;
+               // The forced upgrades are generic, as such we wouldn't want to skip the format check!
+               const bool force_format_upgrade = !force_indirect_texture_format_upgrades && hash_based_indirect_texture_format_upgrades;
 
                bool any_changed = false;
                bool any_changed_inline = false;
@@ -6074,7 +6085,7 @@ namespace
                      const uint8_t slot = auto_texture_format_upgrade_shader_hashes_data.rtv_slots[i];
                      if (rtvs[slot] != nullptr)
                      {
-                        const uint64_t prev_resource_view = reinterpret_cast<uint64_t>(rtvs[slot].get());
+                        const uint64_t prev_resource_view = reinterpret_cast<uintptr_t>(rtvs[slot].get());
                         // Already redirected to a mirror? Nothing to upgrade, keep the bound mirror.
 #if 1 // Faster // TODO: delete the branch here and in the UAV code below once verified
                         if (cmd_list_data.ps_rtvs_state[slot] >= CommandListData::ViewState::SetAndUpgraded)
@@ -6097,7 +6108,7 @@ namespace
                         const uint64_t seed_res_before = prev_resource;
 #endif
                         // TODO: what's the "resource != prev_resource" check for? It seems useless?
-                        if (FindOrCreateIndirectUpgradedResource(device, source_resource, prev_resource, resource, device_data, true, reshade::api::resource_usage::render_target, lock_device_read, allow_scale, force_scale) && resource != prev_resource)
+                        if (FindOrCreateIndirectUpgradedResource(device, source_resource, prev_resource, resource, device_data, true, reshade::api::resource_usage::render_target, lock_device_read, allow_scale, force_scale, true, {}, nullptr, force_format_upgrade) && resource != prev_resource)
                         {
                            uint64_t resource_view = prev_resource_view;
                            if (FindOrCreateIndirectUpgradedResourceView(device, prev_resource_view, resource_view, device_data, true, reshade::api::resource_usage::render_target, lock_device_read))
@@ -6154,7 +6165,7 @@ namespace
                   const uint8_t slot = auto_texture_format_upgrade_shader_hashes_data.uav_slots[i];
                   if (uavs[slot] != nullptr)
                   {
-                     const uint64_t prev_resource_view = reinterpret_cast<uint64_t>(uavs[slot].get());
+                     const uint64_t prev_resource_view = reinterpret_cast<uintptr_t>(uavs[slot].get());
                      // Already redirected to a mirror? Nothing to upgrade, keep the bound mirror.
 #if 1 // Faster
                      if ((is_dispatch ? cmd_list_data.cs_uavs_state[slot] : cmd_list_data.ps_uavs_state[slot]) >= CommandListData::ViewState::SetAndUpgraded)
@@ -6171,7 +6182,7 @@ namespace
 #endif
                      uint64_t prev_resource = GetCachedResourceFromView(device_data, prev_resource_view, true, false, true, &lock_device_read, device);
                      uint64_t resource = prev_resource;
-                     if (FindOrCreateIndirectUpgradedResource(device, source_resource, prev_resource, resource, device_data, true, reshade::api::resource_usage::unordered_access, lock_device_read, allow_scale, force_scale) && resource != prev_resource)
+                     if (FindOrCreateIndirectUpgradedResource(device, source_resource, prev_resource, resource, device_data, true, reshade::api::resource_usage::unordered_access, lock_device_read, allow_scale, force_scale, true, {}, nullptr, force_format_upgrade) && resource != prev_resource)
                      {
                         uint64_t resource_view = prev_resource_view;
                         if (FindOrCreateIndirectUpgradedResourceView(device, prev_resource_view, resource_view, device_data, true, reshade::api::resource_usage::unordered_access, lock_device_read))
@@ -6264,7 +6275,7 @@ namespace
                         {
                            if (rtvs[i] != nullptr)
                            {
-                              const uint64_t rtv_resource = GetCachedResourceFromView(device_data, reinterpret_cast<uint64_t>(rtvs[i].get()), false, true);
+                              const uint64_t rtv_resource = GetCachedResourceFromView(device_data, reinterpret_cast<uintptr_t>(rtvs[i].get()), false, true);
                               // TODO: make a "upgraded view to IndirectUpgradedResource*" map to speed this up
                               // We need to do two lookups to pass from an upgraded view to the original resource (back to the upgraded resource struct)
                               if (auto mirror_it = std::ranges::find_if(device_data.resource_upgrades.original_resources_to_mirrored_upgraded_resources, [rtv_resource](const auto& pair) { return pair.second.mirror_handle == rtv_resource; }); mirror_it != device_data.resource_upgrades.original_resources_to_mirrored_upgraded_resources.end())
@@ -6285,7 +6296,7 @@ namespace
                         }
                         if (dsv.get())
                         {
-                           const uint64_t dsv_resource = GetCachedResourceFromView(device_data, reinterpret_cast<uint64_t>(dsv.get()), false, true);
+                           const uint64_t dsv_resource = GetCachedResourceFromView(device_data, reinterpret_cast<uintptr_t>(dsv.get()), false, true);
                            if (auto mirror_it = std::ranges::find_if(device_data.resource_upgrades.original_resources_to_mirrored_upgraded_resources, [dsv_resource](const auto& pair) { return pair.second.mirror_handle == dsv_resource; }); mirror_it != device_data.resource_upgrades.original_resources_to_mirrored_upgraded_resources.end())
                            {
                               any_scaled |= mirror_it->second.is_scaled;
@@ -6499,7 +6510,7 @@ namespace
             bool targeting_swapchain;
             {
                const std::shared_lock lock(device_data.mutex);
-               targeting_swapchain = device_data.back_buffers.contains((uint64_t)render_target_resource.get());
+               targeting_swapchain = device_data.back_buffers.contains((uintptr_t)render_target_resource.get());
             }
             // We check across all the swap chain back buffers, not just the one that will be presented this frame (we have no 100% of what swapchain will draw this frame).
             // Note that some games (e.g. Prey) compose the UI in separate render targets to then be drawn into the world (e.g. in game interactive computer screens), but these usually don't draw on any of the swapchain buffers.
@@ -7624,6 +7635,7 @@ namespace
       }
       default:
       case LUTDimensions::_2D:
+      case LUTDimensions::_2DAnd3D:
       {
          lut_dimensions = reshade::api::resource_view_type::texture_2d;
          break;
@@ -7633,6 +7645,11 @@ namespace
          lut_dimensions = reshade::api::resource_view_type::texture_3d;
          break;
       }
+      }
+      reshade::api::resource_view_type lut_dimensions_alternative = lut_dimensions;
+      if (texture_format_upgrades_lut_dimensions == LUTDimensions::_2DAnd3D)
+      {
+         lut_dimensions_alternative = reshade::api::resource_view_type::texture_3d;
       }
 
 #if 0 // TODO: delete this and "redirect_empty_resource_views_to_swapchain" or test in more games (e.g. Mafia II, Titanfall 2)
@@ -7656,7 +7673,7 @@ namespace
 #endif
 
       // In DX11 apps can not pass a "DESC" when creating resource views, and DX11 will automatically generate the default one from it, we handle it through "reshade::api::resource_view_type::unknown".
-      if (resource.handle != 0 && (desc.type == reshade::api::resource_view_type::unknown || desc.type == lut_dimensions || desc.type == reshade::api::resource_view_type::texture_2d || desc.type == reshade::api::resource_view_type::texture_2d_array || desc.type == reshade::api::resource_view_type::texture_2d_multisample || desc.type == reshade::api::resource_view_type::texture_2d_multisample_array || desc.type == reshade::api::resource_view_type::texture_cube || desc.type == reshade::api::resource_view_type::texture_cube_array))
+      if (resource.handle != 0 && (desc.type == reshade::api::resource_view_type::unknown || desc.type == lut_dimensions || desc.type == lut_dimensions_alternative || desc.type == reshade::api::resource_view_type::texture_2d || desc.type == reshade::api::resource_view_type::texture_2d_array || desc.type == reshade::api::resource_view_type::texture_2d_multisample || desc.type == reshade::api::resource_view_type::texture_2d_multisample_array || desc.type == reshade::api::resource_view_type::texture_cube || desc.type == reshade::api::resource_view_type::texture_cube_array))
       {
          const reshade::api::resource_desc resource_desc = device->get_resource_desc(resource);
 
@@ -10167,7 +10184,7 @@ namespace
                      // Redirect the hash
                      for (const auto& original_resource_to_mirrored_upgraded_resource : device_data.resource_upgrades.original_resources_to_mirrored_upgraded_resources)
                      {
-                        if (original_resource_to_mirrored_upgraded_resource.second.mirror_handle == uint64_t(selected_resource.get()))
+                        if (original_resource_to_mirrored_upgraded_resource.second.mirror_handle == uintptr_t(selected_resource.get()))
                         {
                            hash = std::to_string(std::hash<void*>{}((void*)original_resource_to_mirrored_upgraded_resource.first));
                            break;
@@ -10244,12 +10261,12 @@ namespace
                   {
                      std::shared_lock lock(device_data.mutex); // Note: this is probably not 100% safe, as we don't keep the resources as a com ptr, DX might destroy them as we iterate the array, but this is debug code so, whatever!
                   
-                     swapchain = device_data.back_buffers.contains(uint64_t(selected_resource.get()));
+                     swapchain = device_data.back_buffers.contains(uintptr_t(selected_resource.get()));
 
                      // Redirect the hash to the indirect texture
                      for (const auto& original_resource_to_mirrored_upgraded_resource : device_data.resource_upgrades.original_resources_to_mirrored_upgraded_resources)
                      {
-                        if (original_resource_to_mirrored_upgraded_resource.second.mirror_handle == uint64_t(selected_resource.get()))
+                        if (original_resource_to_mirrored_upgraded_resource.second.mirror_handle == uintptr_t(selected_resource.get()))
                         {
                            lock.unlock();
 
@@ -10407,6 +10424,12 @@ namespace
             {
                xess_name = (Intel::XeSS::IsNativeDX11(xess_instance->second) ? "XeSS (Native DX11)" : "XeSS (DX12 Interop)");
             }
+#elif ENABLE_SR_BRIDGE
+            // The helper only tries the native DX11 XeSS on Intel GPUs (and doesn't report whether that worked), the ones it's auto selectable on
+            if (const auto xess_instance = device_data.sr_implementations_instances.find(SR::Type::XeSS); xess_instance != device_data.sr_implementations_instances.end() && xess_instance->second && !xess_instance->second->auto_selectable)
+            {
+               xess_name = "XeSS (DX12 Interop)";
+            }
 #endif
             const SR::Type sr_auto_type = SR::GetAutoType(device_data.sr_implementations_instances);
             const std::string auto_name = (sr_auto_type != SR::Type::None ? std::format("Auto ({})", SR::GetTypeName(sr_auto_type)) : "Auto");
@@ -10464,10 +10487,10 @@ namespace
                   AddComboItem(auto_name.c_str(), SR::UserType::Auto, sr_auto_type, sr_auto_type != SR::Type::None);
                AddComboItem("DLSS", SR::UserType::DLSS, SR::Type::DLSS, device_data.sr_implementations_instances.contains(SR::Type::DLSS));
                AddComboItem("FSR 3", SR::UserType::FSR_3, SR::Type::FSR, device_data.sr_implementations_instances.contains(SR::Type::FSR));
-#if ENABLE_FSR4
+#if ENABLE_FSR4 || ENABLE_SR_BRIDGE
                AddComboItem("FSR 4 (DX12 Interop)", SR::UserType::FSR_4, SR::Type::FSR_4, device_data.sr_implementations_instances.contains(SR::Type::FSR_4));
 #endif
-#if ENABLE_XESS
+#if ENABLE_XESS || ENABLE_SR_BRIDGE
                AddComboItem(xess_name, SR::UserType::XeSS, SR::Type::XeSS, device_data.sr_implementations_instances.contains(SR::Type::XeSS));
 #endif
                ImGui::EndCombo();
@@ -10582,6 +10605,7 @@ namespace
                auto* sr_instance_data = device_data.GetSRInstanceData();
                if (sr_instance_data)
                {
+                  sr_implementations[device_data.sr_type]->ReleaseResources(sr_instance_data);
 #if 0 // This would actually unload the previously selected SR DLL and all, making the game hitch, so it's better to just keep it in memory, especially because otherwise we need to check for compatibily again and load them again etc
                   sr_implementations[device_data.sr_type]->Deinit(sr_instance_data);
                   sr_instance_data = nullptr;
@@ -12054,6 +12078,12 @@ void Init(bool async)
 #endif
 #if ENABLE_XESS
    sr_implementations[SR::Type::XeSS] = std::make_unique<Intel::XeSS>();
+#endif
+#if ENABLE_SR_BRIDGE
+   for (const SR::Type type : {SR::Type::DLSS, SR::Type::FSR, SR::Type::FSR_4, SR::Type::XeSS})
+   {
+      sr_implementations[type] = std::make_unique<SRBridge::Bridge>(type);
+   }
 #endif
 #if DEVELOPMENT
    Mcp::Start();

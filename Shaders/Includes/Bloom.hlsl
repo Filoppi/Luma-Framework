@@ -23,7 +23,7 @@ Texture2D tex : register(t0);
 #define LUMA_BLOOM_THRESHOLD_FUNCTION(color) quadratic_threshold(color)
 #endif
 
-// Only used in the default threshold function. 
+// Only used in the default threshold function.
 #ifndef LUMA_BLOOM_THRESHOLD
 #define LUMA_BLOOM_THRESHOLD 1.0
 #endif
@@ -86,10 +86,14 @@ float4 bloom_prefilter_ps(float4 pos : SV_Position, float2 texcoord : TEXCOORD) 
     // Calculate kernel radius.
     const float radius = ceil(sigma * 3.0);
 
-    for (float i = 1.0 - radius; i <= radius; ++i) {
-        const float weight = get_gaussian_weight(i - f);
-        csum += tex.SampleLevel(smp, tc + i * inv_src_size * axis, 0.0).rgb * weight;
-        wsum += weight;
+    // Optimized, we are processing 2 samples per linear texture fetch.
+    for (float i = 1.0 - radius; i <= radius; i += 2.0) {
+        const float w1 = get_gaussian_weight(i - f);
+        const float w2 = get_gaussian_weight(i + 1.0 - f);
+        const float w12 = w1 + w2;
+        const float offset = (i * w1 + (i + 1.0) * w2) / w12;
+        csum += tex.SampleLevel(smp, tc + offset * inv_src_size * axis, 0.0).rgb * w12;
+        wsum += w12;
     }
 
     // Normalize.
@@ -118,10 +122,14 @@ float4 bloom_downsample_ps(float4 pos : SV_Position, float2 texcoord : TEXCOORD)
     // Calculate kernel radius.
     const float radius = ceil(sigma * 3.0);
 
-    for (float i = 1.0 - radius; i <= radius; ++i) {
-        const float weight = get_gaussian_weight(i - f);
-        csum += tex.SampleLevel(smp, tc + i * inv_src_size * axis, 0.0).rgb * weight;
-        wsum += weight;
+    // Optimized, we are processing 2 samples per linear texture fetch.
+    for (float i = 1.0 - radius; i <= radius; i += 2.0) {
+        const float w1 = get_gaussian_weight(i - f);
+        const float w2 = get_gaussian_weight(i + 1.0 - f);
+        const float w12 = w1 + w2;
+        const float offset = (i * w1 + (i + 1.0) * w2) / w12;
+        csum += tex.SampleLevel(smp, tc + offset * inv_src_size * axis, 0.0).rgb * w12;
+        wsum += w12;
     }
 
     // Normalize.
