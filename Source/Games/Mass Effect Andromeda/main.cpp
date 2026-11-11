@@ -2133,9 +2133,10 @@ class MassEffectAndromeda final : public Game
    }
 
    // A motion blur pass while upscaling (see "shader_hashes_motion_blur"), at the output size with its size constants patched.
-   // The output tiles are the engine's own at the output width, so the blur keeps the native length limit (2 tiles). Engine
-   // strides at a width w (measured live, 652 to 3840 wide): the first stage w / 448 + 1, the second its output width
-   // / 64 rounded, tile px = their product (1920: 5 x 6, 3840: 9 x 7); narrow targets run the product as one stage (1302: 21).
+   // The output tiles are the engine's own at the output height, so the blur keeps the native length limit (2 tiles). The
+   // engine picks its strides from the height alone, at any aspect (measured live at 16:9 and 21:9, see "tile_strides").
+   // Below 900 it runs one stage of h / 36 px (776: 21, 864: 24). From 900 it runs two, and the tile is their product
+   // (1080: 5 x 6, 2160: 9 x 7).
    // Constants (from the disassembly): tile passes c0.w motion scale, c1.y stride, c1.z the source texel's area in px, c2.xy
    // source size; neighbourhood c0.xy size, c1.x tile px, c1.z tile px squared, c2.xy tile counts; velocity c0.x tile px, c0.zw
    // size, c1.x shift; gather c0.y tile px, c2 = (size, tile counts), c1.w velocity shift. The gather's target is also
@@ -2151,13 +2152,16 @@ class MassEffectAndromeda final : public Game
       const auto ceil_div = [](uint32_t value, uint32_t divisor)
       { return (value + divisor - 1) / divisor; };
 
-      const auto tile_strides = [](uint32_t width)
+      // The first and second stage strides. A single stage is returned as (tile px, 1).
+      const auto tile_strides = [](uint32_t height)
       {
-         const uint32_t first = width / 448 + 1;
-         return uint2{first, ((width + first - 1) / first + 32) / 64};
+         if (const uint32_t tile = height / 36; tile <= 24)
+            return uint2{tile, 1u};
+         const uint32_t first = height / 252 + 1;
+         return uint2{first, ((height + first - 1) / first + 18) / 36};
       };
-      const uint2 engine_strides = tile_strides(render_size.x);
-      const uint2 output_strides = tile_strides(output_size.x);
+      const uint2 engine_strides = tile_strides(render_size.y);
+      const uint2 output_strides = tile_strides(output_size.y);
       const uint32_t output_tile = output_strides.x * output_strides.y;
 
       bool drawn = false;
@@ -2192,11 +2196,8 @@ class MassEffectAndromeda final : public Game
          uint32_t output_stride = 0;
          if (first_stage && stride == engine_strides.x)
          {
-            output_stride = output_strides.x;
-         }
-         else if (first_stage && stride == engine_strides.x * engine_strides.y)
-         {
-            output_stride = output_strides.x * output_strides.y; // One stage
+            // A single engine stage stays single at the output size, and covers the whole output tile
+            output_stride = (engine_strides.y == 1 ? output_tile : output_strides.x);
          }
          else if (!first_stage && stride == engine_strides.y)
          {
