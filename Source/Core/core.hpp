@@ -5878,8 +5878,10 @@ namespace
                bool targeting_swapchain = false;
                if (!device_data.ui_initial_original_rtv)
                {
+                  com_ptr<ID3D11Resource> render_target_resource;
+                  rtv->GetResource(&render_target_resource);
                   const std::shared_lock lock(device_data.mutex);
-                  targeting_swapchain = device_data.back_buffers.contains((uintptr_t)rtv.get());
+                  targeting_swapchain = device_data.back_buffers.contains((uintptr_t)render_target_resource.get());
                }
                if ((ui_separation_use_ui_hashes_only && cmd_list_data.is_known_ui_shader_bound) || targeting_swapchain || (AreViewsOfSameResource(rtv.get(), device_data.ui_initial_original_rtv.get()) && rtv_desc.Texture2D.MipSlice == 0)) // Make sure it was writing to the base mip (just in case the game did weird stuff)
                {
@@ -9967,6 +9969,7 @@ namespace
                ImGui::BeginDisabled(selected_custom_shader == nullptr);
 
                uint64_t pipeline_to_recompile = 0;
+               uint64_t pipeline_to_unload = 0;
 
                // Make sure our selected shader is still in the "custom_shaders_cache" list, without blocking its mutex through the whole imgui rendering
                bool custom_shader_found = false;
@@ -10049,7 +10052,7 @@ namespace
                         {
                            for (auto pipeline : pipelines_pair->second)
                            {
-                              ASSERT_ONCE(pipeline->cloned || !selected_custom_shader->compilation_errors.empty());
+                              ASSERT_ONCE(pipeline->cloned || pipeline->manually_unloaded || !selected_custom_shader->compilation_errors.empty());
 
                               ImGui::PushID(i);
                               ImGui::NewLine();
@@ -10061,11 +10064,10 @@ namespace
                                  if (pipeline->HasPixelShader())
                                     ImGui::SliderInt("Shader Custom Depth/Stencil Type", reinterpret_cast<int*>(&pipeline->custom_depth_stencil), 0, IM_ARRAYSIZE(CachedPipeline::shader_custom_depth_stencil_type_names) - 1, CachedPipeline::shader_custom_depth_stencil_type_names[(size_t)pipeline->custom_depth_stencil], ImGuiSliderFlags_NoInput);
                               }
-                              if (ImGui::Button("Unload"))
+                              if (pipeline->cloned && ImGui::Button("Unload"))
                               {
-                                 s_mutex_generic.unlock(); // Hack to avoid deadlocks with the device destroying pipelines
-                                 UnloadCustomShaders(device_data, { reinterpret_cast<uint64_t>(pipeline) }, false);
-                                 s_mutex_generic.lock();
+                                 pipeline->manually_unloaded = true;
+                                 pipeline_to_unload = pipeline->pipeline.handle;
                               }
 #if 0 // TODO: this still deadlocks!
                               if (ImGui::Button(pipeline->cloned ? "Recompile" : "Load"))
@@ -10113,6 +10115,12 @@ namespace
                      }
                      ImGui::EndChild();
                   }
+               }
+
+               // Destroy clones after releasing the cache lock and leaving its iteration.
+               if (pipeline_to_unload != 0)
+               {
+                  UnloadCustomShaders(device_data, { pipeline_to_unload }, false);
                }
 
                if (pipeline_to_recompile != 0)
