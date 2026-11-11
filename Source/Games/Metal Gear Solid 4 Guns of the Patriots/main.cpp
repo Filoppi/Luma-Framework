@@ -23,7 +23,7 @@ namespace
 
    // User settings:
    bool enable_smaa = true;
-   bool enable_gtao = false; // TODO1: disable by default?
+   bool enable_gtao = true;
    uint fix_bloom_scaling_type = 1;
    uint shadow_maps_resolution_multiplier = 2;
 
@@ -354,7 +354,7 @@ public:
       // The first vertex+pixel that draws on the scene color texture with depth writes should have the projection matrix for GTAO, cache it!
       if (enable_gtao &&
          (!game_device_data.gtao_data.found_proj_mat_constant_buffer || !game_device_data.gtao_data.found_fog_constant_buffer) &&
-         game_device_data.gtao_data.scene_resource &&
+         (game_device_data.gtao_data.scene_resources[0] || game_device_data.gtao_data.scene_resources[1]) &&
          game_device_data.gtao_data.scene_frame != cb_luma_global_settings.FrameIndex &&
          (stages & (reshade::api::shader_stage::vertex | reshade::api::shader_stage::pixel)) == (reshade::api::shader_stage::vertex | reshade::api::shader_stage::pixel))
       {
@@ -375,7 +375,8 @@ public:
             rtv->GetResource(rtv_resource.put());
 
             // The first few writes are the sky and they don't use the right cb layout. They don't write depth.
-            if (game_device_data.gtao_data.scene_resource == rtv_resource && depth_stencil_desc.DepthEnable && depth_stencil_desc.DepthWriteMask != D3D11_DEPTH_WRITE_MASK_ZERO)
+            if ((game_device_data.gtao_data.scene_resources[0] == rtv_resource || game_device_data.gtao_data.scene_resources[1] == rtv_resource) &&
+               depth_stencil_desc.DepthEnable && depth_stencil_desc.DepthWriteMask != D3D11_DEPTH_WRITE_MASK_ZERO)
             {
                // Wait until we have a mesh that draws with shadow maps to make sure we are a proper mesh, otherwise the fog data isn't in the CB
                com_ptr<ID3D11ShaderResourceView> ps_srvs[7];

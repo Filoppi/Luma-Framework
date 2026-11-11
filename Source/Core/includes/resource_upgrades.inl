@@ -520,12 +520,13 @@ bool ResourceUpgradeManager::FindOrCreateIndirectUpgradedResourceView(
       auto original_resource_to_mirrored_upgraded_resource = original_resources_to_mirrored_upgraded_resources.find(resource.handle);
       if (original_resource_to_mirrored_upgraded_resource != original_resources_to_mirrored_upgraded_resources.end())
       {
-         const auto original_resource_to_mirrored_upgraded_resource_ptr = original_resource_to_mirrored_upgraded_resource->second.mirror_handle;
+         const uint64_t mirror_handle = original_resource_to_mirrored_upgraded_resource->second.mirror_handle;
+         com_ptr<ID3D11Resource> mirror_resource = reinterpret_cast<ID3D11Resource*>(mirror_handle);
 
          lock_device_read.unlock(); // Avoids deadlocks with the device
 
          reshade::api::resource_view_desc resource_view_desc = device->get_resource_view_desc({ in_rv });
-         const reshade::api::resource_desc mirrored_upgraded_resource_desc = device->get_resource_desc({ original_resource_to_mirrored_upgraded_resource_ptr }); // The format should match previous calls to "GetBestResourceUpgradeFormat()"
+         const reshade::api::resource_desc mirrored_upgraded_resource_desc = device->get_resource_desc({ mirror_handle }); // The format should match previous calls to "GetBestResourceUpgradeFormat()"
          // Depth/Stencil resources are the only ones "GetBestResourceUpgradeFormat()" upgrades to a typeless format (so they can be cast to both a depth/stencil write view and a shader resource view),
          // and views can't use typeless formats, so here we can't let the format be determined automatically from the resource, we need to explicitly pick the view format matching the upgrade.
          // Note that this applies to their SRVs as well, not just their DSVs.
@@ -548,30 +549,42 @@ bool ResourceUpgradeManager::FindOrCreateIndirectUpgradedResourceView(
          }
 
          reshade::api::resource_view mirrored_upgraded_resource_view;
-         if (device->create_resource_view({ original_resource_to_mirrored_upgraded_resource_ptr }, usage, resource_view_desc, &mirrored_upgraded_resource_view))
+         if (device->create_resource_view({ mirror_handle }, usage, resource_view_desc, &mirrored_upgraded_resource_view))
          {
-            std::unique_lock lock_device_write(*lock_device_read.mutex());
-            if (!original_resource_views_to_mirrored_upgraded_resource_views.contains(in_rv))
+            bool retained = false;
             {
-               original_resource_views_to_mirrored_upgraded_resource_views[in_rv] = mirrored_upgraded_resource_view.handle;
-               mirror_views_by_mirror_resource[original_resource_to_mirrored_upgraded_resource_ptr].emplace(mirrored_upgraded_resource_view.handle);
-               mirror_views_to_mirror_resources[mirrored_upgraded_resource_view.handle] = original_resource_to_mirrored_upgraded_resource_ptr;
-               out_rv = mirrored_upgraded_resource_view.handle;
+               std::unique_lock lock_device_write(*lock_device_read.mutex());
+               // Invalidation can replace or unlink the mirror while CreateResourceView runs.
+               const auto current_mirror = original_resources_to_mirrored_upgraded_resources.find(resource.handle);
+               if (current_mirror != original_resources_to_mirrored_upgraded_resources.end() && current_mirror->second.mirror_handle == mirror_handle)
+               {
+                  retained = original_resource_views_to_mirrored_upgraded_resource_views.try_emplace(in_rv, mirrored_upgraded_resource_view.handle).second;
+                  if (retained)
+                  {
+                     mirror_views_by_mirror_resource[mirror_handle].emplace(mirrored_upgraded_resource_view.handle);
+                     mirror_views_to_mirror_resources[mirrored_upgraded_resource_view.handle] = mirror_handle;
+                  }
+               }
             }
-            else // Destroy it if it was accidentally created at the same time by another thread
-            {
-               out_rv = original_resource_views_to_mirrored_upgraded_resource_views[in_rv];
-               lock_device_write.unlock();
+            if (!retained)
                device->destroy_resource_view(mirrored_upgraded_resource_view);
-            }
-            replaced = true;
          }
          else
          {
             ASSERT_ONCE_MSG(false, "Failed to create an indirect upgraded texture view (maybe some format mismatch)");
          }
 
+         mirror_resource.reset(); // Release outside the mutex; destruction callbacks may lock it.
          lock_device_read.lock();
+      }
+
+      // The mapping may have changed before we reacquired the shared lock.
+      // Return only a handle that the caller can safely retain under that lock.
+      const auto current_view = original_resource_views_to_mirrored_upgraded_resource_views.find(in_rv);
+      if (current_view != original_resource_views_to_mirrored_upgraded_resource_views.end())
+      {
+         out_rv = current_view->second;
+         replaced = true;
       }
    }
 

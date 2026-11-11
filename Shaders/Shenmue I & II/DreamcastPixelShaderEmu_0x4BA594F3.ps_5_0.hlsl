@@ -137,4 +137,6 @@ void main(
     o0.rgb = linear_to_gamma(o0.rgb);
   }
 #endif
+
+  o0.w = saturate(o0.w); // Luma: UNORM emulation
 }

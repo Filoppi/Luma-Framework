@@ -1326,6 +1326,7 @@ public:
 
             DWORD temp_protect;
             VirtualProtect(pattern_1_addresses[0], 1, old_protect, &temp_protect);
+            FlushInstructionCache(GetCurrentProcess(), pattern_1_addresses[0], 1);
 
             success = VirtualProtect(pattern_2_addresses[0], 3, PAGE_EXECUTE_READWRITE, &old_protect);
             if (success)
@@ -1334,6 +1335,7 @@ public:
                std::memcpy(pattern_2_addresses[0], replacement_data_2.data(), 3);
 
                VirtualProtect(pattern_2_addresses[0], 3, old_protect, &temp_protect);
+               FlushInstructionCache(GetCurrentProcess(), pattern_2_addresses[0], 3);
 
                taa_enabled = !taa_enabled;
             }
@@ -1355,6 +1357,7 @@ public:
 
             DWORD temp_protect;
             VirtualProtect(pattern_1_addresses[0], 2, old_protect, &temp_protect);
+            FlushInstructionCache(GetCurrentProcess(), pattern_1_addresses[0], 1);
 
             taa_enabled_1 = !taa_enabled_1;
             taa_enabled = !taa_enabled;
@@ -1372,6 +1375,7 @@ public:
 
             DWORD temp_protect;
             VirtualProtect(pattern_2_addresses[0], 3, old_protect, &temp_protect);
+            FlushInstructionCache(GetCurrentProcess(), pattern_2_addresses[0], 3);
 
             taa_enabled_2 = !taa_enabled_2;
          }

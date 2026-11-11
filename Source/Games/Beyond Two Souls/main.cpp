@@ -1,5 +1,4 @@
-// ### Rename this ###
-#define GAME_TEMPLATE 1
+#define GAME_BEYOND_TWO_SOULS 1
 
 #define LUMA_PATCH_BYTECODE_SYNC 1
 
@@ -7,7 +6,7 @@
 
 #include "..\..\Core\includes\shader_patching.h"
 
-class GameShadowOfMordor final : public Game
+class GameBeyondTwoSouls final : public Game
 {
 public:
    void OnInit(bool async) override
@@ -223,7 +222,7 @@ BOOL APIENTRY DllMain(HMODULE hModule, DWORD ul_reason_for_call, LPVOID lpReserv
       forced_shader_names.emplace(std::stoul("A525E946", nullptr, 16), "UI");
 #endif
 
-      game = new GameShadowOfMordor();
+      game = new GameBeyondTwoSouls();
    }
 
    CoreMain(hModule, ul_reason_for_call, lpReserved);

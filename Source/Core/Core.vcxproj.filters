@@ -102,6 +102,12 @@
     <ClInclude Include="utils\draw.hpp">
       <Filter>Utils</Filter>
     </ClInclude>
+    <ClInclude Include="texture_data\SMAA_AreaTex.h">
+      <Filter>Utils</Filter>
+    </ClInclude>
+    <ClInclude Include="texture_data\SMAA_SearchTex.h">
+      <Filter>Utils</Filter>
+    </ClInclude>
     <ClInclude Include="includes\debug.h">
       <Filter>Includes</Filter>
     </ClInclude>

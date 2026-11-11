@@ -107,7 +107,7 @@ float3 ApplyColorLUT(float3 color, float lutY, bool forceVanillaSDR)
 
     // Luma: fix missing half texel offset for LUT
     float2 LUTSize2D = 64.0;
-    // Likely always 64x64 but checking won't hurt
+    // Likely always 64x64 but checking won't hurt (it might have gotten upgraded)
     ColorLUT.GetDimensions(LUTSize2D.x, LUTSize2D.y);
     float LUTSize  = LUTSize2D.x;
     float LUTScale = (LUTSize - 1.0) / LUTSize; // 63 / 64

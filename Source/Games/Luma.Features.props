@@ -65,14 +65,50 @@
   </PropertyGroup>
 
   <ItemGroup Condition="'$(UseLumaSafetyHook)'=='true'">
-    <ClCompile Include="$(LumaSafetyHookRoot)\src\allocator.cpp;$(LumaSafetyHookRoot)\src\easy.cpp;$(LumaSafetyHookRoot)\src\inline_hook.cpp;$(LumaSafetyHookRoot)\src\mid_hook.cpp;$(LumaSafetyHookRoot)\src\os.windows.cpp;$(LumaSafetyHookRoot)\src\utility.cpp;$(LumaSafetyHookRoot)\src\vmt_hook.cpp">
+    <ClCompile Include="$(LumaSafetyHookRoot)\src\allocator.cpp">
+      <ObjectFileName>$(IntDir)safetyhook\</ObjectFileName>
+      <PrecompiledHeader>NotUsing</PrecompiledHeader>
+      <ForcedIncludeFiles></ForcedIncludeFiles>
+      <TreatWarningAsError>false</TreatWarningAsError>
+    </ClCompile>
+    <ClCompile Include="$(LumaSafetyHookRoot)\src\easy.cpp">
+      <ObjectFileName>$(IntDir)safetyhook\</ObjectFileName>
+      <PrecompiledHeader>NotUsing</PrecompiledHeader>
+      <ForcedIncludeFiles></ForcedIncludeFiles>
+      <TreatWarningAsError>false</TreatWarningAsError>
+    </ClCompile>
+    <ClCompile Include="$(LumaSafetyHookRoot)\src\inline_hook.cpp">
+      <ObjectFileName>$(IntDir)safetyhook\</ObjectFileName>
+      <PrecompiledHeader>NotUsing</PrecompiledHeader>
+      <ForcedIncludeFiles></ForcedIncludeFiles>
+      <TreatWarningAsError>false</TreatWarningAsError>
+    </ClCompile>
+    <ClCompile Include="$(LumaSafetyHookRoot)\src\mid_hook.cpp">
+      <ObjectFileName>$(IntDir)safetyhook\</ObjectFileName>
+      <PrecompiledHeader>NotUsing</PrecompiledHeader>
+      <ForcedIncludeFiles></ForcedIncludeFiles>
+      <TreatWarningAsError>false</TreatWarningAsError>
+    </ClCompile>
+    <ClCompile Include="$(LumaSafetyHookRoot)\src\os.windows.cpp">
+      <ObjectFileName>$(IntDir)safetyhook\</ObjectFileName>
+      <PrecompiledHeader>NotUsing</PrecompiledHeader>
+      <ForcedIncludeFiles></ForcedIncludeFiles>
+      <TreatWarningAsError>false</TreatWarningAsError>
+    </ClCompile>
+    <ClCompile Include="$(LumaSafetyHookRoot)\src\utility.cpp">
+      <ObjectFileName>$(IntDir)safetyhook\</ObjectFileName>
+      <PrecompiledHeader>NotUsing</PrecompiledHeader>
+      <ForcedIncludeFiles></ForcedIncludeFiles>
+      <TreatWarningAsError>false</TreatWarningAsError>
+    </ClCompile>
+    <ClCompile Include="$(LumaSafetyHookRoot)\src\vmt_hook.cpp">
       <ObjectFileName>$(IntDir)safetyhook\</ObjectFileName>
       <PrecompiledHeader>NotUsing</PrecompiledHeader>
       <ForcedIncludeFiles></ForcedIncludeFiles>
       <TreatWarningAsError>false</TreatWarningAsError>
     </ClCompile>
     <!-- Zydis and Zycore have files with the same name (e.g. "String.c"), so they need separate object folders -->
-    <ClCompile Include="$(LumaZydisRoot)\src\*.c">
+    <ClCompile Include="$(LumaZydisRoot)\src\Decoder.c">
       <ObjectFileName>$(IntDir)zydis\</ObjectFileName>
       <AdditionalIncludeDirectories>$(LumaZydisRoot)\src;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
       <CompileAs>CompileAsC</CompileAs>
@@ -80,7 +116,227 @@
       <ForcedIncludeFiles></ForcedIncludeFiles>
       <TreatWarningAsError>false</TreatWarningAsError>
     </ClCompile>
-    <ClCompile Include="$(LumaZydisRoot)\dependencies\zycore\src\*.c;$(LumaZydisRoot)\dependencies\zycore\src\API\*.c">
+    <ClCompile Include="$(LumaZydisRoot)\src\DecoderData.c">
+      <ObjectFileName>$(IntDir)zydis\</ObjectFileName>
+      <AdditionalIncludeDirectories>$(LumaZydisRoot)\src;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+      <CompileAs>CompileAsC</CompileAs>
+      <PrecompiledHeader>NotUsing</PrecompiledHeader>
+      <ForcedIncludeFiles></ForcedIncludeFiles>
+      <TreatWarningAsError>false</TreatWarningAsError>
+    </ClCompile>
+    <ClCompile Include="$(LumaZydisRoot)\src\Disassembler.c">
+      <ObjectFileName>$(IntDir)zydis\</ObjectFileName>
+      <AdditionalIncludeDirectories>$(LumaZydisRoot)\src;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+      <CompileAs>CompileAsC</CompileAs>
+      <PrecompiledHeader>NotUsing</PrecompiledHeader>
+      <ForcedIncludeFiles></ForcedIncludeFiles>
+      <TreatWarningAsError>false</TreatWarningAsError>
+    </ClCompile>
+    <ClCompile Include="$(LumaZydisRoot)\src\Encoder.c">
+      <ObjectFileName>$(IntDir)zydis\</ObjectFileName>
+      <AdditionalIncludeDirectories>$(LumaZydisRoot)\src;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+      <CompileAs>CompileAsC</CompileAs>
+      <PrecompiledHeader>NotUsing</PrecompiledHeader>
+      <ForcedIncludeFiles></ForcedIncludeFiles>
+      <TreatWarningAsError>false</TreatWarningAsError>
+    </ClCompile>
+    <ClCompile Include="$(LumaZydisRoot)\src\EncoderData.c">
+      <ObjectFileName>$(IntDir)zydis\</ObjectFileName>
+      <AdditionalIncludeDirectories>$(LumaZydisRoot)\src;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+      <CompileAs>CompileAsC</CompileAs>
+      <PrecompiledHeader>NotUsing</PrecompiledHeader>
+      <ForcedIncludeFiles></ForcedIncludeFiles>
+      <TreatWarningAsError>false</TreatWarningAsError>
+    </ClCompile>
+    <ClCompile Include="$(LumaZydisRoot)\src\Formatter.c">
+      <ObjectFileName>$(IntDir)zydis\</ObjectFileName>
+      <AdditionalIncludeDirectories>$(LumaZydisRoot)\src;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+      <CompileAs>CompileAsC</CompileAs>
+      <PrecompiledHeader>NotUsing</PrecompiledHeader>
+      <ForcedIncludeFiles></ForcedIncludeFiles>
+      <TreatWarningAsError>false</TreatWarningAsError>
+    </ClCompile>
+    <ClCompile Include="$(LumaZydisRoot)\src\FormatterATT.c">
+      <ObjectFileName>$(IntDir)zydis\</ObjectFileName>
+      <AdditionalIncludeDirectories>$(LumaZydisRoot)\src;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+      <CompileAs>CompileAsC</CompileAs>
+      <PrecompiledHeader>NotUsing</PrecompiledHeader>
+      <ForcedIncludeFiles></ForcedIncludeFiles>
+      <TreatWarningAsError>false</TreatWarningAsError>
+    </ClCompile>
+    <ClCompile Include="$(LumaZydisRoot)\src\FormatterBase.c">
+      <ObjectFileName>$(IntDir)zydis\</ObjectFileName>
+      <AdditionalIncludeDirectories>$(LumaZydisRoot)\src;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+      <CompileAs>CompileAsC</CompileAs>
+      <PrecompiledHeader>NotUsing</PrecompiledHeader>
+      <ForcedIncludeFiles></ForcedIncludeFiles>
+      <TreatWarningAsError>false</TreatWarningAsError>
+    </ClCompile>
+    <ClCompile Include="$(LumaZydisRoot)\src\FormatterBuffer.c">
+      <ObjectFileName>$(IntDir)zydis\</ObjectFileName>
+      <AdditionalIncludeDirectories>$(LumaZydisRoot)\src;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+      <CompileAs>CompileAsC</CompileAs>
+      <PrecompiledHeader>NotUsing</PrecompiledHeader>
+      <ForcedIncludeFiles></ForcedIncludeFiles>
+      <TreatWarningAsError>false</TreatWarningAsError>
+    </ClCompile>
+    <ClCompile Include="$(LumaZydisRoot)\src\FormatterIntel.c">
+      <ObjectFileName>$(IntDir)zydis\</ObjectFileName>
+      <AdditionalIncludeDirectories>$(LumaZydisRoot)\src;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+      <CompileAs>CompileAsC</CompileAs>
+      <PrecompiledHeader>NotUsing</PrecompiledHeader>
+      <ForcedIncludeFiles></ForcedIncludeFiles>
+      <TreatWarningAsError>false</TreatWarningAsError>
+    </ClCompile>
+    <ClCompile Include="$(LumaZydisRoot)\src\MetaInfo.c">
+      <ObjectFileName>$(IntDir)zydis\</ObjectFileName>
+      <AdditionalIncludeDirectories>$(LumaZydisRoot)\src;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+      <CompileAs>CompileAsC</CompileAs>
+      <PrecompiledHeader>NotUsing</PrecompiledHeader>
+      <ForcedIncludeFiles></ForcedIncludeFiles>
+      <TreatWarningAsError>false</TreatWarningAsError>
+    </ClCompile>
+    <ClCompile Include="$(LumaZydisRoot)\src\Mnemonic.c">
+      <ObjectFileName>$(IntDir)zydis\</ObjectFileName>
+      <AdditionalIncludeDirectories>$(LumaZydisRoot)\src;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+      <CompileAs>CompileAsC</CompileAs>
+      <PrecompiledHeader>NotUsing</PrecompiledHeader>
+      <ForcedIncludeFiles></ForcedIncludeFiles>
+      <TreatWarningAsError>false</TreatWarningAsError>
+    </ClCompile>
+    <ClCompile Include="$(LumaZydisRoot)\src\Register.c">
+      <ObjectFileName>$(IntDir)zydis\</ObjectFileName>
+      <AdditionalIncludeDirectories>$(LumaZydisRoot)\src;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+      <CompileAs>CompileAsC</CompileAs>
+      <PrecompiledHeader>NotUsing</PrecompiledHeader>
+      <ForcedIncludeFiles></ForcedIncludeFiles>
+      <TreatWarningAsError>false</TreatWarningAsError>
+    </ClCompile>
+    <ClCompile Include="$(LumaZydisRoot)\src\Segment.c">
+      <ObjectFileName>$(IntDir)zydis\</ObjectFileName>
+      <AdditionalIncludeDirectories>$(LumaZydisRoot)\src;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+      <CompileAs>CompileAsC</CompileAs>
+      <PrecompiledHeader>NotUsing</PrecompiledHeader>
+      <ForcedIncludeFiles></ForcedIncludeFiles>
+      <TreatWarningAsError>false</TreatWarningAsError>
+    </ClCompile>
+    <ClCompile Include="$(LumaZydisRoot)\src\SharedData.c">
+      <ObjectFileName>$(IntDir)zydis\</ObjectFileName>
+      <AdditionalIncludeDirectories>$(LumaZydisRoot)\src;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+      <CompileAs>CompileAsC</CompileAs>
+      <PrecompiledHeader>NotUsing</PrecompiledHeader>
+      <ForcedIncludeFiles></ForcedIncludeFiles>
+      <TreatWarningAsError>false</TreatWarningAsError>
+    </ClCompile>
+    <ClCompile Include="$(LumaZydisRoot)\src\String.c">
+      <ObjectFileName>$(IntDir)zydis\</ObjectFileName>
+      <AdditionalIncludeDirectories>$(LumaZydisRoot)\src;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+      <CompileAs>CompileAsC</CompileAs>
+      <PrecompiledHeader>NotUsing</PrecompiledHeader>
+      <ForcedIncludeFiles></ForcedIncludeFiles>
+      <TreatWarningAsError>false</TreatWarningAsError>
+    </ClCompile>
+    <ClCompile Include="$(LumaZydisRoot)\src\Utils.c">
+      <ObjectFileName>$(IntDir)zydis\</ObjectFileName>
+      <AdditionalIncludeDirectories>$(LumaZydisRoot)\src;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+      <CompileAs>CompileAsC</CompileAs>
+      <PrecompiledHeader>NotUsing</PrecompiledHeader>
+      <ForcedIncludeFiles></ForcedIncludeFiles>
+      <TreatWarningAsError>false</TreatWarningAsError>
+    </ClCompile>
+    <ClCompile Include="$(LumaZydisRoot)\src\Zydis.c">
+      <ObjectFileName>$(IntDir)zydis\</ObjectFileName>
+      <AdditionalIncludeDirectories>$(LumaZydisRoot)\src;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+      <CompileAs>CompileAsC</CompileAs>
+      <PrecompiledHeader>NotUsing</PrecompiledHeader>
+      <ForcedIncludeFiles></ForcedIncludeFiles>
+      <TreatWarningAsError>false</TreatWarningAsError>
+    </ClCompile>
+    <ClCompile Include="$(LumaZydisRoot)\dependencies\zycore\src\Allocator.c">
+      <ObjectFileName>$(IntDir)zycore\</ObjectFileName>
+      <CompileAs>CompileAsC</CompileAs>
+      <PrecompiledHeader>NotUsing</PrecompiledHeader>
+      <ForcedIncludeFiles></ForcedIncludeFiles>
+      <TreatWarningAsError>false</TreatWarningAsError>
+    </ClCompile>
+    <ClCompile Include="$(LumaZydisRoot)\dependencies\zycore\src\ArgParse.c">
+      <ObjectFileName>$(IntDir)zycore\</ObjectFileName>
+      <CompileAs>CompileAsC</CompileAs>
+      <PrecompiledHeader>NotUsing</PrecompiledHeader>
+      <ForcedIncludeFiles></ForcedIncludeFiles>
+      <TreatWarningAsError>false</TreatWarningAsError>
+    </ClCompile>
+    <ClCompile Include="$(LumaZydisRoot)\dependencies\zycore\src\Bitset.c">
+      <ObjectFileName>$(IntDir)zycore\</ObjectFileName>
+      <CompileAs>CompileAsC</CompileAs>
+      <PrecompiledHeader>NotUsing</PrecompiledHeader>
+      <ForcedIncludeFiles></ForcedIncludeFiles>
+      <TreatWarningAsError>false</TreatWarningAsError>
+    </ClCompile>
+    <ClCompile Include="$(LumaZydisRoot)\dependencies\zycore\src\Format.c">
+      <ObjectFileName>$(IntDir)zycore\</ObjectFileName>
+      <CompileAs>CompileAsC</CompileAs>
+      <PrecompiledHeader>NotUsing</PrecompiledHeader>
+      <ForcedIncludeFiles></ForcedIncludeFiles>
+      <TreatWarningAsError>false</TreatWarningAsError>
+    </ClCompile>
+    <ClCompile Include="$(LumaZydisRoot)\dependencies\zycore\src\List.c">
+      <ObjectFileName>$(IntDir)zycore\</ObjectFileName>
+      <CompileAs>CompileAsC</CompileAs>
+      <PrecompiledHeader>NotUsing</PrecompiledHeader>
+      <ForcedIncludeFiles></ForcedIncludeFiles>
+      <TreatWarningAsError>false</TreatWarningAsError>
+    </ClCompile>
+    <ClCompile Include="$(LumaZydisRoot)\dependencies\zycore\src\String.c">
+      <ObjectFileName>$(IntDir)zycore\</ObjectFileName>
+      <CompileAs>CompileAsC</CompileAs>
+      <PrecompiledHeader>NotUsing</PrecompiledHeader>
+      <ForcedIncludeFiles></ForcedIncludeFiles>
+      <TreatWarningAsError>false</TreatWarningAsError>
+    </ClCompile>
+    <ClCompile Include="$(LumaZydisRoot)\dependencies\zycore\src\Vector.c">
+      <ObjectFileName>$(IntDir)zycore\</ObjectFileName>
+      <CompileAs>CompileAsC</CompileAs>
+      <PrecompiledHeader>NotUsing</PrecompiledHeader>
+      <ForcedIncludeFiles></ForcedIncludeFiles>
+      <TreatWarningAsError>false</TreatWarningAsError>
+    </ClCompile>
+    <ClCompile Include="$(LumaZydisRoot)\dependencies\zycore\src\Zycore.c">
+      <ObjectFileName>$(IntDir)zycore\</ObjectFileName>
+      <CompileAs>CompileAsC</CompileAs>
+      <PrecompiledHeader>NotUsing</PrecompiledHeader>
+      <ForcedIncludeFiles></ForcedIncludeFiles>
+      <TreatWarningAsError>false</TreatWarningAsError>
+    </ClCompile>
+    <ClCompile Include="$(LumaZydisRoot)\dependencies\zycore\src\API\Memory.c">
+      <ObjectFileName>$(IntDir)zycore\</ObjectFileName>
+      <CompileAs>CompileAsC</CompileAs>
+      <PrecompiledHeader>NotUsing</PrecompiledHeader>
+      <ForcedIncludeFiles></ForcedIncludeFiles>
+      <TreatWarningAsError>false</TreatWarningAsError>
+    </ClCompile>
+    <ClCompile Include="$(LumaZydisRoot)\dependencies\zycore\src\API\Process.c">
+      <ObjectFileName>$(IntDir)zycore\</ObjectFileName>
+      <CompileAs>CompileAsC</CompileAs>
+      <PrecompiledHeader>NotUsing</PrecompiledHeader>
+      <ForcedIncludeFiles></ForcedIncludeFiles>
+      <TreatWarningAsError>false</TreatWarningAsError>
+    </ClCompile>
+    <ClCompile Include="$(LumaZydisRoot)\dependencies\zycore\src\API\Synchronization.c">
+      <ObjectFileName>$(IntDir)zycore\</ObjectFileName>
+      <CompileAs>CompileAsC</CompileAs>
+      <PrecompiledHeader>NotUsing</PrecompiledHeader>
+      <ForcedIncludeFiles></ForcedIncludeFiles>
+      <TreatWarningAsError>false</TreatWarningAsError>
+    </ClCompile>
+    <ClCompile Include="$(LumaZydisRoot)\dependencies\zycore\src\API\Terminal.c">
+      <ObjectFileName>$(IntDir)zycore\</ObjectFileName>
+      <CompileAs>CompileAsC</CompileAs>
+      <PrecompiledHeader>NotUsing</PrecompiledHeader>
+      <ForcedIncludeFiles></ForcedIncludeFiles>
+      <TreatWarningAsError>false</TreatWarningAsError>
+    </ClCompile>
+    <ClCompile Include="$(LumaZydisRoot)\dependencies\zycore\src\API\Thread.c">
       <ObjectFileName>$(IntDir)zycore\</ObjectFileName>
       <CompileAs>CompileAsC</CompileAs>
       <PrecompiledHeader>NotUsing</PrecompiledHeader>

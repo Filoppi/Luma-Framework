@@ -1318,7 +1318,7 @@ namespace Trace
          if (is_dispatch)
             FreezeInputs<DrawStateStackType::Compute>(native_device_context, device_data);
          else
-            FreezeInputs<DrawStateStackType::FullGraphics>(native_device_context, device_data);
+            FreezeInputs<DrawStateStackType::ExtendedGraphics>(native_device_context, device_data);
       }
       game_draw.pre_draw_state = CacheState(native_device_context, device_data, is_dispatch);
       if (!is_dispatch && debug_draw_disable_blends) // TODO: we never reset these after the draw call? Potentially polluting the game's state? It'd be fine if we are draw debugging!
@@ -1508,7 +1508,7 @@ namespace Trace
       debug_draw_pipeline_target_thread = std::thread::id();
       debug_draw_pipeline_instance = 0;
       debug_draw_custom_pass_instance = 0;
-      device_data.debug_draw_frozen_draw_state_stack.reset(); // It might store the state of another type of pass ("DrawStateStack<DrawStateStackType::Compute>" or "DrawStateStack<DrawStateStackType::FullGraphics>")
+      device_data.debug_draw_frozen_draw_state_stack.reset(); // It might store the state of another type of pass ("DrawStateStack<DrawStateStackType::Compute>" or "DrawStateStack<DrawStateStackType::ExtendedGraphics>")
       device_data.debug_draw_texture = nullptr;
       device_data.debug_draw_texture_format = DXGI_FORMAT_UNKNOWN;
       device_data.debug_draw_texture_size = {};

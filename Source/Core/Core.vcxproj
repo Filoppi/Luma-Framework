@@ -646,6 +646,8 @@
     <ClInclude Include="includes\super_resolution.h" />
     <ClInclude Include="utils\display.hpp" />
     <ClInclude Include="utils\draw.hpp" />
+    <ClInclude Include="texture_data\SMAA_AreaTex.h" />
+    <ClInclude Include="texture_data\SMAA_SearchTex.h" />
     <ClInclude Include="utils\format.hpp" />
     <ClInclude Include="utils\pipeline.hpp" />
     <ClInclude Include="utils\resource.hpp" />

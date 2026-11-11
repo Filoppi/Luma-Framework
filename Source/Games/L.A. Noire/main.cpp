@@ -2,15 +2,15 @@
 
 #include "..\..\Core\core.hpp"
 
-struct GameDeviceDataTemplate final : public GameDeviceData
+struct GameDeviceDataLANoire final : public GameDeviceData
 {
 };
 
-class GameShadowOfMordor final : public Game
+class GameLANoire final : public Game
 {
-   static GameDeviceDataTemplate& GetGameDeviceData(DeviceData& device_data)
+   static GameDeviceDataLANoire& GetGameDeviceData(DeviceData& device_data)
    {
-      return *static_cast<GameDeviceDataTemplate*>(device_data.game);
+      return *static_cast<GameDeviceDataLANoire*>(device_data.game);
    }
 
 public:
@@ -36,7 +36,7 @@ public:
 
    void OnCreateDevice(ID3D11Device* native_device, DeviceData& device_data) override
    {
-      device_data.game = new GameDeviceDataTemplate;
+      device_data.game = new GameDeviceDataLANoire;
    }
 
    DrawOrDispatchOverrideType OnDrawOrDispatch(ID3D11Device* native_device, ID3D11DeviceContext* native_device_context, CommandListData& cmd_list_data, DeviceData& device_data, reshade::api::shader_stage stages, const ShaderHashesList<OneShaderPerPipeline>& original_shader_hashes, bool is_custom_pass, bool& updated_cbuffers, std::function<void()>* original_draw_dispatch_func) override
@@ -84,7 +84,7 @@ BOOL APIENTRY DllMain(HMODULE hModule, DWORD ul_reason_for_call, LPVOID lpReserv
 
       enable_samplers_upgrade = true;
 
-      game = new GameShadowOfMordor();
+      game = new GameLANoire();
    }
 
    CoreMain(hModule, ul_reason_for_call, lpReserved);

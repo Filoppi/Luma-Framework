@@ -193,6 +193,32 @@ public:
    {
       auto& game_device_data = GetGameDeviceData(device_data);
 
+      // Fix meshes that are rendered within the UI not being tonemapped, as they draw in after tonemapping and can go up to 10k nits.
+      constexpr uint32_t StretchShaderHash = 0x46988DD4;
+      if (is_custom_pass && original_shader_hashes.Contains(StretchShaderHash, reshade::api::shader_stage::pixel))
+      {
+         com_ptr<ID3D11RenderTargetView> rtv;
+         native_device_context->OMGetRenderTargets(1, &rtv, nullptr);
+         uint4 resource_size;
+         DXGI_FORMAT resource_format;
+         GetResourceInfo(rtv.get(), resource_size, resource_format);
+         if (resource_size.x == 1920 && resource_size.y == 1080)
+         {
+            D3D11_VIEWPORT viewports[D3D11_VIEWPORT_AND_SCISSORRECT_OBJECT_COUNT_PER_PIPELINE];
+            UINT num_viewports = ARRAYSIZE(viewports);
+            native_device_context->RSGetViewports(&num_viewports, viewports);
+            // This is a partial draw of a UI render being stretched into a sprite sheet
+            if (num_viewports == 1 && viewports[0].Width < resource_size.x && viewports[0].Height < resource_size.y)
+            {
+               // Inform the shader to do tonemapping
+               uint32_t custom_data = 1;
+               SetLumaConstantBuffers(native_device_context, cmd_list_data, device_data, stages, LumaConstantBufferType::LumaSettings);
+               SetLumaConstantBuffers(native_device_context, cmd_list_data, device_data, stages, LumaConstantBufferType::LumaData, custom_data);
+               updated_cbuffers = true;
+            }
+         }
+      }
+
       return DrawOrDispatchOverrideType::None; // Don't cancel the original draw call
    }
    void OnPresent(ID3D11Device* native_device, DeviceData& device_data) override
@@ -311,6 +337,21 @@ BOOL APIENTRY DllMain(HMODULE hModule, DWORD ul_reason_for_call, LPVOID lpReserv
             "F72115F0",
          };
 
+      // Game has bad AF on floor/terrain
+      enable_samplers_upgrade = true;
+
+      // Increase shadow maps resolution
+      uint shadow_maps_resolution_multiplier = 2;
+      if (shadow_maps_resolution_multiplier != 1)
+      {
+         texture_custom_dimensions_upgrades.insert(texture_custom_dimensions_upgrades.end(), {
+            // High quality settings only
+            {uint4(1024, 4096, 1, 1), reshade::api::format::r24_g8_typeless, uint4(1024 * shadow_maps_resolution_multiplier, 4096 * shadow_maps_resolution_multiplier, 0, 0)},
+            // Note: unfortunately we need to upscale their matching RTV because the game binds it alongside the shadow depth target.
+            {uint4(1024, 4096, 1, 1), reshade::api::format::r8g8b8a8_unorm, uint4(1024 * shadow_maps_resolution_multiplier, 4096 * shadow_maps_resolution_multiplier, 0, 0)},
+         });
+      }
+
 #if DEVELOPMENT
       forced_shader_names.emplace(std::stoul("65D6A60E", nullptr, 16), "Clear");
       forced_shader_names.emplace(std::stoul("C76A5C7C", nullptr, 16), "DoF");
@@ -319,7 +360,6 @@ BOOL APIENTRY DllMain(HMODULE hModule, DWORD ul_reason_for_call, LPVOID lpReserv
       forced_shader_names.emplace(std::stoul("0B815FB3", nullptr, 16), "Blur Type B");
       forced_shader_names.emplace(std::stoul("BBCA06B9", nullptr, 16), "Blur");
       forced_shader_names.emplace(std::stoul("CEA28077", nullptr, 16), "Merge Bloom Mips");
-      forced_shader_names.emplace(std::stoul("46988DD4", nullptr, 16), "Copy/Upscale");
       forced_shader_names.emplace(std::stoul("2ED6B88D", nullptr, 16), "FXAA");
       forced_shader_names.emplace(std::stoul("2862B6C1", nullptr, 16), "FXAA");
       forced_shader_names.emplace(std::stoul("7C024E6E", nullptr, 16), "FXAA");
@@ -327,6 +367,7 @@ BOOL APIENTRY DllMain(HMODULE hModule, DWORD ul_reason_for_call, LPVOID lpReserv
       forced_shader_names.emplace(std::stoul("88CBAE06", nullptr, 16), "Edge AA");
       forced_shader_names.emplace(std::stoul("22F2EE3C", nullptr, 16), "Downscale ?");
       forced_shader_names.emplace(std::stoul("76DB7FD2", nullptr, 16), "Downscale ?");
+      forced_shader_names.emplace(std::stoul("9DFE9644", nullptr, 16), "Inline Motion Blur"); // Probably not the only shader for it!
 #endif
 
       game = new LegoCityUndercover();

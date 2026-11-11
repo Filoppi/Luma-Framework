@@ -2,6 +2,10 @@
 <Project ToolsVersion="4.0" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
   <ItemGroup>
     <ClCompile Include="main.cpp" />
+    <ClCompile Include="..\..\External\reshade\deps\minhook\src\buffer.c" />
+    <ClCompile Include="..\..\External\reshade\deps\minhook\src\hook.c" />
+    <ClCompile Include="..\..\External\reshade\deps\minhook\src\trampoline.c" />
+    <ClCompile Include="..\..\External\reshade\deps\minhook\src\hde\hde32.c" />
     <ClCompile Include="BS2_CrashFix\BS2_CrashFix.cpp">
       <Filter>BS2_CrashFix</Filter>
     </ClCompile>
@@ -16,8 +20,5 @@
     <ClInclude Include="BS2_CrashFix\BS2_CrashFix.h">
       <Filter>BS2_CrashFix</Filter>
     </ClInclude>
-  </ItemGroup>
-  <ItemGroup>
-    <None Include="vcpkg.json" />
   </ItemGroup>
 </Project>

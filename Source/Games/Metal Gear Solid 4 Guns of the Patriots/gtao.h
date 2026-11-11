@@ -38,8 +38,8 @@ namespace MGS4GTAO
       uint32_t viewport_size[2] = {};
       float viewport_pixel_size[2] = {};
       float depth_scale = 1.f; // Game uses millimeters as unit but this is fine as 1.
-      float effect_radius = 500.f; // In mm
-      float final_value_power = 0.85f; // Slightly lowered to be conservative of the original look.
+      float effect_radius = 1000.f; // In mm
+      float final_value_power = 1.25f; // Slightly lowered to be conservative of the original look.
       uint32_t linear_depth = 0; // The hook supplies device depth; linearize in the prefilter pass.
       float radius_scaling_min_depth = 25000.f; // In mm
       float radius_scaling_max_depth = 100000.f;
@@ -108,7 +108,9 @@ namespace MGS4GTAO
       // The first translucency composition of a frame composes hair and decals onto the opaque scene (PS t0), into RTV 0.
       // The first draw that renders on the opaque scene is the opaque scene raster, which has the camera projection.
       // AO is written on the composed scene right before the depth linearization draw that follows the composition.
-      ComPtr<ID3D11Resource> scene_resource;
+      // Note: it's two as they swap every frame, ping ponging for some reason (not sure why, there's nothing temporal AFAIK)
+      ComPtr<ID3D11Resource> scene_resources[2] = {};
+      // Changed every frame, ping ponged, like the above ones (it's the one that isn't currently the SRV)
       ComPtr<ID3D11RenderTargetView> composed_scene_rtv;
       uint32_t scene_frame = UINT32_MAX;
    };
@@ -124,7 +126,8 @@ namespace MGS4GTAO
       data.found_proj_mat_constant_buffer = false;
       data.found_fog_constant_buffer = false;
 
-      data.scene_resource.reset();
+      data.scene_resources[0].reset();
+      data.scene_resources[1].reset();
       data.composed_scene_rtv.reset();
    }
 
@@ -255,7 +258,7 @@ namespace MGS4GTAO
    inline void OnComposeTranslucency(ID3D11DeviceContext* context, DeviceData& device_data, Data& data)
    {
       const uint32_t frame = cb_luma_global_settings.FrameIndex;
-      if (context->GetType() != D3D11_DEVICE_CONTEXT_IMMEDIATE || data.scene_frame == frame)
+      if (context->GetType() != D3D11_DEVICE_CONTEXT_IMMEDIATE || data.scene_frame == frame || data.last_drawn_frame == frame)
          return;
 
       ComPtr<ID3D11ShaderResourceView> scene_srv;
@@ -269,7 +272,27 @@ namespace MGS4GTAO
       // The opaque scene is what finds the camera constant buffer, independently of whether AO can be drawn on this composition's output below
       ComPtr<ID3D11Resource> scene_resource;
       scene_srv->GetResource(scene_resource.put());
-      data.scene_resource = scene_resource;
+      if (data.scene_resources[0] != scene_resource
+         && data.scene_resources[1] != scene_resource)
+      {
+         // They are both different and previously set, something changed (e.g. resolution, or re-created buffers for some reason, seemengly can't happen in MGS4 anyway), so reset both
+         if (data.scene_resources[0] && data.scene_resources[1])
+         {
+            //ASSERT_ONCE(false); // Probably can't ever happen, this is here just to verify it, it'd work anyway // Edit: this triggers when toggling the mod on/off as textures get changed
+            data.scene_resources[0] = scene_resource;
+            data.scene_resources[1].reset();
+         }
+         // We had previously set the first only, this is a new one, hence set it as second
+         else if (data.scene_resources[0])
+         {
+            data.scene_resources[1] = scene_resource;
+         }
+         // We had previously set none, so set this as first
+         else
+         {
+            data.scene_resources[0] = scene_resource;
+         }
+      }
       data.scene_frame = frame;
       // Clear these flags so we search for them again in the next frame, or re-use the old alternatively
       data.found_proj_mat_constant_buffer = false;

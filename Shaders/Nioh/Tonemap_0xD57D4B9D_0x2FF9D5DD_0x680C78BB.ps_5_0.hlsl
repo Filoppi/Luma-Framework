@@ -245,6 +245,6 @@ void main(
 #endif
 
 #if ENABLE_FXAA // Overwrite the alpha with luminance (it doesn't seem like it was ever used by the UI, and anyway it was already set to the pre-tonemapping luminance it seems)
-  o0.a = linear_to_gamma(GetLuminance(o0.rgb), GCT_MIRROR);
+  o0.a = linear_to_gamma(GetLuminance(o0.rgb), GCT_POSITIVE).x;
 #endif
 }

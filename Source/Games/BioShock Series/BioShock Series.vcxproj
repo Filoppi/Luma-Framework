@@ -28,7 +28,6 @@
     <Platform>Win32</Platform>
     <ProjectName>BioShock Series</ProjectName>
     <VCProjectUpgraderObjectName>NoUpgrade</VCProjectUpgraderObjectName>
-    <VcpkgTriplet Condition="'$(Platform)'=='Win32'">x86-windows-static</VcpkgTriplet>
   </PropertyGroup>
   <PropertyGroup>
     <!-- Packaging defaults to off; enable via Project Properties -> Luma Properties -> Package after build. -->
@@ -108,28 +107,8 @@
     <OutDir>$(SolutionDir)\Binaries\$(Platform)-$(Configuration)\</OutDir>
   </PropertyGroup>
   <PropertyGroup Label="Vcpkg">
-    <VcpkgEnableManifest>true</VcpkgEnableManifest>
-    <VcpkgEnabled>true</VcpkgEnabled>
-  </PropertyGroup>
-  <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Development-Debug|Win32'" Label="Vcpkg">
-    <VcpkgUseStatic>true</VcpkgUseStatic>
-    <VcpkgHostTriplet>x86-windows-static</VcpkgHostTriplet>
-    <VcpkgUseMD>false</VcpkgUseMD>
-  </PropertyGroup>
-  <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Publishing-Release|Win32'" Label="Vcpkg">
-    <VcpkgUseStatic>true</VcpkgUseStatic>
-    <VcpkgHostTriplet>x86-windows-static</VcpkgHostTriplet>
-    <VcpkgUseMD>false</VcpkgUseMD>
-  </PropertyGroup>
-  <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Test-Release|Win32'" Label="Vcpkg">
-    <VcpkgUseStatic>true</VcpkgUseStatic>
-    <VcpkgHostTriplet>x86-windows-static</VcpkgHostTriplet>
-    <VcpkgUseMD>false</VcpkgUseMD>
-  </PropertyGroup>
-  <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Development-Release|Win32'" Label="Vcpkg">
-    <VcpkgUseStatic>true</VcpkgUseStatic>
-    <VcpkgHostTriplet>x86-windows-static</VcpkgHostTriplet>
-    <VcpkgUseMD>false</VcpkgUseMD>
+    <VcpkgEnableManifest>false</VcpkgEnableManifest>
+    <VcpkgEnabled>false</VcpkgEnabled>
   </PropertyGroup>
   <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Development-Debug|Win32'">
     <ClCompile>
@@ -347,16 +326,43 @@
       <Command>IF DEFINED LUMA_BIOSHOCK_BIN_PATH ( xcopy /Y "$(TargetDir)*$(SolutionName)-$(ProjectName).addon" "%LUMA_BIOSHOCK_BIN_PATH%" || exit /B 0 )</Command>
     </PostBuildEvent>
   </ItemDefinitionGroup>
+  <!-- Use the MinHook revision pinned by the ReShade submodule. -->
+  <ItemDefinitionGroup>
+    <ClCompile>
+      <AdditionalIncludeDirectories>..\..\External\reshade\deps\minhook\include;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+    </ClCompile>
+  </ItemDefinitionGroup>
   <ItemGroup>
     <ClCompile Include="..\..\Core\unity_build.cpp" />
+    <ClCompile Include="..\..\External\reshade\deps\minhook\src\buffer.c">
+      <CompileAs>CompileAsC</CompileAs>
+      <PrecompiledHeader>NotUsing</PrecompiledHeader>
+      <ForcedIncludeFiles />
+      <TreatWarningAsError>false</TreatWarningAsError>
+    </ClCompile>
+    <ClCompile Include="..\..\External\reshade\deps\minhook\src\hook.c">
+      <CompileAs>CompileAsC</CompileAs>
+      <PrecompiledHeader>NotUsing</PrecompiledHeader>
+      <ForcedIncludeFiles />
+      <TreatWarningAsError>false</TreatWarningAsError>
+    </ClCompile>
+    <ClCompile Include="..\..\External\reshade\deps\minhook\src\trampoline.c">
+      <CompileAs>CompileAsC</CompileAs>
+      <PrecompiledHeader>NotUsing</PrecompiledHeader>
+      <ForcedIncludeFiles />
+      <TreatWarningAsError>false</TreatWarningAsError>
+    </ClCompile>
+    <ClCompile Include="..\..\External\reshade\deps\minhook\src\hde\hde32.c">
+      <CompileAs>CompileAsC</CompileAs>
+      <PrecompiledHeader>NotUsing</PrecompiledHeader>
+      <ForcedIncludeFiles />
+      <TreatWarningAsError>false</TreatWarningAsError>
+    </ClCompile>
     <ClCompile Include="BS2_CrashFix\BS2_CrashFix.cpp" />
     <ClCompile Include="main.cpp" />
   </ItemGroup>
   <ItemGroup>
     <ClInclude Include="BS2_CrashFix\BS2_CrashFix.h" />
-  </ItemGroup>
-  <ItemGroup>
-    <None Include="vcpkg.json" />
   </ItemGroup>
   <!-- Apply feature settings after the final per-configuration properties. -->
   <Import Project="..\Luma.DXP.props" Condition="Exists('..\Luma.DXP.props')" />

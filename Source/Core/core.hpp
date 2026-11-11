@@ -134,9 +134,6 @@
 #ifndef ENABLE_DRAW_DISPATCH_DATA_CACHE
 #define ENABLE_DRAW_DISPATCH_DATA_CACHE 0
 #endif // ENABLE_DRAW_DISPATCH_DATA_CACHE
-#ifndef ENABLE_DRAW_STATE_VERTEX_BUFFER_CACHE
-#define ENABLE_DRAW_STATE_VERTEX_BUFFER_CACHE 0
-#endif // ENABLE_DRAW_STATE_VERTEX_BUFFER_CACHE
 #ifndef TEST_DUPLICATE_SHADER_HASH
 #define TEST_DUPLICATE_SHADER_HASH 0
 #endif // TEST_DUPLICATE_SHADER_HASH
@@ -2725,11 +2722,11 @@ namespace
 
       if (enable_samplers_upgrade)
       {
-         // Release custom samplers outside the lock, as releasing them can trigger "OnDestroySampler()", which locks it again (and would hang)
+         // Release custom samplers outside the lock, as releasing them can trigger OnDestroySampler.
+         // Device teardown can precede child-object destruction, and samplers can be shared.
          decltype(device_data.custom_sampler_by_original_sampler) samplers;
          {
             const std::unique_lock lock_samplers(s_mutex_samplers);
-            ASSERT_ONCE(device_data.custom_sampler_by_original_sampler.empty()); // These should have been cleared already ("OnDestroySampler()")
             samplers = std::move(device_data.custom_sampler_by_original_sampler);
             device_data.custom_sampler_by_original_sampler.clear();
          }
@@ -2756,6 +2753,7 @@ namespace
       Display::NVAPI::DeInit();
 #endif
 
+      device_data.destroyed = true;
       device->destroy_private_data<DeviceData>();
    }
 
@@ -4665,6 +4663,9 @@ namespace
          return;
 
       std::vector<reshade::api::resource_view> replaced_rtvs;
+      // Keep the selected views alive across later lookups and the native bind.
+      std::array<com_ptr<ID3D11RenderTargetView>, D3D11_SIMULTANEOUS_RENDER_TARGET_COUNT> retained_rtvs;
+      com_ptr<ID3D11DepthStencilView> retained_dsv;
       bool any_replaced = false;
 
       CommandListData& cmd_list_data = *cmd_list->get_private_data<CommandListData>();
@@ -4689,6 +4690,7 @@ namespace
                   any_replaced = true;
                }
 
+               retained_rtvs[i] = reinterpret_cast<ID3D11RenderTargetView*>(replaced_rtv);
                replaced_rtvs[i] = {replaced_rtv};
 
                cmd_list_data.ps_rtvs_state[i] = CommandListData::ViewState::SetAndUpgraded;
@@ -4707,6 +4709,7 @@ namespace
          // Usually not needed (yet?) but won't hurt
          if (FindOrCreateIndirectUpgradedResourceView(cmd_list->get_device(), dsv.handle, dsv.handle, device_data, enable_chain_indirect_texture_format_upgrades >= ChainTextureFormatUpgradesType::DirectDependencies, reshade::api::resource_usage::depth_stencil, lock_device_read))
          {
+            retained_dsv = reinterpret_cast<ID3D11DepthStencilView*>(dsv.handle);
             cmd_list_data.ps_dsvs_state[0] = CommandListData::ViewState::SetAndUpgraded;
             cmd_list_data.any_upgraded_ps_dsvs = true;
             any_replaced = true;
@@ -7281,7 +7284,7 @@ namespace
       SKIP_UNSUPPORTED_DEVICE_API(device->get_api());
 
       DeviceData& device_data = *device->get_private_data<DeviceData>();
-      if (&device_data == nullptr)
+      if (&device_data == nullptr || device_data.destroyed)
          return;
       // This only seems to happen when the game shuts down in Prey (as any destroy callback, it can be called from an arbitrary thread, but that's fine).
       // We don't need to check the custom samplers within the map even if they might be the same object, because they are strong pointers and thus wouldn't get destroyed if they were non null.
@@ -7974,6 +7977,8 @@ namespace
 
          reshade::api::descriptor_table_update replaced_update = update;
          std::vector<reshade::api::resource_view> replaced_descriptors;
+         // Keep mirrors alive across lookups that may release the device lock and until the bind takes its own references.
+         std::vector<com_ptr<ID3D11View>> retained_descriptor_views;
          bool any_replaced = false;
          bool any_upgraded = false;
 
@@ -8047,6 +8052,7 @@ namespace
                      replaced_rvs = (reshade::api::resource_view*)replaced_update.descriptors;
                   }
 
+                  retained_descriptor_views.emplace_back(reinterpret_cast<ID3D11View*>(replaced_rv));
                   replaced_rvs[i].handle = replaced_rv;
                }
 
@@ -8512,9 +8518,10 @@ namespace
       auto original_resource_view_to_mirrored_upgraded_resource_view = device_data.resource_upgrades.original_resource_views_to_mirrored_upgraded_resource_views.find(dsv.handle);
       if (!ignore_indirect_upgraded_textures && original_resource_view_to_mirrored_upgraded_resource_view != device_data.resource_upgrades.original_resource_views_to_mirrored_upgraded_resource_views.end())
       {
-         const auto original_resource_view_to_mirrored_upgraded_resource_view_ptr = original_resource_view_to_mirrored_upgraded_resource_view->second;
+         const uint64_t mirrored_handle = original_resource_view_to_mirrored_upgraded_resource_view->second;
+         com_ptr<ID3D11DepthStencilView> mirrored_view = reinterpret_cast<ID3D11DepthStencilView*>(mirrored_handle);
          lock.unlock(); // Avoids deadlock with the device
-         cmd_list->clear_depth_stencil_view({ original_resource_view_to_mirrored_upgraded_resource_view_ptr }, depth, stencil, rect_count, rects);
+         cmd_list->clear_depth_stencil_view({ mirrored_handle }, depth, stencil, rect_count, rects);
          return true;
       }
 
@@ -8534,9 +8541,10 @@ namespace
       auto original_resource_view_to_mirrored_upgraded_resource_view = device_data.resource_upgrades.original_resource_views_to_mirrored_upgraded_resource_views.find(rtv.handle);
       if (!ignore_indirect_upgraded_textures && original_resource_view_to_mirrored_upgraded_resource_view != device_data.resource_upgrades.original_resource_views_to_mirrored_upgraded_resource_views.end())
       {
-         const auto original_resource_view_to_mirrored_upgraded_resource_view_ptr = original_resource_view_to_mirrored_upgraded_resource_view->second;
+         const uint64_t mirrored_handle = original_resource_view_to_mirrored_upgraded_resource_view->second;
+         com_ptr<ID3D11RenderTargetView> mirrored_view = reinterpret_cast<ID3D11RenderTargetView*>(mirrored_handle);
          lock.unlock(); // Avoids deadlock with the device
-         cmd_list->clear_render_target_view({ original_resource_view_to_mirrored_upgraded_resource_view_ptr }, color, rect_count, rects);
+         cmd_list->clear_render_target_view({ mirrored_handle }, color, rect_count, rects);
          return true;
       }
 
@@ -8556,12 +8564,12 @@ namespace
       auto original_resource_view_to_mirrored_upgraded_resource_view = device_data.resource_upgrades.original_resource_views_to_mirrored_upgraded_resource_views.find(uav.handle);
       if (!ignore_indirect_upgraded_textures && original_resource_view_to_mirrored_upgraded_resource_view != device_data.resource_upgrades.original_resource_views_to_mirrored_upgraded_resource_views.end())
       {
-         const auto original_resource_view_to_mirrored_upgraded_resource_view_ptr = original_resource_view_to_mirrored_upgraded_resource_view->second;
+         const uint64_t mirrored_handle = original_resource_view_to_mirrored_upgraded_resource_view->second;
+         com_ptr<ID3D11UnorderedAccessView> mirrored_view = reinterpret_cast<ID3D11UnorderedAccessView*>(mirrored_handle);
          lock.unlock(); // Avoids deadlock with the device
 #if DEVELOPMENT
-         ID3D11UnorderedAccessView* uav = (ID3D11UnorderedAccessView*)original_resource_view_to_mirrored_upgraded_resource_view_ptr;
          D3D11_UNORDERED_ACCESS_VIEW_DESC desc;
-         uav->GetDesc(&desc);
+         mirrored_view->GetDesc(&desc);
          ASSERT_ONCE(!IsIntFormat(desc.Format)); // UNORM/SNORM/SFLOAT/UFLOAT formats are all support with the UAV clear float functions, only INT/UINT formats are not
 #endif
          // Use the float clearing function as all upgraded textures are float for the moment
@@ -8570,7 +8578,7 @@ namespace
          upgraded_values[1] = values[1];
          upgraded_values[2] = values[2];
          upgraded_values[3] = values[3];
-         cmd_list->clear_unordered_access_view_float({ original_resource_view_to_mirrored_upgraded_resource_view_ptr }, upgraded_values, rect_count, rects);
+         cmd_list->clear_unordered_access_view_float({ mirrored_handle }, upgraded_values, rect_count, rects);
          return true;
       }
 
@@ -8590,9 +8598,10 @@ namespace
       auto original_resource_view_to_mirrored_upgraded_resource_view = device_data.resource_upgrades.original_resource_views_to_mirrored_upgraded_resource_views.find(uav.handle);
       if (!ignore_indirect_upgraded_textures && original_resource_view_to_mirrored_upgraded_resource_view != device_data.resource_upgrades.original_resource_views_to_mirrored_upgraded_resource_views.end())
       {
-         const auto original_resource_view_to_mirrored_upgraded_resource_view_ptr = original_resource_view_to_mirrored_upgraded_resource_view->second;
+         const uint64_t mirrored_handle = original_resource_view_to_mirrored_upgraded_resource_view->second;
+         com_ptr<ID3D11UnorderedAccessView> mirrored_view = reinterpret_cast<ID3D11UnorderedAccessView*>(mirrored_handle);
          lock.unlock(); // Avoids deadlock with the device
-         cmd_list->clear_unordered_access_view_float({ original_resource_view_to_mirrored_upgraded_resource_view_ptr }, values, rect_count, rects);
+         cmd_list->clear_unordered_access_view_float({ mirrored_handle }, values, rect_count, rects);
          return true;
       }
 
@@ -9180,17 +9189,12 @@ namespace
          thread_auto_dumping = std::thread(AutoDumpShaders);
       }
 
-      s_mutex_loading.lock_shared();
-      // Load new shaders
-      // We avoid running this if "thread_auto_compiling" is still running from boot.
-      // Note that this thread doesn't really need to be by "device", but we did so to make it simpler, to automatically handle the "CreateDeviceNativeShaders()" shaders.
 #if (LUMA_PATCH_PROVIDERS & (LUMA_PATCH_PROVIDER_BYTECODE_ASYNC | LUMA_PATCH_PROVIDER_RECIPE_ASYNC))
-      // Publish completed clones at the present boundary — the live clone map
-      // never mutates mid-frame (see worker lifecycle: OnInitDevice).
+      // Publish at the present boundary. Publishing takes s_mutex_generic and
+      // does not read custom_shaders_cache. Shader loading takes s_mutex_generic
+      // before s_mutex_loading, so holding s_mutex_loading here can deadlock.
       Patch::PublishReadyAsyncClones(device_data);
 #endif
-
-      s_mutex_loading.unlock_shared();
 
       if (needs_unload_shaders)
       {
