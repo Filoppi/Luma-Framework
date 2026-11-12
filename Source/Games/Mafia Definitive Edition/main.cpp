@@ -34,13 +34,9 @@
 //     stored in UV space, so it must be scaled by the render resolution.
 //   - Jitter: the TAA pass' PS constant buffer slot 0, floats 32/33, already in pixel space
 //     (-0.5..0.5, quantised to an 8 phase Halton sequence). No NDC conversion, no sign flip.
-//   - The motion vectors *contain* the per frame jitter delta: the engine bakes the jitter into
-//     the projection matrices and the resolve shader does "prevUV = curUV + MV" with no jitter term
-//     at all (see sr_mvs_jittered for the disassembly). So the correct "MVJittered" declaration is
-//     ON - but the shipping default is OFF, because with DLSS 310.9.x ON comes out softer and noisier
-//     while OFF matches the game's own TAA in sharpness at the cost of some edge aliasing. Both
-//     sides of that trade are measured and written up at "sr_mvs_jittered"; do not flip it back
-//     from the disassembly alone, and do not assume OFF is a bug.
+//   - DLAA always gets the game's motion vectors and jitter offsets. The player build leaves
+//     NGX motion-vector de-jittering off: the checked opaque chain has near-zero static motion,
+//     and the accepted K path uses this setting. Development can compare both modes.
 //   - The resolve runs TWICE per frame, for different parts of the image (the same shader hash
 //     both times; Mafia III's mod documents the same thing with "this happens 3 times"). The
 //     second call covers the character / skin / transparency layer. If it is left to run, the
@@ -107,6 +103,8 @@
 // UseLumaNGX is enabled in the .vcxproj, so the DLSS/DLAA code paths are compiled in.
 
 #include "..\..\Core\core.hpp"
+#include "hdr_proxy.h"
+#include "lighting_history.h"
 #include "taa_inputs.h"
 
 #include <fstream>
@@ -136,11 +134,13 @@ ShaderHashesList shader_hashes_DepthOfField;
 // tell which from this mod's own log is to have the number here.
 static HMODULE g_own_module = nullptr;
 
-// The persisted value of the MVJittered declaration. It needs a global because LoadConfigs() runs
-// on the Game object, before any device data exists, while the setting itself lives in the per
-// device data ("sr_mvs_jittered", which carries the long explanation). OnCreateDevice() copies it
-// across. The panel writes both so the two never drift.
-static int g_mvs_jittered_ini = 0; // 0 = OFF, which is also the shipping default when the key is absent
+static constexpr unsigned int k_mafia_dlss_preset = 11; // K
+static constexpr unsigned int m_mafia_dlss_preset = 13; // M, the previous default
+
+#if DEVELOPMENT
+// Only the Development build honours the saved motion-vector de-jittering override.
+static int g_mvs_jittered_ini = 0;
+#endif
 
 // Fill the pass hash lists during static initialisation rather than in Game::OnInit.
 // Game::OnInit() *is* called (core.hpp:16137), but it runs on a provider thread and its ordering
@@ -543,6 +543,12 @@ static const char* DepthFuncName(D3D11_COMPARISON_FUNC func)
 
 struct MafiaDefinitiveEditionGameDeviceData final : public GameDeviceData
 {
+   MafiaDE::HdrProxy hdr_proxy;
+   MafiaDE::HdrProxyPath hdr_proxy_path;
+   bool hdr_proxy_active = false; // The path used by the last successful SR evaluation.
+   uint32_t hdr_proxy_failures = 0;
+   bool sr_drawn_last_frame = false;
+
    // The scene depth, captured from the position fill pass. Only a target that passes
    // IsUsableMainDepth is ever stored, and a rejected candidate never overwrites a good one, so
    // this always holds the last *valid* main depth (the game reuses the same texture every frame).
@@ -711,7 +717,7 @@ struct MafiaDefinitiveEditionGameDeviceData final : public GameDeviceData
    float sharpen_amount_cached = -1.f;
    // RCAS on top of the SR output, like Mafia III's mod does. It used to be a load bearing part of
    // this mod (default 0.35) because DLAA looked noticeably softer than the game's TAA - but that
-   // softness turned out to be mostly the wrong motion vector declaration (see sr_mvs_jittered):
+   // the image became sharper with motion-vector jitter compensation off:
    // with the MVJittered flag off the base image got visibly sharp, and sharpening it further only
    // re-adds the noise that DLAA is already criticised for. So the default is now 0, which skips
    // the pass entirely (DrawSharpen returns before creating anything).
@@ -767,42 +773,12 @@ struct MafiaDefinitiveEditionGameDeviceData final : public GameDeviceData
    // Reading UV space vectors as pixel space shrinks the perceived motion by a factor of 3840,
    // which makes DLSS see essentially random motion: that was the source of the heavy noise.
    int sr_mv_scale_by_resolution = 1; // 1 = multiply by render resolution (Mafia III behaviour)
-   // Default OFF. READ THIS BEFORE CHANGING IT BACK, BECAUSE THE CODE AND THE
-   // FACTS DISAGREE ON PURPOSE HERE.
-   //
-   // What the data says (and it is not in doubt): the engine bakes the jitter into the projection
-   // matrices, so the motion vectors it produces already contain the per frame jitter delta, which
-   // means the *correct* declaration is ON. Proof, from the disassembly of the resolve itself
-   // (0x37B05605.ps_5_0.cso.asm, dumped with D3DDisassemble):
-   //   sample_indexable(texture2d) r0.xyzw, v1.xyxx, t2.xyzw, s0   // r0.xy = motion vector
-   //   add r1.xyzw, r0.xyxy, v1.xyxy                                // prevUV = curUV + MV, nothing else
-   // and the shader never reads cb0[8], i.e. the jitter floats we read and hand to DLSS - there is
-   // no jitter correction term anywhere in it. For the game's own TAA to be exact (it is: with SR
-   // off the image has almost no noise) the delta has to be inside the MVs.
-   //
-   // Why the default is OFF anyway: with DLSS 310.9.x the flag no longer behaves the way the DLSS 3
-   // era reasoning above assumes. Measured in game, repeatedly, on the same scenes:
-   //   OFF -> visibly sharper, and *less* noise than ON (not more, as an earlier A/B against an
-   //          older DLSS recorded), reflective/transparent content unchanged, more aliasing on
-   //          high contrast edges (taxi roof, reflective trim against the sky).
-   //   ON  -> softer overall, the bright sky and sunlit ground speckle and flicker more.
-   // Measured against "none" mode (the game's own TAA, i.e. no DLSS at all) as the reference for
-   // correctness, OFF is the closer match in sharpness; the aliasing it trades for is the price.
-   //
-   // Rule of thumb for why OFF is not "broken": the offset it introduces is bounded by the jitter
-   // amplitude, at most 0.5 px per axis, so DLSS's history clamp absorbs it as *reduced temporal
-   // accumulation* (sharper, noisier structure, more aliasing) rather than as a reprojection to the
-   // wrong content. It does not smear: ghosting needs the filter to trust its history MORE, and OFF
-   // makes it trust it less. If ghosting ever does appear, look at the MV scale and sign first
-   // (sr_mv_scale_by_resolution below), not at this flag - toggling that one produces ghosting an
-   // order of magnitude worse and is the fastest way to see what real ghosting looks like here.
-   //
-   // It stays a user facing toggle, and the panel shows the current state: anyone who prefers the
-   // correct declaration and accepts the softness can flip it back in one click.
-   //
-   // NOTE: this only changes the *declaration*; the jitter we feed (jitter_px, from cb0 32/33) is
-   // unchanged and still has to be the offset the game really applied.
+#if DEVELOPMENT
+   // Declaring jittered MVs makes NGX subtract the supplied jitter from the vectors. Motion
+   // vectors, their UV-to-pixel scale and the actual jitter offsets are submitted either way.
+   // Older M comparisons traded sharper, less noisy detail for some extra edge aliasing.
    int sr_mvs_jittered = 0;
+#endif
 
    int aa_seen = 0;       // how often the resolve was hooked (lifetime)
    int aa_this_frame = 0; // how often it was hooked in the current frame
@@ -901,6 +877,10 @@ public:
       // Our own RCAS sharpening pass, drawn right after the SR output.
       native_shaders_definitions.emplace(CompileTimeStringHash("MafiaDE Sharpen PS"),
          ShaderDefinition{"Luma_MafiaDE_Sharpen", reshade::api::pipeline_subobject_type::pixel_shader, nullptr, "sharpen_ps"});
+      native_shaders_definitions.emplace(CompileTimeStringHash("MafiaDE HDR Proxy Encode"),
+         ShaderDefinition{"Luma_MafiaDE_HDRProxyEncode", reshade::api::pipeline_subobject_type::compute_shader});
+      native_shaders_definitions.emplace(CompileTimeStringHash("MafiaDE HDR Proxy Decode"),
+         ShaderDefinition{"Luma_MafiaDE_HDRProxyDecode", reshade::api::pipeline_subobject_type::compute_shader});
 
       GetShaderDefineData(POST_PROCESS_SPACE_TYPE_HASH).SetDefaultValue('0');
       GetShaderDefineData(EARLY_DISPLAY_ENCODING_HASH).SetDefaultValue('0');
@@ -915,10 +895,52 @@ public:
       default_luma_global_game_settings.GameSetting02 = cb_luma_global_settings.GameSettings.GameSetting02 = 33;
    }
 
+   std::unique_ptr<std::byte[]> PatchShaderBytecodeSync(const std::byte* code, size_t& size,
+      reshade::api::pipeline_subobject_type type, uint64_t shader_hash,
+      const std::byte* shader_object, size_t shader_object_size) override
+   {
+      if (type != reshade::api::pipeline_subobject_type::compute_shader) return nullptr;
+      if (shader_hash == 0xE967D545u) return MafiaDE::PatchReflectionHistoryCap(code, size);
+      if (shader_hash == 0x2991B691u) return MafiaDE::PatchDiffuseHistoryCap(code, size);
+      return nullptr;
+   }
+
+   DrawOrDispatchOverrideType OnDrawOrDispatchCustomPipeline(ID3D11DeviceContext* native_device_context,
+      CommandListData& cmd_list_data, DeviceData& device_data,
+      const ShaderHashesList<OneShaderPerPipeline>& original_shader_hashes,
+      std::function<void()>* original_draw_dispatch_func) override
+   {
+      const auto compute = reshade::api::shader_stage::compute;
+      if ((cmd_list_data.custom_compute_pipeline.patch_stages & compute) == 0)
+         return DrawOrDispatchOverrideType::None;
+      const bool diffuse = original_shader_hashes.Contains(0x2991B691u, compute);
+      if (!diffuse && !original_shader_hashes.Contains(0xE967D545u, compute))
+         return DrawOrDispatchOverrideType::None;
+
+      // Lighting precedes the resolve. Use the original caps unless K DLAA actually drew
+      // on the previous frame, and validate the bindings because a shader can serve other passes.
+      bool use_patch = dlss_render_preset == k_mafia_dlss_preset && device_data.sr_type == SR::Type::DLSS && !device_data.sr_suppressed && GetGameDeviceData(device_data).sr_drawn_last_frame;
+      if (use_patch)
+      {
+         com_ptr<ID3D11ShaderResourceView> history_view, motion_view;
+         native_device_context->CSGetShaderResources(diffuse ? 6 : 8, 1, &history_view);
+         native_device_context->CSGetShaderResources(diffuse ? 7 : 11, 1, &motion_view);
+         com_ptr<ID3D11Resource> history, motion;
+         const UINT width = static_cast<UINT>(device_data.render_resolution.x + .5f);
+         const UINT height = static_cast<UINT>(device_data.render_resolution.y + .5f);
+         use_patch = MafiaDE::ReadResolveInput(history_view.get(), width, height, false, history) && MafiaDE::ReadResolveInput(motion_view.get(), width, height, true, motion);
+      }
+      Shader::UsePipelineVariant(cmd_list_data, native_device_context, compute,
+         use_patch ? Shader::PipelineVariant::Custom : Shader::PipelineVariant::Original);
+      return DrawOrDispatchOverrideType::None;
+   }
+
    void OnCreateDevice(ID3D11Device* native_device, DeviceData& device_data) override
    {
       auto* gd = new MafiaDefinitiveEditionGameDeviceData;
-      gd->sr_mvs_jittered = g_mvs_jittered_ini; // the ini value LoadConfigs() already read
+#if DEVELOPMENT
+      gd->sr_mvs_jittered = g_mvs_jittered_ini;
+#endif
       device_data.game = gd;
    }
 
@@ -1988,15 +2010,45 @@ public:
          return DrawOrDispatchOverrideType::None;
       }
 
+      D3D11_SHADER_RESOURCE_VIEW_DESC colour_view_desc = {};
+      srvs[slot]->GetDesc(&colour_view_desc);
+      const bool proxy_requested = device_data.sr_type == SR::Type::DLSS && dlss_render_preset == k_mafia_dlss_preset && game_device_data.sr_hdr != 0;
+      const bool was_mixed = game_device_data.hdr_proxy_path.mixed_formats;
+      const bool hdr_proxy = game_device_data.hdr_proxy_path.Select(proxy_requested, colour_view_desc.Format, output_desc.Format);
+      if (!was_mixed && game_device_data.hdr_proxy_path.mixed_formats)
+         Probe::Line(std::format("[SR colour] frame={} using original HDR until resolve gap ({} -> {})",
+            Probe::s_frame, static_cast<int>(colour_view_desc.Format), static_cast<int>(output_desc.Format)));
+
+      const auto proxy_decode = device_data.native_compute_shaders.find(CompileTimeStringHash("MafiaDE HDR Proxy Decode"));
+      if (hdr_proxy)
+      {
+         const auto encode = device_data.native_compute_shaders.find(CompileTimeStringHash("MafiaDE HDR Proxy Encode"));
+         HRESULT hr = E_FAIL;
+         if (game_device_data.main_depth && encode != device_data.native_compute_shaders.end() && proxy_decode != device_data.native_compute_shaders.end())
+            hr = game_device_data.hdr_proxy.Prepare(native_device, native_device_context,
+               srvs[slot].get(), render_width, render_height, output_desc.Format, encode->second.get());
+         if (FAILED(hr))
+         {
+            device_data.force_reset_sr = true;
+            if (++game_device_data.hdr_proxy_failures <= 3 || Probe::s_frame % 300 == 0)
+               Probe::Line(std::format("[SR colour] frame={} proxy prepare failed HRESULT=0x{:08X}, using game AA",
+                  Probe::s_frame, static_cast<unsigned int>(hr)));
+            return DrawOrDispatchOverrideType::None;
+         }
+      }
+      if (hdr_proxy != game_device_data.hdr_proxy_active) device_data.force_reset_sr = true;
+
       SR::SettingsData settings_data;
       settings_data.output_width = static_cast<unsigned int>(device_data.output_resolution.x + 0.5f);
       settings_data.output_height = static_cast<unsigned int>(device_data.output_resolution.y + 0.5f);
       settings_data.render_width = static_cast<unsigned int>(device_data.render_resolution.x + 0.5f);
       settings_data.render_height = static_cast<unsigned int>(device_data.render_resolution.y + 0.5f);
-      settings_data.hdr = game_device_data.sr_hdr != 0;
+      settings_data.hdr = game_device_data.sr_hdr != 0 && !hdr_proxy;
       settings_data.inverted_depth = game_device_data.sr_inverted_depth != 0;
+#if DEVELOPMENT
       settings_data.mvs_jittered = game_device_data.sr_mvs_jittered != 0;
-      settings_data.auto_exposure = game_device_data.sr_auto_exposure != 0;
+#endif
+      settings_data.auto_exposure = game_device_data.sr_auto_exposure != 0 && !hdr_proxy;
       const float mv_sign = game_device_data.mv_scale_sign > 0 ? 1.f : -1.f;
       settings_data.mvs_x_scale = (game_device_data.sr_mv_scale_by_resolution ? device_data.render_resolution.x : 1.f) * mv_sign;
       settings_data.mvs_y_scale = (game_device_data.sr_mv_scale_by_resolution ? device_data.render_resolution.y : 1.f) * mv_sign;
@@ -2017,7 +2069,7 @@ public:
       // (observed bind flags 0xA8), so normally we can use it directly.
       com_ptr<ID3D11Resource> dlss_output = output_color;
       const bool output_has_uav = (output_desc.BindFlags & D3D11_BIND_UNORDERED_ACCESS) != 0;
-      if (!output_has_uav)
+      if (!output_has_uav && !hdr_proxy)
       {
          D3D11_TEXTURE2D_DESC desc = output_desc;
          desc.BindFlags |= D3D11_BIND_UNORDERED_ACCESS;
@@ -2035,6 +2087,14 @@ public:
 
       // Keep the validated MV resource alive through Draw; missing motion falls back to TAA.
       draw_data.motion_vectors = motion_vectors.get();
+      if (hdr_proxy)
+      {
+         // NGX sees bounded colour in explicit UNORM textures. The SDK uses unit exposure scale.
+         // Decode the reconstruction back into the game's HDR target before its output chain.
+         draw_data.source_color = game_device_data.hdr_proxy.input.get();
+         draw_data.output_color = game_device_data.hdr_proxy.output.get();
+         draw_data.pre_exposure = 1.f;
+      }
 
       // No valid main depth has been seen yet (a scene that never runs the position fill pass, or
       // the very first frames): DLSS/DLAA cannot reproject without it, so leave the game's own AA
@@ -2102,10 +2162,18 @@ public:
       draw_data.jitter_y = jitter_value.y * jitter_sign;
       draw_data.reset = device_data.force_reset_sr;
 
-      const bool draw_ok = sr_implementation->Draw(sr_instance_data, native_device_context, draw_data);
-
-      D3D11_SHADER_RESOURCE_VIEW_DESC colour_view_desc = {};
-      srvs[slot]->GetDesc(&colour_view_desc);
+      bool draw_ok = sr_implementation->Draw(sr_instance_data, native_device_context, draw_data);
+      if (draw_ok && hdr_proxy)
+      {
+         const HRESULT hr = game_device_data.hdr_proxy.Decode(native_device, native_device_context, proxy_decode->second.get());
+         if (FAILED(hr))
+         {
+            draw_ok = false;
+            if (++game_device_data.hdr_proxy_failures <= 3 || Probe::s_frame % 300 == 0)
+               Probe::Line(std::format("[SR colour] frame={} proxy decode failed HRESULT=0x{:08X}, using game AA",
+                  Probe::s_frame, static_cast<unsigned int>(hr)));
+         }
+      }
       const uint32_t colour_format_bit = colour_view_desc.Format == DXGI_FORMAT_R11G11B10_FLOAT ? 1u : 2u;
       if (game_device_data.logged_each[resolve_index] == 0 || (game_device_data.logged_colour_formats[resolve_index] & colour_format_bit) == 0 || ((game_device_data.logged_draw_ok[resolve_index] != draw_ok || draw_data.reset) && Probe::s_frame - game_device_data.last_sr_log_frame[resolve_index] >= 60))
       {
@@ -2156,13 +2224,16 @@ public:
 
       // A reset is consumed only by a successful evaluation. Failed settings/draws must not lose it.
       device_data.force_reset_sr = false;
+      game_device_data.hdr_proxy_active = hdr_proxy;
       if (draw_data.reset) ++game_device_data.sr_resets;
       ++game_device_data.dlss_drawn;
       device_data.has_drawn_sr = true;
       device_data.taa_detected = true;
 
       // The game's AA draw never ran, so nothing wrote the render target: push our result in.
-      if (!output_has_uav)
+      if (hdr_proxy)
+         native_device_context->CopyResource(output_color.get(), game_device_data.hdr_proxy.decoded.get());
+      else if (!output_has_uav)
       {
          native_device_context->CopyResource(output_color.get(), dlss_output.get());
       }
@@ -2229,6 +2300,7 @@ public:
       // function). Without this the very first DLSS draw latches the flag and every later frame
       // skips the hook - we measured "resolve hooked 3962x, DLSS drawn 1x".
       const bool sr_drawn_this_frame = device_data.has_drawn_sr;
+      game_device_data.sr_drawn_last_frame = sr_drawn_this_frame;
       const int resolves_this_frame = game_device_data.aa_this_frame;
       // A resolve can run while its inputs/settings are rejected. That is a history gap too,
       // even though aa_this_frame is nonzero; reset once when DLAA next succeeds.
@@ -2236,6 +2308,8 @@ public:
       device_data.has_drawn_sr = false;
       if (game_device_data.aa_this_frame == 0)
       {
+         // Rejected resolves reset history without reopening the bounded path.
+         game_device_data.hdr_proxy_path.Reset();
          device_data.taa_detected = false;
       }
       // The world was drawn but no resolve ran, i.e. the game's Anti-Aliasing is not on Low. Counted
@@ -2300,61 +2374,27 @@ public:
       float sharpen_scale_cfg = 1.f;
       reshade::get_config_value(runtime, NAME, "GameSharpenScale", sharpen_scale_cfg);
       game_sharpen_scale = (std::clamp)(sharpen_scale_cfg, 0.f, 2.f);
-      // The one setting the panel exposes that the ini has to remember, because the measured best
-      // answer for it contradicts the technically correct one. See "sr_mvs_jittered".
-      int mvs_jittered_cfg = 0; // shipping default is OFF, so an absent key means OFF too
+#if DEVELOPMENT
+      int mvs_jittered_cfg = 0;
       reshade::get_config_value(runtime, NAME, "MVsJittered", mvs_jittered_cfg);
       g_mvs_jittered_ini = mvs_jittered_cfg != 0 ? 1 : 0;
-      // DLSS render preset. "Default" is an unknown by design and is the worst place to be with
-      // DLSS 310.9.x: it resolved to a model that mishandles reflective and transparent content in
-      // this game. Measured on this title, over a rainy night scene and sunlit ground at noon:
-      //
-      //   preset   sharpness   power draw   noise flicker   reflective / transparent correctness
-      //   E        lowest      lowest       lowest          not measured
-      //   F        lowest      lowest       lowest          not measured
-      //   J        high        low          lowest          WRONG
-      //   K        highest     low          lowest          WRONG
-      //   M        medium      very high    highest         CORRECT (matches the game's own TAA)
-      //   L        high        highest      highest         not measured
-      //
-      // Reflective correctness is a separate axis from noise, and it is the one that decides this.
-      // Measured on the same rainy night scene, against "none" mode (the game's own TAA, i.e. the
-      // ground truth with no DLSS involved at all):
-      //
-      //   K: the neon behind the wet window is far too weak, its chroma is wrong, and the glow
-      //      around the neon edges is missing entirely - emissive/transparent energy is being lost.
-      //      mvs_jittered=OFF recovers a little chroma but it stays wrong.
-      //   M: brightness and chroma both match "none" closely. Only sharpness is behind, and
-      //      mvs_jittered=OFF makes it sharper than ON.
-      //
-      // That makes K unusable no matter how sharp or how quiet it is: losing an emissive layer is a
-      // content error, and no post process can put it back, while M's softness is exactly the kind
-      // of problem a sharpening pass can. So M is the default despite being the noisiest and one of
-      // the most expensive presets - correctness first.
-      //
-      // The core's own tooltip for J/K ("issues with reflections and transparent effects /
-      // volumetrics") is CORRECT and is exactly what was measured. An earlier version of this
-      // comment claimed the opposite because the neon's *brightness* and three *noise* readings had
-      // been lumped into one score. Do not "fix" this back.
-      //
-      // Open: L is the only candidate left for "correct AND sharp", and E/F for "correct and cheap"
-      // (their reflection behaviour is unmeasured). Recorded in
-      // REPORT.md §6.1.
-      //
-      // Only a default is overridden. A preset the user picked explicitly is never touched.
-      if (dlss_render_preset == 0)
+#endif
+      // The bounded colour path restores K's highlights in Mafia DE. M was previously
+      // pinned on startup, so migrate saved M once and honour deliberate later selections.
+      bool migrated_to_k = false;
+      reshade::get_config_value(runtime, NAME, "MafiaPresetKMigrated", migrated_to_k);
+      const bool using_default = dlss_render_preset == 0;
+      const bool migrate_old_m = !migrated_to_k && dlss_render_preset == m_mafia_dlss_preset;
+      if (using_default || migrate_old_m)
       {
-         dlss_render_preset = 13; // NVSDK_NGX_DLSS_Hint_Render_Preset_M
+         dlss_render_preset = k_mafia_dlss_preset;
          reshade::set_config_value(runtime, NAME, "DLSSRenderPreset", static_cast<int>(dlss_render_preset));
-         Probe::Line("[preset] DLSS render preset was Default, pinned to M. M is the only measured preset "
-                     "whose emissive/transparent layers (neon behind a wet window) match the game's own TAA; "
-                     "K/J are sharper and quieter but lose that layer entirely. See "
-                     "REPORT.md §6.1");
       }
-      else
-      {
-         Probe::Line(std::format("[preset] DLSS render preset = {} (kept, the user picked it)", dlss_render_preset));
-      }
+      if (!migrated_to_k)
+         reshade::set_config_value(runtime, NAME, "MafiaPresetKMigrated", true);
+      Probe::Line(std::format("[preset] DLSS render preset = {} ({})", dlss_render_preset,
+         using_default ? "Mafia DE default" : migrate_old_m ? "migrated old M"
+                                                            : "kept configuration"));
    }
 
    void DrawImGuiSettings(DeviceData& device_data) override
@@ -2398,6 +2438,13 @@ public:
          }
       }
       ImGui::Text("DLSS: %s", dlss_state);
+      if (device_data.sr_type == SR::Type::DLSS)
+      {
+         ImGui::TextWrapped("Mafia DE: K is recommended. With this mod it retains neon detail and was clearer than the game's TAA in testing. "
+                            "M remains an alternative and cost more to run in our DLAA tests.");
+         ImGui::TextWrapped("If NVIDIA App forces M for Mafia DE, open DLSS Override - Model Presets and set Super Resolution to "
+                            "Use the 3D application setting. The driver can override the preset Luma requests.");
+      }
 
       // Whether DLSS is actually *drawing* is a separate question from whether it is selected: a draw
       // can fail (the source slots or formats were not what DLSS accepts) and the mod then falls back
@@ -2458,21 +2505,6 @@ public:
       {
          game_device_data.sharpen_amount = 0.f;
       }
-      // The MVJittered declaration, exposed because it is the one setting where the measured best
-      // answer contradicts the technically correct one (see the long comment on "sr_mvs_jittered").
-      // Shipping default is OFF: sharper and less noisy with DLSS 310.9.x, at the cost of a little
-      // more edge aliasing. ON is the declaration the game's data says is right, and it comes out
-      // softer and noisier. Either is defensible, so the user picks, and it is persisted.
-      ImGui::Text("Motion vectors declared jittered: %s",
-         game_device_data.sr_mvs_jittered ? "ON  (correct declaration, softer, noisier)"
-                                          : "OFF (sharper, less noise, slightly more aliasing)");
-      if (ImGui::Button(game_device_data.sr_mvs_jittered ? "  Set OFF (shipping default)" : "  Set ON (technically correct)"))
-      {
-         game_device_data.sr_mvs_jittered = !game_device_data.sr_mvs_jittered;
-         g_mvs_jittered_ini = game_device_data.sr_mvs_jittered;
-         reshade::set_config_value(nullptr, NAME, "MVsJittered", game_device_data.sr_mvs_jittered);
-      }
-
       // The game's own post-tonemap sharpener is NOT exposed: the pass it lives in (0x747C6210) was
       // measured to never run during gameplay - the probe log never contains a single "[sharpen]"
       // line, and the pass prints on its first four draws - so scaling it does nothing at all. The
@@ -2591,15 +2623,15 @@ public:
       {
          game_device_data.sr_mv_scale_by_resolution = !game_device_data.sr_mv_scale_by_resolution;
       }
-      // (The MVJittered toggle used to live here. It is now in the shipping part of the panel,
-      // because it is a user facing choice rather than a development experiment - see the comment
-      // next to "sr_mvs_jittered".)
-      ImGui::Text("MVs jittered: %s (switch it in the panel section above)", game_device_data.sr_mvs_jittered ? "ON" : "OFF");
-      ImGui::SameLine();
-      // The MVJittered flag is a correctness declaration, not a quality setting: it tells DLSS the
-      // motion vectors already carry the sub pixel jitter. The disassembly settles it for this game
-      // (the resolve does "prevUV = curUV + MV" and never reads the jitter floats), so it stays on.
-      //
+      ImGui::Text("DLSS motion-vector jitter compensation: %s", game_device_data.sr_mvs_jittered ? "ON" : "OFF");
+      if (ImGui::Button(game_device_data.sr_mvs_jittered ? "Set MV jitter compensation OFF" : "Set MV jitter compensation ON"))
+      {
+         game_device_data.sr_mvs_jittered = !game_device_data.sr_mvs_jittered;
+         g_mvs_jittered_ini = game_device_data.sr_mvs_jittered;
+         reshade::set_config_value(nullptr, NAME, "MVsJittered", game_device_data.sr_mvs_jittered);
+      }
+      ImGui::TextUnformatted("Both settings still submit the game's motion vectors and jitter offsets.");
+
       // What the jitter *timing* is, is a separate question and the open one. Reading the resolve's
       // cb0[32]/[33] may hand us the NEXT frame's offset, because the engine builds next frame's
       // projection matrices before drawing this frame. When that is what happens, DLSS reprojects
