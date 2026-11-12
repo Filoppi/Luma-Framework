@@ -1,7 +1,12 @@
-// Shared ME1LE/ME2LE stage-1 body for twelve LUT-graded permutations, selected by TM_HAS_MOTIONBLUR, TM_HAS_GRAIN,
-// TM_HAS_FILMIC and the ME1LE vignette overrides. ME1LE has no filmic axis; with the axes fixed the two games'
-// non-filmic paths are identical, verified bit-exact against the ME1LE bytecode. The analytic shaders 0xAAE8755A
-// (ME1LE) and 0xCC76075F (ME2LE) use the shared analytic body instead.
+// ME1LE/ME2LE stage-1 tonemap, twelve LUT-graded permutations. Their hashes are listed in main.cpp ("redirected_shader_hashes")
+// and each one selects its axes below. ME1LE has no filmic axis; with the axes fixed the two games' non-filmic paths are
+// identical, verified bit-exact against the ME1LE bytecode. The analytic shaders 0xAAE8755A (ME1LE) and 0xCC76075F (ME2LE)
+// live in "TonemapAnalytic_..." instead.
+//   TM_HAS_MOTIONBLUR  the motion blur taps: 0 = none, 1 = velocity blur
+//   TM_HAS_GRAIN       the film grain noise texture: 0 = none, 1 = grain
+//   TM_HAS_FILMIC      the filmic LUT: 0 = none, 1 = filmic and color-grade LUTs (ME2LE only)
+//   ME1LE (0x109F3B6E 0x151FE4CA 0x69F03340 0x8C8E8CA2): power-100 vignette with a weaker blue floor, no filmic LUT
+//   ME2LE: the other eight, default vignette
 //   ME2LE: 0x2754F750 = MB         0x1536C5B5 = MB + grain      0x940979D8 = MB + filmic
 //          0x75BFAFBC = MB + grain + filmic
 //          0xD077D06B = (bare LUT) 0x8E0C0DBB = grain           0x222186F8 = filmic
@@ -11,27 +16,41 @@
 //
 // Non-filmic grading is transcribed from 0x2754F750 and filmic grading from 0x222186F8; their register-level
 // swizzles differ, are each internally rotation-consistent, and must be preserved. The body emits linear
-// gradedHDR and native gamma sdrGamma for the shared DICE/output tail.
+// gradedHDR and native gamma sdrGamma for the shared output tail.
+
+#if _2754F750 || _1536C5B5 || _940979D8 || _75BFAFBC || _151FE4CA || _69F03340
+#define TM_HAS_MOTIONBLUR 1
+#else
+#define TM_HAS_MOTIONBLUR 0
+#endif
+
+#if _1536C5B5 || _75BFAFBC || _8E0C0DBB || _EC890842 || _151FE4CA || _109F3B6E
+#define TM_HAS_GRAIN 1
+#else
+#define TM_HAS_GRAIN 0
+#endif
+
+#if _222186F8 || _75BFAFBC || _940979D8 || _EC890842
+#define TM_HAS_FILMIC 1
+#else
+#define TM_HAS_FILMIC 0
+#endif
+
+#if _109F3B6E || _151FE4CA || _69F03340 || _8C8E8CA2
+#define TM_VIG_POW   100.0
+#define TM_VIG_FLOOR kMELE_ME1LEVignetteFloor
+#endif
 
 // clang-format off
 #include "Includes/Common.hlsl"      // Defines game settings; keep first.
 #include "../Includes/Color.hlsl"    // Transfer and color helpers.
-#include "../Includes/DICE.hlsl"     // Display-peak tonemap.
 #include "../Includes/Reinhard.hlsl" // ReinhardRange, used by the grade proxy.
 #include "Includes/Tonemap_MELE_HDRConfig.hlsli"   // HDR reconstruction constants.
 #include "Includes/Tonemap_MELE_ExpExtended.hlsli" // Continued scene curve and its validated work input.
 #include "Includes/Tonemap_MELE_HDRBridge.hlsli"   // Max-channel grade proxy; needs Reinhard above.
+#include "../Includes/CInfinityRolloff.hlsl" // Display-peak rolloff, for the shared output tail.
+#include "../Includes/MacLeodBoynton.hlsl"   // Highlights Desaturation, for the shared output tail.
 // clang-format on
-
-#ifndef TM_HAS_MOTIONBLUR
-#define TM_HAS_MOTIONBLUR 1
-#endif
-#ifndef TM_HAS_GRAIN
-#define TM_HAS_GRAIN 1
-#endif
-#ifndef TM_HAS_FILMIC
-#define TM_HAS_FILMIC 0
-#endif
 
 // Decompiler artifact kept so the verbatim transcription compiles unchanged.
 #define cmp -
@@ -161,8 +180,8 @@ SamplerState smpFilmicLUTSampler_s : register(S_FILMIC);
 #endif
 
 // Native ME1LE/ME2LE SDR grade transcribed from live CSOs. main() runs it once on the untouched native value in every
-// Display Mode and, in HDR, once more on the grade proxy; HDR keeps the native result's RGB ratios and takes only
-// luminance from the reconstruction. Preserve register-level swizzles; the filmic 1D LUT stays inline in main().
+// Display Mode and, in HDR, once more on the grade proxy (see "MELE_NativeColorGradedHDR"). Preserve register-level
+// swizzles; the filmic 1D LUT stays inline in main().
 float3 MELE_ME12LE_GradeChain(float3 c)
 {
    float4 r0, r1, r2;
@@ -298,15 +317,11 @@ void main(
    r1.xyz = r1.xyz * LumaSettings.GameSettings.Exposure;
 
 #if TM_HAS_FILMIC
-   // Filmic path from 0x222186F8: bloom, exponential curve, then per-channel 4096x1 LUT. DELIBERATE DEVIATION: the
-   // screen-blend weight reads the luma of the LINEAR scene, where the native CSO reads it after the curve (always 1
-   // at the measured threshold). Bright pixels therefore lose their bloom; that keeps highlight detail and colour in
-   // HDR, and the families were calibrated with it. Restoring the native weight was A/B'd in game and rejected; do not
-   // change the weight or its input without an in-game A/B (see Shaders/Mass Effect Legendary Edition/AGENTS.md).
+   // Filmic path from 0x222186F8: bloom, exponential curve, then per-channel 4096x1 LUT. The bloom weight deliberately
+   // reads the linear scene, see "MELE_BloomScreenBlend".
    r0.xyz = MELE_BloomScreenBlend(r0.xy, r1.xyz, r0.w);
 
-   // Kept separate on purpose: the game evaluates L(F(C) + B), so C and B must not be summed before the
-   // pre-curve.
+   // The game evaluates L(F(C) + B), so C and B must not be summed before the pre-curve.
    const float3 sceneLinear = r1.xyz;
    const float3 bloomLinear = r0.xyz * r0.www;
 
@@ -325,11 +340,10 @@ void main(
    // r1.xyz keeps the native post-filmic value, which reaches the 16-slice LUT untouched as this branch's SDR result.
 #else
    // Non-filmic path from 0x2754F750: bloom, exponential curve, highlight desaturation, adjustments, then LUT.
-   // DELIBERATE DEVIATION: the screen-blend weight reads the LINEAR RGB scene through r1.yzx, i.e. in GBR order (native
-   // reads the curved BRG scene, where .yzx restores RGB), so bright pixels lose their bloom, with a hue-dependent
-   // threshold. Keeps highlight detail and colour in HDR; the families were calibrated with it, and the native weight
-   // and an RGB-order linear weight were both A/B'd in game and rejected. Do not change the weight, its input or its
-   // channel order without an in-game A/B (see Shaders/Mass Effect Legendary Edition/AGENTS.md).
+   // The screen-blend weight deliberately reads the linear RGB scene through r1.yzx, so in GBR order (native reads the
+   // curved BRG scene, where .yzx restores RGB), and bright pixels lose their bloom at a hue-dependent threshold. As in
+   // "MELE_BloomScreenBlend", the native weight and also an RGB-order linear weight were rejected in in-game A/Bs, so
+   // don't change the weight, its input or its channel order without one.
    r0.xyz = BlurredImageSeperateBloom.Sample(BlurredImageSeperateBloomSampler_s, r0.xy).xyz * LumaSettings.GameSettings.BloomIntensity;
    r0.xyz = BloomTintAndScreenBlendThreshold.zxy * r0.zxy;
    r0.w = dot(r1.yzx, float3(0.298999995, 0.587000012, 0.114));
@@ -360,8 +374,8 @@ void main(
       float3 workRGB;
       bool sourceValid = MELE_TryExpExtendedInput(sceneLinear, bloomLinear, workRGB);
 #if TM_HAS_FILMIC
-      // workRGB, the continued scene plus bloom, is the filmic LUT's input z. The native filmic samples in r1 were
-      // written BRG, so they are rotated to RGB here.
+      // workRGB, the continued scene plus bloom, is the filmic LUT's input z. The native samples in r1 are BRG,
+      // rotated to RGB here.
       const float3 z = workRGB;
       if (sourceValid)
       {
@@ -369,7 +383,7 @@ void main(
       }
 #endif
       // The bridge drives the real grade and 16-slice LUT, whose chain is transcribed BRG-in / RGB-out in both
-      // branches, so the proxy is rotated into it. r is read from the frame's own cbuffer, never assumed to be 1.
+      // branches, so the proxy is rotated into it.
       float q;
       float3 proxyRGB;
       if (sourceValid && MELE_TryBuildGradeProxy(workRGB, GammaColorScaleAndInverse.w * DefaultGamma, q, proxyRGB))
@@ -378,7 +392,6 @@ void main(
       }
    }
 
-   // Use one native grade function for both the working value and SDR reference. Filmic feeds r1; non-filmic r0.
 #if TM_HAS_FILMIC
    float3 sdrGamma = MELE_ME12LE_GradeChain(r1.xyz);
 #else
