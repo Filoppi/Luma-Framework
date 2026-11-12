@@ -4,33 +4,23 @@
 #include "../../Includes/ACES.hlsl"  // BT709 <-> AP1 matrices for the gamut clamp.
 #include "../../Includes/Oklab.hlsl" // Same include root as this folder's Common.hlsl, not the body's.
 
-// Hue-only transfer for family 05, adapted from renodx::color::correct::HueOKLab
-// (renodx/src/shaders/colorcorrect.hlsl) with RenoDX's AP1-positive clamp
-// (renodx/src/shaders/color/clamp.hlsl) rebuilt on Luma's own ACES matrices. MELE_IsFinite comes from
-// Includes/Common.hlsl.
+// Hue-only transfer for family 05, adapted from RenoDX's "renodx::color::correct::HueOKLab"
+// (renodx/src/shaders/colorcorrect.hlsl), with its AP1-positive clamp (renodx/src/shaders/color/clamp.hlsl)
+// rebuilt on Luma's own ACES matrices. Needs "Includes/Common.hlsl" for "MELE_IsFinite".
 //
-// WHAT MOVES AND WHAT DOES NOT. Only the direction of the OKLab (a, b) vector is allowed to travel
-// toward the reference. The target keeps its perceptual lightness L and the magnitude of its own
-// chroma, so the reference sets no brightness, no saturation and no range - it is a hue donor and
-// nothing else. Describing this as restoring the vanilla SDR colour would be wrong.
+// Only the direction of the OKLab (a, b) vector moves toward the reference. The target keeps its OKLab
+// lightness and OKLab chroma, so the reference is a hue donor, not a restoration of the vanilla SDR colour.
+// Renormalizing to the target's own chroma also bounds the operation, so it can't amplify anything. When the
+// blended vector is at or near zero (a neutral donor at strength 1, or a donor ab that cancels the target's),
+// exactly zero comes out achromatic (safeDivision returns 1) and round-off is scaled up to the target's chroma
+// in an arbitrary direction. That is deliberate, see "MELE_HARDCLIP_HUE_STRENGTH".
 //
-// The rescale back to the target's chroma is what makes that true, and it also bounds the operation:
-// the blended vector is always renormalized to a length the target already had, so this cannot
-// amplify anything. The degenerate case is a blended vector at or near zero - a neutral donor at
-// strength 1, or a donor ab that cancels the target's: exactly zero comes out achromatic (safeDivision
-// returns 1), and round-off is scaled up to the target's chroma in an arbitrary direction. That is left
-// as it is deliberately; a donor-chroma threshold would be a new artistic rule, and the shipped strength
-// is below 1 precisely so a neutral donor still leaves a direction to keep (MELE_HARDCLIP_HUE_STRENGTH).
+// Like RenoDX we clamp to positive AP1, which is wider than BT.709, so a negative BT.709 component out of this
+// is ordinary wide-gamut colour. Rejecting the whole triple there would produce a visible switching boundary,
+// so the only fallback is for arithmetic that actually broke. The C-infinity rolloff in the shared output tail
+// stays the only display mapper.
 //
-// GAMUT. RenoDX clamps to positive AP1 and converts back, which is wider than BT.709: a negative
-// BT.709 component coming out of this is ordinary wide-gamut colour and is NOT a reason to abandon
-// the correction - a whole-triple rejection there would produce a visible switching boundary. The only
-// fallback here is for arithmetic that actually broke.
-//
-// DICE, further down the shared output tail, stays the one and only display mapper.
-//
-// The OKLab locals stay snake_case where the rest of this game's HDR code is camelCase: this is a line-by-line port,
-// and keeping the source's snake_case keeps the two diffable, as Shaders/Includes/ACES.hlsl and Reinhard.hlsl do.
+// The OKLab locals keep the source's snake_case so this line-by-line port stays diffable with it.
 float3 MELE_HueReferenceOKLab(float3 target, float3 reference, float strength)
 {
    float3 target_lab = Oklab::linear_srgb_to_oklab(target);

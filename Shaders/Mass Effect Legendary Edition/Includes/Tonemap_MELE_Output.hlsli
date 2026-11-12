@@ -1,33 +1,35 @@
 // Shared stage-1 output tail, included inside each main() after it defines gradedHDR, sdrGamma, v0, v1, o0, o1.
-// The bodies already decode sdrGamma for gradedHDR (MELE_NativeColorGradedHDR, or 0x225A8330's hue donor), but this
-// tail decodes it again on purpose: consuming that decode reschedules the vanilla curve on 0x2754F750 and 0x69F03340
-// in Publishing, turning r0*w + (1 - e) into (r0*w - e) + 1 at the same instruction count. Float32 addition is not
-// associative and that line is native transcription, so the duplicate decode stays (measured).
-// Includer macros, all defaulting to off: TM_VIGNETTE_TYPE (0 none, 1 radial power, 3 ME3LE smoothstep), TM_HAS_GRAIN,
-// TM_ALPHA_LUMA (native ME3LE output luma to alpha).
+// The bodies already decode sdrGamma for gradedHDR, but this tail decodes it again on purpose: consuming that decode
+// reschedules the vanilla curve on 0x2754F750 and 0x69F03340 in Publishing, turning r0*w + (1 - e) into
+// (r0*w - e) + 1 at the same instruction count. Float32 addition is not associative and that line is native
+// transcription, so the duplicate decode stays (measured). fxc still picks either form per permutation from unrelated
+// code (the exposure metering moved some ME1LE/ME2LE ones): at most 1 ULP, and only a "precise" on the curve would pin
+// it, which spreads to the whole expression.
+
+// 0 none, 1 radial power, 3 ME3LE smoothstep.
 #ifndef TM_VIGNETTE_TYPE
 #define TM_VIGNETTE_TYPE 0
 #endif
+
+// fxc flags the early return of "MacLeodBoynton::SolvePurity()" as an uninitialized result (X4000). It comes at code
+// generation, so it stays off for the whole shader; here, last, because "ColorGradingLUT.hlsl" turns it back on.
+#pragma warning(disable : 4000)
 #ifndef TM_HAS_GRAIN
 #define TM_HAS_GRAIN 0
 #endif
+// Write the native ME3LE output luma to alpha.
 #ifndef TM_ALPHA_LUMA
 #define TM_ALPHA_LUMA 0
 #endif
 
-// A unit conversion, not an application of Game Paper White: the HDR branch below multiplies into
-// absolute-nit ratios for DICE and divides straight back out. The two passes that actually apply this
-// scale to an outgoing frame are Output_0x0765601C and Video_0x7B5C59DF, and this is not a third.
-const float paperWhite = MELE_GetGamePaperWhiteScale();
-const float peakWhite = LumaSettings.PeakWhiteNits / sRGB_WhiteLevelNits;
-
 float3 sdrLinear = gamma_to_linear(sdrGamma, GCT_MIRROR);
 
-// Native vignette, hoisted ahead of the tonemap and expressed in linear so DICE absorbs its blue-tinted white
+// Native vignette, moved ahead of the tonemap and applied in linear so the display map absorbs its blue-tinted white
 // point instead of the frame leaving stage 1 above Scene Peak. linear_to_gamma is a signed pure pow, so this is
-// exactly the vanilla multiply in the encoded domain. Grain and dither stay in gamma below, where hoisting would
+// exactly the vanilla multiply in the encoded domain. Grain and dither stay in gamma below, where moving them would
 // amplify shadow noise.
 float3 vigLinear = 1.0;
+float3 vigGamma = 1.0; // The native gamma-domain multiplier, for the exposure metering below.
 #if TM_VIGNETTE_TYPE == 1
 // The slider scales only radial darkening, so zero intensity does not alter the native white point tint.
 {
@@ -40,6 +42,7 @@ float3 vigLinear = 1.0;
    const float3 whitePoint = TM_VIG_FLOOR + 1.0; // Floor plus center value.
    float3 vig = TM_VIG_FLOOR + vd;
    vig = whitePoint * lerp(1.0, vig / whitePoint, LumaSettings.GameSettings.VignetteIntensity);
+   vigGamma = vig;
    vigLinear = gamma_to_linear(vig, GCT_MIRROR);
 }
 #elif TM_VIGNETTE_TYPE == 3
@@ -53,6 +56,7 @@ float3 vigLinear = 1.0;
    float vs = (3.0 - 2.0 * vd) * vd * vd; // smoothstep(0, 1, vd).
    const float3 whitePoint = float3(1.01036298, 1.00000572, 1.16309249);
    float3 vig = whitePoint - vs * LumaSettings.GameSettings.VignetteIntensity;
+   vigGamma = vig;
    vigLinear = gamma_to_linear(vig, GCT_MIRROR);
 }
 #endif
@@ -60,34 +64,34 @@ float3 vigLinear = 1.0;
 float3 postProcessedColor;
 if (LumaSettings.DisplayMode == 1) // HDR
 {
-   // gradedHDR arrives as Game-Paper-White-relative linear HDR; DICE owns peak rolloff and gamut from here.
-   float3 vignettedHDR = gradedHDR * vigLinear;
-
-   // User contrast BEFORE the display map so DICE contains whatever it pushes up: after the rolloff the slider
-   // would escape the Scene Peak it just established, and nothing downstream re-contains it. Multiplicative
-   // around mid-gray (0.18, Game-Paper-White-relative), the repo's form (RenoDX_Contrast). [branch] on a cbuffer
-   // uniform: at the 1.0 default this is a bit-exact no-op. The pow is spelled out with a floored log2 so
-   // Contrast 0 on a black pixel is 0 * log2(1e-30) = 0 rather than pow(0, 0) = NaN.
-   [branch] if (LumaSettings.GameSettings.Contrast != 1.0)
+   // gradedHDR is Game Paper White relative linear BT.709. Its peak is Scene Peak over Game Paper White, a unit
+   // conversion; Game Paper White itself is applied by "Output_0x0765601C" and "Video_0x7B5C59DF". Grain, dither and
+   // RCAS can still push the result ~2% past Scene Peak, which we accept.
+   postProcessedColor = gradedHDR * vigLinear;
+   // Highlights Desaturation: only the whitening (MacLeod-Boynton chrominance) of a per-channel Reinhard (ceiling 5, shoulder
+   // 1.5: identity below it), as MGR:R and Mirror's Edge; the hue stays the native grade's. Skipped below the shoulder.
+   const float3 color2020 = BT709_To_BT2020(postProcessedColor);
+   [branch] if (LumaSettings.GameSettings.HighlightDechroma > 0.0 && max3(color2020) > 1.5)
    {
-      const float midGray = 0.18;
-      vignettedHDR = exp2(LumaSettings.GameSettings.Contrast * log2(max(vignettedHDR / midGray, 1e-30))) * midGray;
+      postProcessedColor = BT2020_To_BT709(MacLeodBoynton::HueAndPurityEmulationBT2020(color2020, Reinhard::ReinhardPiecewise(color2020, 5.0, 1.5),
+                                                                                       0.0, LumaSettings.GameSettings.HighlightDechroma));
    }
-
-   // DICE works in absolute-nit ratios, so its cap lands at Scene Peak White (PeakWhiteNits). Type 2 also runs
-   // CorrectOutOfRangeColor. Grain, dither, and RCAS can still push the result ~2% past Scene Peak; accepted.
-   DICESettings settings = DefaultDICESettings(DICE_TYPE_BY_LUMINANCE_PQ_CORRECT_CHANNELS_BEYOND_PEAK_WHITE);
-   // Highlight dechroma handed to DICE rather than run as our own pass afterwards, so it runs INSIDE the containment
-   // in the processing primaries. DICE ramps it on the compressed MAX CHANNEL from ShoulderStart * PeakWhite (1/3 of
-   // peak for this type, so mid-tones cannot be touched) to peak, but only enters that block once the channel
-   // AVERAGE passes the same shoulder: a saturated highlight below it is not desaturated, and a non-zero setting
-   // switches on with a step where the average crosses. That gate is shared DICE.hlsl code. 0 = off for the OUTPUT
-   // but not the cost: DICE's guard carries no [branch], so fxc flattens it for every pixel above the shoulder.
-   settings.HighlightsDesaturation = LumaSettings.GameSettings.HighlightDechroma;
-   postProcessedColor = DICETonemap(vignettedHDR * paperWhite, peakWhite, settings) / paperWhite; // Game-Paper-White-relative.
-
-   // User saturation LAST, after the display map, in Game-Paper-White-relative linear RGB; 1.0 is a no-op.
-   postProcessedColor = Saturation(postProcessedColor, LumaSettings.GameSettings.Saturation);
+   // Contrast (a power of relative luminance around mid gray) and a chrominance scale around relative luminance,
+   // applied here as the rolloff doesn't take them.
+   const float contrast = LumaSettings.GameSettings.Contrast;
+   [branch] if (contrast != 1.0)
+   {
+      postProcessedColor *= pow(max(GetLuminance(postProcessedColor, CS_BT709), FLT_MIN) / MidGray, contrast - 1.0);
+   }
+   const float saturationScale = LumaSettings.GameSettings.Saturation;
+   [branch] if (saturationScale != 1.0)
+   {
+      postProcessedColor = Saturation(postProcessedColor, saturationScale, CS_BT709);
+   }
+   // Max-channel C-infinity rolloff to the peak (MGR:R, Mirror's Edge), which keeps RGB ratios. The peak can't go below
+   // paper white (the rolloff needs it above its 0.18 anchor).
+   const float paperWhite = max(GamePaperWhiteNits, 1.0);
+   postProcessedColor = Tonemap::CInfinityRollOff::MaxChannel(postProcessedColor, max(PeakWhiteNits, paperWhite) / paperWhite, 0.18, 1.0); // Game-Paper-White-relative.
 }
 else // SDR still uses the scRGB swapchain; sdrLinear is the exact native grade.
 {
@@ -96,6 +100,8 @@ else // SDR still uses the scRGB swapchain; sdrLinear is the exact native grade.
 }
 
 postProcessedColor = IsNaN_Strict(postProcessedColor) ? 0.0 : postProcessedColor;
+// Stage 1 owns the non-negative floor: no negative RGB may reach the gamma HUD or the swapchain, so wide-gamut
+// (negative BT.709) components the hue transfer kept end here.
 postProcessedColor = max(0.0, postProcessedColor);
 
 // Encode gamma(scene / R), R = UI Paper White / Game Paper White. The native gamma HUD blends before stage 2
@@ -103,26 +109,28 @@ postProcessedColor = max(0.0, postProcessedColor);
 const float uiPaperWhiteRelativeToGame = MELE_GetUIPaperWhiteRelativeToGame();
 o0.xyz = linear_to_gamma(postProcessedColor / max(uiPaperWhiteRelativeToGame, 1e-4), GCT_MIRROR);
 
+float grain = 0.0;
 #if TM_HAS_GRAIN
 // Native film grain stays in gamma after encoding, as vanilla did, scaled by the user control.
 {
    float2 nuv = v0.zw * NoiseTextureOffset.xy + NoiseTextureOffset.zw;
    float n = NoiseTexture.Sample(NoiseTextureSampler_s, nuv).x;
-   n = (n - 0.5) * FilmGrain_Scale * LumaSettings.GameSettings.FilmGrainIntensity;
-   o0.xyz = o0.xyz + n;
+   grain = (n - 0.5) * FilmGrain_Scale * LumaSettings.GameSettings.FilmGrainIntensity;
+   o0.xyz = o0.xyz + grain;
 }
 #endif
 
 o0.xyz = max(0.0, o0.xyz); // Grain may make shadows negative; retain HDR headroom above 1.
 
 // linear_to_gamma is a pure pow, so dividing by R in linear equals dividing by gamma(R) in the encoded domain.
-// Used by the metering below and by the native SDR clamp at the end of this tail.
+// Used by the native SDR clamp at the end of this tail.
 const float rEncoded = linear_to_gamma1(uiPaperWhiteRelativeToGame, GCT_MIRROR);
 
-// Native eye adaptation meters the final gamma scene after vignette, grain, and SDR clamp, HUD not yet present.
-// Cancelling transport with gamma(x / R) * gamma(R) = gamma(x) keeps both Paper White controls out of exposure.
+// Native eye adaptation meters the vanilla final gamma scene: the native SDR grade times the gamma vignette, plus
+// grain, clamped as vanilla's mov_sat did, HUD not yet present. Built from the native result, not from o0, so the HDR
+// reconstruction, the display map and both Paper White controls stay out of exposure in every Display Mode.
 {
-   float3 metered = saturate(o0.xyz * rEncoded);
+   float3 metered = saturate(sdrGamma * vigGamma + grain);
    float adaptLuma = dot(metered, float3(0.212670997, 0.715160012, 0.0721689984));
    o1 = 0.25 * log2(adaptLuma * 15 + 1);
 }
@@ -130,15 +138,7 @@ const float rEncoded = linear_to_gamma1(uiPaperWhiteRelativeToGame, GCT_MIRROR);
 // Anti-banding dither, one step of the output quantizer: 8-bit in SDR, 10-bit BT.2020 PQ in HDR and SDR on HDR.
 if (LumaSettings.GameSettings.Dithering > 0.5)
 {
-   if (LumaSettings.DisplayMode == 0)
-      ApplyDithering(o0.xyz, v1.xy, true, 1.0, 8u, LumaSettings.FrameIndex, true);
-   else
-   {
-      const float pqScale = max(LumaSettings.UIPaperWhiteNits, 1.0) / HDR10_MaxWhiteNits;
-      float3 pq = Linear_to_PQ(BT709_To_BT2020(gamma_to_linear(o0.xyz, GCT_MIRROR) * pqScale), GCT_MIRROR);
-      ApplyDithering(pq, v1.xy, true, 1.0, 10u, LumaSettings.FrameIndex, true);
-      o0.xyz = linear_to_gamma(BT2020_To_BT709(PQ_to_Linear(pq, GCT_MIRROR)) / pqScale, GCT_MIRROR);
-   }
+   ApplyOutputDithering(o0.xyz, v1.xy, true, LumaSettings.DisplayMode != 0, LumaSettings.UIPaperWhiteNits);
 }
 
 #if TM_ALPHA_LUMA
@@ -148,9 +148,9 @@ o0.w = 0;
 #endif
 
 // Vanilla ended stage 1 with mov_sat into an 8-bit UNORM target, so the gamma HUD always composited against a
-// value capped at white; the Luma intermediate is fp16, so the cap must be explicit. Applied last, after the
-// alpha dot product, to keep vanilla's clamp position, and in the transport-normalized domain so neither Paper
-// White control moves it. HDR keeps its headroom.
+// value capped at white; our intermediate is fp16, so the cap must be explicit. It's applied last, after the alpha
+// dot product, to keep vanilla's clamp position, and in the transport-normalized domain so neither Paper White
+// control moves it. HDR keeps its headroom.
 if (LumaSettings.DisplayMode != 1)
 {
    o0.xyz = min(o0.xyz, 1.0 / max(rEncoded, 1e-4));

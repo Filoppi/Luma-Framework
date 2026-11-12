@@ -9,7 +9,6 @@
 // clang-format off
 #include "Includes/Common.hlsl"
 #include "../Includes/Color.hlsl"
-#include "../Includes/DICE.hlsl"
 #include "../Includes/Reinhard.hlsl" // ReinhardRange, used by the grade proxy.
 #include "Includes/Tonemap_MELE_HDRConfig.hlsli"   // HDR reconstruction constants.
 #include "Includes/Tonemap_MELE_HDRBridge.hlsli"   // Max-channel grade proxy; needs Reinhard above.
@@ -81,6 +80,8 @@ float3 MELE_ME3LEAnalytic_GradeChain(float3 c)
 // Included here, not with the headers: MELE_CompositeDOF reads the _Globals fields and DOF textures declared above.
 #include "Includes/Tonemap_MELE_Scene.hlsli"
 
+#include "../Includes/CInfinityRolloff.hlsl" // Display-peak rolloff, for the shared output tail.
+#include "../Includes/MacLeodBoynton.hlsl"   // Highlights Desaturation, for the shared output tail.
 #include "Includes/Tonemap_MELE_HueReference.hlsli"
 
 void main(
@@ -110,15 +111,14 @@ void main(
 
    float3 untonemapped = r0.xyz * r0.www + r1.xyz;
    r0.xyz = untonemapped;
-   // No tonemap curve here, so the raw scene reaches the grade and the saturate its grade opens with is this
-   // permutation's vanilla blowout. Family 05 answers that by preparing the grade input, so nothing here
-   // measures the clip.
+   // No tonemap curve here, so the raw scene reaches the grade and the saturate it opens with is this permutation's
+   // vanilla blowout.
    float3 workHDR = 0.0;
    bool workValid = false;
    if (LumaSettings.DisplayMode == 1)
    {
-      // Family 05. The grade chain is called unchanged, caps and all: this path earns its range by preparing
-      // the INPUT, not by stripping the grade. The blue white point and the black floor stay inside it.
+      // Family 05 calls the grade chain unchanged, caps included, and gets its range by preparing the input, not by
+      // measuring the clip or stripping the grade. The blue white point and the black floor stay inside it.
       float q;
       float3 proxy;
       if (MELE_TryBuildGradeProxy(untonemapped, GammaColorScaleAndInverse.w * DefaultGamma, q, proxy))
@@ -130,13 +130,12 @@ void main(
    float3 sdrGamma = MELE_ME3LEAnalytic_GradeChain(r0.xyz);
 
    // The exact native SDR result is the starting value and the only fallback, for the whole triple. The output tail
-   // decodes sdrGamma again on purpose; see Tonemap_MELE_Output.hlsli.
+   // decodes sdrGamma again on purpose, see "Tonemap_MELE_Output.hlsli".
    float3 gradedHDR = gamma_to_linear(sdrGamma, GCT_MIRROR);
    if (workValid)
    {
-      // The native hard-clipped result is ONLY a hue reference, following RenoDX hard-clip hue emulation; the working
-      // value keeps its own OKLab lightness and chroma magnitude. If the transfer breaks, MELE_HueReferenceOKLab
-      // returns its target untouched, so the reconstruction survives.
+      // The native hard-clipped result is only a hue reference, following RenoDX hard-clip hue emulation, see
+      // "MELE_HueReferenceOKLab". If the transfer breaks it returns its target untouched.
       gradedHDR = MELE_HueReferenceOKLab(workHDR, gradedHDR, MELE_HARDCLIP_HUE_STRENGTH);
    }
 

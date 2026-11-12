@@ -68,13 +68,15 @@ float3 MELE_CompositeDOF(float2 uv, float2 blurEnable, float3 scene)
    return r1.xyz;
 }
 
-// Bloom screen blend, straight-RGB form used by the ME2LE filmic, ME3LE, and analytic permutations. The weight reads
-// whatever scene the caller passes: ME3LE has no pre-curve, so its linear scene is the native input, while the
-// ME1LE/ME2LE callers pass the LINEAR scene where their native CSOs read it after the exponential curve - a
-// deliberate deviation documented at each call site. Tinted bloom and screen-blend weight come out separately because
-// their product is needed as a value of its own, not only folded into the native per-channel curve: families 02 and
-// 03 must keep the scene and the bloom apart, because the game adds the bloom between two tone stages. The ME1LE/ME2LE non-filmic path carries an internal
-// BRG rotation on these same operations and is deliberately not routed through here.
+// Bloom screen blend, straight-RGB form used by the ME2LE filmic, ME3LE and analytic permutations. The ME1LE/ME2LE
+// non-filmic path carries a BRG rotation on these operations and is deliberately not routed through here.
+// The weight reads the BT.601-weighted sum of whatever scene the caller passes. ME3LE has no pre-curve, so its linear
+// scene is the native input. The ME1LE/ME2LE callers deliberately pass the linear scene where their native CSOs read
+// it after the exponential curve (on 0x222186F8 that weight is always 1 at the measured threshold): bright pixels lose
+// their bloom, which keeps highlight detail and colour in HDR. The families were calibrated with it and the filmic
+// native weight was rejected in an in-game A/B, so don't change the weight or its input without one.
+// Tinted bloom and weight come out separately because families 02 and 03 need their product on its own: the game adds
+// the bloom between two tone stages.
 float3 MELE_BloomScreenBlend(float2 uv, float3 scene, out float weight)
 {
    float4 r0;
