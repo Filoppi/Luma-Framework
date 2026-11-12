@@ -897,7 +897,9 @@ public:
    }
 
    // Finds the view scaling percentage closest above "nominal_screen_percentage", and the matching unscaling percentage (HUD canvas),
-   // so that unscaling the truncated render size gives back exactly the output size on both axes (the engine truncates both ways)
+   // so that unscaling the truncated render size gives back exactly the output size on both axes (the engine truncates both ways).
+   // The render width is kept even: the engine lighting is checkerboarded (FTileShadingComputeShader shades every other pixel, FRecomposeComputeShader fills in the rest),
+   // and packs its two outputs side by side, the second one "int(view width * 0.5)" columns to the right, so with an odd width the last column of the first lands on the first of the second.
    static void FindScreenPercentages(uint32_t output_width, uint32_t output_height, float nominal_screen_percentage, float& screen_percentage, float& unscale_screen_percentage)
    {
       screen_percentage = nominal_screen_percentage;
@@ -911,6 +913,10 @@ public:
          const float candidate = nominal_screen_percentage + float(step) * 0.005f;
          const uint32_t render_width = ScaleSize(output_width, candidate);
          const uint32_t render_height = ScaleSize(output_height, candidate);
+         if (render_width % 2 != 0)
+         {
+            continue;
+         }
          // Valid unscaling scales are in (render / (output + 1), render / output] on each axis
          const double min_scale = std::max(double(render_width) / double(output_width + 1), double(render_height) / double(output_height + 1));
          const double max_scale = std::min(double(render_width) / double(output_width), double(render_height) / double(output_height));
