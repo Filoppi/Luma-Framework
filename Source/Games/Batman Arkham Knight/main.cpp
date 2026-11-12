@@ -56,6 +56,9 @@ namespace
    using PostGatherFunc = void(__fastcall*)(void* post_proxy, void* context, uint8_t* view, int levels);
    PostGatherFunc g_original_post_gather_func = nullptr;
    bool g_upscaling_supported = false;
+   // The engine velocities and jitter patches were all applied. Without them the game velocities are unusable for super resolution
+   // (no camera motion without motion blur, nothing while the camera is still) and the frame can't be jittered, so super resolution is unavailable (the game anti aliasing is kept).
+   bool g_engine_velocities_supported = false;
 
    // Written on the render thread, read on the game thread
    std::atomic<bool> g_jitter_enabled = false;
@@ -72,15 +75,19 @@ namespace
    float2 g_previous_frame_jitter_pixels = {}; // The jitter of the previous super resolution frame
    bool g_camera_velocity_rendered = false;
    bool g_camera_velocity_has_history = false;
+   bool g_sr_drawn_this_frame = false; // Super resolution replaced the game anti aliasing this frame (it doesn't run when that's off, or without a scene)
    std::atomic<bool> g_use_engine_exposure = true;
-   float4 g_reprojection_matrix[4] = {}; // Current jittered NDC + device depth to previous jittered clip space, for the camera velocity pass
+   // Current jittered NDC + device depth to previous jittered clip space, for the camera velocity pass.
+   // Identity (no motion) until the camera velocity hook provides it: our replaced shader runs even if the hook couldn't be installed.
+   float4 g_reprojection_matrix[4] = {{1.f, 0.f, 0.f, 0.f}, {0.f, 1.f, 0.f, 0.f}, {0.f, 0.f, 1.f, 0.f}, {0.f, 0.f, 0.f, 1.f}};
    double g_last_translated_view_projection[4][4] = {};
    double g_last_pre_view_translation[3] = {};
    uint32_t g_last_camera_velocity_frame_index = 0;
    bool g_has_last_camera_velocity = false;
    bool g_sr_upscaled_this_frame = false; // Super resolution upscaled the scene this frame, so the post processes need to switch to the output resolution
    float2 g_post_render_scale = {1.f, 1.f};
-   float4 g_camera_velocity_view_rect = {}; // Size (xy) and origin (zw) of the main view rect, for the camera velocity pass
+   // Size (xy) and origin (zw) of the main view rect, for the camera velocity pass. Never an empty size: our replaced shader divides by it even if the hook couldn't be installed.
+   float4 g_camera_velocity_view_rect = {1.f, 1.f, 0.f, 0.f};
 
    using ViewJitterFunc = void(__fastcall*)(uint8_t* view);
    using CameraVelocityFunc = void(__fastcall*)(void* renderer, uint8_t* view);
@@ -351,47 +358,52 @@ namespace
 
    // The engine only computes velocities (camera and objects) when motion blur is enabled, and skips the camera velocity pass when the camera barely moved.
    // These patches make it always compute them, while the motion blur effect itself still follows the user setting.
+   // All the patterns are found and both hooks are installed first, so either all the patches are applied or none of the velocity gates are touched
+   // (super resolution is unavailable then, as it would get no usable velocities or the wrong jitter).
    void PatchVelocityAndJitter()
    {
-      // Motion blur post process proxy creation: don't require the motion blur setting for "requires velocities" (je -> nop)
-      if (std::byte* match = FindUniquePattern("MotionBlurRequiresVelocities", "39 3D ?? ?? ?? ?? 74 1E 39 3D ?? ?? ?? ?? 75 16 39 3D ?? ?? ?? ?? 75 0E B8 01 00 00 00"))
+      std::byte* motion_blur_requires_velocities = FindUniquePattern("MotionBlurRequiresVelocities", "39 3D ?? ?? ?? ?? 74 1E 39 3D ?? ?? ?? ?? 75 16 39 3D ?? ?? ?? ?? 75 0E B8 01 00 00 00");
+      std::byte* velocity_stage_gate = FindUniquePattern("VelocityStageGate", "83 3D ?? ?? ?? ?? 00 49 8B D9 48 8B F2 0F 84 ?? ?? ?? ?? F7 41 28 00 04 00 00");
+      std::byte* velocity_stage_end_gate = FindUniquePattern("VelocityStageEndGate", "83 3D ?? ?? ?? ?? 00 49 8B F1 48 8B EA 48 8B F9 74 ?? F7 41 28 00 04 00 00");
+      std::byte* object_velocity_gate = FindUniquePattern("ObjectVelocityGate", "83 3D ?? ?? ?? ?? 00 74 ?? F7 43 28 00 04 00 00");
+      std::byte* camera_velocity_cut_gates = FindUniquePattern("CameraVelocityCutGates", "83 BB E4 3A 00 00 00 75 59 F7 83 00 08 00 00 00 02 00 00 75 4D 83 BB 0C 08 00 00 00 75 44 85 C0 75 40");
+      std::byte* camera_velocity_pass = FindUniquePattern("CameraVelocityPass", "E8 ?? ?? ?? ?? 85 C0 75 ?? 48 8B D3 48 8B CE E8 ?? ?? ?? ?? E9");
+      std::byte* view_jitter = FindUniquePattern("ViewJitter", "E8 ?? ?? ?? ?? 8B 05 ?? ?? ?? ?? 45 33 E4 89 87 38 05 00 00");
+      if (!motion_blur_requires_velocities || !velocity_stage_gate || !velocity_stage_end_gate || !object_velocity_gate || !camera_velocity_cut_gates || !camera_velocity_pass || !view_jitter)
       {
-         NopBytes(match + 6, 2);
+         return;
       }
-      // Velocity stage (camera velocity pass) motion blur setting check (je rel32 -> nop)
-      if (std::byte* match = FindUniquePattern("VelocityStageGate", "83 3D ?? ?? ?? ?? 00 49 8B D9 48 8B F2 0F 84 ?? ?? ?? ?? F7 41 28 00 04 00 00"))
+
+      // Camera velocity pass: hook the pass itself. Harmless on its own: the pass then gets the right reprojection matrix whenever the engine runs it.
+      g_original_camera_velocity_func = reinterpret_cast<CameraVelocityFunc>(RedirectCall(camera_velocity_pass + 15, reinterpret_cast<void*>(&HookedCameraVelocity)));
+      if (!g_original_camera_velocity_func)
       {
-         NopBytes(match + 13, 6);
-      }
-      // Velocity stage end motion blur setting check (je -> nop)
-      if (std::byte* match = FindUniquePattern("VelocityStageEndGate", "83 3D ?? ?? ?? ?? 00 49 8B F1 48 8B EA 48 8B F9 74 ?? F7 41 28 00 04 00 00"))
-      {
-         NopBytes(match + 16, 2);
-      }
-      // Base pass object velocity motion blur setting check (je -> nop)
-      if (std::byte* match = FindUniquePattern("ObjectVelocityGate", "83 3D ?? ?? ?? ?? 00 74 ?? F7 43 28 00 04 00 00"))
-      {
-         NopBytes(match + 7, 2);
-      }
-      // Camera velocity pass: also run it on camera cut frames (where it writes no motion), so the camera of those frames is known by the next one
-      // ("bPrevTransformsReset", "bInstantlySwitchPostProcessVolume" and "bCameraCut" checks, jne -> nop)
-      if (std::byte* match = FindUniquePattern("CameraVelocityCutGates", "83 BB E4 3A 00 00 00 75 59 F7 83 00 08 00 00 00 02 00 00 75 4D 83 BB 0C 08 00 00 00 75 44 85 C0 75 40"))
-      {
-         NopBytes(match + 7, 2);
-         NopBytes(match + 19, 2);
-         NopBytes(match + 28, 2);
-      }
-      // Camera velocity pass: skip the "camera didn't move enough" early out (jne -> nop) and hook the pass itself
-      if (std::byte* match = FindUniquePattern("CameraVelocityPass", "E8 ?? ?? ?? ?? 85 C0 75 ?? 48 8B D3 48 8B CE E8 ?? ?? ?? ?? E9"))
-      {
-         NopBytes(match + 7, 2);
-         g_original_camera_velocity_func = reinterpret_cast<CameraVelocityFunc>(RedirectCall(match + 15, reinterpret_cast<void*>(&HookedCameraVelocity)));
+         return;
       }
       // View init: hook the view jitter setup, to jitter the projection before all the other view matrices are derived from it
-      if (std::byte* match = FindUniquePattern("ViewJitter", "E8 ?? ?? ?? ?? 8B 05 ?? ?? ?? ?? 45 33 E4 89 87 38 05 00 00"))
+      g_original_view_jitter_func = reinterpret_cast<ViewJitterFunc>(RedirectCall(view_jitter, reinterpret_cast<void*>(&HookedViewJitter)));
+      if (!g_original_view_jitter_func)
       {
-         g_original_view_jitter_func = reinterpret_cast<ViewJitterFunc>(RedirectCall(match, reinterpret_cast<void*>(&HookedViewJitter)));
+         return;
       }
+
+      // Motion blur post process proxy creation: don't require the motion blur setting for "requires velocities" (je -> nop)
+      NopBytes(motion_blur_requires_velocities + 6, 2);
+      // Velocity stage (camera velocity pass) motion blur setting check (je rel32 -> nop)
+      NopBytes(velocity_stage_gate + 13, 6);
+      // Velocity stage end motion blur setting check (je -> nop)
+      NopBytes(velocity_stage_end_gate + 16, 2);
+      // Base pass object velocity motion blur setting check (je -> nop)
+      NopBytes(object_velocity_gate + 7, 2);
+      // Camera velocity pass: also run it on camera cut frames (where it writes no motion), so the camera of those frames is known by the next one
+      // ("bPrevTransformsReset", "bInstantlySwitchPostProcessVolume" and "bCameraCut" checks, jne -> nop)
+      NopBytes(camera_velocity_cut_gates + 7, 2);
+      NopBytes(camera_velocity_cut_gates + 19, 2);
+      NopBytes(camera_velocity_cut_gates + 28, 2);
+      // Camera velocity pass: skip the "camera didn't move enough" early out (jne -> nop)
+      NopBytes(camera_velocity_pass + 7, 2);
+
+      g_engine_velocities_supported = true;
    }
 
    // Render thread: the first post process after the anti aliasing (SMAA or our super resolution), in the Rocksteady post process proxy.
@@ -522,6 +534,12 @@ public:
       return *(GameDeviceDataBatmanArkhamKnight*)device_data.game;
    }
 
+   // Super resolution replaces the game anti aliasing (SMAA), it needs the engine velocities and jitter
+   static bool UsesSuperResolution(const DeviceData& device_data)
+   {
+      return device_data.sr_type != SR::Type::None && g_engine_velocities_supported;
+   }
+
    void OnLoad(std::filesystem::path& file_path, bool failed) override
    {
       if (!failed)
@@ -618,7 +636,7 @@ public:
 
       if (original_shader_hashes.Contains(shader_hashes_SMAAEdgeDetection))
       {
-         if (device_data.sr_type != SR::Type::None)
+         if (UsesSuperResolution(device_data))
          {
             // SRV1 should be the depth.
             ComPtr<ID3D11ShaderResourceView> srv_depth;
@@ -633,7 +651,7 @@ public:
 
       if (original_shader_hashes.Contains(shader_hashes_SMAABlendingWeightCalculation))
       {
-         if (device_data.sr_type != SR::Type::None)
+         if (UsesSuperResolution(device_data))
          {
             return DrawOrDispatchOverrideType::Skip;
          }
@@ -643,7 +661,7 @@ public:
 
       if (original_shader_hashes.Contains(shader_hashes_SMAANeighborhoodBlending))
       {
-         if (device_data.sr_type != SR::Type::None)
+         if (UsesSuperResolution(device_data))
          {
             // DLSS requires an immediate context for execution!
             ASSERT_ONCE(native_device_context->GetType() == D3D11_DEVICE_CONTEXT_IMMEDIATE);
@@ -705,6 +723,7 @@ public:
 
             sr_implementations[device_data.sr_type]->Draw(sr_instance_data, native_device_context, draw_data);
             g_previous_frame_jitter_pixels = g_frame_jitter_pixels;
+            g_sr_drawn_this_frame = true;
             // The post processes need to switch to the output resolution (done in the hook of the first one)
             g_sr_upscaled_this_frame = device_data.render_resolution.x < device_data.output_resolution.x || device_data.render_resolution.y < device_data.output_resolution.y;
 
@@ -911,8 +930,10 @@ public:
 
    void OnPresent(ID3D11Device* native_device, DeviceData& device_data) override
    {
-      const bool sr_active = device_data.sr_type != SR::Type::None && !device_data.sr_suppressed;
-      g_jitter_enabled.store(sr_active, std::memory_order_relaxed);
+      const bool sr_active = UsesSuperResolution(device_data) && !device_data.sr_suppressed;
+      // Only jitter while super resolution actually runs, nothing else resolves the jitter (the image would shake):
+      // it doesn't run when the game anti aliasing is off. It starts without jitter, which then follows from the next frame.
+      g_jitter_enabled.store(sr_active && g_sr_drawn_this_frame, std::memory_order_relaxed);
 
       const uint32_t output_width = uint32_t(device_data.output_resolution.x + 0.5f);
       const uint32_t output_height = uint32_t(device_data.output_resolution.y + 0.5f);
@@ -953,6 +974,7 @@ public:
       g_jitter_phases.store(std::max(uint32_t(SR::GetDefaultJitterPhases()), uint32_t(std::ceil(8.f * upscale_ratio * upscale_ratio))), std::memory_order_relaxed);
 
       g_camera_velocity_rendered = false;
+      g_sr_drawn_this_frame = false;
       g_sr_upscaled_this_frame = false;
       g_post_render_scale = float2{1.f, 1.f};
       g_frame_index++;
@@ -995,6 +1017,10 @@ public:
    void DrawImGuiSettings(DeviceData& device_data) override
    {
       reshade::api::effect_runtime* runtime = nullptr;
+      if (!g_engine_velocities_supported)
+      {
+         ImGui::TextWrapped("DLSS/FSR are not supported by this version of the game, the game's anti aliasing is used instead.");
+      }
       ImGui::BeginDisabled(!g_upscaling_supported);
       int sr_quality = g_sr_quality.load(std::memory_order_relaxed);
       if (ImGui::Combo("Super Resolution Quality", &sr_quality, sr_quality_names, sr_quality_count))
