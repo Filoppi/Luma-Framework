@@ -75,32 +75,30 @@ control in this mod, on purpose: the combo already owns that state, and a duplic
 writes to a variable nothing reads is exactly the kind of thing that makes a panel look functional
 while doing nothing.
 
-### 3.2 DLSS render preset — pin it, do not leave it on Default
+### 3.2 DLSS render preset — K recommended for Mafia DE
 
-**Use `M`.** This is not a taste call: it is the only preset measured to reproduce the game's
-emissive and transparent layers correctly. See §6.1 for the full table.
+Use **K**. The Mafia DE colour path in §4.6 restores neon to M-like brightness in the
+tested scene. The player reported clearer rain-covered window reflections than with the
+game's TAA. M remains an alternative with higher observed cost in this game's DLAA tests.
 
-The mod pins **`M`** automatically, but **only when the preset is still `Default`**. A preset you
-picked yourself is never overwritten.
+On startup, the mod resolves Default to K. The first startup with this update also migrates
+a saved M to K. Players can select M again afterward; other explicit presets are kept.
 
-Why it matters, in one line: with `K` and `J` the neon behind a rain-covered window is far too dim
-and loses its glow entirely; with `E` and `F` the chroma is right but the glow is still missing. Only
-`M` matches the game's own TAA, which is the ground truth here because it involves no DLSS at all.
+If NVIDIA App forces M for Mafia DE, set the game's **DLSS Override - Model Presets →
+Super Resolution** to **Use the 3D application setting**. The driver can override Luma's
+preset request. See the [NVIDIA App instructions](https://www.nvidia.com/en-sg/geforce/news/nvidia-app-update-dlss-overrides-and-more/).
 
-### 3.3 MVs jittered — default OFF, and it is fine to flip
+### 3.3 Motion-vector jitter compensation — Off in the player build
 
-The default is **OFF**, which contradicts what the data says, and the code says so at the
-declaration. Read that comment before changing it back; in short:
+DLAA always receives the game's motion vectors, their scale and the frame's jitter offsets.
+Off leaves the vectors as supplied. On asks NGX to subtract jitter already present in the
+vectors. The checked opaque path had near-zero motion with a fixed camera; that observation
+does not cover every moving or transparent object.
 
-- The game's motion vectors **do** already contain the per-frame jitter delta (the resolve shader is
-  `prevUV = curUV + MV` and never reads the jitter floats), so the *correct* declaration is ON.
-- With DLSS 310.9.1.0, ON measures **softer and noisier**; OFF measures sharper with less noise at
-  the cost of more aliasing on high contrast edges.
-- OFF cannot smear: the offset it introduces is bounded by the jitter amplitude (≤0.5 px per axis),
-  so DLSS's history clamp absorbs it as reduced temporal accumulation rather than as a reprojection
-  onto the wrong content. Ghosting needs the filter to trust its history *more*.
-
-Either choice is defensible and the switch is in the panel.
+Older M comparisons sometimes showed more high-contrast edge aliasing with Off. In the
+accepted K test, the player reported clearer detail, less noise and no obvious aliasing.
+Publishing uses Off even if an older configuration saved On. Development keeps the
+comparison switch and saved value, with Off as the default.
 
 ### 3.4 RCAS sharpen — off, available
 
@@ -132,7 +130,7 @@ Passes are identified by **disassembly fingerprint × live binding**, not by has
 
 | Pass | Hash | Role |
 | --- | --- | --- |
-| Temporal resolve | `0x37B05605` / `0x7B9B914F` | **Replaced by DLSS.** 3 textures: t0 = jittered HDR colour (R11G11B10_FLOAT), t1 = TAA history, t2 = UV space motion vectors (R16G16B16A16_FLOAT). 3x3 Karis variance clamp. Runs at every quality level. |
+| Temporal resolve | `0x37B05605` / `0x7B9B914F` | **Replaced by DLSS.** 3 textures: t0 = jittered HDR colour (R11G11B10_FLOAT), t1 = TAA history, t2 = UV space motion vectors (R16G16B16A16_FLOAT). 3x3 Karis variance clamp. Runs with AA set to Low. |
 | FXAA on R32 | `0x2B974E48` | **Deliberately not hooked.** All four of its FXAA taps read t0, which is a *single channel* R32_FLOAT auxiliary buffer, not the colour. Feeding it to DLSS as the colour source is what produced the original "heavy noise" report. |
 | Position fill | `0x121A4A96` | Geometry pass, depth test and write enabled → the main depth is captured from here, because the resolve itself runs with depth testing disabled and has no DSV bound. |
 | Tonemapper | `0x916B1D65` | Reference point, **not** replaced. Same hash as RenoDX's, so independently confirmed. See §6.3. |
@@ -193,6 +191,38 @@ effect while the rest of the frame did. `cancel_second_taa` cancels it. DLSS wri
 
 That leaves the mod's own RCAS pass (§3.4) as the only real sharpening control.
 
+### 4.6 K colour and lighting paths
+
+K uses a bounded proxy when both the HDR source and resolve target are
+`R11G11B10_FLOAT`. A fixed log and gamma mapping encodes the colour into private
+`R16G16B16A16_UNORM` textures for DLAA. NGX uses its LDR path with auto exposure disabled
+and unit exposure. The result is decoded back to HDR before sharpening and the game's
+tone and output chain. Depth, motion and jitter are unchanged.
+
+After videos, the game can alternate between R11 and FP16 colour bindings. The first
+valid resolve with FP16 at either end keeps the original HDR path for the rest of that
+continuous resolve run, including later R11/R11 pairs. A frame without a resolve clears
+the lock; a rejected resolve does not. This avoids repeated history resets as formats
+alternate. Rejected inputs or a failed DLAA pass leave the game's AA in charge. A
+contract change or interruption still requests a history reset; the request is consumed
+only after the selected path produces a usable DLAA result. Pre-rendered cutscenes have
+no temporal resolve and are not processed by DLAA.
+
+K uses the tested reflection history variant C and the extended diffuse history
+weight cap. Both require validated lighting inputs and a successful DLAA draw on the
+preceding frame: lighting runs before the current resolve, so selecting DLAA alone is
+insufficient. The diffuse change raises the authored cap while retaining the game's
+rejection rules and final clamp. M keeps the original HDR input path and the game's
+original lighting.
+
+The runtime baseline was Development commit `1c8ce5d4` at 3840×2160, with K requested,
+the proxy enabled, reflection C, the extended diffuse cap and MV jitter compensation Off.
+After the original three-cutscene sequence, the player reported no visible shake and normal
+brightness, with clearer detail, less noise and no obvious aliasing in the tested scenes.
+The stable recovery span recorded **3,300 successful DLAA draws and zero additional
+history resets**. The upstream candidate has not been tested in game; end-to-end NR/FG
+and total in-game frame time were not measured here.
+
 ---
 
 ## 5. Facts that took the longest to establish
@@ -203,7 +233,8 @@ Do not re-litigate these; each cost a session.
 2. **The MVs must be scaled by the render resolution**, not read as pixel space. Reading UV space
    vectors as pixel space shrinks the perceived motion by a factor of 3840, which makes DLSS see
    essentially random motion - that was the original "heavy noise".
-3. **The MVs already contain the jitter delta** (§3.3). The declaration is a fact about the data.
+3. **Frame jitter is a separate DLAA input.** The MV jitter flag only controls compensation
+   of the supplied vectors (§3.3).
 4. **Depth is reversed-Z, and it must be captured from the position fill pass**, with the shadow
    atlas trap handled (§4.3).
 5. **Jitter and depth flags show no visible difference in an A/B**, so they need a hard judge
@@ -225,8 +256,8 @@ Do not re-litigate these; each cost a session.
 
 ### 6.1 DLSS render presets
 
-Measured on this title over a rainy night scene (neon behind a wet window, puddles, dark bar floor,
-sofa) and sunlit ground at noon, DLAA at native resolution.
+Historical comparison before the K proxy in §4.6, at native resolution over a rainy night scene
+(neon behind a wet window, puddles, dark bar floor, sofa) and sunlit ground at noon.
 
 | preset | sharpness | power draw | noise flicker | reflective / transparent correctness |
 | --- | --- | --- | --- | --- |
@@ -244,24 +275,21 @@ Notes:
   was measured against **`none`** mode (the game's own TAA, no DLSS involved) as ground truth.
   An earlier version of this table wrongly merged the neon's *brightness* with three *noise*
   readings into one score and concluded the opposite; that is corrected here.
-- The core's own tooltip for `J`/`K` ("issues with reflections and transparent effects /
-  volumetrics") is **correct** and is exactly what was measured.
-- `L` and `M` are the newest models and are meant for upscaling from a low resolution - this mod
-  runs DLAA at native resolution, which is the one case they are not tuned for, and they cost an
-  order of magnitude more power on top.
-- **`M` is therefore the shipping default**, despite being the noisiest and second most expensive:
-  losing an emissive layer is a content error that no post-process can undo, while `M`'s softness
-  is the kind of problem a sharpening pass can address.
+- M was the previous default because it retained the neon through the original colour path.
+  K with the proxy is the current recommendation for Mafia DE (§3.2). The cost ordering
+  applies to these DLAA comparisons.
 
 ### 6.2 `mvs_jittered` and jitter timing
 
+Earlier comparisons on the original colour path; see §3.3 for the current choice.
+
 | configuration | result |
 | --- | --- |
-| `ON` (correct declaration) | softer, more noise on bright sky / sunlit ground |
+| `ON` | softer, more noise on bright sky / sunlit ground |
 | `OFF` | sharper, less noise, more aliasing on high contrast edges; reflections unaffected |
 | jitter one frame late / sign flipped / both | **no visible difference** at all |
 | `auto_exposure` on/off | no visible difference |
-| `hdr` input off | breaks contrast, so HDR input must stay **on** |
+| `hdr` input off with unchanged HDR source | breaks contrast |
 | MV scale set to 1.0 (wrong) | dramatically worse - and the fastest way to see what real ghosting looks like here |
 
 ### 6.3 The tonemapper (`0x916B1D65`)
@@ -389,9 +417,9 @@ the signal is available at the exact frame the cutscene starts.
 
 ## 7. Known limitations
 
-1. **DLSS render preset must be `M`** for correct reflective and transparent content (§6.1).
-2. **`M` is the noisiest and second most expensive preset.** That is the price of correctness, and
-   the only knob against it is the mod's RCAS, which trades sharpness for noise.
+1. **K's bounded proxy needs R11 input and output.** FP16 keeps the original HDR path until
+   a resolve gap (§4.6). A driver model override can take precedence (§3.2).
+2. K's lighting history caps reduce one contribution to flicker (§4.6).
 3. **No native HDR output through this mod** (§6.4). Not a game limitation; the mechanism is unsolved.
 4. **No game-side sharpness control exists to expose** (§6.3).
 5. The mod replaces the temporal resolve only. It does not upscale, so there is no performance win -
