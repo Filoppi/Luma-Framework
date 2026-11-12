@@ -1,13 +1,4 @@
-// Luma: this is the "DX:HR DC (Fixed)" lighting from the "Gold Filter Restoration" mod (DXHRDC-GFX, "LightingShader1"), which swaps the DC shader (0x4C48AF67) with the original DX:HR one (0x0AB7755C), as the DC one looked broken ("inverted").
-// This shader has two hashes because one is for the original game (and for the Gold Filter Restoration mod) and one for the DC, they both run the original game's version.
-// The resources bindings and cbuffers layouts are the same between the two versions.
-// Compared to the DC version, the original version:
-//  -uses a half Lambert (wrapped) N dot L, instead of a hard (clamped) one
-//  -saturates the distance falloff, instead of only clamping it to >= 0 (it could go beyond 1)
-// With FIX_DC_LIGHTING on, this compiles to the exact same instructions as the original game's shader. With it off, it's functionally equivalent to the DC shader (for both hashes).
-#ifndef FIX_DC_LIGHTING
-#define FIX_DC_LIGHTING 1
-#endif
+#include "Includes/Common.hlsl"
 
 cbuffer DrawableBuffer : register(b1)
 {
@@ -63,8 +54,6 @@ SamplerState p_default_Material_0D4489A4339784082_NormalBufferTexture_sampler_s 
 Texture2D<float4> p_default_Material_098651E4334612755_DepthBufferTexture_texture : register(t0);
 Texture2D<float4> p_default_Material_0D4489A4339784082_NormalBufferTexture_texture : register(t1);
 
-#define cmp -
-
 void main(
   float4 v0 : SV_POSITION0,
   out float4 o0 : SV_Target0)
@@ -110,7 +99,7 @@ void main(
   r0.x = r0.x * r0.z;
   r0.x = r0.x * r0.y;
   r0.y = saturate(r0.w);
-  r0.z = cmp(r0.w < 0);
+  r0.z = (r0.w < 0);
   r0.y = saturate(InstanceParams[5].z * r0.y);
   r0.x = r0.y * r0.x;
   r0.xyw = InstanceParams[4].xyz * r0.xxx;

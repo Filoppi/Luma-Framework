@@ -162,7 +162,7 @@ float4 smaa_neighborhood_blending_ps(float4 position : SV_Position, float2 texco
     }
     else
     {
-        color.rgb = linear_to_sRGB_gamma(color.rgb);
+        color.rgb = linear_to_gamma(color.rgb, GCT_MIRROR);
     }
 
     return color;
