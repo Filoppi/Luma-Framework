@@ -511,6 +511,33 @@
 #define SMAA_DECODE_VELOCITY(sample) sample.rg
 #endif
 
+/**
+ * Luma: set SMAA_CUSTOM_BLENDING_DECODE_ENCODE to 1 when the 'colorTex' of
+ * SMAANeighborhoodBlendingPS is encoded (e.g. gamma) and has no sRGB view to
+ * decode it for free (e.g. FP16 textures). Each texel it mixes is then decoded
+ * with SMAA_BLENDING_DECODE, so the blending happens in linear space, as
+ * intended, and the result is encoded with SMAA_BLENDING_ENCODE (e.g. back to
+ * the input encoding, or left linear, by defining it as "(color)", if the
+ * caller post processes it in linear anyway).
+ * Set it to 2 instead when SMAA_BLENDING_ENCODE is the exact inverse of
+ * SMAA_BLENDING_DECODE, so the pixels that aren't blended are returned as
+ * they are, skipping their decode and encode. The two bilinear taps are
+ * replaced by point loads mixed by hand, which is equivalent, given that they
+ * only ever interpolate between the current pixel and one neighbor along the
+ * same axis. Requires 'colorTex' to support "Load()" (HLSL 4+).
+ */
+#ifndef SMAA_CUSTOM_BLENDING_DECODE_ENCODE
+#define SMAA_CUSTOM_BLENDING_DECODE_ENCODE 0
+#endif
+
+#ifndef SMAA_BLENDING_DECODE
+#define SMAA_BLENDING_DECODE(color) (sign(color) * pow(abs(color), 2.2))
+#endif
+
+#ifndef SMAA_BLENDING_ENCODE
+#define SMAA_BLENDING_ENCODE(color) (sign(color) * pow(abs(color), 1.0 / 2.2))
+#endif
+
 //-----------------------------------------------------------------------------
 // Non-Configurable Defines
 
@@ -1249,6 +1276,16 @@ float4 SMAABlendingWeightCalculationPS(float2 texcoord,
 //-----------------------------------------------------------------------------
 // Neighborhood Blending Pixel Shader (Third Pass)
 
+#if SMAA_CUSTOM_BLENDING_DECODE_ENCODE
+// Luma: a texel of the encoded 'colorTex', decoded to linear (clamped to the texture edges, like a clamp sampler would)
+float4 SMAALoadDecoded(SMAATexture2D(colorTex), int2 pixel) {
+    pixel = clamp(pixel, int2(0, 0), int2(SMAA_RT_METRICS.zw) - 1);
+    float4 color = colorTex.Load(int3(pixel, 0));
+    color.rgb = SMAA_BLENDING_DECODE(color.rgb);
+    return color;
+}
+#endif
+
 float4 SMAANeighborhoodBlendingPS(float2 texcoord,
                                   float4 offset,
                                   SMAATexture2D(colorTex),
@@ -1267,6 +1304,12 @@ float4 SMAANeighborhoodBlendingPS(float2 texcoord,
     SMAA_BRANCH
     if (dot(a, float4(1.0, 1.0, 1.0, 1.0)) < 1e-5) {
         float4 color = SMAASampleLevelZero(colorTex, texcoord);
+        #if SMAA_CUSTOM_BLENDING_DECODE_ENCODE == 1
+        // Luma: nothing is mixed here, but the output needs the same encoding as the blended pixels
+        // (e.g. if SMAA_BLENDING_ENCODE is left as linear, this compiles to the decode alone).
+        // In mode 2 the encode is the inverse of the decode, so the texel already has the output encoding.
+        color.rgb = SMAA_BLENDING_ENCODE(SMAA_BLENDING_DECODE(color.rgb));
+        #endif
 
         #if SMAA_REPROJECTION
         float2 velocity = SMAA_DECODE_VELOCITY(SMAASampleLevelZero(velocityTex, texcoord));
@@ -1289,10 +1332,21 @@ float4 SMAANeighborhoodBlendingPS(float2 texcoord,
         // Calculate the texture coordinates:
         float4 blendingCoord = mad(blendingOffset, float4(SMAA_RT_METRICS.xy, -SMAA_RT_METRICS.xy), texcoord.xyxy);
 
+        #if SMAA_CUSTOM_BLENDING_DECODE_ENCODE
+        // Luma: mix the current pixel with the chosen neighbors by hand, in linear space, then encode the result back.
+        // "blendingCoord.xy" moves towards the positive neighbor along the chosen axis, "blendingCoord.zw" towards the negative one.
+        int2 pixel = int2(texcoord * SMAA_RT_METRICS.zw);
+        int2 axis = h ? int2(1, 0) : int2(0, 1);
+        float4 centerColor = SMAALoadDecoded(colorTex, pixel);
+        float4 color = blendingWeight.x * lerp(centerColor, SMAALoadDecoded(colorTex, pixel + axis), blendingOffset.x + blendingOffset.y);
+        color += blendingWeight.y * lerp(centerColor, SMAALoadDecoded(colorTex, pixel - axis), blendingOffset.z + blendingOffset.w);
+        color.rgb = SMAA_BLENDING_ENCODE(color.rgb);
+        #else
         // We exploit bilinear filtering to mix current pixel with the chosen
         // neighbor:
         float4 color = blendingWeight.x * SMAASampleLevelZero(colorTex, blendingCoord.xy);
         color += blendingWeight.y * SMAASampleLevelZero(colorTex, blendingCoord.zw);
+        #endif
 
         #if SMAA_REPROJECTION
         // Antialias velocity for proper reprojection in a later stage:
