@@ -63,6 +63,7 @@
   </ItemGroup>
   <PropertyGroup>
     <UseLumaNGX>true</UseLumaNGX>
+    <UseLumaFSR>true</UseLumaFSR>
     <LumaPackage>false</LumaPackage>
   </PropertyGroup>
   <ImportGroup Label="ExtensionSettings">
@@ -301,6 +302,9 @@
   <ItemGroup>
     <ClCompile Include="..\..\Core\unity_build.cpp" />
     <ClCompile Include="main.cpp" />
+  </ItemGroup>
+  <ItemGroup>
+    <ClInclude Include="jitter_patch.h" />
   </ItemGroup>
   <!-- Apply feature settings after the final per-configuration properties. -->
   <Import Project="..\Luma.DXP.props" Condition="Exists('..\Luma.DXP.props')" />
