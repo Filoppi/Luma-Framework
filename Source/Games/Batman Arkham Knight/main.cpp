@@ -1,8 +1,12 @@
 
 #define GAME_BATMAN_ARKHAM_KNIGHT 1
 
+#define LUMA_PATCH_BYTECODE_SYNC 1
+
 #include "../../../Shaders/Batman Arkham Knight/Includes/GameCBuffers.hlsl"
 #include "..\..\Core\core.hpp"
+
+#include "jitter_patch.h"
 
 // TODO: Fix this globaly? Define NOMINMAX before including windows.h.
 #undef min
@@ -563,6 +567,33 @@ public:
 
       native_shaders_definitions.emplace(CompileTimeStringHash("BAK SR Exposure"), ShaderDefinition("Luma_BAK_SRExposure", reshade::api::pipeline_subobject_type::compute_shader));
       native_shaders_definitions.emplace(CompileTimeStringHash("BAK Unjitter MVs"), ShaderDefinition("Luma_BAK_UnjitterMVs", reshade::api::pipeline_subobject_type::compute_shader));
+   }
+
+   // The shaders that rebuild a position from the scene depth (deferred decals, tiled lighting, reflections, AO, ...) assume a centered projection,
+   // so with a jittered one their results shimmer. There's around 2000 of them, all doing it in a couple of ways, so we live patch them (see "jitter_patch.h").
+   std::unique_ptr<std::byte[]> PatchShaderBytecodeSync(const std::byte* code, size_t& size, reshade::api::pipeline_subobject_type type, uint64_t shader_hash, const std::byte* shader_object, size_t shader_object_size) override
+   {
+      const bool compute_shader = type == reshade::api::pipeline_subobject_type::compute_shader;
+      if (!compute_shader && type != reshade::api::pipeline_subobject_type::pixel_shader)
+         return nullptr;
+      // The frame is never jittered if the engine couldn't be patched
+      if (!g_engine_velocities_supported)
+         return nullptr;
+      // Replaced by our own version, which already takes the jitter into account
+      if (compute_shader && shader_hashes_CameraVelocity.compute_shaders.contains(uint32_t(shader_hash)))
+         return nullptr;
+
+      return BatmanArkhamKnightJitterPatch::Patch(code, size, compute_shader);
+   }
+
+   // The shaders are patched in place when the game creates them, so the game's own shader objects are already the patched ones.
+   // Luma also makes its own copies of patched shaders later on and would bind those instead, but many of the tiled lighting compute shaders
+   // use NVIDIA shader extensions (warp ballots, through the fake UAV at u7), which the driver only resolves for shaders created
+   // while the game has the extension slot set ("NvAPI_D3D11_SetNvShaderExtnSlot()"): in a copy they are plain UAV accesses,
+   // and whole tiles end up with the wrong lights. So we always keep the game's objects bound.
+   bool OnBindPatchedShader(DeviceData& device_data, uint32_t shader_hash, reshade::api::pipeline_subobject_type type) override
+   {
+      return false;
    }
 
    void OnCreateDevice(ID3D11Device* native_device, DeviceData& device_data) override
