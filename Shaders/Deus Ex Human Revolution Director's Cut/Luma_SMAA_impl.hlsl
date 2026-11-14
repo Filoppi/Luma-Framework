@@ -44,6 +44,11 @@ cbuffer SceneBuffer : register(b2)
 #define SMAA_RT_METRICS float4(1.0 / ScreenResolution, ScreenResolution) // Should use ScreenExtents here?
 #define SMAA_PRESET_ULTRA
 #define SMAA_PREDICATION 1
+// The scene is gamma encoded (in an FP16 texture, so it has no sRGB views), the neighborhood blending decodes it to linear,
+// the same way as the FXAA and MLAA shaders that SMAA replaces, and leaves it linear, as we tonemap and encode it after anyway
+#define SMAA_CUSTOM_BLENDING_DECODE_ENCODE 1
+#define SMAA_BLENDING_DECODE(color) gamma_to_linear(color, GCT_MIRROR)
+#define SMAA_BLENDING_ENCODE(color) (color)
 #define SMAA_CUSTOM_SL
 SamplerState LinearSampler : register(s0);
 SamplerState PointSampler : register(s1);
@@ -122,7 +127,7 @@ float4 smaa_neighborhood_blending_ps(float4 position : SV_Position, float2 texco
 {
     // tex0 = colorTex
     // tex1 = blendTex
-    float4 color = SMAANeighborhoodBlendingPS(texcoord, offset, tex0, tex1);
+    float4 color = SMAANeighborhoodBlendingPS(texcoord, offset, tex0, tex1); // Inputs gamma space, outputs linear space color
 
     float2 uv = position.xy * ScreenExtents.zw + ScreenExtents.xy;
     bool forceSDR = ShouldForceSDR(uv);
@@ -157,13 +162,9 @@ float4 smaa_neighborhood_blending_ps(float4 position : SV_Position, float2 texco
         color.rgb *= LumaSettings.GamePaperWhiteNits / LumaSettings.UIPaperWhiteNits;
         ColorGradingLUTTransferFunctionInOutCorrected(color.rgb, GAMMA_CORRECTION_TYPE, VANILLA_ENCODING_TYPE, true);
 #endif // UI_DRAW_TYPE == 2
+    }
 
-        color.rgb = linear_to_gamma(color.rgb, GCT_MIRROR);
-    }
-    else
-    {
-        color.rgb = linear_to_sRGB_gamma(color.rgb);
-    }
+    color.rgb = linear_to_gamma(color.rgb, GCT_MIRROR);
 
     return color;
 }
