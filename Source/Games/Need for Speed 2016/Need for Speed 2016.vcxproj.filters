@@ -13,6 +13,7 @@
     <ClInclude Include="frostbite_settings.h" />
     <ClInclude Include="log.h" />
     <ClInclude Include="memory_scan.h" />
+    <ClInclude Include="render_scale.h" />
     <ClInclude Include="super_resolution_pass.h" />
     <ClInclude Include="taa_resolve.h" />
   </ItemGroup>

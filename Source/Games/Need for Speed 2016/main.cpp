@@ -1,6 +1,7 @@
 // Need for Speed (2016) Luma mod (Frostbite, D3D11), based on the Mass Effect Andromeda one.
 // Replaces the game's TAA resolve with super resolution without upscaling (DLSS, FSR 4, XeSS or FSR 3), sets the engine's jitter to the
-// selected one's Halton sequence, and sharpens textures (16x anisotropic filtering and the usual mip LOD bias).
+// selected one's Halton sequence, sharpens textures (16x anisotropic filtering and the usual mip LOD bias), and offers the game's
+// resolution scale as a setting.
 
 #define GAME_NEED_FOR_SPEED_2016 1
 
@@ -27,6 +28,7 @@
 #include "camera_capture.h"
 #include "diagnostics.h"
 #include "engine_jitter.h"
+#include "render_scale.h"
 #include "super_resolution_pass.h"
 #include "taa_resolve.h"
 
@@ -94,6 +96,8 @@ public:
    void OnDestroyDeviceData(DeviceData& device_data) override;
    DrawOrDispatchOverrideType OnDrawOrDispatch(ID3D11Device* native_device, ID3D11DeviceContext* native_device_context, CommandListData& cmd_list_data, DeviceData& device_data, reshade::api::shader_stage stages, const ShaderHashesList<OneShaderPerPipeline>& original_shader_hashes, bool is_custom_pass, bool& updated_cbuffers, std::function<void()>* original_draw_dispatch_func) override;
    void OnPresent(ID3D11Device* native_device, DeviceData& device_data) override;
+   void LoadConfigs() override;
+   void DrawImGuiSettings(DeviceData& device_data) override;
 #if DEVELOPMENT
    void DrawImGuiDevSettings(DeviceData& device_data) override;
 #endif
@@ -137,6 +141,7 @@ private:
    bool engine_settings_searched = false;
    Frostbite::SettingsLookup settings_lookup;
    EngineJitter engine_jitter;
+   RenderScale render_scale;
 };
 
 // Replaces the resolve with SR (or the Development TAA bypass), else lets the game's run
@@ -199,7 +204,8 @@ bool NeedForSpeed2016GameDeviceData::RunSuperResolution(ID3D11DeviceContext* con
 }
 
 // As in Mass Effect Andromeda: SR's own bias without upscaling (-1 for DLSS and FSR, 0 for XeSS), -1 for the game's TAA, and none without
-// them (FXAA, menus). Unless a custom bias is set in the dev settings.
+// them (FXAA, menus). The resolution scale shifts it (rendering at twice the screen's resolution samples textures a mip finer), never
+// above 0. Unless a custom bias is set in the dev settings.
 void NeedForSpeed2016GameDeviceData::UpdateTextureMipBias(DeviceData& device_data) const
 {
    if (!enable_samplers_upgrade || custom_texture_mip_lod_bias_offset)
@@ -208,7 +214,9 @@ void NeedForSpeed2016GameDeviceData::UpdateTextureMipBias(DeviceData& device_dat
    if (frame.resolve_ran && render_size.height > 0)
    {
       const float height = float(render_size.height);
-      bias = frame.sr_result == SRResult::Drawn ? SR::GetMipLODBias(device_data.sr_type, height, height) : -1.f;
+      const float taa_bias = frame.sr_result == SRResult::Drawn ? SR::GetMipLODBias(device_data.sr_type, height, height) : -1.f;
+      const float scale = height / (std::max)(device_data.output_resolution.y, 1.f);
+      bias = (std::min)(taa_bias + std::log2(scale), 0.f);
    }
 
    // Core reads it under a shared lock from any thread, and only this thread writes it
@@ -288,6 +296,18 @@ void NeedForSpeed2016::OnPresent(ID3D11Device* native_device, DeviceData& device
    NeedForSpeed2016GameDeviceData& data = GetGameData(device_data);
    UpdateEngineSettings(device_data, data);
    data.OnPresent(device_data);
+}
+
+// The mod's saved settings, when Luma loads its own
+void NeedForSpeed2016::LoadConfigs()
+{
+   render_scale.LoadConfig();
+}
+
+// Below Luma's Super Resolution setting
+void NeedForSpeed2016::DrawImGuiSettings(DeviceData& device_data)
+{
+   render_scale.DrawSetting();
 }
 
 #if DEVELOPMENT
@@ -374,8 +394,9 @@ void NeedForSpeed2016::UpdateEngineSettings(const DeviceData& device_data, const
    {
       engine_settings_searched = true;
       if (!settings_lookup.Find("WorldRender"))
-         LogDiagnostic(reshade::log::level::warning, "the engine's settings lookup wasn't found, so SR gets the game's own jitter");
+         LogDiagnostic(reshade::log::level::warning, "the engine's settings lookup wasn't found, so the jitter and the resolution scale can't be set");
       engine_jitter.Find(settings_lookup);
+      render_scale.Find(settings_lookup);
    }
    const bool sr_selected = IsSRSelected(device_data);
    engine_jitter.Apply(sr_selected, sr_selected ? GetSRJitterPhases(device_data) : 0);

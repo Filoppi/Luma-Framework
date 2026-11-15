@@ -8,6 +8,7 @@ inline void DrawAbout()
       "Luma for \"Need for Speed (2016)\" is developed by PetarBadzhakov and is open source and free.\n"
       "It replaces the game's TAA with super resolution anti-aliasing: DLSS, FSR 4, XeSS or FSR 3.\n"
       "Set Anti-Aliasing in the game's video settings to TAA. Luma's \"Auto\" Super Resolution picks the best one your GPU supports.\n"
+      "The Resolution Scale setting renders the game above the screen's resolution (supersampling), for GPUs with performance to spare.\n"
       "Thanks to the Luma team and contributors, and to DristoforColumb's Mass Effect: Andromeda Luma mod, which this is based on.");
    ImGui::PopTextWrapPos();
 
