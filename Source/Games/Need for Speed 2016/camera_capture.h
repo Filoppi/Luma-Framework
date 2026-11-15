@@ -24,7 +24,9 @@ public:
    // The main camera, as last bound this frame (null if none was)
    const Camera* GetCamera() const
    {
-      return has_camera ? &camera : nullptr;
+      if (!has_camera)
+         return nullptr;
+      return &camera;
    }
    void EndFrame();
 

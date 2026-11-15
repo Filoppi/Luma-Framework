@@ -72,7 +72,9 @@ namespace Frostbite
             ReadFieldRecord(field_records + i * kFieldRecordSize, class_size, fields);
          const bool all_found = std::all_of(fields.begin(), fields.end(), [](const FieldOffset& field)
             { return field.offset >= 0; });
-         return all_found ? class_size : 0;
+         if (!all_found)
+            return 0;
+         return class_size;
       }
    } // namespace Detail
 
@@ -122,7 +124,9 @@ namespace Frostbite
       if (!MemoryScan::IsReadable(manager, sizeof(void*)))
          return nullptr;
       void* const manager_instance = MemoryScan::Read<void*>(manager);
-      return manager_instance ? CallGuarded(function, manager_instance, name) : nullptr;
+      if (!manager_instance)
+         return nullptr;
+      return CallGuarded(function, manager_instance, name);
    }
 
    // The code reading a container does "mov rcx, [rip+manager]; lea rdx, [rip+name]; call lookup; test rax, rax", with the first two in
@@ -141,8 +145,15 @@ namespace Frostbite
       const bool lea_first = is_mov_rcx(lea + 7) && is_call_test(lea + 14);
       if (!mov_first && !lea_first)
          return false;
-      call.manager = MemoryScan::GetRipTarget(mov_first ? lea - 7 : lea + 7, 3, 7);
-      call.function = MemoryScan::GetRipTarget(mov_first ? lea + 7 : lea + 14, 1, 5);
+      const uint8_t* mov = lea + 7;
+      const uint8_t* call_instruction = lea + 14;
+      if (mov_first)
+      {
+         mov = lea - 7;
+         call_instruction = lea + 7;
+      }
+      call.manager = MemoryScan::GetRipTarget(mov, 3, 7);
+      call.function = MemoryScan::GetRipTarget(call_instruction, 1, 5);
       return true;
    }
 

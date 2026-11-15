@@ -24,6 +24,7 @@ private:
    static bool IsTable(const uint8_t* pointers, size_t floats);
    uint32_t GetCount() const;
    bool GetUseCmj() const;
+   static const char* GetSequenceName(bool use_cmj);
    void Set(uint32_t count, bool use_cmj);
    void WriteStandardHalton(uint32_t count);
 
@@ -70,7 +71,7 @@ inline void EngineJitter::Find(const Frostbite::SettingsLookup& lookup)
    const bool table_found = game_use_cmj && game_count >= kMinTablePoints && FindTable();
    if (!table_found)
       LogDiagnostic(reshade::log::level::warning, "the engine's jitter table wasn't found, so SR gets the engine's own Halton (which starts at the pixel corner)");
-   LogDiagnostic(reshade::log::level::info, "the engine's jitter settings were found: {} points, {} (the game's own), its table {}", game_count, game_use_cmj ? "its table" : "its own Halton", table_found ? "too" : "not");
+   LogDiagnostic(reshade::log::level::info, "the engine's jitter settings were found: {} points, {} (the game's own)", game_count, GetSequenceName(game_use_cmj));
 }
 
 // At every present, before the engine's next frame reads the settings
@@ -93,10 +94,22 @@ inline void EngineJitter::Apply(bool sr_selected, uint32_t sr_phases)
 // The live settings and the game's own, e.g. "8 points, the standard Halton in its table (the game's own: 1024 points, its table)"
 inline std::string EngineJitter::Describe() const
 {
+   if (!container && searched)
+      return "not found (see the log)";
    if (!container)
-      return searched ? "not found (see the log)" : "not looked up yet (at the first frame in game)";
-   const char* sequence = writes_standard_halton ? "the standard Halton in its table" : (GetUseCmj() ? "its table" : "its own Halton");
-   return std::format("{} points, {} (the game's own: {} points, {})", GetCount(), sequence, game_count, game_use_cmj ? "its table" : "its own Halton");
+      return "not looked up yet (at the first frame in game)";
+   const char* sequence = GetSequenceName(GetUseCmj());
+   if (writes_standard_halton)
+      sequence = "the standard Halton in its table";
+   return std::format("{} points, {} (the game's own: {} points, {})", GetCount(), sequence, game_count, GetSequenceName(game_use_cmj));
+}
+
+// Which sequence the engine uses: its table while CMJ is on
+inline const char* EngineJitter::GetSequenceName(bool use_cmj)
+{
+   if (use_cmj)
+      return "its table";
+   return "its own Halton";
 }
 
 // The engine's jitter table, found by its data (Mass Effect Andromeda finds it by code, which differs in NFS16.exe): the one pair of

@@ -164,7 +164,9 @@ DrawOrDispatchOverrideType NeedForSpeed2016GameDeviceData::ReplaceResolve(ID3D11
    if (sr_selected && RunSuperResolution(context, device_data, resources))
       return DrawOrDispatchOverrideType::Replaced;
    // The game's resolve already ran if it was the depth of field one: core mustn't run it again
-   return original_ran ? DrawOrDispatchOverrideType::Replaced : DrawOrDispatchOverrideType::None;
+   if (original_ran)
+      return DrawOrDispatchOverrideType::Replaced;
+   return DrawOrDispatchOverrideType::None;
 }
 
 // The end of the frame. SR's history restarts after any frame SR didn't draw (menus, loading, FXAA, None or another SR type picked), as
@@ -214,7 +216,9 @@ void NeedForSpeed2016GameDeviceData::UpdateTextureMipBias(DeviceData& device_dat
    if (frame.resolve_ran && render_size.height > 0)
    {
       const float height = float(render_size.height);
-      const float taa_bias = frame.sr_result == SRResult::Drawn ? SR::GetMipLODBias(device_data.sr_type, height, height) : -1.f;
+      float taa_bias = -1.f;
+      if (frame.sr_result == SRResult::Drawn)
+         taa_bias = SR::GetMipLODBias(device_data.sr_type, height, height);
       const float scale = height / (std::max)(device_data.output_resolution.y, 1.f);
       bias = (std::min)(taa_bias + std::log2(scale), 0.f);
    }
@@ -384,7 +388,9 @@ void NeedForSpeed2016::OnDescriptorsPushed(reshade::api::command_list* cmd_list,
 NeedForSpeed2016GameDeviceData* NeedForSpeed2016::FindGameData(reshade::api::device* device)
 {
    DeviceData* device_data = device->get_private_data<DeviceData>();
-   return device_data && device_data->game ? static_cast<NeedForSpeed2016GameDeviceData*>(device_data->game) : nullptr;
+   if (!device_data || !device_data->game)
+      return nullptr;
+   return static_cast<NeedForSpeed2016GameDeviceData*>(device_data->game);
 }
 
 // The engine's settings are looked up at the first frame in game (one with a camera), and the jitter is then set every frame
@@ -399,7 +405,10 @@ void NeedForSpeed2016::UpdateEngineSettings(const DeviceData& device_data, const
       render_scale.Find(settings_lookup);
    }
    const bool sr_selected = IsSRSelected(device_data);
-   engine_jitter.Apply(sr_selected, sr_selected ? GetSRJitterPhases(device_data) : 0);
+   uint32_t sr_phases = 0;
+   if (sr_selected)
+      sr_phases = GetSRJitterPhases(device_data);
+   engine_jitter.Apply(sr_selected, sr_phases);
 }
 
 // The globals and the game object before core starts, and the mod's events off before core shuts down

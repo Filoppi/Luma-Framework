@@ -112,7 +112,10 @@ inline bool Diagnostics::TryBypassTAA(ID3D11DeviceContext* context, const Resolv
 inline void Diagnostics::DrawInfo(float texture_mip_lod_bias, const std::string& engine_jitter) const
 {
    ImGui::NewLine();
-   ImGui::Text("TAA resolve: %s", last_resolve_ran ? "running" : "not running (FXAA, a menu or loading)");
+   const char* resolve_state = "not running (FXAA, a menu or loading)";
+   if (last_resolve_ran)
+      resolve_state = "running";
+   ImGui::Text("TAA resolve: %s", resolve_state);
    ImGui::Text("Super resolution: %s", GetName(last_result));
    ImGui::Text("Resolves with SR: %llu, with the game's TAA instead: %llu", sr_resolves, fallback_resolves);
    DrawCameraInfo();
@@ -195,7 +198,10 @@ inline void Diagnostics::TrackFallbacks(SRResult result, RenderSize render_size)
    if (streak_length > 0)
       LogStreak("in a row");
    streak_result = result;
-   streak_length = result != SRResult::Drawn ? 1 : 0;
+   // 0 while SR draws
+   streak_length = 0;
+   if (result != SRResult::Drawn)
+      streak_length = 1;
    streak_render_size = render_size;
 }
 

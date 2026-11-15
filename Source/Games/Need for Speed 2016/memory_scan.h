@@ -137,7 +137,9 @@ namespace MemoryScan
       std::vector<const char*> strings;
       for (const uint8_t* match : FindBytes(bytes, RegionKind::All))
       {
-         const uint8_t previous = IsReadable(match - 1, 1) ? match[-1] : 0;
+         uint8_t previous = 0;
+         if (IsReadable(match - 1, 1))
+            previous = match[-1];
          if (!std::isalnum(previous) && previous != '_' && previous != '.')
             strings.push_back(reinterpret_cast<const char*>(match));
       }
