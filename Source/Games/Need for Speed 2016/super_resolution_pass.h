@@ -20,6 +20,13 @@ inline bool IsSRSelected(const DeviceData& device_data)
    return device_data.sr_type != SR::Type::None && !device_data.sr_suppressed && device_data.GetSRInstanceData();
 }
 
+// The selected SR's jitter phase count, within a sane range for the engine's sequence
+inline uint32_t GetSRJitterPhases(const DeviceData& device_data)
+{
+   const int phases = sr_implementations[device_data.sr_type]->GetJitterPhases(device_data.GetSRInstanceData());
+   return uint32_t(std::clamp(phases, 1, 64));
+}
+
 // Runs SR in place of the game's TAA resolve, at its render resolution (no upscaling). SR writes the resolve's color output (u2), which is
 // then copied to the history (u3): the game's resolve writes the same values to both.
 class SuperResolutionPass

@@ -25,7 +25,7 @@ public:
    // Replaces the resolve with its raw jittered color input, to check the jitter. False if it's off, or the textures differ.
    bool TryBypassTAA(ID3D11DeviceContext* context, const ResolveResources& resources) const;
 
-   void DrawInfo(float texture_mip_lod_bias) const;
+   void DrawInfo(float texture_mip_lod_bias, const std::string& engine_jitter) const;
    void DrawDevSettings();
 
 private:
@@ -108,14 +108,15 @@ inline bool Diagnostics::TryBypassTAA(ID3D11DeviceContext* context, const Resolv
    return true;
 }
 
-// Luma's Info tab: the last frame's resolve, SR and camera, and the mip bias
-inline void Diagnostics::DrawInfo(float texture_mip_lod_bias) const
+// Luma's Info tab: the last frame's resolve, SR and camera, the engine's jitter and the mip bias
+inline void Diagnostics::DrawInfo(float texture_mip_lod_bias, const std::string& engine_jitter) const
 {
    ImGui::NewLine();
    ImGui::Text("TAA resolve: %s", last_resolve_ran ? "running" : "not running (FXAA, a menu or loading)");
    ImGui::Text("Super resolution: %s", GetName(last_result));
    ImGui::Text("Resolves with SR: %llu, with the game's TAA instead: %llu", sr_resolves, fallback_resolves);
    DrawCameraInfo();
+   ImGui::Text("Engine jitter: %s", engine_jitter.c_str());
    ImGui::Text("Texture mip LOD bias: %.2f", texture_mip_lod_bias);
 }
 

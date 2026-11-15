@@ -1,6 +1,6 @@
 // Need for Speed (2016) Luma mod (Frostbite, D3D11), based on the Mass Effect Andromeda one.
-// Replaces the game's TAA resolve with super resolution without upscaling (DLSS, FSR 4, XeSS or FSR 3), and sharpens textures (16x
-// anisotropic filtering and the usual mip LOD bias).
+// Replaces the game's TAA resolve with super resolution without upscaling (DLSS, FSR 4, XeSS or FSR 3), sets the engine's jitter to the
+// selected one's Halton sequence, and sharpens textures (16x anisotropic filtering and the usual mip LOD bias).
 
 #define GAME_NEED_FOR_SPEED_2016 1
 
@@ -26,6 +26,7 @@
 #include "about.h"
 #include "camera_capture.h"
 #include "diagnostics.h"
+#include "engine_jitter.h"
 #include "super_resolution_pass.h"
 #include "taa_resolve.h"
 
@@ -129,6 +130,13 @@ private:
    {
       return context->GetType() == D3D11_DEVICE_CONTEXT_IMMEDIATE;
    }
+
+   void UpdateEngineSettings(const DeviceData& device_data, const NeedForSpeed2016GameDeviceData& data);
+
+   // The engine's settings are process wide, like the game object
+   bool engine_settings_searched = false;
+   Frostbite::SettingsLookup settings_lookup;
+   EngineJitter engine_jitter;
 };
 
 // Replaces the resolve with SR (or the Development TAA bypass), else lets the game's run
@@ -274,10 +282,12 @@ DrawOrDispatchOverrideType NeedForSpeed2016::OnDrawOrDispatch(ID3D11Device* nati
    return data.ReplaceResolve(native_device_context, device_data, variant, original_draw_dispatch_func);
 }
 
-// The end of the game's frame
+// The engine's settings first: the device's frame end forgets this frame's camera, which the first lookup waits for
 void NeedForSpeed2016::OnPresent(ID3D11Device* native_device, DeviceData& device_data)
 {
-   GetGameData(device_data).OnPresent(device_data);
+   NeedForSpeed2016GameDeviceData& data = GetGameData(device_data);
+   UpdateEngineSettings(device_data, data);
+   data.OnPresent(device_data);
 }
 
 #if DEVELOPMENT
@@ -294,7 +304,7 @@ void NeedForSpeed2016::DrawImGuiDevSettings(DeviceData& device_data)
 void NeedForSpeed2016::PrintImGuiInfo(const DeviceData& device_data)
 {
    if (device_data.game)
-      GetGameData(device_data).diagnostics.DrawInfo(device_data.texture_mip_lod_bias_offset);
+      GetGameData(device_data).diagnostics.DrawInfo(device_data.texture_mip_lod_bias_offset, engine_jitter.Describe());
 }
 #endif
 
@@ -355,6 +365,20 @@ NeedForSpeed2016GameDeviceData* NeedForSpeed2016::FindGameData(reshade::api::dev
 {
    DeviceData* device_data = device->get_private_data<DeviceData>();
    return device_data && device_data->game ? static_cast<NeedForSpeed2016GameDeviceData*>(device_data->game) : nullptr;
+}
+
+// The engine's settings are looked up at the first frame in game (one with a camera), and the jitter is then set every frame
+void NeedForSpeed2016::UpdateEngineSettings(const DeviceData& device_data, const NeedForSpeed2016GameDeviceData& data)
+{
+   if (!engine_settings_searched && data.camera_capture.GetCamera())
+   {
+      engine_settings_searched = true;
+      if (!settings_lookup.Find("WorldRender"))
+         LogDiagnostic(reshade::log::level::warning, "the engine's settings lookup wasn't found, so SR gets the game's own jitter");
+      engine_jitter.Find(settings_lookup);
+   }
+   const bool sr_selected = IsSRSelected(device_data);
+   engine_jitter.Apply(sr_selected, sr_selected ? GetSRJitterPhases(device_data) : 0);
 }
 
 // The globals and the game object before core starts, and the mod's events off before core shuts down
