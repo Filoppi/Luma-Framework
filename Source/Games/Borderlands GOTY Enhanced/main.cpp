@@ -19,9 +19,6 @@
 // invisible and blocks the loader (ReShade times out the addon load -> error 1114).
 #define DISABLE_AUTO_DEBUGGER 1
 
-// FSR 4 and XeSS create a D3D12 device through the DX11->DX12 interop, which Core has to ignore
-#define CHECK_GRAPHICS_API_COMPATIBILITY 1
-
 #define GEOMETRY_SHADER_SUPPORT 0
 #define ENABLE_SMAA 1
 #define ENABLE_RCAS 1

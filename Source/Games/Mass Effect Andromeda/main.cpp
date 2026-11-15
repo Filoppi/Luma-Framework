@@ -10,9 +10,6 @@
 #define DISABLE_FOCUS_LOSS_SUPPRESSION 1
 #define AVOID_INPUT_LOSS 1
 
-// FSR 4 and XeSS create a D3D12 device through the DX11->DX12 interop, which Core has to ignore
-#define CHECK_GRAPHICS_API_COMPATIBILITY 1
-
 #define GEOMETRY_SHADER_SUPPORT 0
 #define ENABLE_SMAA 1 // replaces the game's FXAA pass (FXAA AA mode) with SMAA
 #define ENABLE_RCAS 1 // optional sharpening of the SMAA or DLSS/FSR output (Core's "RCAS PS")
