@@ -591,7 +591,7 @@ public:
    // use NVIDIA shader extensions (warp ballots, through the fake UAV at u7), which the driver only resolves for shaders created
    // while the game has the extension slot set ("NvAPI_D3D11_SetNvShaderExtnSlot()"): in a copy they are plain UAV accesses,
    // and whole tiles end up with the wrong lights. So we always keep the game's objects bound.
-   bool OnBindPatchedShader(DeviceData& device_data, uint32_t shader_hash, reshade::api::pipeline_subobject_type type) override
+   bool OnBindPatchedShader(DeviceData& device_data, uint32_t shader_hash, reshade::api::pipeline_subobject_type type) // TODO: Investigate why was override here?
    {
       return false;
    }
