@@ -65,6 +65,26 @@ void bloom_main_vs(uint vid : SV_VertexID, out float4 pos : SV_Position, out flo
 // f(x) = x - x / (1 + h / (t - h) * (|x| / t)^p)
 //
 // This can break for large p (20+)!
+//float3 luma_bloom_threshold(float3 color)
+//{
+//    // Rename.
+//    const float t = LUMA_BLOOM_THRESHOLD_SOFT_THRESHOLD;
+//    const float h = LUMA_BLOOM_THRESHOLD_KNEE_HEIGHT;
+//    const float p = LUMA_BLOOM_THRESHOLD_KNEE_SHARPNESS;
+//
+//    color = max(0.0, color);
+//    const float k = max(color.r, max(color.g, color.b));
+//    const float u = h / (t - h) * pow(k / t, p);
+//    return color * (u / (1.0 + u)); // Optimized, color * scale(k) / k
+//}
+
+// t - soft threshold, should be in range (0, +inf)
+// h - knee height, should be in range (0, t)
+// p - knee sharpness, should be in range (1, +inf)
+//
+// f(x) = x - x / (1 + exp2(log2(h / (t - h)) + p * log2(|x| / t)))
+//
+// This is equivalent to f(x) = x - x / (1 + h / (t - h) * (|x| / t)^p) implementation, but safe for large p.
 float3 luma_bloom_threshold(float3 color)
 {
     // Rename.
@@ -74,8 +94,8 @@ float3 luma_bloom_threshold(float3 color)
 
     color = max(0.0, color);
     const float k = max(color.r, max(color.g, color.b));
-    const float u = h / (t - h) * pow(k / t, p);
-    return color * (u / (1.0 + u));
+    const float u = log2(h * rcp(t - h)) + p * log2(max(1e-6, k * rcp(t)));
+    return color * rcp(1.0 + exp2(-u)); // Optimized, color * scale(k) / k
 }
 
 float get_gaussian_weight(float x)
