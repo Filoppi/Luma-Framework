@@ -25,8 +25,30 @@
         float ShadowEdgeDetectThreshold : packoffset(c39.y);
         float4 ColorFill : packoffset(c40);
     }
+
+    // TODO: Switch to the new Luma bloom threshold.
     #define LUMA_BLOOM_THRESHOLD PWLThreshold
     #define LUMA_BLOOM_SOFT_KNEE LUMA_BLOOM_THRESHOLD
+    float3 threshold(float3 color)
+    {
+        const float epsilon = 1e-6;
+
+        // Pixel brightness.
+        float br = max(max(color.r, color.g), color.b);
+        br = max(epsilon, br);
+
+        // Under the threshold part, a quadratic curve.
+        // Above the threshold part will be a linear curve.
+        const float k = max(epsilon, LUMA_BLOOM_SOFT_KNEE);
+        const float3 curve = float3(LUMA_BLOOM_THRESHOLD - k, k * 2.0, 0.25 / k);
+        float rq = clamp(br - curve.x, 0.0, curve.y);
+        rq = curve.z * rq * rq;
+
+        // Combine and apply the brightness response curve.
+        return color * max(rq, br - LUMA_BLOOM_THRESHOLD) * rcp(br);
+    }
+
+    #define LUMA_BLOOM_THRESHOLD_FUNCTION(color) threshold(color)
     #define LUMA_BLOOM_TINT float3(1.0, 1.3, 1.0)
 #elif GAME_BIOSHOCK == 2 // BioShock 2 Remastered
     cbuffer _Globals : register(b0)
@@ -59,8 +81,30 @@
         float2 LowResTextureDimensions : packoffset(c25);
         float2 DownsizeTextureDimensions : packoffset(c25.z);
     }
+
+    // TODO: Switch to the new Luma bloom threshold.
     #define LUMA_BLOOM_THRESHOLD PWLThreshold
     #define LUMA_BLOOM_SOFT_KNEE LUMA_BLOOM_THRESHOLD
+    float3 threshold(float3 color)
+    {
+        const float epsilon = 1e-6;
+
+        // Pixel brightness.
+        float br = max(max(color.r, color.g), color.b);
+        br = max(epsilon, br);
+
+        // Under the threshold part, a quadratic curve.
+        // Above the threshold part will be a linear curve.
+        const float k = max(epsilon, LUMA_BLOOM_SOFT_KNEE);
+        const float3 curve = float3(LUMA_BLOOM_THRESHOLD - k, k * 2.0, 0.25 / k);
+        float rq = clamp(br - curve.x, 0.0, curve.y);
+        rq = curve.z * rq * rq;
+
+        // Combine and apply the brightness response curve.
+        return color * max(rq, br - LUMA_BLOOM_THRESHOLD) * rcp(br);
+    }
+
+    #define LUMA_BLOOM_THRESHOLD_FUNCTION(color) threshold(color)
 #elif GAME_BIOSHOCK == 3 // BioShock Infinite
     cbuffer _Globals : register(b0)
     {
@@ -82,9 +126,9 @@
 
     float3 threshold(float3 color)
     {
-	    float br = max(max(color.r, color.g), color.b);
-	    float mask = saturate((br - BloomScaleAndThreshold.y) * 0.5);
-	    return color * mask;
+        float br = max(max(color.r, color.g), color.b);
+        float mask = saturate((br - BloomScaleAndThreshold.y) * 0.5);
+        return color * mask;
     }
 
     #define LUMA_BLOOM_THRESHOLD_FUNCTION(color) threshold(color)
