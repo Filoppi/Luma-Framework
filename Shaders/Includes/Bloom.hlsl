@@ -62,29 +62,9 @@ void bloom_main_vs(uint vid : SV_VertexID, out float4 pos : SV_Position, out flo
 // h - knee height, should be in range (0, t)
 // p - knee sharpness, should be in range (1, +inf)
 //
-// f(x) = x - x / (1 + h / (t - h) * (|x| / t)^p)
-//
-// This can break for large p (20+)!
-//float3 luma_bloom_threshold(float3 color)
-//{
-//    // Rename.
-//    const float t = LUMA_BLOOM_THRESHOLD_SOFT_THRESHOLD;
-//    const float h = LUMA_BLOOM_THRESHOLD_KNEE_HEIGHT;
-//    const float p = LUMA_BLOOM_THRESHOLD_KNEE_SHARPNESS;
-//
-//    color = max(0.0, color);
-//    const float k = max(color.r, max(color.g, color.b));
-//    const float u = h / (t - h) * pow(k / t, p);
-//    return color * (u / (1.0 + u)); // Optimized, color * scale(k) / k
-//}
-
-// t - soft threshold, should be in range (0, +inf)
-// h - knee height, should be in range (0, t)
-// p - knee sharpness, should be in range (1, +inf)
-//
 // f(x) = x - x / (1 + exp2(log2(h / (t - h)) + p * log2(|x| / t)))
 //
-// This is equivalent to f(x) = x - x / (1 + h / (t - h) * (|x| / t)^p) implementation, but safe for large p.
+// This would be equivalent to f(x) = x - x / (1 + h / (t - h) * (|x| / t)^p) implementation, but safe for large p.
 float3 luma_bloom_threshold(float3 color)
 {
     // Rename.
