@@ -1,0 +1,20 @@
+﻿<?xml version="1.0" encoding="utf-8"?>
+<Project ToolsVersion="4.0" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
+  <ItemGroup>
+    <ClCompile Include="main.cpp" />
+    <ClCompile Include="..\..\Core\unity_build.cpp" />
+  </ItemGroup>
+  <ItemGroup>
+    <ClInclude Include="about.h" />
+    <ClInclude Include="camera.h" />
+    <ClInclude Include="camera_capture.h" />
+    <ClInclude Include="diagnostics.h" />
+    <ClInclude Include="engine_jitter.h" />
+    <ClInclude Include="frostbite_settings.h" />
+    <ClInclude Include="log.h" />
+    <ClInclude Include="memory_scan.h" />
+    <ClInclude Include="render_scale.h" />
+    <ClInclude Include="super_resolution_pass.h" />
+    <ClInclude Include="taa_resolve.h" />
+  </ItemGroup>
+</Project>
