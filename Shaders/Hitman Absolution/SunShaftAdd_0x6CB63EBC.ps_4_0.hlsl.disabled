@@ -1,0 +1,42 @@
+// Luma: faithful HLSL translation of Hitman Absolution sun shaft add pixel shader 0x6CB63EBC.
+// Under TONEMAP_TYPE >= 1 the sun shaft term is boosted near the sun by SunShaftHDRBoost (quartic falloff) to add HDR headroom.
+// TONEMAP_TYPE 0 keeps the exact vanilla math.
+
+#include "Includes/Common.hlsl"
+
+cbuffer Globals_cb4 : register(b4)
+{
+  float4 cb4[118];
+};
+
+Texture2D<float4> mapTLC0 : register(t0);
+
+SamplerState samplerTLC0 : register(s0);
+
+void main(
+  float4 v0 : SV_POSITION,
+  float4 v1 : COLOR0,
+  float2 v2 : TEXCOORD0,
+  out float4 o0 : SV_TARGET0)
+{
+  float2 delta = v2.xy - cb4[98].xy;
+  float2 step = delta * cb4[100].z;
+
+  float3 sum = mapTLC0.Sample(samplerTLC0, v2.xy).rgb;
+  float2 uv = v2.xy;
+  for (int i = 0; i < 16; i++)
+  {
+    uv -= step * 0.0625;
+    float4 s = mapTLC0.Sample(samplerTLC0, uv);
+    sum += s.rgb * cb4[i + 25].xyz;
+  }
+
+  float r = saturate(length(delta) * cb4[100].z);
+  float3 result = sum * (1.0 - r);
+#if TONEMAP_TYPE >= 1
+  float n = 1.0 - r;
+  result *= 1.0 + LumaSettings.GameSettings.SunShaftHDRBoost * 4.0 * n * n * n * n;
+#endif
+  o0.xyz = result * cb4[117].xyz;
+  o0.w = 0.0;
+}
