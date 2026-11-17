@@ -17,9 +17,6 @@
 
 #define GEOMETRY_SHADER_SUPPORT 0
 
-// Luma's FSR 4 runs on its own D3D12 device, which ReShade also wraps: ignore the events of non D3D11 devices
-#define CHECK_GRAPHICS_API_COMPATIBILITY 1
-
 #include "..\..\Core\core.hpp"
 #include "..\..\Core\hooks\Hooks.h"
 
