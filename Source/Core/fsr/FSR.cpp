@@ -94,7 +94,8 @@ namespace FidelityFX
          custom_data = new FSRInstanceData();
          custom_data->is_supported = true;
          custom_data->automatically_restores_pipeline_state = false; // TODO: does it actually not do it? What states does it change? Does DLSS properly do it?
-         custom_data->min_resolution = 32; // Not 100% accurate but should be a decent start
+         // Not 100% accurate but should be a decent start
+         custom_data->min_resolution = 32;
       }
 
       // NOTE: the init for FSR is the same as the context creation. There's no separate global dll init like there is for DLSS,
@@ -143,7 +144,7 @@ namespace FidelityFX
          return false;
 
       // No need to re-instantiate FSR "features" if all the params are the same
-      if (memcmp(&settings_data, &custom_data->settings_data, sizeof(SR::SettingsData)) == 0 && custom_data->has_context)
+      if (settings_data == custom_data->settings_data && custom_data->has_context)
       {
          return true;
       }
@@ -242,7 +243,7 @@ namespace FidelityFX
          {
             printf_s("FSR3: ffxFsr3ContextDestroy failed, error = %d\n", static_cast<int>(err_code));
          }
-         //custom_data->context = {}; // Probably not very useful
+         // custom_data->context = {}; // Probably not very useful
          memset(&custom_data->context, 0, sizeof(FfxFsr3Context));
          custom_data->has_context = false;
 
@@ -325,8 +326,8 @@ namespace FidelityFX
          dispatch_upscale.cameraFar = draw_data.far_plane;
          dispatch_upscale.cameraNear = draw_data.near_plane;
       }
-      //dispatch_upscale.cameraFar = draw_data.near_plane; // TODO: why does FSR complain depth is too small with inverse depth? Even with 100000
-      //dispatch_upscale.cameraNear = draw_data.far_plane;
+      // dispatch_upscale.cameraFar = draw_data.near_plane; // TODO: why does FSR complain depth is too small with inverse depth? Even with 100000
+      // dispatch_upscale.cameraNear = draw_data.far_plane;
       dispatch_upscale.viewSpaceToMetersFactor = 1.f; // This can be left at zero and still work. Most engines units should be meters.
 
       dispatch_upscale.reset = draw_data.reset;
@@ -336,7 +337,8 @@ namespace FidelityFX
 
       float time_delta = draw_data.time_delta > 0.f ? draw_data.time_delta : (1.f / 60.f);
       dispatch_upscale.frameTimeDelta = static_cast<float>(time_delta * 1000.f); // FSR expects milliseconds. Unused by upscaling.
-      dispatch_upscale.frameID = draw_data.frame_index; // This is ignored so it doesn't matter (it's for FG)
+      // This is ignored so it doesn't matter (it's for FG)
+      dispatch_upscale.frameID = draw_data.frame_index;
 
       // This is a context constant (not part of the dispatch description), so it's set every frame, which also covers newly created contexts
       float velocity_factor = draw_data.fsr_velocity_factor;
@@ -361,6 +363,6 @@ namespace FidelityFX
       }
       return err_code == FFX_OK;
    }
-}
+} // namespace FidelityFX
 
 #endif
