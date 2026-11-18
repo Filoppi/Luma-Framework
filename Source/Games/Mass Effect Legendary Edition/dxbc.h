@@ -4,6 +4,7 @@
 #include <cstdint>
 #include <cstring>
 #include <initializer_list>
+#include <memory>
 #include <string>
 #include <unordered_map>
 #include <vector>
@@ -368,5 +369,72 @@ namespace DXBC
       (*tokens)[1] = uint32_t(tokens->size());
       program->data.resize(tokens->size() * 4);
       std::memcpy(program->data.data(), tokens->data(), program->data.size());
+   }
+
+   // Only the blend input clamp is needed here. Calls still name it, so that a shared version with more modes (and a "saturate"
+   // default, which would clip HDR UI color) can't silently change what they do.
+   enum class Output0Clamp : uint8_t
+   {
+      BLEND_INPUT,
+   };
+
+   // For "Game::PatchShaderBytecodeSync" ("code": the program after its version and length tokens, "size" its size in and out).
+   // Puts back the clamp a UNORM render target 0 applied to the blend input, for when that target is upgraded to float: rgb >= 0
+   // and alpha in [0, 1] (an alpha above 1 makes INV_SRC_ALPHA negative), keeping color above 1 for HDR. o0's writes go to an added
+   // temp, copied to o0 clamped before the final ret: reading an output ("mov_sat o0, o0") isn't something fxc emits, and WARP's
+   // shader JIT crashes on it. Null for a program with another return or a relatively indexed output.
+   inline std::unique_ptr<std::byte[]> ClampOutput0(const std::byte* code, size_t* size, Output0Clamp /* only BLEND_INPUT */)
+   {
+      if (*size % sizeof(uint32_t) != 0)
+         return nullptr;
+      Chunk program{.fourcc = FourCC("SHEX"), .data = std::vector<uint8_t>(8 + *size)};
+      const uint32_t header[2] = {0, uint32_t(program.data.size() / sizeof(uint32_t))};
+      std::memcpy(program.data.data(), header, sizeof(header));
+      std::memcpy(program.data.data() + sizeof(header), code, *size);
+      std::vector<uint32_t> tokens;
+      std::vector<Instruction> instructions;
+      size_t first_body = 0;
+      if (!ReadProgram(program, &tokens, &instructions, &first_body) || first_body >= instructions.size() || instructions.back().opcode != D3D10_SB_OPCODE_RET ||
+          std::ranges::any_of(instructions.begin() + first_body, instructions.end() - 1, [](const Instruction& instruction)
+             { return instruction.opcode == D3D10_SB_OPCODE_RET || instruction.opcode == D3D10_SB_OPCODE_RETC; }))
+         return nullptr;
+
+      uint32_t color;
+      std::vector<uint32_t> patched = CopyDeclarations(tokens, instructions, first_body, 1, &color, [](size_t)
+         { return std::vector<uint32_t>(); });
+      for (size_t i = first_body; i + 1 < instructions.size(); i++)
+      {
+         const Instruction& instruction = instructions[i];
+         const size_t offset = patched.size();
+         patched.insert(patched.end(), tokens.begin() + instruction.begin, tokens.begin() + instruction.begin + instruction.length);
+         bool supported = true;
+         const bool walked = WalkOperands(tokens, instruction, [&](size_t token_position, size_t index_position)
+            {
+               uint32_t& token = patched[offset + token_position - instruction.begin];
+               if (DECODE_D3D10_SB_OPERAND_TYPE(token) != D3D10_SB_OPERAND_TYPE_OUTPUT)
+                  return true;
+               if (index_position == no_index || DECODE_D3D10_SB_OPERAND_INDEX_REPRESENTATION(0, token) != D3D10_SB_OPERAND_INDEX_IMMEDIATE32)
+                  return supported = false;
+               if (tokens[index_position] == 0)
+               {
+                  token = (token & ~D3D10_SB_OPERAND_TYPE_MASK) | ENCODE_D3D10_SB_OPERAND_TYPE(D3D10_SB_OPERAND_TYPE_TEMP);
+                  patched[offset + index_position - instruction.begin] = color;
+               }
+               return true; });
+         if (!walked || !supported)
+            return nullptr;
+      }
+
+      // "max o0.xyz, rN, l(0, 0, 0, 0)" then "mov_sat o0.w, rN"
+      constexpr uint32_t color_source = Source(D3D10_SB_OPERAND_TYPE_TEMP, 0, 1, 2, 3);
+      constexpr uint32_t immediate = ENCODE_D3D10_SB_OPERAND_NUM_COMPONENTS(D3D10_SB_OPERAND_4_COMPONENT) | ENCODE_D3D10_SB_OPERAND_TYPE(D3D10_SB_OPERAND_TYPE_IMMEDIATE32);
+      patched.insert(patched.end(), {Opcode(D3D10_SB_OPCODE_MAX, 10), Destination(D3D10_SB_OPERAND_TYPE_OUTPUT, mask_xy | D3D10_SB_OPERAND_4_COMPONENT_MASK_Z), 0, color_source, color, immediate, 0, 0, 0, 0,
+                                       Opcode(D3D10_SB_OPCODE_MOV, 5, true), Destination(D3D10_SB_OPERAND_TYPE_OUTPUT, D3D10_SB_OPERAND_4_COMPONENT_MASK_W), 0, color_source, color});
+      patched.insert(patched.end(), tokens.begin() + instructions.back().begin, tokens.end());
+
+      *size = (patched.size() - 2) * sizeof(uint32_t);
+      auto new_code = std::make_unique<std::byte[]>(*size);
+      std::memcpy(new_code.get(), patched.data() + 2, *size);
+      return new_code;
    }
 } // namespace DXBC

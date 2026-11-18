@@ -3027,16 +3027,57 @@ public:
    {
       if (type != reshade::api::pipeline_subobject_type::pixel_shader || !shader_object)
          return nullptr;
+      const auto* shader_bytes = reinterpret_cast<const uint8_t*>(shader_object);
       SceneOffsetPatch::Stats stats;
-      const std::vector<uint32_t> patched = SceneOffsetPatch::PatchPixelShaderProgram(reinterpret_cast<const uint8_t*>(shader_object), shader_object_size, &stats);
+      const std::vector<uint32_t> patched = SceneOffsetPatch::PatchPixelShaderProgram(shader_bytes, shader_object_size, &stats);
 #if DEVELOPMENT
       if (stats.patched_reads || stats.refused_reads)
       {
          reshade::log::message(reshade::log::level::info, std::format("[MELE SceneOffset] PS 0x{:08X} {} reads scaled, {} refused", uint32_t(shader_hash), stats.patched_reads, stats.refused_reads).c_str());
       }
 #endif
+      // Scaleform GFx (menus and HUD) reads no scene texture, so SceneOffset never patches it and it only reaches this branch. Its
+      // pixel shaders clamp their color themselves but write the cxform alpha (color * cb0[1] + cb0[2]) unclamped. The vanilla
+      // UNORM swapchain clamped that alpha before blending. On the upgraded fp16 one an alpha above 1 makes SRC_ALPHA /
+      // INV_SRC_ALPHA extrapolate into out of range quads (ME2LE's Mission Complete smoke reached ~3).
       if (patched.empty())
-         return nullptr;
+      {
+         // Match fxc's last 16 program tokens in place first, which rejects nearly every shader before any parse
+         std::array<uint32_t, 16> tail{};
+         if (size % sizeof(uint32_t) != 0 || size < sizeof(tail))
+            return nullptr;
+         std::memcpy(tail.data(), code + size - sizeof(tail), sizeof(tail));
+         constexpr uint32_t float_one = std::bit_cast<uint32_t>(1.f);
+         constexpr uint32_t float_inverse_gamma = 0x3EE8BA2F; // fxc's l(0.454545)
+         constexpr uint32_t color_mask = D3D10_SB_OPERAND_4_COMPONENT_MASK_X | D3D10_SB_OPERAND_4_COMPONENT_MASK_Y | D3D10_SB_OPERAND_4_COMPONENT_MASK_Z;
+         const uint32_t color_output = DXBC::Destination(D3D10_SB_OPERAND_TYPE_OUTPUT, color_mask);
+         const bool ends_with_ret = tail[15] == DXBC::Opcode(D3D10_SB_OPCODE_RET, 1);
+         // The cxform shaders (all three games): "min o0.xyz, rN, l(1, 1, 1, w)"
+         const bool clamps_color_to_one = tail[5] == DXBC::Opcode(D3D10_SB_OPCODE_MIN, 10) && tail[6] == color_output && tail[7] == 0 &&
+                                          DECODE_D3D10_SB_OPERAND_TYPE(tail[10]) == D3D10_SB_OPERAND_TYPE_IMMEDIATE32 &&
+                                          tail[11] == float_one && tail[12] == float_one && tail[13] == float_one;
+         // ME3LE's sRGB glyph text ("GFx_PS_TextTextureSRGB" and its Multiply mode, SDR and HDR) uses the literal 1 / 2.2 instead
+         // of "InverseGamma": "mul rN.xyz, rN, l(0.454545, ...)" then "exp o0.xyz, rN"
+         const bool srgb_text_gamma = tail[0] == DXBC::Opcode(D3D10_SB_OPCODE_MUL, 10) && DECODE_D3D10_SB_OPERAND_TYPE(tail[5]) == D3D10_SB_OPERAND_TYPE_IMMEDIATE32 &&
+                                      tail[6] == float_inverse_gamma && tail[7] == float_inverse_gamma && tail[8] == float_inverse_gamma &&
+                                      tail[10] == DXBC::Opcode(D3D10_SB_OPCODE_EXP, 5) && tail[11] == color_output && tail[12] == 0;
+         if (!ends_with_ret || !(clamps_color_to_one || srgb_text_gamma))
+            return nullptr;
+         // GFx declares only cb0 and reads up to row 3 ("InverseGamma"), the sRGB text up to row 2 (the cxform add). UE3 materials
+         // also bind PSOffsetConstants (cb2).
+         const uint32_t scaleform_cb0_bytes = (srgb_text_gamma ? 3 : 4) * 16;
+         if (DXBC::ConstantBufferBytes(shader_bytes, shader_object_size, 0) != scaleform_cb0_bytes)
+            return nullptr;
+         if (DXBC::ConstantBufferBytes(shader_bytes, shader_object_size, 1) != 0)
+            return nullptr;
+         if (DXBC::ConstantBufferBytes(shader_bytes, shader_object_size, SceneOffsetPatch::offset_constants_slot) != 0)
+            return nullptr;
+#if DEVELOPMENT
+         reshade::log::message(reshade::log::level::info, std::format("[MELE GFx] PS 0x{:08X} blend input clamped", uint32_t(shader_hash)).c_str());
+#endif
+         // The color is already in [0, 1], so only the alpha changes
+         return DXBC::ClampOutput0(code, &size, DXBC::Output0Clamp::BLEND_INPUT);
+      }
       size = (patched.size() - 2) * sizeof(uint32_t);
       auto program_body = std::make_unique<std::byte[]>(size);
       std::memcpy(program_body.get(), patched.data() + 2, size);
