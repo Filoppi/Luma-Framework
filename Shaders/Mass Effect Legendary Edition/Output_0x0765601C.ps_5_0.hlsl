@@ -17,7 +17,6 @@ void main(
     float2 v0 : TEXCOORD0,
     out float4 o0 : SV_Target0)
 {
-   // Both terms are cbuffer-uniform scalars: fold them so the decode is followed by a single vector multiply.
    const float scale = MELE_GetUIPaperWhiteRelativeToGame() * MELE_GetGamePaperWhiteScale();
    float3 c = SourceTexture.SampleLevel(SourceTextureSampler_s, v0.xy, 0).xyz;
    o0 = float4(gamma_to_linear(c, GCT_MIRROR) * scale, 1.0);

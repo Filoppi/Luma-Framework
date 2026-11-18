@@ -1,8 +1,0 @@
-// ME1LE stage-1 tonemap: LUT grade; no motion blur or film grain.
-// Shares the ME1LE/ME2LE body; ME1LE has no filmic axis and uses a power-100 vignette with a weaker blue floor.
-#define TM_HAS_MOTIONBLUR 0
-#define TM_HAS_GRAIN      0
-#define TM_HAS_FILMIC     0
-#define TM_VIG_POW        100.0
-#define TM_VIG_FLOOR      kMELE_ME1LEVignetteFloor
-#include "Tonemap_ME12LE_LUT_Body.hlsl"

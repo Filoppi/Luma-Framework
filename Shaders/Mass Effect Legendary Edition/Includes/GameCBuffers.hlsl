@@ -13,9 +13,9 @@ namespace CB
 struct LumaGameSettings
 {
    float Exposure;           // 1 = vanilla. Scene exposure multiplier, scene-referred / pre-grade.
-   float Saturation;         // 1 = vanilla. Luminance-based saturation multiplier on the final HDR color.
-   float HighlightDechroma;  // 0 = off (default). DICE HighlightsDesaturation: max channel ramps toward white from a third of peak to peak, only once luminance passes that shoulder.
-   float Contrast;           // 1 = vanilla. Multiplicative contrast around 18% mid-gray, applied before the display map.
+   float Saturation;         // 1 = vanilla. Chrominance scale around relative luminance before the HDR display map.
+   float HighlightDechroma;  // 0 = off (default). Whitening of highlights above 1.5 toward a per-channel Reinhard, before the HDR display map.
+   float Contrast;           // 1 = vanilla. Power of relative luminance around mid gray before the HDR display map.
    float VignetteIntensity;  // 1 = vanilla. Scales the game's vignette darkening (0 = none; the native white-point tint stays).
    float FilmGrainIntensity; // 1 = vanilla. Scales the game's film grain (0 = off).
    float BloomIntensity;     // Written by C++: Bloom Intensity slider * live native BloomScale (0 = no bloom); 1 while Luma bloom is off.
@@ -24,13 +24,13 @@ struct LumaGameSettings
    float VideoAutoHDREnable; // 0/1 toggle. 1 = expand Bink movie highlights into HDR, 0 = vanilla SDR videos (no expansion).
    float VideoAutoHDRBoost;  // 0..1. Bink highlight range relative to UI white: 0 = 1x/no-op, 1 = up to 3.125x. Default 0.5.
    float VideoOnSwapchain;   // Set by C++ per Bink draw: 1 = it targets a swapchain back buffer, 0 = any other target.
+   float BloomScale;         // Written by C++: live native BloomScale (bright-pass cb0.x, clamped to [0, 4]), 1 until first readback.
 };
 
 // Game-specific per-pass cbuffer data.
 struct LumaGameData
 {
-   // 1 until stage 2 draws this frame (it writes linear scRGB to the swapchain); always 1 on the native-SDR topology.
-   float SwapchainGammaEncoded;
+   float Dummy; // hlsl doesn't support empty structs
 };
 } // namespace CB
 

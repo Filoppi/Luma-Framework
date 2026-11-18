@@ -1,20 +1,27 @@
-// Shared stage-1 body for ME1LE/ME2LE analytic scene permutations used by the galaxy map, some Mako scenes, and
-// cutscenes. These permutations have no LUT, vignette, motion blur, or film grain. Bindings: t0 scene, t1 DoF, t2/t3
-// near/far DoF, t4 bloom.
-//
-// ME1LE 0xAAE8755A and ME2LE 0xCC76075F share the decompiled scene preparation and grade; the thin entry points add
-// only ME2LE's post-gamma white point. Preserve register-level swizzles for comparison with the live CSOs. This body
-// produces linear gradedHDR and native gamma sdrGamma; the shared tail applies DICE.
+// ME1LE 0xAAE8755A and ME2LE 0xCC76075F stage-1 analytic scene grade, used by the galaxy map, some Mako scenes, and
+// cutscenes. No LUT, vignette, motion blur, or film grain. Bindings: t0 scene, t1 DoF, t2/t3 near/far DoF, t4 bloom.
+//   0xAAE8755A  ME1LE: no white point. The dumped CSO clamps to 1 after the native gamma curve and goes straight to the
+//               metering dot product and o0, without the 0.832050323/3.25/pow-100 radial vignette constants of the
+//               ME1LE LUT permutations.
+//   0xCC76075F  ME2LE: adds a blue-tinted post-gamma white point (TM_ANALYTIC_WHITEPOINT).
+// Preserve register-level swizzles for comparison with the live CSOs. This file produces linear gradedHDR and native
+// gamma sdrGamma; the shared tail applies the display map.
 // ME3LE analytic shader 0x225A8330 has a different cbuffer layout and no exponential curve.
+
+#if _CC76075F
+#define TM_ANALYTIC_WHITEPOINT float3(1.01036298, 1.00000572, 1.16309249)
+#endif
+#define TM_VIGNETTE_TYPE 0
 
 // clang-format off
 #include "Includes/Common.hlsl"
 #include "../Includes/Color.hlsl"
-#include "../Includes/DICE.hlsl"
-#include "../Includes/Reinhard.hlsl" // ReinhardRange, used by the grade proxy.
+#include "../Includes/Reinhard.hlsl" // ReinhardRange for HDRBridge's grade proxy, which family 02 never calls.
 #include "Includes/Tonemap_MELE_HDRConfig.hlsli"   // HDR reconstruction constants.
 #include "Includes/Tonemap_MELE_ExpExtended.hlsli" // Continued scene curve and its validated work input.
 #include "Includes/Tonemap_MELE_HDRBridge.hlsli"   // Native-colour projection; needs Reinhard above.
+#include "../Includes/CInfinityRolloff.hlsl" // Display-peak rolloff, for the shared output tail.
+#include "../Includes/MacLeodBoynton.hlsl"   // Highlights Desaturation, for the shared output tail.
 // clang-format on
 
 #define cmp -
@@ -71,9 +78,9 @@ float3 MELE_Analytic_GradeHead(float3 c)
    return r0.xyz;
 }
 
-// Native analytic SDR grade transcribed from the live CSOs, evaluated exactly once on the untouched per-channel
-// value in every Display Mode. SDR uses this result directly. HDR keeps its RGB ratios and replaces only its
-// luminance with the reconstruction's. Keep its register-level swizzles and optional ME2LE white point unchanged.
+// Native analytic SDR grade transcribed from the live CSOs, evaluated once on the untouched per-channel value in every
+// Display Mode (see "MELE_NativeColorGradedHDR" for HDR). Keep its register-level swizzles and optional ME2LE white
+// point unchanged.
 float3 MELE_Analytic_GradeChain(float3 c)
 {
    float4 r0;
@@ -97,33 +104,32 @@ float3 MELE_Analytic_GradeChain(float3 c)
    return r0.xyz;
 }
 
-// Family 02: MELE_Analytic_GradeChain with exactly three upper tonal caps lifted, so the working branch can carry
-// values above the native ceiling. No LUT and no max-channel proxy: the grade is a formula, so it is extended as one.
-// Lifted: the saturate opening the Scene grade becomes max(0, .), since log2 follows it; the gamma curve loses its
-// cap and gains no floor, because these permutations feed mul_sat straight into log; the closing min(1) is dropped.
-// Everything else - the shared head, every Scene* field and its order, GammaOverlayColor, both halves of
-// GammaColorScaleAndInverse, the ME2LE encoded white point - is kept.
+// Family 02: "MELE_Analytic_GradeChain" with exactly three upper caps lifted, so the working branch can carry values
+// above the native ceiling. The grade is a formula, so it is extended as one, with no LUT and no max-channel proxy.
+// The saturate opening the Scene grade becomes max(0, .), since log2 follows it. The gamma curve loses its cap and
+// gains no floor, because these permutations feed mul_sat straight into log. The closing min(1) is dropped.
+// Everything else is kept: the shared head, every Scene* field and its order, GammaOverlayColor, both halves of
+// GammaColorScaleAndInverse, and the ME2LE encoded white point.
 //
-// Lifting the caps is what makes overflow reachable, so the guards live here and not in the native chain. Each runs
-// BEFORE the operation it protects: the output alone cannot show a NaN that a later max() swallowed. One failing
-// channel declines the WHOLE triple, since switching channels independently would move hue. Artist dials have a
-// free sign, so values derived from them get the finite check, not the non-negative one.
+// Lifting the caps makes overflow reachable, so the guards live here and not in the native chain. Each runs before
+// the operation it protects, since a later max() would swallow a NaN. One failing channel declines the whole triple,
+// as switching channels independently would move hue. Values derived from artist dials, whose sign is free, get the
+// finite check, not the non-negative one.
 //
-// c is the working grade input from MELE_TryExpExtendedInput. Before the chain, the two cbuffer values no later
-// guard observes are checked: SceneMidTones, because an infinite exponent on a positive base collapses to an exact 0
-// that passes every later guard, and GammaColorScaleAndInverse.w, which must be positive because the tail divides by
-// it - the exponent is checked too, since a tiny invGamma overflows the reciprocal. The other Scene* and Gamma* fields
-// reach a guarded value through arithmetic that turns a non-finite into NaN or inf, and their unused .w never takes
-// part. A zero output scale is a fade and is NOT refused. Bad parameters are never repaired: false only declines the
-// reconstruction, and the caller keeps the exact native SDR reference. The uncapped result is decoded once.
+// Only the two cbuffer values no later guard observes are checked up front: SceneMidTones, because an infinite
+// exponent on a positive base collapses to an exact 0 that passes every later guard, and GammaColorScaleAndInverse.w,
+// which must be positive because the tail divides by it, with its reciprocal checked too because a tiny invGamma
+// overflows it. The other Scene* and Gamma* fields reach a guarded value through arithmetic that turns a non-finite
+// into NaN or inf; their unused .w never takes part. A zero output scale is a fade and is not refused. Bad parameters
+// are never repaired, false only declines the reconstruction.
 bool MELE_TryAnalyticGradeChainHDR(float3 c, out float3 workHDR)
 {
    const float invGamma = GammaColorScaleAndInverse.w;
    const float gammaExponent = 1.0 / invGamma;
-   // Raw constant-buffer reads take the bit tests, not MELE_IsFinite: without IEEE strictness fxc assumes a cbuffer
-   // value is finite and deletes an ordered comparison against FLT_MAX on it. The exponent is computed, so its
-   // comparison survives.
-   if (IsAnyNaN_Strict(SceneMidTones.xyz) || any(IsInfinite_Strict(SceneMidTones.xyz)) || IsNaN_Strict(invGamma) || IsInfinite_Strict(invGamma) || !(invGamma > 0.0 && gammaExponent <= FLT_MAX))
+   // Raw cbuffer reads take the bit tests, not MELE_IsFinite, whose comparisons fxc deletes on them (see
+   // Includes/Common.hlsl). The exponent is computed, so its comparison survives; past the bit tests it is positive
+   // exactly when invGamma is.
+   if (IsAnyNaN_Strict(SceneMidTones.xyz) || any(IsInfinite_Strict(SceneMidTones.xyz)) || IsNaN_Strict(invGamma) || IsInfinite_Strict(invGamma) || !MELE_IS_FINITE_POSITIVE(gammaExponent))
    {
       workHDR = float3(0.0, 0.0, 0.0);
       return false;
@@ -133,11 +139,11 @@ bool MELE_TryAnalyticGradeChainHDR(float3 c, out float3 workHDR)
    r0.xyz = MELE_Analytic_GradeHead(c);
 
    // Native analytic Scene grade, with only the upper half of the opening saturate removed. The shift itself is
-   // checked, not its max, which would hide a NaN; that check also covers the signed artistic head above and c itself,
-   // whose non-finite values propagate into it.
+   // checked, not its max, which would hide a NaN; that also covers the signed head above and c, whose non-finite
+   // values propagate into it.
    const float3 shifted = -SceneShadowsAndDesaturation.xyz + r0.xyz;
-   // A negative shift is ordinary artist data, not an error. A non-finite SceneInverseHighLights turns the
-   // product into NaN or inf, which the non-negative check on the log base rejects.
+   // A negative shift is ordinary artist data. A non-finite SceneInverseHighLights turns the product into NaN or
+   // inf, which the non-negative check on the log base rejects.
    r0.xyz = SceneInverseHighLights.xyz * max(float3(0, 0, 0), shifted);
    if (!MELE_IsFinite(shifted) || !MELE_IsFiniteNonNegative(r0.xyz))
    {
@@ -199,10 +205,8 @@ void main(
    // Scene-referred exposure before tonemapping.
    r1.xyz = r1.xyz * LumaSettings.GameSettings.Exposure;
 
-   // Screen blend using Luma's rebound fp16 bloom. DELIBERATE DEVIATION: the weight reads the LINEAR scene, where the
-   // native CSOs read it after the curve; bright pixels lose their bloom, which keeps highlight detail and colour in
-   // HDR, and the family was calibrated with it. Do not change the weight or its input without an in-game A/B (see
-   // Shaders/Mass Effect Legendary Edition/AGENTS.md).
+   // Screen blend using Luma's rebound fp16 bloom. The weight deliberately reads the linear scene, see
+   // "MELE_BloomScreenBlend".
    r0.xyz = MELE_BloomScreenBlend(r0.xy, r1.xyz, r0.w);
 
    // Captured before the curve below overwrites r1. Straight RGB, with no BRG rotation to undo.
@@ -214,21 +218,19 @@ void main(
    r1.xyz = exp2(r1.xyz);
    r1.xyz = float3(1, 1, 1) + -r1.xyz;
    r0.xyz = r0.xyz * r0.www + r1.xyz;
-   // The native per-channel value still reaches the analytic grade untouched - that is this body's SDR output.
-   // Family 02 does not touch it; it builds a second, uncapped working value from the scene instead.
+   // The native per-channel value reaches the analytic grade untouched as this body's SDR output. Family 02 builds a
+   // second, uncapped working value from the scene instead.
    float3 workHDR = 0.0;
    bool workValid = false;
    if (LumaSettings.DisplayMode == 1)
    {
-      // The curve continued on the scene, bloom added where vanilla adds it, then the uncapped grade and one decode.
       // Below the pivot with an inert grade this reduces to the native result.
       float3 workNative;
       const bool sourceValid = MELE_TryExpExtendedInput(sceneLinear, bloomLinear, workNative);
       workValid = sourceValid && MELE_TryAnalyticGradeChainHDR(workNative, workHDR);
    }
 
-   // The native grade runs only on the SDR reference; the working value took its uncapped twin above. Hue and
-   // saturation come from this bounded grade, never from the twin or the scene; only the luminance is the twin's.
+   // The uncapped twin above supplies only relative luminance.
    float3 sdrGamma = MELE_Analytic_GradeChain(r0.xyz);
    float3 gradedHDR = MELE_NativeColorGradedHDR(sdrGamma, workHDR, workValid);
 

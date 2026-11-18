@@ -3,24 +3,23 @@
 
 #include "Tonemap_MELE_HDRConfig.hlsli" // Pivot, probes and the fit slope floors.
 
-// Sampled continuation of the game's own 1D filmic LUT, for the two filmic families. Include AFTER the
-// permutation declares smpFilmicLUT and its sampler; MELE_IsFiniteNonNegative and MELE_NativeToneCurve come from
-// Includes/Common.hlsl. The include above carries a guard, so a body that already pulled it in pays nothing.
+// Sampled continuation of the game's own 1D filmic LUT, for the two filmic families. Include after the
+// permutation declares "smpFilmicLUT" and its sampler, and after "Includes/Common.hlsl".
 //
-// Nothing here invents a curve. Every anchor is a real read of the bound LUT, so a different shipped
-// table gives a different continuation; the constants are probe positions, not curve coefficients.
+// Every anchor is a real read of the bound LUT, so a different shipped table gives a different continuation;
+// the constants are probe positions, not curve coefficients.
 //
-// The fit's names stay snake_case (z_lo, pivot_z, probe_hi) where the rest of this code is camelCase: they are the
-// subscripts of the derivations below and of the offline bench model, so the three stay comparable.
+// The fit's names stay snake_case (z_lo, pivot_z, probe_hi) to match the derivations below and the offline
+// bench model.
 //
-// Both evaluators hand their result straight to MELE_TryBuildGradeProxy, which rejects a non-finite or negative
-// working value before any use. What that check cannot see is validated before the continuation: a bad channel that
-// stays below the pivot selects the native sample and would otherwise pass. The ME3LE evaluator checks its own
-// scene+bloom input; the ME2LE one receives z from MELE_TryExpExtendedInput, which already checked the scene and the
-// bloom, so it checks only the native samples.
+// Both evaluators hand their result to "MELE_TryBuildGradeProxy", which rejects a non-finite or negative working
+// value. A bad channel that stays below the pivot selects the native sample and would pass that check, so the
+// inputs are validated before the continuation. The ME3LE evaluator checks its own scene+bloom input; the ME2LE
+// one gets z from "MELE_TryExpExtendedInput", which already checked the scene and bloom, so it checks only the
+// native samples.
 
-// The LUT in its own input domain z: the strip is addressed as SC * z, where SC is the native input
-// scale covering z up to about 16.2. This is the raw read, with no pre-curve of any kind.
+// The raw LUT read in its own input domain z: the strip is addressed as SC * z, where SC is the native input
+// scale covering z up to about 16.2.
 float MELE_FilmicLookupZ(float z)
 {
    const float SC = 0.0616082214;
@@ -32,27 +31,21 @@ struct MELE_FilmicFit
    float pivot_z;     // Where the continuation starts, in the LUT's own domain.
    float pivot_value; // The last native value before it takes over.
    float slope;       // Secant across the probe window, per unit of that domain.
-   bool valid;        // False declines the reconstruction; the caller keeps the native SDR reference.
+   bool valid;        // False declines the reconstruction.
 };
 
-// The one piece of arithmetic the two families genuinely share: three reads and a secant between the
-// outer two. Everything that differs between them is in the nodes the caller passes, which are
-// compile-time probe positions with z_lo < pivot_z < z_hi.
+// The part the two families share: three reads and a secant between the outer two. The nodes the caller
+// passes are compile-time probe positions with z_lo < pivot_z < z_hi.
 //
-// The slope denominator is the difference of the NODES. The input scale is already inside the sampled
-// values, so dividing by a coordinate delta would count it twice.
+// The slope denominator is the difference of the nodes. The input scale is already inside the sampled values,
+// so dividing by a coordinate delta would count it twice. The table is discrete, so the secant isn't claimed
+// to match the local slope of the neighbouring texels.
 //
-// A secant, not an analytic derivative: the table is discrete, so this cannot be claimed to match the
-// local slope of the neighbouring texels.
+// The validity test is local: a globally non-monotone table that rises across the window is accepted, and
+// only a flat, falling or non-finite window is rejected. R16_UNORM quantization can flatten a short run; report
+// the rejection there, never substitute a slope of 1 or one borrowed from another game's curve.
 //
-// The validity test is LOCAL by construction. A table that is globally non-monotone but rising across
-// the window still yields a usable fit and is accepted; only a window that is flat, falling or
-// non-finite is rejected. That matters for R16_UNORM, where quantization can flatten a short run: the
-// answer there is to report the rejection, never to substitute a slope of 1 or one borrowed from
-// another game's curve. Local validity is not a statement about the whole table.
-//
-// min_slope belongs to the caller's domain and the two families' thresholds are NOT interchangeable:
-// see MELE_FILMIC_MIN_SLOPE_Z and MELE_FILMIC_MIN_SLOPE_X.
+// min_slope is in the caller's domain, see "MELE_FILMIC_MIN_SLOPE_Z" and "MELE_FILMIC_MIN_SLOPE_X".
 MELE_FilmicFit MELE_BuildFilmicFitZ(float z_lo, float pivot_z, float z_hi, float min_slope)
 {
    MELE_FilmicFit fit;
@@ -65,13 +58,9 @@ MELE_FilmicFit MELE_BuildFilmicFitZ(float z_lo, float pivot_z, float z_hi, float
    return fit;
 }
 
-// ME3LE, family 04. This LUT is addressed with scene-linear scene+bloom directly - the domain z IS
-// scene-x here - so the probe positions go in unchanged and one scalar fit serves all three channels.
-// Reading the table through MELE_FilmicLookupZ, in its own input domain, also keeps this evaluator
-// correct no matter which body includes it.
-//
-// Below the pivot the caller's already-sampled native value is reused rather than re-probed, so that
-// region is the native result and not an approximation of it.
+// ME3LE, family 04. This LUT is addressed with linear scene+bloom directly (z is scene-x here), so the probe
+// positions go in unchanged and one scalar fit serves all three channels. Below the pivot the caller's native
+// sample is reused rather than re-probed, so that region is exactly the native result.
 bool MELE_TryEvaluateME3LEFilmicExtended(float3 sceneWithBloom, float3 nativeFilmicRGB, out float3 extendedFilmicRGB)
 {
    extendedFilmicRGB = nativeFilmicRGB;
@@ -84,7 +73,7 @@ bool MELE_TryEvaluateME3LEFilmicExtended(float3 sceneWithBloom, float3 nativeFil
    return fit.valid;
 }
 
-// ME2LE, family 03. The game runs two tone stages in series and adds the bloom BETWEEN them:
+// ME2LE, family 03. The game runs two tone stages in series and adds the bloom between them:
 //
 //   native:  ell(F(C) + B)      where F(x) = 1 - exp2(-1.7x) and ell(z) = L(SC * z)
 //
@@ -92,27 +81,24 @@ bool MELE_TryEvaluateME3LEFilmicExtended(float3 sceneWithBloom, float3 nativeFil
 //
 //   W_tone = E_L(E_F(C) + B)
 //
-// It is NOT ell(F(C + B)); those two diverge as soon as the bloom is non-zero. z = E_F(C) + B is the caller's
-// MELE_TryExpExtendedInput result: validated inputs keep it non-negative and never NaN, and an overflow to +inf
+// This is not ell(F(C + B)), which diverges as soon as the bloom is non-zero. z = E_F(C) + B comes from
+// "MELE_TryExpExtendedInput": validated inputs keep it non-negative and never NaN, and an overflow to +inf
 // lands above the pivot and is rejected downstream.
 //
-// THE FIT NODES COME FROM F ALONE and do not depend on C or B. Anchors that move with the signal they
-// extend invert this curve's direction: the table flattens as its coordinate rises, so a brighter
-// bloom would lower the fitted slope and make the working response FALL while the native one rises.
-// Do not introduce B-dependent anchors.
+// The fit nodes come from F alone and don't depend on C or B. The table flattens as its coordinate rises, so
+// anchors that moved with the bloom would lower the fitted slope as the bloom brightens and make the working
+// response fall while the native one rises.
 //
-// One fit serves all three channels, so a tinted bloom costs nothing extra. The probes still may not be
-// cached across frames - the table's contents can be rewritten in place, so a cache keyed on the SRV
-// pointer would be wrong.
+// One fit serves all three channels, so a tinted bloom costs nothing extra. The probes can't be cached across
+// frames, as the table can be rewritten in place, so a cache keyed on the SRV pointer would be wrong.
 //
-// Per channel, the continuation runs when the SECOND stage has passed its pivot - which a bright bloom
-// alone can cause even where the scene never left the native region. Otherwise the caller's native
-// sample is reused, because both stages then stayed native and it IS the native result.
-//
-// There is no third case. C > pivot with a non-negative bloom puts z above pivot_z algebraically, and
-// where float32 rounding defeats that (slope * (C - p) underflowing to zero within about a thousand
-// ULP of the pivot) a fresh read at z returns exactly the native sample anyway - measured over the
-// full ULP neighbourhood and a 200k random float32 sample on the shipped table.
+// Per channel, the continuation runs when the second stage has passed its pivot, which a bright bloom alone can
+// cause where the scene never left the native region. Otherwise both stages stayed native and the caller's
+// native sample is reused.
+// There is no third case. C > pivot with a non-negative bloom puts z above pivot_z algebraically, and where
+// float32 rounding defeats that (slope * (C - p) underflowing to zero within about a thousand ULP of the pivot)
+// a fresh read at z returns exactly the native sample anyway, measured over the full ULP neighbourhood and a
+// 200k random float32 sample on the shipped table.
 bool MELE_TryEvaluateME2LEFilmicExtended(float3 z, float3 nativeFilmicRGB, out float3 extendedFilmicRGB)
 {
    extendedFilmicRGB = nativeFilmicRGB;

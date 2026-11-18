@@ -1,31 +1,37 @@
-// Shared ME3LE stage-1 body for four filmic/LUT permutations, selected by TM_HAS_MOTIONBLUR and TM_HAS_GRAIN.
-//   0x36B90B12 = MB              0x49BD5A95 = MB + grain
-//   0x00944C2E = (bare)          0x5AA0BD09 = grain
+// ME3LE stage-1 tonemap, four filmic/LUT permutations, each selecting its axes below:
+//   TM_HAS_MOTIONBLUR  0 = none, 1 = velocity blur     0x36B90B12 = MB      0x49BD5A95 = MB + grain
+//   TM_HAS_GRAIN       0 = none, 1 = film grain        0x00944C2E = (bare)  0x5AA0BD09 = grain
 // Analytic shader 0x225A8330 remains standalone because its cbuffer and curve differ.
 //
 // Grade and filmic paths are transcribed from 0x00944C2E; motion blur comes from 0x36B90B12. Preserve their
 // register-level structure for comparison with live CSOs.
-// ME3LE deltas vs the ME1LE/ME2LE LUT body:
+// Differences from the ME1LE/ME2LE LUT body:
 // - The 4096x1 R16_UNORM filmic LUT is the whole tonemap, with no exponential pre-curve before it.
-// - Channels remain straight RGB, and motion blur weights each tap by velocity.
-// - The smoothstep vignette contains a blue-tinted white point; the slider affects only radial darkening.
-// - Motion blur does not change the $Globals layout; grain appends c40/c41 and moves ScreenUVScaleBias from c40 to c42.
+// - Channels stay straight RGB, and motion blur weights each tap by velocity.
+// - The smoothstep vignette has a blue-tinted white point; the slider affects only radial darkening.
+// - Motion blur does not change the _Globals layout; grain appends c40/c41 and moves ScreenUVScaleBias from c40 to c42.
+
+#if _36B90B12 || _49BD5A95
+#define TM_HAS_MOTIONBLUR 1
+#else
+#define TM_HAS_MOTIONBLUR 0
+#endif
+
+#if _49BD5A95 || _5AA0BD09
+#define TM_HAS_GRAIN 1
+#else
+#define TM_HAS_GRAIN 0
+#endif
 
 // clang-format off
 #include "Includes/Common.hlsl"      // Defines game settings; keep first.
 #include "../Includes/Color.hlsl"    // Transfer and color helpers.
-#include "../Includes/DICE.hlsl"     // Display-peak tonemap.
-#include "../Includes/Reinhard.hlsl" // Reversible compression, used by the grade proxy.
+#include "../Includes/Reinhard.hlsl" // ReinhardRange, used by the grade proxy.
 #include "Includes/Tonemap_MELE_HDRConfig.hlsli"   // HDR reconstruction constants.
 #include "Includes/Tonemap_MELE_HDRBridge.hlsli"   // Max-channel grade proxy; needs Reinhard above.
+#include "../Includes/CInfinityRolloff.hlsl" // Display-peak rolloff, for the shared output tail.
+#include "../Includes/MacLeodBoynton.hlsl"   // Highlights Desaturation, for the shared output tail.
 // clang-format on
-
-#ifndef TM_HAS_MOTIONBLUR
-#define TM_HAS_MOTIONBLUR 1
-#endif
-#ifndef TM_HAS_GRAIN
-#define TM_HAS_GRAIN 1
-#endif
 
 // Decompiler artifact kept so the verbatim transcription compiles unchanged.
 #define cmp -
@@ -142,9 +148,8 @@ SamplerState NoiseTextureSampler_s : register(S_NOISE);
 #endif
 SamplerState smpFilmicLUTSampler_s : register(S_FILMIC);
 
-// Native ME3LE SDR grade transcribed from the live CSO. main() runs it once on the untouched native value in every
-// Display Mode and, in HDR, once more on the grade proxy; HDR keeps the native result's RGB ratios and takes only
-// luminance from the reconstruction. Preserve register-level operations; the filmic 1D LUT stays inline in main().
+// Native ME3LE SDR grade transcribed from the live CSO, with the same call contract as MELE_ME12LE_GradeChain in
+// TonemapME12LUT_0x########.ps_5_0.hlsl. Preserve register-level operations; the filmic 1D LUT stays inline in main().
 float3 MELE_ME3LE_GradeChain(float3 c)
 {
    float4 r0, r1;
@@ -272,18 +277,18 @@ void main(
    r0.x = smpFilmicLUT.Sample(smpFilmicLUTSampler_s, r0.xx).x;
    r0.y = smpFilmicLUT.Sample(smpFilmicLUTSampler_s, r0.yy).x;
    r0.z = smpFilmicLUT.Sample(smpFilmicLUTSampler_s, r0.zz).x;
-   // The native per-channel filmic value reaches the grade untouched - that is this body's SDR output. Family
-   // 04 does not touch it; it continues the tone LUT itself and grades that second value.
+   // The native per-channel filmic value reaches the grade untouched as this body's SDR output. Family 04 continues
+   // the tone LUT separately and grades that second value.
    float3 workHDR = 0.0;
    bool workValid = false;
    if (LumaSettings.DisplayMode == 1)
    {
-      // untonemapped is the combined scene+bloom, which is correct HERE: this family has no pre-curve, so the
-      // LUT genuinely sees C+B. Do not carry the ME2LE L(F(C)+B) split into this body.
+      // This family has no pre-curve, so the LUT really sees the combined scene+bloom. Don't carry the ME2LE
+      // L(F(C)+B) split into this body.
       float3 extendedFilmic;
       const bool sourceValid = MELE_TryEvaluateME3LEFilmicExtended(untonemapped, r0.xyz, extendedFilmic);
-      // The grade bridge drives the real colour LUT and native tail. This body is straight RGB throughout -
-      // slice from blue, strip-x from red - so the ME1LE/ME2LE BRG rotation must not be copied over.
+      // This body is straight RGB throughout (slice from blue, strip x from red), so the ME1LE/ME2LE BRG rotation
+      // must not be copied over.
       float q;
       float3 proxyRGB;
       if (sourceValid && MELE_TryBuildGradeProxy(extendedFilmic, GammaColorScaleAndInverse.w * DefaultGamma, q, proxyRGB))
@@ -292,8 +297,7 @@ void main(
       }
    }
 
-   // Use one native grade function for both the working value and SDR reference. The white blowout the native result
-   // already contains is kept as it is; it is not given back its lost saturation.
+   // The white blowout already in the native result is kept; its lost chroma is not given back.
    float3 sdrGamma = MELE_ME3LE_GradeChain(r0.xyz);
    float3 gradedHDR = MELE_NativeColorGradedHDR(sdrGamma, workHDR, workValid);
 
