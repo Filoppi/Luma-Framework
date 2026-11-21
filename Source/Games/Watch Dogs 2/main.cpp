@@ -92,6 +92,25 @@ WD2DebugInfo wd2_debug_info;
 
 #endif
 
+struct WD2SSGISettings
+{
+   bool enabled = false;
+   float intensity = 0.12f;
+   float max_distance = 4.0f;
+   float thickness = 0.08f;
+   float normal_bias = 0.04f;
+};
+
+struct alignas(16) WD2SSGIConstants
+{
+   float intensity;
+   float max_distance;
+   float thickness;
+   float normal_bias;
+};
+
+static WD2SSGISettings wd2_ssgi_settings;
+
 namespace
 {
    union word_t
@@ -160,6 +179,7 @@ struct GameDeviceDataWatchDogs2 final : public GameDeviceData
    CachedRenderTargetResource cached_motion_vectors;
    
    ComPtr<ID3D11Buffer> viewport_cbv;
+   ComPtr<ID3D11Buffer> ssgi_constants;
    
    ComPtr<ID3D11Texture2D> resolve_texture;
    ComPtr<ID3D11UnorderedAccessView> resolve_texture_uav;
@@ -359,6 +379,7 @@ public:
 
       native_shaders_definitions.emplace(CompileTimeStringHash("Unjitter Depth"), ShaderDefinition{"Luma_CopyDepth", reshade::api::pipeline_subobject_type::pixel_shader});
       native_shaders_definitions.emplace(CompileTimeStringHash("Copy Luminance"), ShaderDefinition{"Luma_CopyLuminance", reshade::api::pipeline_subobject_type::compute_shader});
+      native_shaders_definitions.emplace(CompileTimeStringHash("WD2 SSGI"), ShaderDefinition{"Luma_WD2_SSGI", reshade::api::pipeline_subobject_type::compute_shader});
       
       native_shaders_definitions.emplace(CompileTimeStringHash("Decode Motion Vector"),
                ShaderDefinition{"Luma_DecodeMotionVector", reshade::api::pipeline_subobject_type::compute_shader});
@@ -418,6 +439,16 @@ public:
       game_device_data.prev_skin_buffer = std::make_unique<StretchyBuffer>(native_device, context.get(), 32 * 1024 * 1024);
       
       CreateSamplers(native_device, game_device_data);
+
+      D3D11_BUFFER_DESC ssgi_cb_desc{};
+      ssgi_cb_desc.ByteWidth = sizeof(WD2SSGIConstants);
+      ssgi_cb_desc.Usage = D3D11_USAGE_DEFAULT;
+      ssgi_cb_desc.BindFlags = D3D11_BIND_CONSTANT_BUFFER;
+      HRESULT ssgi_cb_hr = native_device->CreateBuffer(&ssgi_cb_desc, nullptr, game_device_data.ssgi_constants.put());
+      if (FAILED(ssgi_cb_hr))
+      {
+         reshade::log::message(reshade::log::level::error, "WD2 SSGI: Failed to create constants buffer.");
+      }
 #if 0
       if (!g_clear_state_hook)
       {
@@ -1258,6 +1289,61 @@ public:
             }
          }
 
+         // Screen-space diffuse GI runs on the HDR scene color before the upscaler.
+         // It writes to the existing resolve texture, then copies the result back to the scene color.
+         if (!skip_dlss && wd2_ssgi_settings.enabled &&
+             game_device_data.cached_source_color.srv.get() &&
+             game_device_data.cached_source_color.texture.get() &&
+             game_device_data.resolve_texture.get() &&
+             game_device_data.resolve_texture_uav.get() &&
+             game_device_data.viewport_cbv.get() &&
+             game_device_data.ssgi_constants.get())
+         {
+            const auto ssgi_shader = device_data.native_compute_shaders.find(CompileTimeStringHash("WD2 SSGI"));
+            if (ssgi_shader != device_data.native_compute_shaders.end() && ssgi_shader->second.get())
+            {
+               const WD2SSGIConstants ssgi_data =
+               {
+                  wd2_ssgi_settings.intensity,
+                  wd2_ssgi_settings.max_distance,
+                  wd2_ssgi_settings.thickness,
+                  wd2_ssgi_settings.normal_bias
+               };
+               native_device_context->UpdateSubresource(game_device_data.ssgi_constants.get(), 0, nullptr, &ssgi_data, 0, 0);
+
+               // Detach the game's output-merger targets so their SRVs can be read safely.
+               native_device_context->OMSetRenderTargets(0, nullptr, nullptr);
+
+               ID3D11ShaderResourceView* ssgi_srvs[] =
+               {
+                  game_device_data.cached_source_color.srv.get(),
+                  linearDepth->m_texture->m_shaderResourceView
+               };
+               ID3D11UnorderedAccessView* ssgi_uavs[] = {game_device_data.resolve_texture_uav.get()};
+               ID3D11Buffer* ssgi_cbuffers[] =
+               {
+                  game_device_data.viewport_cbv.get(),
+                  game_device_data.ssgi_constants.get()
+               };
+
+               native_device_context->CSSetShader(ssgi_shader->second.get(), nullptr, 0);
+               native_device_context->CSSetShaderResources(0, 2, ssgi_srvs);
+               native_device_context->CSSetConstantBuffers(0, 2, ssgi_cbuffers);
+               native_device_context->CSSetUnorderedAccessViews(0, 1, ssgi_uavs, nullptr);
+               native_device_context->Dispatch((g_perFrame.RenderResolutionInt.x + 7) / 8, (g_perFrame.RenderResolutionInt.y + 7) / 8, 1);
+
+               // Unbind compute resources before copying the GI result back into the game's HDR scene texture.
+               ID3D11UnorderedAccessView* null_uavs[] = {nullptr};
+               ID3D11ShaderResourceView* null_srvs[] = {nullptr, nullptr};
+               ID3D11Buffer* null_cbuffers[] = {nullptr, nullptr};
+               native_device_context->CSSetUnorderedAccessViews(0, 1, null_uavs, nullptr);
+               native_device_context->CSSetShaderResources(0, 2, null_srvs);
+               native_device_context->CSSetConstantBuffers(0, 2, null_cbuffers);
+               native_device_context->CSSetShader(nullptr, nullptr, 0);
+               native_device_context->CopyResource(game_device_data.cached_source_color.texture.get(), game_device_data.resolve_texture.get());
+            }
+         }
+
          if (!skip_dlss)
          {
             SR::SuperResolutionImpl::DrawData draw_data;
@@ -1615,6 +1701,14 @@ public:
    }
 #endif
    
+   void DrawImGuiSettings(DeviceData&) override
+   {
+      ImGui::TextUnformatted("Screen-Space Global Illumination");
+      ImGui::Checkbox("Enable Screen-Space GI", &wd2_ssgi_settings.enabled);
+      ImGui::SliderFloat("SSGI Intensity", &wd2_ssgi_settings.intensity, 0.0f, 0.40f, "%.2f");
+      ImGui::SliderFloat("SSGI Radius", &wd2_ssgi_settings.max_distance, 0.5f, 8.0f, "%.1f");
+   }
+
    void PrintImGuiAbout() override
    {
       ImGui::Text("Luma for \"Watch Dogs 2\" is developed by Pumbo and is open source and free.\nIf you enjoy it, consider donating.", "");
