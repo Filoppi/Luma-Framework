@@ -2,7 +2,7 @@ name: Build and Release Luma Mods
 
 on:
   push:
-    branches: [ main ]
+    branches: [ main, wd2-ssrtgi ]
   pull_request:
     branches: [ main ]
 
