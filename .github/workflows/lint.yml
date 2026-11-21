@@ -24,6 +24,7 @@ jobs:
           style: file
           tidy-checks: '-*' # clang-tidy has no compile database here, so it only reports noise
           files-changed-only: true # should be set to true initially, but false for testing
+          lines-changed-only: true
           thread-comments: false
           ignore: 'Source/External/** | **/safetyhook* | **/Zydis*'
       - name: Fail fast?!
