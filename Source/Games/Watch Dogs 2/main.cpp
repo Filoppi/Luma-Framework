@@ -402,11 +402,11 @@ public:
       native_shaders_definitions.emplace(CompileTimeStringHash("WD2 SSGI"), ShaderDefinition{"Luma_WD2_SSGI", reshade::api::pipeline_subobject_type::compute_shader});
 
       native_shaders_definitions.emplace(CompileTimeStringHash("Decode Motion Vector"),
-               ShaderDefinition{"Luma_DecodeMotionVector", reshade::api::pipeline_subobject_type::compute_shader});
+         ShaderDefinition{"Luma_DecodeMotionVector", reshade::api::pipeline_subobject_type::compute_shader});
 
       native_shaders_definitions.emplace(CompileTimeStringHash("Decode Motion Vector ZTD"),
-      ShaderDefinition{"Luma_DecodeMotionVector", reshade::api::pipeline_subobject_type::compute_shader, nullptr, nullptr,
-         {{"ZERO_TIME_DELTA", "1"}}});
+         ShaderDefinition{"Luma_DecodeMotionVector", reshade::api::pipeline_subobject_type::compute_shader, nullptr, nullptr,
+            {{"ZERO_TIME_DELTA", "1"}}});
 
       std::vector<ShaderDefineData> game_shader_defines_data = {
          {"ENABLE_DITHER", '0', true, false, "Allows disabling the game's 8 bit dithering effect (luma disables it by default as it's all HDR)"},
@@ -909,7 +909,7 @@ public:
             &uav_desc,
             game_device_data.resolve_texture_uav.put());
       }
-           // Create two ping-pong textures for temporal SSGI history.
+      // Create two ping-pong textures for temporal SSGI history.
       D3D11_TEXTURE2D_DESC history_desc = {};
       history_desc.Width = g_perFrame.RenderResolutionInt.x;
       history_desc.Height = g_perFrame.RenderResolutionInt.y;
@@ -1352,9 +1352,7 @@ public:
                ID3D11Buffer* buffers[] = {game_device_data.viewport_cbv.get()};
                ID3D11SamplerState* samplers[] = {game_device_data.depth_sampler.get()};
 
-               const auto cs = ZeroTimeDelta ?
-                                          device_data.native_compute_shaders[CompileTimeStringHash("Decode Motion Vector ZTD")].get() :
-                                          device_data.native_compute_shaders[CompileTimeStringHash("Decode Motion Vector")].get();
+               const auto cs = ZeroTimeDelta ? device_data.native_compute_shaders[CompileTimeStringHash("Decode Motion Vector ZTD")].get() : device_data.native_compute_shaders[CompileTimeStringHash("Decode Motion Vector")].get();
 
                native_device_context->CSSetShader(cs, nullptr, 0);
                native_device_context->CSSetShaderResources(0, 2, srvs);
