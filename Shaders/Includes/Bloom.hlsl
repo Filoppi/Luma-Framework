@@ -18,19 +18,27 @@ Texture2D tex : register(t0);
 // User configurable
 //
 
-// Allows you to define a custom threshold funcion that takes one float3 argument (color).
+// Allows you to define a custom threshold function that takes one float3 argument (color).
 #ifndef LUMA_BLOOM_THRESHOLD_FUNCTION
-#define LUMA_BLOOM_THRESHOLD_FUNCTION(color) quadratic_threshold(color)
+#define LUMA_BLOOM_THRESHOLD_FUNCTION(color) luma_bloom_threshold(color)
 #endif
 
 // Only used in the default threshold function.
-#ifndef LUMA_BLOOM_THRESHOLD
-#define LUMA_BLOOM_THRESHOLD 1.0
+// Should be in range (0, +inf).
+#ifndef LUMA_BLOOM_THRESHOLD_SOFT_THRESHOLD
+#define LUMA_BLOOM_THRESHOLD_SOFT_THRESHOLD 1.0
 #endif
 
 // Only used in the default threshold function.
-#ifndef LUMA_BLOOM_SOFT_KNEE
-#define LUMA_BLOOM_SOFT_KNEE 1.0
+// Should be in range (0, LUMA_BLOOM_THRESHOLD_SOFT_THRESHOLD).
+#ifndef LUMA_BLOOM_THRESHOLD_KNEE_HEIGHT
+#define LUMA_BLOOM_THRESHOLD_KNEE_HEIGHT 0.1
+#endif
+
+// Only used in the default threshold function.
+// Should be in range (1, +inf).
+#ifndef LUMA_BLOOM_THRESHOLD_KNEE_SHARPNESS
+#define LUMA_BLOOM_THRESHOLD_KNEE_SHARPNESS 3.0
 #endif
 
 #ifndef LUMA_BLOOM_TINT
@@ -50,23 +58,24 @@ void bloom_main_vs(uint vid : SV_VertexID, out float4 pos : SV_Position, out flo
     pos = float4(texcoord * float2(2.0, -2.0) + float2(-1.0, 1.0), 0.0, 1.0);
 }
 
-float3 quadratic_threshold(float3 color)
+// t - soft threshold, should be in range (0, +inf)
+// h - knee height, should be in range (0, t)
+// p - knee sharpness, should be in range (1, +inf)
+//
+// f(x) = x - x / (1 + exp2(log2(h / (t - h)) + p * log2(|x| / t)))
+//
+// This would be equivalent to f(x) = x - x / (1 + h / (t - h) * (|x| / t)^p) implementation, but safe for large p.
+float3 luma_bloom_threshold(float3 color)
 {
-    const float epsilon = 1e-6;
+    // Rename.
+    const float t = LUMA_BLOOM_THRESHOLD_SOFT_THRESHOLD;
+    const float h = LUMA_BLOOM_THRESHOLD_KNEE_HEIGHT;
+    const float p = LUMA_BLOOM_THRESHOLD_KNEE_SHARPNESS;
 
-    // Pixel brightness.
-    float br = max(max(color.r, color.g), color.b);
-    br = max(epsilon, br);
-
-    // Under the threshold part, a quadratic curve.
-    // Above the threshold part will be a linear curve.
-    const float k = max(epsilon, LUMA_BLOOM_SOFT_KNEE);
-    const float3 curve = float3(LUMA_BLOOM_THRESHOLD - k, k * 2.0, 0.25 / k);
-    float rq = clamp(br - curve.x, 0.0, curve.y);
-    rq = curve.z * rq * rq;
-
-    // Combine and apply the brightness response curve.
-    return color * max(rq, br - LUMA_BLOOM_THRESHOLD) * rcp(br);
+    color = max(0.0, color);
+    const float k = max(color.r, max(color.g, color.b));
+    const float u = log2(h * rcp(t - h)) + p * log2(max(1e-6, k * rcp(t)));
+    return color * rcp(1.0 + exp2(-u)); // Optimized, color * scale(k) / k
 }
 
 float get_gaussian_weight(float x)
@@ -162,14 +171,14 @@ float4 bloom_upsample_ps(float4 pos : SV_Position, float2 texcoord : TEXCOORD) :
     float2 g1 = w2 + w3;
 
     // h0 = w1/g0 - 1, move from [-0.5, extent-0.5] to [0, extent]
-    float2 h0 = (w1 / g0) - 0.5 + index;
-    float2 h1 = (w3 / g1) + 1.5 + index;
+    float2 h0 = ((w1 / g0) - 0.5 + index) * inv_src_size;
+    float2 h1 = ((w3 / g1) + 1.5 + index) * inv_src_size;
 
     // fetch the four linear interpolations
-    float3 tex00 = tex.SampleLevel(smp, float2(h0.x, h0.y) * inv_src_size, 0.0).rgb;
-    float3 tex10 = tex.SampleLevel(smp, float2(h1.x, h0.y) * inv_src_size, 0.0).rgb;
-    float3 tex01 = tex.SampleLevel(smp, float2(h0.x, h1.y) * inv_src_size, 0.0).rgb;
-    float3 tex11 = tex.SampleLevel(smp, float2(h1.x, h1.y) * inv_src_size, 0.0).rgb;
+    float3 tex00 = tex.SampleLevel(smp, float2(h0.x, h0.y), 0.0).rgb;
+    float3 tex10 = tex.SampleLevel(smp, float2(h1.x, h0.y), 0.0).rgb;
+    float3 tex01 = tex.SampleLevel(smp, float2(h0.x, h1.y), 0.0).rgb;
+    float3 tex11 = tex.SampleLevel(smp, float2(h1.x, h1.y), 0.0).rgb;
 
     // weigh along the y-direction
     tex00 = lerp(tex01, tex00, g0.y);
