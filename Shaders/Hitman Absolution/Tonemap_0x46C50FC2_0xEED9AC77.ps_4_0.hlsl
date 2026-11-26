@@ -1,4 +1,6 @@
-// Luma: HDR-preserving replacement for the tonemap/color grading pass 0x46C50FC2.
+// Luma: HDR-preserving replacement for the tonemap/color grading passes 0x46C50FC2 and 0xEED9AC77 (Chinatown variant).
+// 0x46C50FC2: always applies the LUT grade.
+// 0xEED9AC77: when the raw depth coord is > 1 the LUT grade is skipped and the faded scene is output ungraded.
 // Vanilla math is kept exactly under TONEMAP_TYPE 0. With TONEMAP_TYPE >= 1 the scene is not clamped to SDR:
 // the LUT curves are extended above 1 and sampled per channel (with optional hue preservation), then the grading settings and highlight saturation are applied.
 
@@ -39,7 +41,13 @@ void main(
   float depth = t0.Sample(s0, v2).x;
   float d = depth * cb4[8].z - cb4[8].y;
   d = -cb4[8].x / d;
+#if _EED9AC77
+  float dRaw = d * cb4[101].y + cb4[101].x;
+  bool noGrade = dRaw > 1.0;
+  d = saturate(dRaw);
+#else
   d = saturate(d * cb4[101].y + cb4[101].x);
+#endif
 
   float4 fade = t3.Sample(s3, v2);
   float3 lumaWeights = float3(0.299, 0.587, 0.114);
@@ -54,8 +62,8 @@ void main(
   // The boost is applied after the LUT grade, since boosting before it pushes the sun core past the LUT top and knee kinks (contour lines).
   // The sun scales like the rest of the sky; there is no separate per-sun brightness control.
   float skyBoost = 1.0;
-  // Sky HDR expansion, applied here rather than in Sky_0xACE3BFA3 so the auto-exposure meter sees the vanilla sky. Same curve; the sky
-  // texture luminance is estimated from the sky's pre-exposure brightness (divisor 1.06), so dim-exposure scenes still get the lift.
+  // Sky HDR expansion, applied here rather than in Sky_0xACE3BFA3 so the auto-exposure meter sees the vanilla sky.
+  // Keyed to the sky's pre-exposure brightness (divisor 1.06) so dim-exposure levels still get the lift.
   float skyY = SoftCubicRamp(GetLuminance(hdr) / max(scale * LumaSettings.GameSettings.Exposure, 1e-6) * skyBoost / 1.06);
   skyBoost *= 1.0 + LumaSettings.GameSettings.SkyHDRBoost * 3.0 * skyMask * skyY;
   hdr = lerp(hdr, fade.rgb, fade.a);
@@ -67,24 +75,47 @@ void main(
   float3 hdrGraded;
   if (LumaSettings.GameSettings.TonemapVersion == 0)
   {
+#if _EED9AC77
+    hdrGraded = (noGrade ? hdr : LUTGradeHDR(hdr, d)) * lerp(skyBoost, 1.0, fade.a);
+#else
     hdrGraded = LUTGradeHDR(hdr, d) * lerp(skyBoost, 1.0, fade.a);
+#endif
     // Pull hue and chrominance toward the vanilla SDR grade of the same pixel (VanillaHueRestore, same as Tonemap_0xEED9AC77).
     float3 sdrScene = saturate(t1.Sample(s1, v2).rgb * GetHMAExposure(cb4[41].z) * LumaSettings.GameSettings.Exposure);
+#if _EED9AC77
+    float3 sdrRef = noGrade ? lerp(sdrScene, fade.rgb, fade.a) : LUTGradeScaled(sdrScene, fade, d, curveHaze);
+#else
     float3 sdrRef = LUTGradeScaled(sdrScene, fade, d, curveHaze);
+#endif
     if (restore > 0.0)
       hdrGraded = RestoreHueAndChrominance(hdrGraded, sdrRef, 0.75 * restore, restore);
   }
   else
   {
+#if _EED9AC77
+    float3 neutralGraded = neutral;
+    if (!noGrade)
+    {
+      neutralGraded = LUTGradeNeutral(neutral, d, curveHaze);
+      // The floor uses the near curve only (haze 0), so the depth haze veil is not subtracted back out.
+      float3 floorC = LUTGradeNeutral(0.0, d, 0.0);
+      neutralGraded = max(neutralGraded - floorC * saturate(1.0 - GetLuminance(neutral) / 0.18) * LumaSettings.GameSettings.BlackFloorRemoval, 0.0);
+    }
+#else
     float3 neutralGraded = LUTGradeNeutral(neutral, d, curveHaze);
     // Floor uses the near curve only (no haze), so the depth haze veil isn't subtracted from shadows.
     float3 floorC = LUTGradeNeutral(0.0, d, 0.0);
     neutralGraded = max(neutralGraded - floorC * saturate(1.0 - GetLuminance(neutral) / 0.18) * LumaSettings.GameSettings.BlackFloorRemoval, 0.0);
+#endif
     hdrGraded = UpgradeToneMap(hdr, neutral, neutralGraded, 1.0) * lerp(skyBoost, 1.0, fade.a);
     if (restore > 0.0)
       hdrGraded = RestoreHueAndChrominance(hdrGraded, neutralGraded * lerp(skyBoost, 1.0, fade.a), 0.75 * restore, restore);
   }
+#if _EED9AC77
+  if (!noGrade && restore > 0.0)
+#else
   if (restore > 0.0)
+#endif
   {
     // Linear haze uses haze-free shadow references; the curve model follows the saturated slider.
     float3 vanillaScene = saturate(t1.Sample(s1, v2).rgb * GetHMAExposure(cb4[41].z) * LumaSettings.GameSettings.Exposure);
@@ -105,7 +136,11 @@ void main(
       hdrGraded = lerp(hdrGraded, shadowTarget, (1.0 - smoothstep(0.035, 0.14, vanillaY)) * restore);
     }
   }
+#if _EED9AC77
+  if (useLinearHaze && !noGrade && fade.a < 1.0)
+#else
   if (useLinearHaze && fade.a < 1.0)
+#endif
   {
     float3 hazed = ApplyDistanceHaze(hdrGraded, neutral, d, clamp(LumaSettings.GameSettings.DistanceHaze, 0.0, 2.0));
     hdrGraded = lerp(hazed, hdrGraded, fade.a);
@@ -154,8 +189,11 @@ void main(
   o0 = float4(outRgb, dot(saturate(outRgb), lumaWeights));
 #else
   float3 scene = saturate(t1.Sample(s1, v2).rgb * GetHMAExposure(cb4[41].z));
-
+#if _EED9AC77
+  float3 graded = noGrade ? lerp(scene, fade.rgb, fade.a) : LUTGrade(scene, fade, d);
+#else
   float3 graded = LUTGrade(scene, fade, d);
+#endif
 
   o0 = float4(graded, dot(graded, lumaWeights));
 #endif
