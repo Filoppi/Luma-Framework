@@ -85,15 +85,15 @@ static constexpr float HMA_FLARE_HALO_CHAIN_WEIGHT = (1.f - 0.85f) * 0.85f / 7.f
 // Registers the flare shader permutations (called from OnInit).
 static void HMA_RegisterFlareShaders()
 {
-   native_shaders_definitions.emplace(CompileTimeStringHash("HMA Flare Prepare"), ShaderDefinition{"Luma_HMA_Flare_Prepare", reshade::api::pipeline_subobject_type::pixel_shader});
-   native_shaders_definitions.emplace(CompileTimeStringHash("HMA Flare Downsample"), ShaderDefinition{"Luma_HMA_Flare_Downsample", reshade::api::pipeline_subobject_type::pixel_shader});
-   native_shaders_definitions.emplace(CompileTimeStringHash("HMA Flare Halo"), ShaderDefinition{"Luma_HMA_Flare_Halo", reshade::api::pipeline_subobject_type::pixel_shader});
-   native_shaders_definitions.emplace(CompileTimeStringHash("HMA Flare Ghosts"), ShaderDefinition{"Luma_HMA_Flare_Ghosts", reshade::api::pipeline_subobject_type::pixel_shader});
-   native_shaders_definitions.emplace(CompileTimeStringHash("HMA Flare Kawase Down"), ShaderDefinition{"Luma_HMA_Flare_KawaseDown", reshade::api::pipeline_subobject_type::pixel_shader});
-   native_shaders_definitions.emplace(CompileTimeStringHash("HMA Flare Kawase Up"), ShaderDefinition{"Luma_HMA_Flare_KawaseUp", reshade::api::pipeline_subobject_type::pixel_shader});
-   native_shaders_definitions.emplace(CompileTimeStringHash("HMA Flare Glare VS"), ShaderDefinition{"Luma_HMA_Flare_Glare_VS", reshade::api::pipeline_subobject_type::vertex_shader});
-   native_shaders_definitions.emplace(CompileTimeStringHash("HMA Flare Glare PS"), ShaderDefinition{"Luma_HMA_Flare_Glare_PS", reshade::api::pipeline_subobject_type::pixel_shader});
-   native_shaders_definitions.emplace(CompileTimeStringHash("HMA Flare Mix"), ShaderDefinition{"Luma_HMA_Flare_Mix", reshade::api::pipeline_subobject_type::pixel_shader});
+   native_shaders_definitions.emplace(CompileTimeStringHash("HMA Flare Prepare"), ShaderDefinition{"Luma_HMA_Flare", reshade::api::pipeline_subobject_type::pixel_shader, nullptr, "prepare_ps"});
+   native_shaders_definitions.emplace(CompileTimeStringHash("HMA Flare Downsample"), ShaderDefinition{"Luma_HMA_Flare", reshade::api::pipeline_subobject_type::pixel_shader, nullptr, "downsample_ps"});
+   native_shaders_definitions.emplace(CompileTimeStringHash("HMA Flare Halo"), ShaderDefinition{"Luma_HMA_Flare", reshade::api::pipeline_subobject_type::pixel_shader, nullptr, "halo_ps"});
+   native_shaders_definitions.emplace(CompileTimeStringHash("HMA Flare Ghosts"), ShaderDefinition{"Luma_HMA_Flare", reshade::api::pipeline_subobject_type::pixel_shader, nullptr, "ghosts_ps"});
+   native_shaders_definitions.emplace(CompileTimeStringHash("HMA Flare Kawase Down"), ShaderDefinition{"Luma_HMA_Flare", reshade::api::pipeline_subobject_type::pixel_shader, nullptr, "kawase_down_ps"});
+   native_shaders_definitions.emplace(CompileTimeStringHash("HMA Flare Kawase Up"), ShaderDefinition{"Luma_HMA_Flare", reshade::api::pipeline_subobject_type::pixel_shader, nullptr, "kawase_up_ps"});
+   native_shaders_definitions.emplace(CompileTimeStringHash("HMA Flare Glare VS"), ShaderDefinition{"Luma_HMA_Flare", reshade::api::pipeline_subobject_type::vertex_shader, nullptr, "glare_vs"});
+   native_shaders_definitions.emplace(CompileTimeStringHash("HMA Flare Glare PS"), ShaderDefinition{"Luma_HMA_Flare", reshade::api::pipeline_subobject_type::pixel_shader, nullptr, "glare_ps"});
+   native_shaders_definitions.emplace(CompileTimeStringHash("HMA Flare Mix"), ShaderDefinition{"Luma_HMA_Flare", reshade::api::pipeline_subobject_type::pixel_shader, nullptr, "mix_ps"});
 }
 
 static ID3D11PixelShader* HMAFlare_FindPS(DeviceData& device_data, uint32_t hash)

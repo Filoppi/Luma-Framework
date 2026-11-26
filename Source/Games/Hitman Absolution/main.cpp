@@ -952,10 +952,10 @@ public:
 #endif
 
       native_shaders_definitions.emplace(CompileTimeStringHash("HMA Tonemapped Resolve"), ShaderDefinition{"Luma_HMA_TonemappedResolve", reshade::api::pipeline_subobject_type::pixel_shader});
-      native_shaders_definitions.emplace(CompileTimeStringHash("HMA Tonemapped Resolve 2x2"), ShaderDefinition{"Luma_HMA_TonemappedResolve2x2", reshade::api::pipeline_subobject_type::pixel_shader});
+      native_shaders_definitions.emplace(CompileTimeStringHash("HMA Tonemapped Resolve 2x2"), ShaderDefinition{"Luma_HMA_TonemappedResolve", reshade::api::pipeline_subobject_type::pixel_shader, nullptr, nullptr, {{"HMA_RESOLVE_2X2", "1"}}});
       native_shaders_definitions.emplace(CompileTimeStringHash("HMA Ambient Volume"), ShaderDefinition{"Luma_HMA_AmbientVolume", reshade::api::pipeline_subobject_type::pixel_shader});
-      native_shaders_definitions.emplace(CompileTimeStringHash("HMA GBuffer Clamp Zero"), ShaderDefinition{"Luma_HMA_GBufferClamp_Zero", reshade::api::pipeline_subobject_type::pixel_shader});
-      native_shaders_definitions.emplace(CompileTimeStringHash("HMA GBuffer Clamp One"), ShaderDefinition{"Luma_HMA_GBufferClamp_One", reshade::api::pipeline_subobject_type::pixel_shader});
+      native_shaders_definitions.emplace(CompileTimeStringHash("HMA GBuffer Clamp Zero"), ShaderDefinition{"Luma_HMA_GBufferClamp", reshade::api::pipeline_subobject_type::pixel_shader, nullptr, nullptr, {{"HMA_GBUFFER_CLAMP_ONE", "0"}}});
+      native_shaders_definitions.emplace(CompileTimeStringHash("HMA GBuffer Clamp One"), ShaderDefinition{"Luma_HMA_GBufferClamp", reshade::api::pipeline_subobject_type::pixel_shader, nullptr, nullptr, {{"HMA_GBUFFER_CLAMP_ONE", "1"}}});
       native_shaders_definitions.emplace(CompileTimeStringHash("HMA XeGTAO Prefilter CS"), ShaderDefinition{"Luma_HMA_XeGTAO", reshade::api::pipeline_subobject_type::compute_shader, nullptr, "prefilter_depths16x16_cs"});
       native_shaders_definitions.emplace(CompileTimeStringHash("HMA XeGTAO Main CS"), ShaderDefinition{"Luma_HMA_XeGTAO", reshade::api::pipeline_subobject_type::compute_shader, nullptr, "main_pass_cs"});
       native_shaders_definitions.emplace(CompileTimeStringHash("HMA XeGTAO Main VBAO CS"), ShaderDefinition{"Luma_HMA_XeGTAO", reshade::api::pipeline_subobject_type::compute_shader, nullptr, "main_pass_vbao_cs"});

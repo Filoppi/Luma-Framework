@@ -1,7 +1,7 @@
 // Tonemapped MSAA resolve for the 4x fp16 scene targets (replaces the hardware resolve).
 // Weighted Karis-style average: each sample is weighted by 1 / (1 + peak * E), where E is the Luma auto-exposure
 // (the scene multiplier, same as GetHMAExposure), so very bright samples don't dominate the edges. Alpha is a plain average.
-// HMA_RESOLVE_2X2 = 1: some drivers expose the 4x MS surface as a 2x2 grid in sample 0 (see Luma_HMA_TonemappedResolve2x2.hlsl).
+// HMA_RESOLVE_2X2 = 1: some drivers expose the 4x MS surface as a 2x2 grid in sample 0 (set per registration in main.cpp, "HMA Tonemapped Resolve 2x2").
 
 #ifndef HMA_RESOLVE_2X2
 #define HMA_RESOLVE_2X2 0
