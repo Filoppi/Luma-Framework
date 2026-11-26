@@ -1,0 +1,27 @@
+﻿<?xml version="1.0" encoding="utf-8"?>
+<Project ToolsVersion="4.0" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
+  <ItemGroup>
+    <ClCompile Include="main.cpp" />
+    <ClInclude Include="sdl_redirect.h" />
+    <ClInclude Include="dgvoodoo_msaa.h" />
+    <ClInclude Include="alpha_test_shaders.h" />
+    <ClInclude Include="dxbc.h" />
+    <ClInclude Include="alpha_to_coverage_patch.h" />
+    <ClInclude Include="spec_highlights_patch.h" />
+    <ClInclude Include="anim_interp.h" />
+    <ClInclude Include="d3d9_call_filter.h" />
+    <ClInclude Include="d3d9_cs_dispatch.h" />
+    <ClInclude Include="d3d9_cs_hook.h" />
+    <ClInclude Include="d3d9_cs_queue.h" />
+    <ClInclude Include="d3d9_cs_shadow.h" />
+    <ClInclude Include="d3d9_cs_staging.h" />
+    <ClInclude Include="d3d9_cs_stateblock.h" />
+    <ClInclude Include="d3d9_cs_tables.h" />
+    <ClInclude Include="draw_distance.h" />
+    <ClInclude Include="fmod_upgrade.h" />
+    <ClInclude Include="frame_pacing.h" />
+    <ClInclude Include="gtao.h" />
+    <ClInclude Include="sim_tick.h" />
+    <ClCompile Include="..\..\Core\unity_build.cpp" />
+  </ItemGroup>
+</Project>

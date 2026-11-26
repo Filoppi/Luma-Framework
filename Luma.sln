@@ -152,6 +152,8 @@ Project("{8BC9CEB8-8B4A-11D0-8D11-00A0C91BC942}") = "Sunset Overdrive", "Source\
 EndProject
 Project("{8BC9CEB8-8B4A-11D0-8D11-00A0C91BC942}") = "SR Bridge Helper", "Source\Tools\SR Bridge Helper\SR Bridge Helper.vcxproj", "{1A1AC095-1247-455C-8FF4-D8D6051AA52A}"
 EndProject
+Project("{8BC9CEB8-8B4A-11D0-8D11-00A0C91BC942}") = "Brutal Legend", "Source\Games\Brutal Legend\Brutal Legend.vcxproj", "{B6C756EB-E0DD-4F9A-800A-E581C6583547}"
+EndProject
 Global
 	GlobalSection(SolutionConfigurationPlatforms) = preSolution
 		Development-Debug|Win32 = Development-Debug|Win32
@@ -1048,6 +1050,18 @@ Global
 		{1A1AC095-1247-455C-8FF4-D8D6051AA52A}.Test-Release|Win32.ActiveCfg = Test-Release|x64
 		{1A1AC095-1247-455C-8FF4-D8D6051AA52A}.Test-Release|Win32.Build.0 = Test-Release|x64
 		{1A1AC095-1247-455C-8FF4-D8D6051AA52A}.Test-Release|x64.ActiveCfg = Test-Release|x64
+		{B6C756EB-E0DD-4F9A-800A-E581C6583547}.Development-Debug|Win32.ActiveCfg = Development-Debug|Win32
+		{B6C756EB-E0DD-4F9A-800A-E581C6583547}.Development-Debug|Win32.Build.0 = Development-Debug|Win32
+		{B6C756EB-E0DD-4F9A-800A-E581C6583547}.Development-Debug|x64.ActiveCfg = Development-Debug|Win32
+		{B6C756EB-E0DD-4F9A-800A-E581C6583547}.Development-Release|Win32.ActiveCfg = Development-Release|Win32
+		{B6C756EB-E0DD-4F9A-800A-E581C6583547}.Development-Release|Win32.Build.0 = Development-Release|Win32
+		{B6C756EB-E0DD-4F9A-800A-E581C6583547}.Development-Release|x64.ActiveCfg = Development-Release|Win32
+		{B6C756EB-E0DD-4F9A-800A-E581C6583547}.Publishing-Release|Win32.ActiveCfg = Publishing-Release|Win32
+		{B6C756EB-E0DD-4F9A-800A-E581C6583547}.Publishing-Release|Win32.Build.0 = Publishing-Release|Win32
+		{B6C756EB-E0DD-4F9A-800A-E581C6583547}.Publishing-Release|x64.ActiveCfg = Publishing-Release|Win32
+		{B6C756EB-E0DD-4F9A-800A-E581C6583547}.Test-Release|Win32.ActiveCfg = Test-Release|Win32
+		{B6C756EB-E0DD-4F9A-800A-E581C6583547}.Test-Release|Win32.Build.0 = Test-Release|Win32
+		{B6C756EB-E0DD-4F9A-800A-E581C6583547}.Test-Release|x64.ActiveCfg = Test-Release|Win32
 	EndGlobalSection
 	GlobalSection(SolutionProperties) = preSolution
 		HideSolutionNode = FALSE
@@ -1122,6 +1136,7 @@ Global
 		{A8505E49-DA6F-4C05-ADF0-3480DC27B3FC} = {02EA681E-C7D8-13C7-8484-4AC65E1B71E8}
 		{D7DCEC3D-3209-4370-8CED-8CF6A4D34D78} = {02EA681E-C7D8-13C7-8484-4AC65E1B71E8}
 		{3A6C5692-A5DE-46AE-8E7A-1838642DDC30} = {02EA681E-C7D8-13C7-8484-4AC65E1B71E8}
+		{B6C756EB-E0DD-4F9A-800A-E581C6583547} = {02EA681E-C7D8-13C7-8484-4AC65E1B71E8}
 	EndGlobalSection
 	GlobalSection(ExtensibilityGlobals) = postSolution
 		SolutionGuid = {8B799422-BA66-3174-B21F-B9FA07C4B2E3}
