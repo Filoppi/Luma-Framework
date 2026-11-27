@@ -39,9 +39,15 @@ void main(uint2 pixel : SV_DispatchThreadID)
 		const float2 prevNdc = prevClipXY / prevClipW;
 		motionVector = (prevNdc - clipXY) * renderSize * float2(0.5, -0.5);
 	}
+	// A depth that gives no finite view position (e.g. exactly on the projection's pole) gives no motion too, rather than inf or NaN
+	if (any(!isfinite(motionVector)))
+	{
+		motionVector = 0.0;
+	}
 
 	// Where objects drew, the game stored their own velocity, in the same 8 bit encoding as its camera motion:
-	// (current - previous) / 64 pixels, x right and y down, length clamped to 1, as "v * 0.5 + 0.5".
+	// (current - previous) / 64 pixels, x right and y down, length clamped to 1, as "v * 0.5 + 0.5" (so objects faster than 64 pixels a
+	// frame come out at 64).
 	// Its zero is ±0.25 pixels off (127 or 128), so it's only used where the object moves relative to the camera:
 	// where it doesn't match our camera motion in that same encoding (static objects keep the exact camera motion).
 	const float4 objectVelocity = g_objectVelocity[pixel];
