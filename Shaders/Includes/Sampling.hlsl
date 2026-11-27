@@ -12,6 +12,8 @@
 // f(x) = 2 * |x|^3 - 3 * |x|^2 + 1 for 0 <= |x| <= 1
 // f(x) = 0 otherwise
 //
+// Reference: https://www.niklashaas.de/assets/slides/vdd23.pdf
+//
 #define SAMPLING_TEMPLATE(T) \
 T sample_hermite(Texture2D<T> tex, SamplerState smp, float2 uv, bool specify_src_sizes = false, float2 src_size = 0, float2 inv_src_size = 0) \
 {                                                                 \
@@ -176,6 +178,8 @@ SAMPLING_TEMPLATE(float4)
 // smp should be linear.
 // Should not be used for downsampling.
 // Will produce ringing artifacts, but it may not be noticable at all.
+//
+// Reference: http://www.klayge.org/material/4_11/Filmic%20SMAA%20v7.pdf
 //
 #define SAMPLING_TEMPLATE(T) \
 T sample_catmull_rom_approx(Texture2D<T> tex, SamplerState smp, float2 uv, bool specify_src_sizes = false, float2 src_size = 0, float2 inv_src_size = 0) \

@@ -97,27 +97,21 @@ public:
                 // DLSS requires an immediate context for execution!
                 ASSERT_ONCE(native_device_context->GetType() == D3D11_DEVICE_CONTEXT_IMMEDIATE);
 
-                // Get SRVs.
-                std::array<ID3D11ShaderResourceView*, 3> srvs;
-                native_device_context->PSGetShaderResources(0, srvs.size(), srvs.data());
+			    // Get depth resource.
+			    ComPtr<ID3D11ShaderResourceView> srv_depth;
+			    native_device_context->PSGetShaderResources(0, 1, srv_depth.put());
+			    ComPtr<ID3D11Resource> resource_depth;
+			    srv_depth->GetResource(resource_depth.put());
 
-                // Get SRV0 resource, depth.
-                ComPtr<ID3D11Resource> resource_depth;
-                srvs[0]->GetResource(resource_depth.put());
+			    // Get RTVs.
+			    std::array<ID3D11RenderTargetView*, 3> rtvs;
+			    native_device_context->OMGetRenderTargets(rtvs.size(), rtvs.data(), nullptr);
 
-                // Get SRV2 resource, scene.
-                ComPtr<ID3D11Resource> resource_scene;
-                srvs[2]->GetResource(resource_scene.put());
+			    // Get RTV1 resource, TAA out.
+			    ComPtr<ID3D11Resource> resource_scene;
+			    rtvs[1]->GetResource(resource_scene.put());
 
-                // Get RTVs.
-                std::array<ID3D11RenderTargetView*, 3> rtvs;
-                native_device_context->OMGetRenderTargets(rtvs.size(), rtvs.data(), nullptr);
-
-                // Get RTV1 resource, TAA out.
-                ComPtr<ID3D11Resource> resource_rt;
-                rtvs[1]->GetResource(resource_rt.put());
-
-                // MVs pass
+                // PreDLSS pass
                 //
 
                 // Create RTV.
@@ -135,7 +129,7 @@ public:
                 }
 
                 // Bindings.
-                const std::array mvs_pass_rtvs = { managed_resources.render_target_views["mvs"_h].get(), rtvs[2] };
+                const std::array mvs_pass_rtvs = { managed_resources.render_target_views["mvs"_h].get(), rtvs[1], rtvs[2] };
                 native_device_context->OMSetRenderTargets(mvs_pass_rtvs.size(), mvs_pass_rtvs.data(), nullptr);
                 native_device_context->PSSetShader(device_data.native_pixel_shaders.at("TEW2 MVs PS"_h).get(), nullptr, 0);
 
@@ -143,11 +137,14 @@ public:
 
                 //
 
+                // DLSS pass
+                //
+
                 // Create texture.
                 // The original RT resource doesn't have D3D11_BIND_UNORDERED_ACCESS bind flag, needed for DLSS.
                 [[unlikely]] if (!managed_resources.textures_2d["dlss_output"_h]) {
                     // Get original RT texture description.
-                    ensure(resource_rt->QueryInterface(managed_resources.textures_2d["dlss_output"_h].put()), >= 0);
+                    ensure(resource_scene->QueryInterface(managed_resources.textures_2d["dlss_output"_h].put()), >= 0);
                     D3D11_TEXTURE2D_DESC tex_desc;
                     managed_resources.textures_2d["dlss_output"_h]->GetDesc(&tex_desc);
 
@@ -155,10 +152,7 @@ public:
                     tex_desc.BindFlags = D3D11_BIND_SHADER_RESOURCE | D3D11_BIND_UNORDERED_ACCESS;
                     ensure(native_device->CreateTexture2D(&tex_desc, nullptr, managed_resources.textures_2d["dlss_output"_h].put()), >= 0);
                 }
-
-                // DLSS pass
-                //
-
+                
                 auto* sr_instance_data = device_data.GetSRInstanceData();
                 ASSERT_ONCE(sr_instance_data);
 
@@ -199,10 +193,9 @@ public:
                 //
 
                 // Copy DLSS output to the original output.
-                native_device_context->CopyResource(resource_rt.get(), managed_resources.textures_2d["dlss_output"_h].get());
+                native_device_context->CopyResource(resource_scene.get(), managed_resources.textures_2d["dlss_output"_h].get());
 
                 ResetCOMArray(rtvs);
-                ResetCOMArray(srvs);
 
                 return DrawOrDispatchOverrideType::Replaced;
             }

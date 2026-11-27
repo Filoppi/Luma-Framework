@@ -20,25 +20,24 @@ SamplerState tex7_samp_state_s : register(s3);
 SamplerState tex1_samp_state_s : register(s4);
 SamplerState tex5_samp_state_s : register(s5);
 SamplerState tex6_samp_state_s : register(s6);
-Texture2D<float4> viewdepthmap_samp : register(t0);
-Texture2D<float4> tex3_samp : register(t1);
-Texture2D<float4> tex0_samp : register(t2);
-Texture2D<float4> tex7_samp : register(t3);
-Texture2D<float4> tex1_samp : register(t4);
-Texture2D<float4> tex5_samp : register(t5);
-Texture2D<float4> tex6_samp : register(t6);
+Texture2D<float4> viewdepthmap_samp : register(t0); // Hardware depth
+Texture2D<float4> tex3_samp : register(t1); // MVs
+Texture2D<float4> tex0_samp : register(t2); // Scene
+Texture2D<float4> tex7_samp : register(t3); // Light effects
+Texture2D<float4> tex1_samp : register(t4); // History
+Texture2D<float4> tex5_samp : register(t5); // ?
+Texture2D<float4> tex6_samp : register(t6); // ?
 
 // 3Dmigoto declarations
 #define cmp -
 
-// We only want/need MVs.
 void main(
   float4 v0 : TEXCOORD1,
   float4 v1 : TEXCOORD2,
   float4 v2 : SV_Position0,
-  out float2 o0 : SV_Target0, // Originally, out float4 o0 : SV_Target0
-  out float4 o1 : SV_Target1
-  /*out float4 o2 : SV_Target2*/)
+  out float2 o0 : SV_Target0, // Originally history, out float4 o0 : SV_Target0
+  out float4 o1 : SV_Target1, // Current frame
+  out float4 o2 : SV_Target2) // Motion blur
 {
   float4 r0,r1,r2,r3,r4,r5,r6,r7,r8,r9,r10,r11,r12,r13,r14,r15,r16,r17,r18;
   uint4 bitmask, uiDest;
@@ -46,6 +45,10 @@ void main(
 
   r0.xy = v2.xy * renderpositiontoviewtexture.zw + renderpositiontoviewtexture.xy;
   r0.z = viewdepthmap_samp.SampleLevel(viewdepthmap_samp_state_s, r0.xy, 0).x;
+
+  // Clamp depth. Without this we won't have MVs in the sky (not even 0).
+  r0.z = min(r0.z, 1.0 - 1e-6);
+
   r1.xyzw = -v1.xyzw + v0.xyzw;
   r1.xyzw = r0.zzzz * r1.xyzw + v1.xyzw;
   r1.xyz = r1.xyz / r1.www;
@@ -63,10 +66,9 @@ void main(
   r1.xy = -r1.xz + r0.xy;
   r1.xy = r0.ww ? r2.xy : r1.xy;
 
-  // TAA MVs.
+  // MVs.
   o0.xy = r1.xy;
 
-  // Motion blur.
   r1.zw = cmp(r1.xy != r1.xy);
   r1.z = (int)r1.w | (int)r1.z;
   r2.zw = (int2)r1.xy & int2(0x7fffffff,0x7fffffff);
@@ -94,43 +96,40 @@ void main(
   r1.w = r0.w ? r2.z : r2.w;
   r1.w = blurstep.z * r1.w;
   r3.z = r0.w ? r1.w : r2.w;
-
-  //r4.xyz = tex0_samp.SampleLevel(tex0_samp_state_s, r0.xy, 0).xyz;
-  //r5.w = dot(r4.xyz, float3(0.212599993,0.715200007,0.0722000003));
-  //r1.w = r5.w * 4 + 4;
-  //r6.xyz = saturate(r4.xyz / r1.www);
-  //r1.xy = r1.zz ? float2(-0,-0) : -r1.xy;
-  //r1.xy = r1.xy + r0.xy;
-  //r1.zw = r1.xy * float2(2,2) + float2(-1,-1);
-  //r7.xyzw = tex7_samp.SampleLevel(tex7_samp_state_s, r0.xy, 0).xyzw;
-  //r1.zw = cmp(abs(r1.zw) >= float2(1,1));
-  //r1.z = (int)r1.w | (int)r1.z;
-  //r0.z = cmp(r0.z >= 1);
-  //r0.z = (int)r0.z | (int)r1.z;
-  //r8.xyz = float3(4,4,4) * r6.xyz;
-  //r1.z = dot(r6.xyz, float3(0.212599993,0.715200007,0.0722000003));
-  //r1.z = -r1.z * 4 + 1;
-  //r8.xyz = r8.xyz / r1.zzz;
-  //r9.xyz = r8.xyz * r7.www + r7.xyz;
-  //r10.xyz = cmp(r9.xyz != r9.xyz);
-  //r1.z = (int)r10.y | (int)r10.x;
-  //r1.z = (int)r10.z | (int)r1.z;
-  //r10.xyz = (int3)r9.xyz & int3(0x7fffffff,0x7fffffff,0x7fffffff);
-  //r10.xyz = cmp((int3)r10.xyz == int3(0x7f800000,0x7f800000,0x7f800000));
-  //r1.z = (int)r1.z | (int)r10.x;
-  //r1.z = (int)r10.y | (int)r1.z;
-  //r1.z = (int)r10.z | (int)r1.z;
-  //r9.xyz = r1.zzz ? float3(0,0,0) : r9.xyz;
-  //r9.xyz = max(float3(0,0,0), r9.xyz);
-  //o1.xyz = min(float3(1024,1024,1024), r9.xyz);
+  r4.xyz = tex0_samp.SampleLevel(tex0_samp_state_s, r0.xy, 0).xyz;
+  r5.w = dot(r4.xyz, float3(0.212599993,0.715200007,0.0722000003));
+  r1.w = r5.w * 4 + 4;
+  r6.xyz = saturate(r4.xyz / r1.www);
+  r1.xy = r1.zz ? float2(-0,-0) : -r1.xy;
+  r1.xy = r1.xy + r0.xy;
+  r1.zw = r1.xy * float2(2,2) + float2(-1,-1);
+  r7.xyzw = tex7_samp.SampleLevel(tex7_samp_state_s, r0.xy, 0).xyzw;
+  r1.zw = cmp(abs(r1.zw) >= float2(1,1));
+  r1.z = (int)r1.w | (int)r1.z;
+  r0.z = cmp(r0.z >= 1);
+  r0.z = (int)r0.z | (int)r1.z;
+  r8.xyz = float3(4,4,4) * r6.xyz;
+  r1.z = dot(r6.xyz, float3(0.212599993,0.715200007,0.0722000003));
+  r1.z = -r1.z * 4 + 1;
+  r8.xyz = r8.xyz / r1.zzz;
+  r9.xyz = r8.xyz * r7.www + r7.xyz;
+  r10.xyz = cmp(r9.xyz != r9.xyz);
+  r1.z = (int)r10.y | (int)r10.x;
+  r1.z = (int)r10.z | (int)r1.z;
+  r10.xyz = (int3)r9.xyz & int3(0x7fffffff,0x7fffffff,0x7fffffff);
+  r10.xyz = cmp((int3)r10.xyz == int3(0x7f800000,0x7f800000,0x7f800000));
+  r1.z = (int)r1.z | (int)r10.x;
+  r1.z = (int)r10.y | (int)r1.z;
+  r1.z = (int)r10.z | (int)r1.z;
+  r9.xyz = r1.zzz ? float3(0,0,0) : r9.xyz;
+  r9.xyz = max(float3(0,0,0), r9.xyz);
+  o1.xyz = min(float3(1024,1024,1024), r9.xyz);
   //o0.xyz = r8.xyz;
   //o0.w = 0;
-  //o1.w = 1;
+  o1.w = 1;
+  o2.xyzw = r3.xyzw;
 
-  // Motion blur.
-  o1.xyzw = r3.xyzw;
-
-  // Rest of the TAA.
+  // TAA.
   /*
   if (r0.z != 0) return;
   r8.xyz = r0.zzz ? r8.xyz : r6.xyz;
